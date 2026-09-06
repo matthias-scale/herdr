@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime};
 use serde_json::Value;
 
 use crate::agent_resume::{AgentSessionRef, AgentSessionRefKind};
+use crate::detect::AgentState;
 
 pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 pub(crate) const WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -20,8 +21,25 @@ const MAX_TRANSCRIPT_PATH_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TranscriptEvent {
-    Started(String),
-    Finished(String),
+    Started(ClaudeSubagentObservation),
+    StateChanged {
+        id: String,
+        state: AgentState,
+        observed_at: Option<SystemTime>,
+    },
+}
+
+/// One Claude Task observation reconstructed by the existing transcript scan.
+/// This remains runtime-only evidence alongside the active count derived from
+/// the same rows; it is never persisted or exposed through the server API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClaudeSubagentObservation {
+    pub(crate) id: String,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) name: String,
+    pub(crate) state: AgentState,
+    pub(crate) observed_at: Option<SystemTime>,
+    pub(crate) transcript_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -31,6 +49,7 @@ pub(crate) struct TranscriptCursor {
     line_buffer: Vec<u8>,
     line_overflowed: bool,
     pub(crate) active_ids: HashSet<String>,
+    pub(crate) observations: Vec<ClaudeSubagentObservation>,
     pub(crate) caught_up_once: bool,
     pub(crate) trustworthy: bool,
 }
@@ -53,6 +72,7 @@ pub(crate) struct TranscriptTracker {
     file_identity: Option<FileIdentity>,
     last_len: Option<u64>,
     last_modified: Option<SystemTime>,
+    transcript_paths_initialized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -85,6 +105,7 @@ pub(crate) struct RefreshObservation {
     pub(crate) target: TargetIdentity,
     pub(crate) tracker: TranscriptTracker,
     pub(crate) count: Option<u32>,
+    pub(crate) observations: Option<Vec<ClaudeSubagentObservation>>,
     pub(crate) stats: ScanStats,
 }
 
@@ -138,17 +159,53 @@ impl TranscriptCursor {
             .then(|| u32::try_from(self.active_ids.len()).unwrap_or(u32::MAX))
     }
 
+    pub(crate) fn observations(&self) -> Option<&[ClaudeSubagentObservation]> {
+        (self.caught_up_once && self.trustworthy).then_some(&self.observations)
+    }
+
     fn apply_event(&mut self, event: TranscriptEvent) {
         match event {
-            TranscriptEvent::Started(id) => {
-                if self.active_ids.len() >= MAX_ACTIVE_IDS && !self.active_ids.contains(&id) {
+            TranscriptEvent::Started(observation) => {
+                let id = observation.id.clone();
+                let known_observation = self.observations.iter().any(|existing| existing.id == id);
+                if (!known_observation && self.observations.len() >= MAX_ACTIVE_IDS)
+                    || (self.active_ids.len() >= MAX_ACTIVE_IDS && !self.active_ids.contains(&id))
+                {
                     self.trustworthy = false;
                 } else {
-                    self.active_ids.insert(id);
+                    self.active_ids.insert(id.clone());
+                    if let Some(existing) = self
+                        .observations
+                        .iter_mut()
+                        .find(|existing| existing.id == id)
+                    {
+                        existing.state = AgentState::Working;
+                        existing.observed_at = observation.observed_at.or(existing.observed_at);
+                        if existing.name == existing.id {
+                            existing.name = observation.name;
+                        }
+                        existing.parent_id = observation.parent_id.or(existing.parent_id.take());
+                    } else {
+                        self.observations.push(observation);
+                    }
                 }
             }
-            TranscriptEvent::Finished(id) => {
-                self.active_ids.remove(&id);
+            TranscriptEvent::StateChanged {
+                id,
+                state,
+                observed_at,
+            } => {
+                if state == AgentState::Idle {
+                    self.active_ids.remove(&id);
+                }
+                if let Some(existing) = self
+                    .observations
+                    .iter_mut()
+                    .find(|existing| existing.id == id)
+                {
+                    existing.state = state;
+                    existing.observed_at = observed_at.or(existing.observed_at);
+                }
             }
         }
     }
@@ -221,11 +278,28 @@ impl TranscriptTracker {
             file_identity: None,
             last_len: None,
             last_modified: None,
+            transcript_paths_initialized: false,
         }
     }
 
     pub(crate) fn count(&self) -> Option<u32> {
         self.cursor.count()
+    }
+
+    pub(crate) fn observations(&self) -> Option<Vec<ClaudeSubagentObservation>> {
+        Some(self.cursor.observations()?.to_vec())
+    }
+
+    fn refresh_transcript_paths(&mut self) {
+        for observation in &mut self.cursor.observations {
+            if observation.transcript_path.is_none()
+                && (!self.transcript_paths_initialized || observation.state != AgentState::Idle)
+            {
+                observation.transcript_path =
+                    known_subagent_transcript_path(&self.path, &observation.id);
+            }
+        }
+        self.transcript_paths_initialized = true;
     }
 
     fn retained_bytes(&self) -> usize {
@@ -253,6 +327,7 @@ impl TranscriptTracker {
             || metadata.len() < self.cursor.scan_offset;
         if replaced {
             self.cursor.reset();
+            self.transcript_paths_initialized = false;
             stats.identity_resets = 1;
         }
         self.file_identity = Some(identity);
@@ -358,11 +433,14 @@ pub(crate) fn refresh_trackers(
         } else {
             total_carry = total_carry.saturating_add(retained);
         }
+        item.tracker.refresh_transcript_paths();
         let count = item.tracker.count();
+        let subagents = item.tracker.observations();
         observations.push(RefreshObservation {
             target: item.target,
             tracker: item.tracker,
             count,
+            observations: subagents,
             stats,
         });
     }
@@ -528,8 +606,8 @@ impl crate::app::App {
             }
             self.claude_subagent_trackers
                 .insert(observation.target.terminal_id.clone(), observation.tracker);
+            let _ = (observation.count, observation.observations);
             updated_terminal_ids.push(observation.target.terminal_id);
-            let _ = observation.count;
             let _ = observation.stats;
         }
 
@@ -558,21 +636,37 @@ impl crate::app::App {
         updated_terminal_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         updated_terminal_ids.dedup();
         let mut counts_changed = 0_u64;
+        let mut observations_changed = 0_u64;
         let mut changed_panes = Vec::new();
         for terminal_id in updated_terminal_ids {
             let count = self
                 .claude_subagent_trackers
                 .get(&terminal_id)
                 .and_then(TranscriptTracker::count);
-            let changed = self
+            let observations = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .and_then(TranscriptTracker::observations);
+            let (count_changed, observation_changed) = self
                 .state
                 .terminals
                 .get_mut(&terminal_id)
-                .is_some_and(|terminal| terminal.set_active_subagents(count));
-            if !changed {
+                .map(|terminal| {
+                    (
+                        terminal.set_active_subagents(count),
+                        terminal.set_claude_subagent_observations(observations),
+                    )
+                })
+                .unwrap_or_default();
+            if count_changed {
+                counts_changed = counts_changed.saturating_add(1);
+            }
+            if observation_changed {
+                observations_changed = observations_changed.saturating_add(1);
+            }
+            if !count_changed && !observation_changed {
                 continue;
             }
-            counts_changed = counts_changed.saturating_add(1);
             if let Some(location) =
                 self.state
                     .workspaces
@@ -617,10 +711,11 @@ impl crate::app::App {
             elapsed_us = stats.elapsed_us,
             max_target_us = stats.max_target_us,
             counts_changed,
+            observations_changed,
             active_subagents_total,
             "refreshed Claude subagent transcripts"
         );
-        counts_changed > 0
+        counts_changed > 0 || observations_changed > 0
     }
 }
 
@@ -730,6 +825,10 @@ pub(crate) fn validated_transcript_path(
 
 fn parse_transcript_event(line: &[u8]) -> Result<Option<TranscriptEvent>, ()> {
     let value: Value = serde_json::from_slice(line).map_err(|_| ())?;
+    let observed_at = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(crate::work_index::parse_rfc3339_system_time);
     if let Some(result) = value.get("toolUseResult") {
         if result.get("status").and_then(Value::as_str) == Some("async_launched")
             && result.get("isAsync").and_then(Value::as_bool) == Some(true)
@@ -738,14 +837,41 @@ fn parse_transcript_event(line: &[u8]) -> Result<Option<TranscriptEvent>, ()> {
                 .get("agentId")
                 .and_then(Value::as_str)
                 .and_then(valid_subagent_id)
-                .map(TranscriptEvent::Started));
+                .map(|id| {
+                    let name = result
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .and_then(valid_subagent_name)
+                        .unwrap_or_else(|| id.clone());
+                    let parent_id = result
+                        .get("parentAgentId")
+                        .and_then(Value::as_str)
+                        .and_then(valid_subagent_id);
+                    TranscriptEvent::Started(ClaudeSubagentObservation {
+                        id,
+                        parent_id,
+                        name,
+                        state: AgentState::Working,
+                        observed_at,
+                        transcript_path: None,
+                    })
+                }));
         }
         if result.get("success").and_then(Value::as_bool) == Some(true) {
             return Ok(result
                 .get("resumedAgentId")
                 .and_then(Value::as_str)
                 .and_then(valid_subagent_id)
-                .map(TranscriptEvent::Started));
+                .map(|id| {
+                    TranscriptEvent::Started(ClaudeSubagentObservation {
+                        name: id.clone(),
+                        id,
+                        parent_id: None,
+                        state: AgentState::Working,
+                        observed_at,
+                        transcript_path: None,
+                    })
+                }));
         }
     }
 
@@ -757,14 +883,28 @@ fn parse_transcript_event(line: &[u8]) -> Result<Option<TranscriptEvent>, ()> {
     let Some(content) = value.get("content").and_then(Value::as_str) else {
         return Ok(None);
     };
-    if !content.starts_with("<task-notification>")
-        || !content.contains("<status>completed</status>")
-    {
+    if !content.starts_with("<task-notification>") {
         return Ok(None);
     }
+    let Some(state) = tag_value(content, "status").and_then(notification_state) else {
+        return Ok(None);
+    };
     Ok(tag_value(content, "task-id")
         .and_then(valid_subagent_id)
-        .map(TranscriptEvent::Finished))
+        .map(|id| TranscriptEvent::StateChanged {
+            id,
+            state,
+            observed_at,
+        }))
+}
+
+fn notification_state(value: &str) -> Option<AgentState> {
+    match value {
+        "completed" => Some(AgentState::Idle),
+        "blocked" => Some(AgentState::Blocked),
+        "running" => Some(AgentState::Working),
+        _ => None,
+    }
 }
 
 fn tag_value<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
@@ -782,6 +922,23 @@ fn valid_subagent_id(value: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
     .then(|| value.to_string())
+}
+
+fn valid_subagent_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.chars().take(120).collect())
+}
+
+fn known_subagent_transcript_path(parent: &Path, id: &str) -> Option<PathBuf> {
+    let path = parent
+        .with_extension("")
+        .join("subagents")
+        .join(format!("agent-{id}.jsonl"));
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    (!metadata.file_type().is_symlink() && metadata.is_file()).then_some(path)
 }
 
 #[cfg(test)]
@@ -850,6 +1007,30 @@ mod tests {
         }))
     }
 
+    fn launch_named(agent_id: &str, name: &str, timestamp: &str) -> Vec<u8> {
+        line(serde_json::json!({
+            "type": "user",
+            "timestamp": timestamp,
+            "toolUseResult": {
+                "isAsync": true,
+                "status": "async_launched",
+                "agentId": agent_id,
+                "description": name
+            }
+        }))
+    }
+
+    fn notification(agent_id: &str, status: &str, timestamp: &str) -> Vec<u8> {
+        line(serde_json::json!({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "timestamp": timestamp,
+            "content": format!(
+                "<task-notification><task-id>{agent_id}</task-id><status>{status}</status></task-notification>"
+            )
+        }))
+    }
+
     #[test]
     fn claude_async_launch_and_completion_fixture_uses_one_proven_identity() {
         let mut cursor = TranscriptCursor::new();
@@ -861,6 +1042,76 @@ mod tests {
         cursor.ingest(&completion(AGENT_A), true);
         assert_eq!(cursor.count(), Some(1));
         assert!(cursor.active_ids.contains(AGENT_B));
+    }
+
+    #[test]
+    fn transcript_observations_keep_name_status_and_latest_age_source() {
+        let mut cursor = TranscriptCursor::new();
+        let mut fixture = launch_named(AGENT_A, "review parser", "2026-09-06T10:00:00Z");
+        fixture.extend(notification(AGENT_A, "blocked", "2026-09-06T10:02:00Z"));
+        fixture.extend(launch_named(AGENT_B, "run tests", "2026-09-06T10:03:00Z"));
+        fixture.extend(notification(AGENT_B, "completed", "2026-09-06T10:04:00Z"));
+
+        cursor.ingest(&fixture, true);
+
+        let observations = cursor.observations().expect("authoritative replay");
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].name, "review parser");
+        assert_eq!(observations[0].state, AgentState::Blocked);
+        assert_eq!(observations[1].name, "run tests");
+        assert_eq!(observations[1].state, AgentState::Idle);
+        assert_eq!(cursor.count(), Some(1), "blocked work remains active");
+        assert_eq!(
+            observations[1].observed_at,
+            crate::work_index::parse_rfc3339_system_time("2026-09-06T10:04:00Z")
+        );
+    }
+
+    #[test]
+    fn tracker_exposes_only_existing_regular_subagent_transcripts() {
+        let dir = TestDir::new("transcript-path");
+        let path = dir.transcript();
+        let child = path
+            .with_extension("")
+            .join("subagents")
+            .join(format!("agent-{AGENT_A}.jsonl"));
+        std::fs::create_dir_all(child.parent().expect("subagent directory")).unwrap();
+        std::fs::write(&child, b"{}\n").unwrap();
+        let mut tracker = TranscriptTracker::new(SESSION_ID.into(), path, 1);
+        tracker.cursor.ingest(&launch(AGENT_A), true);
+        tracker.cursor.ingest(&launch(AGENT_B), true);
+        tracker.refresh_transcript_paths();
+
+        let observations = tracker.observations().expect("authoritative replay");
+        assert_eq!(observations[0].transcript_path.as_ref(), Some(&child));
+        assert_eq!(observations[1].transcript_path, None);
+    }
+
+    #[test]
+    fn completed_observation_history_is_bounded() {
+        let mut cursor = TranscriptCursor::new();
+        cursor.observations = (0..MAX_ACTIVE_IDS)
+            .map(|index| ClaudeSubagentObservation {
+                id: format!("agent-{index}"),
+                parent_id: None,
+                name: format!("agent {index}"),
+                state: AgentState::Idle,
+                observed_at: None,
+                transcript_path: None,
+            })
+            .collect();
+
+        cursor.apply_event(TranscriptEvent::Started(ClaudeSubagentObservation {
+            id: "overflow".into(),
+            parent_id: None,
+            name: "overflow".into(),
+            state: AgentState::Working,
+            observed_at: None,
+            transcript_path: None,
+        }));
+
+        assert!(!cursor.trustworthy);
+        assert_eq!(cursor.observations.len(), MAX_ACTIVE_IDS);
     }
 
     #[test]
@@ -1188,6 +1439,7 @@ mod tests {
                 target_generation,
             },
             count: tracker.count(),
+            observations: tracker.observations(),
             tracker,
             stats: ScanStats::default(),
         }

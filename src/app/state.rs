@@ -1342,6 +1342,8 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_selection: Option<std::path::PathBuf>,
     pub(crate) files_filter: String,
     pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) agents_focused: bool,
+    pub(crate) agents_selection: Option<String>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -1379,6 +1381,8 @@ impl Default for DockPresentationState {
             files_selection: None,
             files_filter: String::new(),
             files_collapsed: std::collections::HashSet::new(),
+            agents_focused: false,
+            agents_selection: None,
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -1670,7 +1674,7 @@ impl DockSurface {
 
     /// Placeholder body until the surface gets its implementation slice.
     pub fn placeholder(self) -> Option<String> {
-        matches!(self, Self::Terminal | Self::Files | Self::Agents)
+        matches!(self, Self::Terminal | Self::Files)
             .then(|| format!("{}: coming in a later slice", self.title()))
     }
 }
@@ -1714,6 +1718,12 @@ pub(crate) struct DiffCacheEntry {
 pub(crate) struct DockFileRowHitArea {
     pub(crate) path: std::path::PathBuf,
     pub(crate) kind: crate::files::FileTreeRowKind,
+    pub(crate) rect: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockAgentRowHitArea {
+    pub(crate) id: String,
     pub(crate) rect: Rect,
 }
 
@@ -1854,6 +1864,7 @@ pub struct ViewState {
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_home_detail_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
+    pub(crate) dock_agent_row_hit_areas: Vec<DockAgentRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -2934,6 +2945,10 @@ pub struct AppState {
     pub(crate) dock_files_selection: Option<std::path::PathBuf>,
     pub(crate) dock_files_filter: String,
     pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    /// Selection and keyboard ownership for the focus-following Agents tree.
+    /// Both fields are attach-local TUI presentation state.
+    pub(crate) dock_agents_focused: bool,
+    pub(crate) dock_agents_selection: Option<String>,
     /// Cached client-side file snapshots, keyed by repository root.
     pub(crate) dock_file_cache:
         std::collections::HashMap<std::path::PathBuf, crate::files::FileTreeSnapshot>,
@@ -3549,6 +3564,7 @@ impl AppState {
         self.dock_editor_focused = false;
         self.dock_diff_focused = false;
         self.dock_files_focused = false;
+        self.dock_agents_focused = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
@@ -3746,6 +3762,7 @@ impl AppState {
             self.dock_home_focused = false;
             self.dock_diff_focused = false;
             self.dock_files_focused = false;
+            self.dock_agents_focused = false;
             self.dock_chooser_focused = true;
         }
     }
@@ -3796,6 +3813,8 @@ impl AppState {
         std::mem::swap(&mut self.dock_files_selection, &mut other.files_selection);
         std::mem::swap(&mut self.dock_files_filter, &mut other.files_filter);
         std::mem::swap(&mut self.dock_files_collapsed, &mut other.files_collapsed);
+        std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
+        std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -4300,6 +4319,7 @@ impl AppState {
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_file_row_hit_areas: Vec::new(),
+                dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -4351,6 +4371,8 @@ impl AppState {
             dock_files_selection: None,
             dock_files_filter: String::new(),
             dock_files_collapsed: std::collections::HashSet::new(),
+            dock_agents_focused: false,
+            dock_agents_selection: None,
             dock_file_cache: std::collections::HashMap::new(),
             dock_files_root: None,
             dock_files_cwd: None,

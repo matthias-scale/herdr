@@ -618,6 +618,12 @@ fn compute_view_internal(
         } else {
             Vec::new()
         };
+    let dock_agent_row_hit_areas =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Agents) {
+            dock::agents::row_hit_areas(app, dock_body_rect)
+        } else {
+            Vec::new()
+        };
 
     let add_action_layout = if app.mode == Mode::AddAction {
         user_actions::add_action_layout(area)
@@ -708,6 +714,7 @@ fn compute_view_internal(
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
         dock_file_row_hit_areas,
+        dock_agent_row_hit_areas,
         dock_body_rect,
     };
     // The menu anchors on the `+`, so its geometry needs the strip already
@@ -949,6 +956,7 @@ fn compute_mobile_view(
         dock_home_tab_keys: Vec::new(),
         dock_home_detail_tab_hit_areas: Vec::new(),
         dock_file_row_hit_areas: Vec::new(),
+        dock_agent_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {

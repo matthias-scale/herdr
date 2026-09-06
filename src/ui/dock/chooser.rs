@@ -31,12 +31,14 @@ pub(crate) fn surface_available(
     surface: DockSurface,
     ctx: &PaneWorkContext,
     in_git_repo: bool,
+    has_subagents: bool,
 ) -> bool {
     match surface {
         DockSurface::Diff => in_git_repo,
         DockSurface::Pr => !ctx.pr_urls.is_empty(),
         DockSurface::Linear => !ctx.ticket_ids.is_empty(),
         DockSurface::Missive => !ctx.missive_urls.is_empty(),
+        DockSurface::Agents => has_subagents,
         _ => true,
     }
 }
@@ -133,6 +135,7 @@ pub(crate) fn render_chooser(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let (context, in_git_repo) = focused_availability(app);
+    let has_subagents = super::agents::has_focused_observations(app);
 
     let title = Style::default()
         .fg(app.palette.text)
@@ -150,7 +153,7 @@ pub(crate) fn render_chooser(app: &AppState, frame: &mut Frame, area: Rect) {
         .into_iter()
         .zip(app.view.dock_surface_card_hit_areas.iter().copied())
     {
-        let enabled = surface_available(surface, &context, in_git_repo);
+        let enabled = surface_available(surface, &context, in_git_repo, has_subagents);
         render_card(app, frame, card, surface, enabled);
     }
 }
@@ -191,7 +194,11 @@ fn render_card(app: &AppState, frame: &mut Frame, card: Rect, surface: DockSurfa
         ]),
     ];
     if card.height >= 4 {
-        let text = surface.hint();
+        let text = if surface == DockSurface::Agents && !enabled {
+            "no subagents"
+        } else {
+            surface.hint()
+        };
         let padded: String = text.chars().take(inner).collect();
         lines.push(Line::from(vec![
             Span::styled("│", border),
@@ -200,7 +207,11 @@ fn render_card(app: &AppState, frame: &mut Frame, card: Rect, surface: DockSurfa
                     "{padded}{}",
                     " ".repeat(inner.saturating_sub(padded.chars().count()))
                 ),
-                hint,
+                if enabled {
+                    hint
+                } else {
+                    Style::default().fg(app.palette.overlay0)
+                },
             ),
             Span::styled("│", border),
         ]));
@@ -238,6 +249,7 @@ pub(crate) fn render_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
     let (context, in_git_repo) = focused_availability(app);
+    let has_subagents = super::agents::has_focused_observations(app);
 
     frame.render_widget(Clear, layout.rect);
     frame.render_widget(
@@ -255,7 +267,7 @@ pub(crate) fn render_menu(app: &AppState, frame: &mut Frame) {
         let Some(surface) = DockSurface::ALL.get(index).copied() else {
             break;
         };
-        let enabled = surface_available(surface, &context, in_git_repo);
+        let enabled = surface_available(surface, &context, in_git_repo, has_subagents);
         let selected = index == menu.selected;
         let style = if !enabled {
             Style::default().fg(app.palette.overlay0)
@@ -356,7 +368,8 @@ mod tests {
         assert!(!surface_available(
             DockSurface::Diff,
             &context(&[], &[]),
-            in_git_repo
+            in_git_repo,
+            false,
         ));
 
         // Observations from the Git refresh answer both panes, and still per cwd.
@@ -376,7 +389,8 @@ mod tests {
         assert!(surface_available(
             DockSurface::Diff,
             &context(&[], &[]),
-            in_git_repo
+            in_git_repo,
+            false,
         ));
 
         // The runtime projection changes before the terminal snapshot after a
@@ -402,7 +416,7 @@ mod tests {
             (DockSurface::Linear, false, &linked, true),
             (DockSurface::Terminal, false, &empty, true),
             (DockSurface::Files, false, &empty, true),
-            (DockSurface::Agents, false, &empty, true),
+            (DockSurface::Agents, false, &empty, false),
             (DockSurface::Home, false, &empty, true),
             (DockSurface::Editor, false, &empty, true),
             (DockSurface::Shortcuts, false, &empty, true),
@@ -410,11 +424,33 @@ mod tests {
             (DockSurface::Scratchpad, false, &empty, true),
         ] {
             assert_eq!(
-                surface_available(surface, ctx, in_repo),
+                surface_available(surface, ctx, in_repo, false),
                 expected,
                 "{surface:?} in_git_repo={in_repo}"
             );
         }
+        assert!(surface_available(DockSurface::Agents, &empty, false, true));
+    }
+
+    #[test]
+    fn unavailable_agents_card_names_the_missing_observation() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let app = AppState::test_new();
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_card(&app, frame, frame.area(), DockSurface::Agents, false))
+            .expect("render Agents chooser card");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("no subagents"), "{text:?}");
     }
 
     #[test]

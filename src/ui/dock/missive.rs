@@ -195,11 +195,13 @@ mod tests {
             crate::app::DockSurface::Missive,
             &empty,
             true,
+            false,
         ));
         assert!(super::super::chooser::surface_available(
             crate::app::DockSurface::Missive,
             &linked,
             true,
+            false,
         ));
         let snapshot = Snapshot {
             items: Vec::new(),

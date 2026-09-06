@@ -2263,7 +2263,7 @@ fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
     })
 }
 
-fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
+pub(crate) fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
     let bytes = value.as_bytes();
     if bytes.len() < 20
         || bytes[4] != b'-'

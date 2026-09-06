@@ -304,10 +304,11 @@ impl App {
         }
     }
 
-    fn open_file_in_dock_editor(&mut self, path: PathBuf) {
+    pub(crate) fn open_file_in_dock_editor(&mut self, path: PathBuf) {
         self.state.open_dock_surface(DockSurface::Editor);
         self.state.dock_editor_focused = true;
         self.state.dock_files_focused = false;
+        self.state.dock_agents_focused = false;
         self.ensure_dock_editor();
         let Some(agent_pane_id) = crate::ui::dock::editor::focused_agent_pane_id(&self.state)
         else {

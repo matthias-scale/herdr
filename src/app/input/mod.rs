@@ -202,6 +202,9 @@ impl App {
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
         }
+        if self.handle_dock_agents_key(&key) {
+            return None;
+        }
         if self.handle_dock_files_key(&key) {
             return None;
         }
@@ -301,6 +304,7 @@ impl App {
 
         let dock_surface_focused = self.state.dock_home_focused
             || self.state.dock_files_focused
+            || self.state.dock_agents_focused
             || self.state.dock_chooser_focused;
         if dock_surface_focused && self.state.dock_tab.is_some() {
             if let KeyCode::Char(character) = event.code {
@@ -471,6 +475,36 @@ impl App {
         true
     }
 
+    fn handle_dock_agents_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Agents)
+            || !self.state.dock_agents_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        match event.code {
+            KeyCode::Down => self.state.move_dock_agents_selection(1),
+            KeyCode::Up => self.state.move_dock_agents_selection(-1),
+            KeyCode::Enter => {
+                let path = self
+                    .state
+                    .selected_dock_agent_observation()
+                    .and_then(|observation| observation.transcript_path.clone());
+                if let Some(path) = path {
+                    self.open_file_in_dock_editor(path);
+                }
+            }
+            KeyCode::Esc => self.state.dock_agents_focused = false,
+            _ => return false,
+        }
+        true
+    }
+
     /// Stage a pull request action for confirmation. Returns false when the
     /// selection is not a pull request, so the key falls through unchanged.
     fn stage_pull_request_action(&mut self, action: PullRequestAction) -> bool {
@@ -588,6 +622,11 @@ impl App {
 
     pub(crate) fn handle_dock_diff_key_headless(&mut self, key: &TerminalKey) -> bool {
         self.state.popup_pane.is_none() && self.handle_dock_diff_key(key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_dock_agents_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_agents_key(key)
     }
 
     pub(crate) fn handle_dock_pr_key_headless(&mut self, key: &TerminalKey) -> bool {
@@ -3089,6 +3128,7 @@ impl App {
         self.state.dock_home_focused = false;
         self.state.dock_diff_focused = false;
         self.state.dock_files_focused = false;
+        self.state.dock_agents_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
@@ -3880,6 +3920,85 @@ mod tests {
         )));
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
         assert!(app.state.dock_surface_menu.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agents_keys_move_and_open_a_known_transcript_in_the_editor() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("claude")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let pane_terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("pane terminal")
+            .clone();
+        let second_path = std::path::PathBuf::from("/tmp/second.jsonl");
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&pane_terminal_id)
+            .expect("terminal state");
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.claude_transcript_session_id = Some("session".into());
+        terminal.claude_subagent_observations = Some(vec![
+            crate::app::claude_subagents::ClaudeSubagentObservation {
+                id: "first".into(),
+                parent_id: None,
+                name: "first".into(),
+                state: crate::detect::AgentState::Working,
+                observed_at: None,
+                transcript_path: None,
+            },
+            crate::app::claude_subagents::ClaudeSubagentObservation {
+                id: "second".into(),
+                parent_id: None,
+                name: "second".into(),
+                state: crate::detect::AgentState::Idle,
+                observed_at: None,
+                transcript_path: Some(second_path),
+            },
+        ]);
+        let editor_terminal_id = crate::terminal::TerminalId::alloc();
+        let (runtime, mut input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes
+            .insert(editor_terminal_id.clone(), runtime);
+        app.state.dock_editor_sessions.insert(
+            pane_id,
+            crate::app::state::DockEditorSession {
+                pane_id: crate::layout::PaneId::alloc(),
+                terminal_id: editor_terminal_id,
+            },
+        );
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Agents);
+        app.state.dock_agents_focused = true;
+        app.state.dock_agents_selection = Some("first".into());
+
+        assert!(app.handle_dock_agents_key_headless(&TerminalKey::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
+        assert!(input.try_recv().is_err());
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Agents));
+        assert!(app.handle_dock_agents_key_headless(&TerminalKey::new(
+            KeyCode::Down,
+            KeyModifiers::empty()
+        )));
+        assert_eq!(app.state.dock_agents_selection.as_deref(), Some("second"));
+        assert!(app.handle_dock_agents_key_headless(&TerminalKey::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
+
+        assert_eq!(
+            input.try_recv().expect("editor input"),
+            Bytes::from_static(b"\x1b:e /tmp/second.jsonl\r")
+        );
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Editor));
     }
 
     fn files_with_open_surface_menu() -> App {
