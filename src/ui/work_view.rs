@@ -53,7 +53,7 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         )
     });
     let teammate_count = crate::work_index::missive_assignees(state.snapshot.as_ref()).len();
-    let columns = if area.width >= 72 {
+    let columns = if area.width >= 96 {
         Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
     } else {
         Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
@@ -119,13 +119,13 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         if index == selected {
             selected_line = lines.len();
         }
-        push_work_row(
+        push_missive_row(
             &mut lines,
+            item,
             &row,
             index == selected,
             palette,
             left_inner.width,
-            false,
         );
     }
     if items.is_empty() {
@@ -219,7 +219,10 @@ fn render_missive_detail(
             Style::default().fg(app.palette.accent),
         ));
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((state.missive_detail_scroll, 0)),
+        area,
+    );
 
     if let Some(choice) = state.missive_start_menu {
         render_missive_start_menu(app, frame, area, choice);
@@ -631,6 +634,45 @@ fn push_work_row(
             Style::default().fg(palette.subtext0),
         ));
     }
+}
+
+fn push_missive_row(
+    lines: &mut Vec<Line<'static>>,
+    item: &ConversationItem<'_>,
+    row: &WorkRow,
+    selected: bool,
+    palette: &Palette,
+    width: u16,
+) {
+    let base = if selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.surface0)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.text)
+    };
+    let status = crate::ui::work_status::WorkGroupStatus::from_conversation(
+        item.summary.closed,
+        !item.summary.assignees.is_empty(),
+    );
+    let available = usize::from(width).saturating_sub(row.age.chars().count() + 5);
+    lines.push(Line::from(vec![
+        ratatui::text::Span::styled(" ", base),
+        ratatui::text::Span::styled(status.glyph(), base.fg(status.color(palette))),
+        ratatui::text::Span::styled(
+            format!(" {}  {}", fit_cell(&row.title, available), row.age),
+            base,
+        ),
+    ]));
+    lines.push(Line::styled(
+        format!("   {}", row.metadata),
+        if selected {
+            Style::default().fg(palette.subtext0).bg(palette.surface0)
+        } else {
+            Style::default().fg(palette.subtext0)
+        },
+    ));
 }
 
 fn render_ticket_detail(
@@ -1157,7 +1199,11 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
             " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more"
         }
         WorkProjection::Missive => {
-            " / search   ↑/↓ move   f open/all   c start thread   o Open in Missive   r refresh"
+            if area.width >= 96 {
+                " / search   ↑/↓ move   PgUp/PgDn detail   f open/all   c start thread   o Open in Missive   r refresh"
+            } else {
+                " / search  ↑/↓ conversation  PgUp/PgDn detail  c start  o copy  r refresh"
+            }
         }
         WorkProjection::Agents => " ←/→ view PRs tickets Missive [agents]   not yet available",
         WorkProjection::ReviewQueue => {
@@ -1278,6 +1324,49 @@ mod tests {
             unavailable: None,
             observed_at: SystemTime::UNIX_EPOCH,
         }
+    }
+
+    fn missive_conversation(message_count: usize) -> crate::work_index::MissiveConversation {
+        crate::work_index::MissiveConversation {
+            id: "sample".into(),
+            subject: "Billing question that stays readable".into(),
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            assignees: vec![crate::work_index::MissiveUser {
+                id: "ada".into(),
+                name: "Ada Lovelace".into(),
+                email: None,
+                is_me: true,
+            }],
+            last_activity_at: Some(SystemTime::UNIX_EPOCH),
+            closed: false,
+            messages: (0..message_count)
+                .map(|index| crate::work_index::MissiveEntry {
+                    id: format!("message-{index}"),
+                    author: Some("Customer".into()),
+                    preview: format!("message body {index}"),
+                    created_at: Some(SystemTime::UNIX_EPOCH),
+                })
+                .collect(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        }
+    }
+
+    fn missive_state(message_count: usize) -> WorkViewState {
+        let mut state = WorkViewState::new(
+            true,
+            Some(Snapshot {
+                items: Vec::new(),
+                conversations: vec![missive_conversation(message_count)],
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: SystemTime::UNIX_EPOCH,
+            }),
+        );
+        state.projection = WorkProjection::Missive;
+        state
     }
 
     fn ticket(identifier: &str, group: crate::work_index::TicketGroup) -> WorkItem {
@@ -1630,6 +1719,53 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("o Open in Missive"), "{text}");
+    }
+
+    #[test]
+    fn missive_full_view_at_eighty_columns_keeps_subject_actions_and_scroll_hint() {
+        let text = rendered_text_at(&missive_state(8), 80, 24);
+        assert!(text.contains("Billing question"), "{text}");
+        assert!(
+            text.contains("[Start thread ▾] [Open in Missive]"),
+            "{text}"
+        );
+        assert!(text.contains("PgUp/PgDn detail"), "{text}");
+        assert!(text.contains("o copy"), "{text}");
+    }
+
+    #[test]
+    fn missive_detail_scroll_reaches_later_messages_independently() {
+        let mut state = missive_state(10);
+        let initial = rendered_text_at(&state, 80, 24);
+        assert!(initial.contains("message body 0"), "{initial}");
+        assert!(!initial.contains("message body 6"), "{initial}");
+
+        state.missive_detail_scroll = 13;
+        let scrolled = rendered_text_at(&state, 80, 24);
+        assert!(scrolled.contains("message body 6"), "{scrolled}");
+        assert!(!scrolled.contains("message body 0"), "{scrolled}");
+    }
+
+    #[test]
+    fn missive_list_status_glyph_uses_palette_state_colour() {
+        let state = missive_state(1);
+        let app = AppState {
+            work_view: Some(state),
+            ..AppState::test_new()
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(&app, frame.area(), frame))
+            .expect("render Missive view");
+        let glyph = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "○")
+            .expect("open conversation glyph");
+        assert_eq!(glyph.fg, app.palette.work_status_open());
     }
 
     #[test]

@@ -1718,10 +1718,29 @@ fn missive_work_title(app: &AppState, url: &str) -> Option<String> {
         .and_then(|context| context.work_title.clone())
 }
 
-/// The header for a Missive conversation, resolved from state Herdr already
-/// holds: the cached link label, then the declared work title of a pane on that
-/// conversation, then the URL tail. This slice adds no Missive fetch.
+fn indexed_missive_conversation<'a>(
+    app: &'a AppState,
+    url: &str,
+) -> Option<&'a crate::work_index::MissiveConversation> {
+    let id = missive_url_tail(url);
+    app.work_index_snapshot
+        .as_ref()?
+        .conversations
+        .iter()
+        .find(|conversation| {
+            conversation.app_url == url || conversation.web_url == url || conversation.id == id
+        })
+}
+
+/// Prefer the indexed subject, then fall back to pane-local context while the
+/// first Missive observation is still pending.
 fn missive_subject(app: &AppState, url: &str) -> String {
+    if let Some(subject) = indexed_missive_conversation(app, url)
+        .map(|conversation| conversation.subject.trim())
+        .filter(|subject| !subject.is_empty())
+    {
+        return subject.to_string();
+    }
     missive_subject_from(
         cached_missive_link_label(app, url).as_deref(),
         missive_work_title(app, url).as_deref(),
@@ -1745,12 +1764,18 @@ fn missive_group_title(app: &AppState, url: &str) -> String {
     work_group_header_title(&tail, Some(missive_subject(app, url)).as_deref())
 }
 
-/// Where a Missive conversation stands. Nothing on this base caches
-/// conversation records -- the read-only Missive client (F12-4) is the first
-/// thing that will -- so a conversation Herdr only knows from a pane link
-/// reads as open, and this is the single seam the cached record plugs into.
-fn missive_group_status(_app: &AppState, _url: &str) -> WorkGroupStatus {
-    WorkGroupStatus::from_conversation(false, true)
+/// Use indexed state when present. A pane-only conversation remains open
+/// until the read-only observation supplies stronger evidence.
+fn missive_group_status(app: &AppState, url: &str) -> WorkGroupStatus {
+    indexed_missive_conversation(app, url).map_or_else(
+        || WorkGroupStatus::from_conversation(false, true),
+        |conversation| {
+            WorkGroupStatus::from_conversation(
+                conversation.closed,
+                !conversation.assignees.is_empty(),
+            )
+        },
+    )
 }
 
 /// Every pane's effective work context, in workspace order.
@@ -1850,9 +1875,10 @@ pub(crate) fn sidebar_work_groups(
                 // A pane replying in several conversations belongs under each
                 // of them.
                 for url in urls {
+                    let conversation = indexed_missive_conversation(app, url);
                     if !app
                         .sidebar_work_filter
-                        .matches_missive(None, None, &app.work_index_session)
+                        .matches_missive_conversation(conversation, &app.work_index_session)
                     {
                         continue;
                     }
@@ -1990,11 +2016,27 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
             );
             options
         }
-        SidebarGroupMode::Missive => vec![
-            SidebarFilterOption::MissiveAssignee(Some("me".into())),
-            SidebarFilterOption::MissiveAssignee(None),
-            SidebarFilterOption::MissiveClosed(app.sidebar_work_filter.missive.show_closed),
-        ],
+        SidebarGroupMode::Missive => {
+            let mut options = vec![
+                SidebarFilterOption::MissiveAssignee(Some("me".into())),
+                SidebarFilterOption::MissiveAssignee(None),
+            ];
+            options.extend(
+                app.work_index_session
+                    .missive
+                    .assignees
+                    .iter()
+                    .filter(|assignee| {
+                        app.work_index_session.missive.viewer.as_deref() != Some(assignee.as_str())
+                    })
+                    .cloned()
+                    .map(|assignee| SidebarFilterOption::MissiveAssignee(Some(assignee))),
+            );
+            options.push(SidebarFilterOption::MissiveClosed(
+                app.sidebar_work_filter.missive.show_closed,
+            ));
+            options
+        }
         SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => Vec::new(),
     }
 }
@@ -8965,12 +9007,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.work_index_session.missive.viewer = Some("Mina".into());
+        app.work_index_session.missive.assignees = vec!["Ada".into(), "Mina".into()];
         assert_eq!(
             sidebar_filter_options(&app)
                 .into_iter()
                 .map(|option| option.label())
                 .collect::<Vec<_>>(),
-            ["assignee: me", "assignee: all", "[ ] show closed"]
+            [
+                "assignee: me",
+                "assignee: all",
+                "assignee: Ada",
+                "[ ] show closed",
+            ]
         );
     }
 
@@ -9073,7 +9122,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let app = AppState::test_new();
         assert!(app
             .sidebar_work_filter
-            .matches_missive(None, None, &app.work_index_session));
+            .matches_missive_conversation(None, &app.work_index_session));
     }
 
     #[test]
@@ -10930,6 +10979,64 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             headers.iter().all(|(line, _)| !line.contains('●')),
             "{headers:?}"
         );
+    }
+
+    #[test]
+    fn missive_group_headers_use_indexed_subject_assignment_and_state() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.sidebar_work_filter.missive.assignee = None;
+        app.sidebar_work_filter.missive.show_closed = true;
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index snapshot")
+            .conversations = vec![
+            crate::work_index::MissiveConversation {
+                id: "aaa111".into(),
+                subject: "Refund approved".into(),
+                app_url: CONVERSATION_A.into(),
+                web_url: CONVERSATION_A.into(),
+                assignees: vec![crate::work_index::MissiveUser {
+                    id: "ada".into(),
+                    name: "Ada".into(),
+                    email: None,
+                    is_me: false,
+                }],
+                last_activity_at: None,
+                closed: true,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            },
+            crate::work_index::MissiveConversation {
+                id: "bbb222".into(),
+                subject: "Needs owner".into(),
+                app_url: CONVERSATION_B.into(),
+                web_url: CONVERSATION_B.into(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            },
+        ];
+
+        let headers = rendered_nested_headers(&mut app, 120, 40);
+        let closed = headers
+            .iter()
+            .find(|(line, _)| line.contains("aaa111 · Refu"))
+            .unwrap_or_else(|| panic!("indexed closed conversation header in {headers:?}"));
+        assert!(closed.0.contains("● aaa111"), "{:?}", closed.0);
+        assert_eq!(closed.1, Some(app.palette.work_status_done()));
+        let unassigned = headers
+            .iter()
+            .find(|(line, _)| line.contains("bbb222 · Needs"))
+            .expect("indexed unassigned conversation header");
+        assert!(unassigned.0.contains("◌ bbb222"), "{:?}", unassigned.0);
+        assert_eq!(unassigned.1, Some(app.palette.work_status_neutral()));
     }
 
     #[test]

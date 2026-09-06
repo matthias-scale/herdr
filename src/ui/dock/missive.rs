@@ -134,22 +134,34 @@ mod tests {
 
     #[test]
     fn compact_missive_surface_renders_conversation_fixture() {
-        let conversation = conversation();
-        let item = ConversationItem {
-            summary: &conversation,
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("missive")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                missive_urls: vec![
+                    "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+                ],
+                ..Default::default()
+            });
+        app.work_index_snapshot = Some(Snapshot {
+            items: Vec::new(),
+            conversations: vec![conversation()],
+            missive_users: Vec::new(),
+            unavailable: None,
             observed_at: SystemTime::UNIX_EPOCH,
-        };
+        });
         let backend = TestBackend::new(60, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| {
-                let detail = item.detail();
-                let lines = vec![
-                    Line::from(detail.title),
-                    Line::from(detail.sections[0].entries[0].body.clone()),
-                ];
-                frame.render_widget(Paragraph::new(lines), frame.area());
-            })
+            .draw(|frame| render_missive(&app, frame, frame.area()))
             .expect("render compact Missive surface");
         let text = terminal
             .backend()
