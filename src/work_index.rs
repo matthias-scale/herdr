@@ -3239,6 +3239,14 @@ pub(crate) enum WorkItemWrite {
         repo: String,
         number: u64,
     },
+    MarkPullRequestDraft {
+        repo: String,
+        number: u64,
+    },
+    MarkPullRequestReady {
+        repo: String,
+        number: u64,
+    },
 }
 
 impl WorkItemWrite {
@@ -3261,6 +3269,12 @@ impl WorkItemWrite {
                 format!("squash-merge {repo}#{number}")
             }
             Self::ClosePullRequest { repo, number } => format!("close {repo}#{number}"),
+            Self::MarkPullRequestDraft { repo, number } => {
+                format!("mark {repo}#{number} draft")
+            }
+            Self::MarkPullRequestReady { repo, number } => {
+                format!("mark {repo}#{number} ready")
+            }
         }
     }
 
@@ -3271,7 +3285,9 @@ impl WorkItemWrite {
             Self::CommentOnPullRequest { repo, number, .. }
             | Self::ApprovePullRequest { repo, number }
             | Self::MergePullRequest { repo, number }
-            | Self::ClosePullRequest { repo, number } => Some(crate::app::state::WorkItemKey {
+            | Self::ClosePullRequest { repo, number }
+            | Self::MarkPullRequestDraft { repo, number }
+            | Self::MarkPullRequestReady { repo, number } => Some(crate::app::state::WorkItemKey {
                 repo: repo.clone(),
                 pr_number: Some(*number),
                 pr_url: None,
@@ -3354,6 +3370,16 @@ pub(crate) fn run_work_item_write(
         WorkItemWrite::ClosePullRequest { repo, number } => {
             let mut command = crate::noninteractive_process::command(gh_program);
             command.args(["pr", "close", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+        WorkItemWrite::MarkPullRequestDraft { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "ready", "--undo", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+        WorkItemWrite::MarkPullRequestReady { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "ready", &number.to_string(), "-R", repo]);
             (command, None)
         }
     };
@@ -3447,5 +3473,39 @@ mod work_item_write_tests {
         assert!(argv.contains(
             "attachments create SCA-7 --title owner/repo#42 --url https://github.com/owner/repo/pull/42"
         ));
+    }
+
+    #[test]
+    fn pr_state_writes_map_to_gh_argv() {
+        let (gh, log) = recorder();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for write in [
+            WorkItemWrite::ClosePullRequest {
+                repo: "owner/repo".into(),
+                number: 42,
+            },
+            WorkItemWrite::MarkPullRequestDraft {
+                repo: "owner/repo".into(),
+                number: 42,
+            },
+            WorkItemWrite::MarkPullRequestReady {
+                repo: "owner/repo".into(),
+                number: 42,
+            },
+        ] {
+            run_work_item_write(&write, &gh, Path::new("/usr/bin/false"), deadline)
+                .expect("pull request state command");
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(log).expect("read recorder log"),
+            [
+                "pr close 42 -R owner/repo",
+                "pr ready --undo 42 -R owner/repo",
+                "pr ready 42 -R owner/repo",
+                "",
+            ]
+            .join("\n")
+        );
     }
 }
