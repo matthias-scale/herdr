@@ -329,7 +329,9 @@ impl AppState {
         if self.sidebar_group_menu_open {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
-                    if let Some(mode) = crate::app::state::SidebarGroupMode::ALL.get(index).copied()
+                    if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
+                        .get(index)
+                        .copied()
                     {
                         self.set_sidebar_group_mode(mode);
                     }

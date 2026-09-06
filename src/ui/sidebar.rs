@@ -1513,6 +1513,22 @@ fn sidebar_tab_groups(
                     .as_deref()
                     .or(context.session_name.as_deref());
                 for url in &context.pr_urls {
+                    if app
+                        .work_index_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            snapshot
+                                .items
+                                .iter()
+                                .find(|item| item.pr_url.as_deref() == Some(url.as_str()))
+                        })
+                        .is_some_and(|item| {
+                            !app.sidebar_work_filter
+                                .matches_github(item, &app.work_index_session)
+                        })
+                    {
+                        continue;
+                    }
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
                     push_sidebar_tab_group(
@@ -1588,23 +1604,6 @@ pub(crate) fn ticket_team(identifier: &str) -> Option<String> {
         .split_once('-')
         .map(|(team, _)| team.to_string())
         .filter(|team| !team.is_empty())
-}
-
-fn ticket_matches_filter(
-    ticket: &crate::work_index::WorkTicket,
-    filter: &crate::app::state::SidebarWorkFilter,
-) -> bool {
-    if let Some(team) = filter.team.as_deref() {
-        if ticket_team(&ticket.identifier).as_deref() != Some(team) {
-            return false;
-        }
-    }
-    if let Some(assignee) = filter.assignee.as_deref() {
-        if ticket.assignee.as_deref() != Some(assignee) {
-            return false;
-        }
-    }
-    true
 }
 
 fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
@@ -1782,7 +1781,10 @@ pub(crate) fn sidebar_work_groups(
     let mut groups: Vec<SidebarWorkGroup> = Vec::new();
     if mode == SidebarGroupMode::LinearTeam {
         for row in app.dock_home_projection().ticket_rows {
-            if !ticket_matches_filter(&row.ticket, &app.sidebar_work_filter) {
+            if !app
+                .sidebar_work_filter
+                .matches_linear(&row.ticket, &app.work_index_session)
+            {
                 continue;
             }
             let key = format!("linear:{}", row.ticket.identifier);
@@ -1835,6 +1837,12 @@ pub(crate) fn sidebar_work_groups(
                 // A pane replying in several conversations belongs under each
                 // of them.
                 for url in urls {
+                    if !app
+                        .sidebar_work_filter
+                        .matches_missive(None, None, &app.work_index_session)
+                    {
+                        continue;
+                    }
                     let key = format!("missive:{url}");
                     let index = match work_group_index(&groups, &key) {
                         Some(index) => index,
@@ -1863,50 +1871,119 @@ pub(crate) fn sidebar_work_groups(
     groups
 }
 
-/// Teams and assignees the filter dropdown can offer, taken from the tickets
-/// the projection already knows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidebarFilterOption {
-    AllTeams,
-    Team(String),
-    AllAssignees,
-    Assignee(String),
+    LinearTeam(Option<String>),
+    LinearAssignee(Option<String>),
+    LinearStatus(crate::app::state::LinearStatusFilter, bool),
+    GithubAssignee(Option<String>),
+    GithubDrafts(bool),
+    GithubState(crate::app::state::GithubStateFilter),
+    MissiveAssignee(Option<String>),
+    MissiveClosed(bool),
 }
 
 impl SidebarFilterOption {
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::AllTeams => "all teams".into(),
-            Self::Team(team) => team.clone(),
-            Self::AllAssignees => "all assignees".into(),
-            Self::Assignee(assignee) => format!("assigned to {assignee}"),
+            Self::LinearTeam(None) => "team: all".into(),
+            Self::LinearTeam(Some(team)) => format!("team: {team}"),
+            Self::LinearAssignee(None) => "assignee: all".into(),
+            Self::LinearAssignee(Some(assignee)) => format!("assignee: {assignee}"),
+            Self::LinearStatus(status, selected) => format!(
+                "{} status: {}",
+                if *selected { "[x]" } else { "[ ]" },
+                status.label()
+            ),
+            Self::GithubAssignee(None) => "assignee: all".into(),
+            Self::GithubAssignee(Some(assignee)) => format!("assignee: {assignee}"),
+            Self::GithubDrafts(shown) => {
+                format!("{} show drafts", if *shown { "[x]" } else { "[ ]" })
+            }
+            Self::GithubState(state) => format!("state: {}", state.label()),
+            Self::MissiveAssignee(None) => "assignee: all".into(),
+            Self::MissiveAssignee(Some(assignee)) => format!("assignee: {assignee}"),
+            Self::MissiveClosed(shown) => {
+                format!("{} show closed", if *shown { "[x]" } else { "[ ]" })
+            }
         }
     }
 }
 
 pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption> {
-    let projection = app.dock_home_projection();
-    let mut teams = Vec::new();
-    let mut assignees = Vec::new();
-    for row in &projection.ticket_rows {
-        if let Some(team) = ticket_team(&row.ticket.identifier) {
-            if !teams.contains(&team) {
+    match app.sidebar_group_mode {
+        SidebarGroupMode::LinearTeam => {
+            let projection = app.dock_home_projection();
+            let mut teams = projection
+                .ticket_rows
+                .iter()
+                .filter_map(|row| ticket_team(&row.ticket.identifier))
+                .collect::<Vec<_>>();
+            if let Some(team) = app.sidebar_work_filter.team.clone() {
                 teams.push(team);
             }
+            teams.sort();
+            teams.dedup();
+            let mut options = vec![SidebarFilterOption::LinearTeam(None)];
+            options.extend(
+                teams
+                    .into_iter()
+                    .map(|team| SidebarFilterOption::LinearTeam(Some(team))),
+            );
+            options.push(SidebarFilterOption::LinearAssignee(Some("me".into())));
+            options.push(SidebarFilterOption::LinearAssignee(None));
+            options.extend(
+                app.work_index_session
+                    .linear
+                    .assignees
+                    .iter()
+                    .filter(|assignee| assignee.as_str() != "me")
+                    .cloned()
+                    .map(|assignee| SidebarFilterOption::LinearAssignee(Some(assignee))),
+            );
+            options.extend(
+                crate::app::state::LinearStatusFilter::ALL
+                    .into_iter()
+                    .map(|status| {
+                        SidebarFilterOption::LinearStatus(
+                            status,
+                            app.sidebar_work_filter.linear_statuses.contains(&status),
+                        )
+                    }),
+            );
+            options
         }
-        if let Some(assignee) = row.ticket.assignee.clone() {
-            if !assignees.contains(&assignee) {
-                assignees.push(assignee);
-            }
+        SidebarGroupMode::RepoPr => {
+            let mut options = vec![
+                SidebarFilterOption::GithubAssignee(Some("me".into())),
+                SidebarFilterOption::GithubAssignee(None),
+            ];
+            options.extend(
+                app.work_index_session
+                    .github
+                    .assignees
+                    .iter()
+                    .filter(|assignee| assignee.as_str() != "me")
+                    .cloned()
+                    .map(|assignee| SidebarFilterOption::GithubAssignee(Some(assignee))),
+            );
+            options.push(SidebarFilterOption::GithubDrafts(
+                app.sidebar_work_filter.github.show_drafts,
+            ));
+            options.extend(
+                crate::app::state::GithubStateFilter::ALL
+                    .into_iter()
+                    .map(SidebarFilterOption::GithubState),
+            );
+            options
         }
+        SidebarGroupMode::Missive => vec![
+            SidebarFilterOption::MissiveAssignee(Some("me".into())),
+            SidebarFilterOption::MissiveAssignee(None),
+            SidebarFilterOption::MissiveClosed(app.sidebar_work_filter.missive.show_closed),
+        ],
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => Vec::new(),
     }
-    teams.sort();
-    assignees.sort();
-    let mut options = vec![SidebarFilterOption::AllTeams];
-    options.extend(teams.into_iter().map(SidebarFilterOption::Team));
-    options.push(SidebarFilterOption::AllAssignees);
-    options.extend(assignees.into_iter().map(SidebarFilterOption::Assignee));
-    options
 }
 
 fn append_recently_done_rows(
@@ -3691,32 +3768,36 @@ pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
     if area.width < 6 || area.height == 0 {
         return Rect::default();
     }
-    Rect::new(area.x + area.width.saturating_sub(5), area.y, 2, 1)
+    let trailing_width = if area.width < 20 { 4 } else { 5 };
+    Rect::new(
+        area.x + area.width.saturating_sub(trailing_width),
+        area.y,
+        2,
+        1,
+    )
 }
 
-/// The sidebar header line. In the work-item modes it names the team and the
-/// active filter rather than the mode, which is what the operator is actually
-/// steering there.
 pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
-    match app.sidebar_group_mode {
-        SidebarGroupMode::LinearTeam => format!(
-            "{} {} · {} ▾",
-            app.sidebar_group_mode.icon(),
-            app.sidebar_work_filter.team_label(),
-            app.sidebar_work_filter.label()
-        ),
-        _ => format!(
-            "{} {} ▾",
-            app.sidebar_group_mode.icon(),
-            app.sidebar_group_mode.label()
-        ),
+    let view = format!("View: {} ▾", app.sidebar_group_mode.view_label());
+    let filters = match app.sidebar_group_mode {
+        SidebarGroupMode::LinearTeam => Some(app.sidebar_work_filter.linear_label()),
+        SidebarGroupMode::RepoPr => Some(app.sidebar_work_filter.github_label()),
+        SidebarGroupMode::Missive => Some(app.sidebar_work_filter.missive_label()),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => None,
+    };
+    match filters {
+        Some(filters) => format!("{view} · {filters} ▾"),
+        None => view,
     }
 }
 
 /// The `· <filter> ▾` half of the header line, which opens the filter dropdown.
 /// Empty outside the work-item modes, where there is nothing to filter.
 pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
-    if app.sidebar_group_mode != SidebarGroupMode::LinearTeam {
+    if matches!(
+        app.sidebar_group_mode,
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree
+    ) {
         return Rect::default();
     }
     let mode_anchor = sidebar_group_mode_anchor_rect(area);
@@ -3743,7 +3824,7 @@ pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
     if area.width < 8 || area.height == 0 {
         return Rect::default();
     }
-    let x = area.x.saturating_add(2);
+    let x = area.x.saturating_add(if area.width < 20 { 1 } else { 2 });
     let right = sidebar_header_new_space_rect(area).x.saturating_sub(1);
     Rect::new(x, area.y, right.saturating_sub(x), 1)
 }
@@ -3756,10 +3837,10 @@ pub(crate) fn sidebar_group_menu_layout(
     super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
             anchor,
-            item_count: SidebarGroupMode::ALL.len(),
+            item_count: SidebarGroupMode::VIEWS.len(),
             selected: app.sidebar_group_menu_selected,
             has_filter: false,
-            max_rows: SidebarGroupMode::ALL.len(),
+            max_rows: SidebarGroupMode::VIEWS.len(),
             min_width: 22,
         },
         area,
@@ -3939,7 +4020,7 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
-    let lines = SidebarGroupMode::ALL
+    let lines = SidebarGroupMode::VIEWS
         .iter()
         .enumerate()
         .skip(layout.first_visible)
@@ -3958,7 +4039,7 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                format!("{marker} {} {}", mode.icon(), mode.label()),
+                format!("{marker} View: {}", mode.view_label()),
                 style,
             ))
         })
@@ -8461,6 +8542,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         workspace.test_add_tab(Some("addendum"));
         workspace.test_add_tab(Some("shell"));
         let mut app = AppState::test_new();
+        // Most 2b characterization tests predate F12's narrowed defaults and
+        // exercise the complete fixture unless they opt into a filter.
+        app.sidebar_work_filter.team = None;
+        app.sidebar_work_filter.assignee = None;
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         for (tab_idx, context) in [
@@ -8777,6 +8862,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
             team: Some("SCA".into()),
             assignee: None,
+            ..Default::default()
         };
         assert_eq!(
             work_group_shape(&app)
@@ -8804,22 +8890,59 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn the_filter_dropdown_lists_teams_and_assignees_from_the_projection() {
+    fn the_linear_filter_dropdown_lists_defaults_users_and_statuses() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.work_index_session.linear.assignees = vec!["Ada".into(), "Matthias".into()];
+        let labels = sidebar_filter_options(&app)
+            .into_iter()
+            .map(|option| option.label())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &labels[..7],
+            [
+                "team: all",
+                "team: OPS",
+                "team: SCA",
+                "assignee: me",
+                "assignee: all",
+                "assignee: Ada",
+                "assignee: Matthias",
+            ]
+        );
+        assert!(labels.contains(&"[x] status: In Progress".into()));
+        assert!(labels.contains(&"[ ] status: Canceled".into()));
+        assert!(labels.contains(&"[ ] status: Duplicate".into()));
+    }
+
+    #[test]
+    fn github_and_missive_filter_dropdowns_list_their_controls() {
+        let mut app = sidebar_work_item_fixture();
+        app.work_index_session.github.assignees = vec!["Ada".into()];
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         assert_eq!(
             sidebar_filter_options(&app)
                 .into_iter()
                 .map(|option| option.label())
                 .collect::<Vec<_>>(),
-            vec![
-                "all teams",
-                "OPS",
-                "SCA",
-                "all assignees",
-                "assigned to jacob",
-                "assigned to matthias",
+            [
+                "assignee: me",
+                "assignee: all",
+                "assignee: Ada",
+                "[ ] show drafts",
+                "state: open",
+                "state: merged",
+                "state: closed",
             ]
+        );
+
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        assert_eq!(
+            sidebar_filter_options(&app)
+                .into_iter()
+                .map(|option| option.label())
+                .collect::<Vec<_>>(),
+            ["assignee: me", "assignee: all", "[ ] show closed"]
         );
     }
 
@@ -8827,18 +8950,102 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn the_linear_header_names_the_team_and_the_filter() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter = crate::app::state::SidebarWorkFilter::default();
         assert_eq!(
             sidebar_header_mode_label(&app),
-            "◎ all teams · all assignees ▾"
+            "View: Linear ▾ · SCA · me · active ▾"
         );
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
             team: Some("SCA".into()),
             assignee: Some("matthias".into()),
+            ..Default::default()
         };
         assert_eq!(
             sidebar_header_mode_label(&app),
-            "◎ SCA · assigned to matthias ▾"
+            "View: Linear ▾ · SCA · matthias · active ▾"
         );
+    }
+
+    #[test]
+    fn the_view_picker_has_only_the_four_f12_labels() {
+        let labels = SidebarGroupMode::VIEWS.map(|mode| format!("View: {}", mode.view_label()));
+        assert_eq!(
+            labels,
+            [
+                "View: Repo",
+                "View: Linear",
+                "View: GitHub",
+                "View: Missive"
+            ]
+        );
+        assert_eq!(SidebarGroupMode::default(), SidebarGroupMode::Repo);
+    }
+
+    #[test]
+    fn per_view_filter_defaults_match_f12() {
+        let filters = crate::app::state::SidebarWorkFilter::default();
+        assert_eq!(filters.team.as_deref(), Some("SCA"));
+        assert_eq!(filters.assignee.as_deref(), Some("me"));
+        assert_eq!(filters.linear_statuses.len(), 8);
+        assert!(!filters
+            .linear_statuses
+            .contains(&crate::app::state::LinearStatusFilter::Canceled));
+        assert!(!filters
+            .linear_statuses
+            .contains(&crate::app::state::LinearStatusFilter::Duplicate));
+        assert_eq!(filters.github.assignee.as_deref(), Some("me"));
+        assert!(!filters.github.show_drafts);
+        assert_eq!(
+            filters.github.state,
+            crate::app::state::GithubStateFilter::Open
+        );
+        assert_eq!(filters.missive.assignee.as_deref(), Some("me"));
+        assert!(!filters.missive.show_closed);
+    }
+
+    #[test]
+    fn injected_me_identity_filters_linear_and_github_projections() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter = crate::app::state::SidebarWorkFilter::default();
+        app.work_index_session.linear.viewer = Some("matthias".into());
+        let linear_titles = work_group_shape(&app)
+            .into_iter()
+            .map(|(title, ..)| title)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            linear_titles,
+            [
+                "SCA-3102 annual credits  P1",
+                "SCA-3165 image-edit v3  P2",
+                "unlinked",
+            ]
+        );
+
+        let mut github = work_item("scalable-so/herdr", Some(159), Vec::new());
+        github.source.github = true;
+        github.assignees = vec!["matthias-scale".into()];
+        app.work_index_session.github.viewer = Some("matthias-scale".into());
+        assert!(app
+            .sidebar_work_filter
+            .matches_github(&github, &app.work_index_session));
+        github.draft = true;
+        assert!(!app
+            .sidebar_work_filter
+            .matches_github(&github, &app.work_index_session));
+        github.draft = false;
+        github.pr_state = Some("merged".into());
+        assert!(!app
+            .sidebar_work_filter
+            .matches_github(&github, &app.work_index_session));
+    }
+
+    #[test]
+    fn absent_missive_filter_fields_show_every_conversation() {
+        let app = AppState::test_new();
+        assert!(app
+            .sidebar_work_filter
+            .matches_missive(None, None, &app.work_index_session));
     }
 
     #[test]
@@ -8848,34 +9055,35 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let options = sidebar_filter_options(&app);
         let team = options
             .iter()
-            .position(|option| *option == SidebarFilterOption::Team("SCA".into()))
+            .position(|option| *option == SidebarFilterOption::LinearTeam(Some("SCA".into())))
             .expect("SCA in the options");
         app.select_sidebar_filter_option(team);
         assert_eq!(app.sidebar_work_filter.team.as_deref(), Some("SCA"));
 
         let assignee = options
             .iter()
-            .position(|option| *option == SidebarFilterOption::Assignee("jacob".into()))
-            .expect("jacob in the options");
+            .position(|option| *option == SidebarFilterOption::LinearAssignee(Some("me".into())))
+            .expect("me in the options");
         app.select_sidebar_filter_option(assignee);
         // The two narrowings compose instead of resetting each other.
         assert_eq!(app.sidebar_work_filter.team.as_deref(), Some("SCA"));
-        assert_eq!(app.sidebar_work_filter.assignee.as_deref(), Some("jacob"));
+        assert_eq!(app.sidebar_work_filter.assignee.as_deref(), Some("me"));
         assert_eq!(
             app.take_sidebar_work_filter_persistence_request(),
             Some(crate::app::state::SidebarWorkFilter {
                 team: Some("SCA".into()),
-                assignee: Some("jacob".into()),
+                assignee: Some("me".into()),
+                ..Default::default()
             })
         );
 
         let all_teams = options
             .iter()
-            .position(|option| *option == SidebarFilterOption::AllTeams)
+            .position(|option| *option == SidebarFilterOption::LinearTeam(None))
             .expect("all teams in the options");
         app.select_sidebar_filter_option(all_teams);
         assert_eq!(app.sidebar_work_filter.team, None);
-        assert_eq!(app.sidebar_work_filter.assignee.as_deref(), Some("jacob"));
+        assert_eq!(app.sidebar_work_filter.assignee.as_deref(), Some("me"));
     }
 
     #[test]

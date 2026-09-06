@@ -52,6 +52,7 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
             state.ticket_open_only,
             observed_at,
             has_context_pr,
+            Some((&app.sidebar_work_filter, &app.work_index_session)),
         )
     });
     let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {
@@ -254,6 +255,7 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
             state.open_only,
             observed_at,
             &app.land_approval_label,
+            Some((&app.sidebar_work_filter, &app.work_index_session)),
         )
     });
     let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {

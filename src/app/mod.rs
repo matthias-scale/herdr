@@ -692,7 +692,7 @@ impl App {
             .collect(),
             sidebar_group_mode,
             sidebar_group_menu_open: false,
-            sidebar_group_menu_selected: sidebar_group_mode.index(),
+            sidebar_group_menu_selected: sidebar_group_mode.view_index(),
             sidebar_work_filter,
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
