@@ -3688,8 +3688,14 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
-        pane.activity.note(now);
-        let unsettled = pane.settled_at.take().is_some();
+        let entered_active_agent_state = change.previous_state != change.state
+            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let foreground_agent_changed = change.previous_known_agent != change.known_agent;
+        let activity = entered_active_agent_state || foreground_agent_changed;
+        if activity {
+            pane.activity.note(now);
+        }
+        let unsettled = activity && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,

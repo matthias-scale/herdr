@@ -2367,6 +2367,27 @@ mod tests {
     }
 
     #[test]
+    fn pane_unsettle_api_explicitly_clears_settled_at() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.state.settle_pane_at(0, internal_pane_id, 1_725_000_000));
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "unsettle".into(),
+            method: crate::api::schema::Method::PaneUnsettle(PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        });
+        let response: SuccessResponse = serde_json::from_str(&response).expect("unsettle response");
+        let ResponseResult::PaneInfo { pane } = response.result else {
+            panic!("expected pane info");
+        };
+
+        assert!(pane.settled_at.is_none());
+        assert!(!app.state.pane_is_settled(0, internal_pane_id));
+    }
+
+    #[test]
     fn ac4_work_context_patch_is_atomic_exposed_and_emits_once_per_mutation() {
         let (mut app, pane_id) = app_with_test_workspace();
         let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;

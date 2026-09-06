@@ -1754,6 +1754,34 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[tokio::test]
+    async fn typing_bytes_into_settled_pane_clears_settled_at() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("settled-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            pane_infos[0].inner_rect.width,
+            pane_infos[0].inner_rect.height,
+        );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(rx.try_recv().expect("forwarded input").as_ref(), b"x");
+        assert!(!app.state.pane_is_settled(0, pane_id));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn forwarded_input_retires_a_blocked_hook_and_allows_screen_state() {
         let mut app = app_for_mouse_test();
