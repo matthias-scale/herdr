@@ -698,6 +698,12 @@
           "description": "Select the next dock tab."
         },
         {
+          "key": "keys.editor_open_repo",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the focused repository in a right-side Vim-family editor."
+        },
+        {
           "key": "keys.edit_scratchpad",
           "type": "keybinding",
           "default": "\"ctrl+alt+e\"",

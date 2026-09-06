@@ -516,6 +516,10 @@ impl App {
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenRepoEditor => {
+                self.open_repo_editor();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::EditScratchpad => {
                 self.open_scratchpad_in_editor();
                 leave_navigate_mode(&mut self.state);
@@ -1895,6 +1899,7 @@ pub(crate) enum NavigateAction {
     ToggleDock,
     PreviousDockTab,
     NextDockTab,
+    OpenRepoEditor,
     OpenInbox,
     OpenHome,
     EditScratchpad,
@@ -2123,6 +2128,7 @@ fn non_indexed_action_for_key(
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
+        (&kb.editor_open_repo, NavigateAction::OpenRepoEditor),
         (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
         (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
@@ -2497,6 +2503,10 @@ pub(super) fn execute_navigate_action_in_context(
                 state.dock_tab = Some(next);
             }
             sync_dock_tab_focus(state);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenRepoEditor => {
+            state.request_open_repo_editor = true;
             leave_navigate_mode(state);
         }
         // Spawning the editor needs an `App`; the state-only mirror cannot do it.
@@ -4839,6 +4849,24 @@ navigate_pane_right = "ctrl+l"
         );
 
         assert_eq!(action, Some(NavigateAction::LastPane));
+    }
+
+    #[test]
+    fn repository_editor_shortcut_maps_to_open_repo_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.editor_open_repo = crate::config::ActionKeybinds::direct("ctrl+alt+v");
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        );
+
+        assert_eq!(action, Some(NavigateAction::OpenRepoEditor));
+        execute_navigate_action(&mut state, action.expect("repository editor action"));
+        assert!(state.request_open_repo_editor);
     }
 
     #[test]
