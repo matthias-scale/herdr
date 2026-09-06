@@ -741,6 +741,8 @@ pub struct KeysConfig {
     pub previous_dock_tab: BindingConfig,
     /// Select the next dock tab. Default: "prefix+shift+]"
     pub next_dock_tab: BindingConfig,
+    /// Open the focused repository in a right-side Vim-family editor. Unset by default.
+    pub editor_open_repo: BindingConfig,
     /// Open the focused repository's scratchpad in a terminal pane. Default: "ctrl+alt+e"
     pub edit_scratchpad: BindingConfig,
     /// Show the scratchpad in the dock without opening an editor. Default: "ctrl+alt+n"
@@ -921,6 +923,8 @@ pub(crate) struct KeysConfigOverlay {
     previous_dock_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_dock_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    editor_open_repo: Option<BindingConfig>,
     edit_scratchpad: Option<BindingConfig>,
     show_scratchpad: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1032,6 +1036,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
+        apply_field!(editor_open_repo);
         apply_field!(edit_scratchpad);
         apply_field!(show_scratchpad);
         apply_field!(toggle_info_panel);
@@ -1162,6 +1167,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
+        copy_effective_action_field!(editor_open_repo, keybinds.editor_open_repo);
         copy_effective_action_field!(edit_scratchpad, keybinds.edit_scratchpad);
         copy_effective_action_field!(show_scratchpad, keybinds.show_scratchpad);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
@@ -1597,6 +1603,7 @@ impl Default for KeysConfig {
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
+            editor_open_repo: BindingConfig::empty(),
             edit_scratchpad: BindingConfig::one("ctrl+alt+e"),
             show_scratchpad: BindingConfig::one("ctrl+alt+n"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
