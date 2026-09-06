@@ -9837,7 +9837,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f12_7_enter_and_n_on_unassigned_ticket_build_a_spawn_plan() {
+    fn enter_on_unassigned_linear_and_missive_rows_prefills_home_and_stays_open() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -9862,17 +9862,107 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 vec![unassigned_ticket],
             ));
         app.sidebar_selected_work_group = Some("linear:SCA-9999".into());
-        let SidebarWorkGroupKeyAction::Dispatch(plan) = app.handle_sidebar_work_group_key(enter)
-        else {
-            panic!("Enter should dispatch the selected unassigned ticket");
-        };
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(enter),
+            SidebarWorkGroupKeyAction::Consumed
+        ));
         assert_eq!(app.sidebar_selected_work_group, None);
+        let home = app.home.as_ref().expect("ticket composer stays open");
+        assert_eq!(home.prompt, "SCA-9999: unassigned");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert!(home.pending_dispatch.is_none());
+
+        app.home = None;
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_B}"));
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(enter),
+            SidebarWorkGroupKeyAction::Consumed
+        ));
+        let home = app.home.as_ref().expect("conversation composer stays open");
+        assert_eq!(home.prompt, "bbb222: fix pricing");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert!(home.pending_dispatch.is_none());
+    }
+
+    #[test]
+    fn n_on_unassigned_rows_dispatches_with_the_work_context_patch() {
+        use crate::app::SidebarWorkGroupKeyAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let mut unassigned_ticket = work_ticket("SCA-9999", "unassigned", "jacob", &[]);
+        unassigned_ticket.url = Some("https://linear.app/scalable/issue/SCA-9999".into());
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .items
+            .push(work_item(
+                "scalable-so/herdr",
+                None,
+                vec![unassigned_ticket],
+            ));
+        app.sidebar_selected_work_group = Some("linear:SCA-9999".into());
+        let SidebarWorkGroupKeyAction::Dispatch(plan) = app.handle_sidebar_work_group_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
+        ) else {
+            panic!("n should dispatch the selected unassigned ticket");
+        };
         assert!(plan.prompt.contains("SCA-9999: unassigned"));
         assert!(plan.prompt.contains("https://linear.app/"));
         assert_eq!(
             plan.work_context_patch.ticket_ids,
             Some(vec!["SCA-9999".into()])
         );
+
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_B}"));
+        let SidebarWorkGroupKeyAction::Dispatch(plan) = app.handle_sidebar_work_group_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
+        ) else {
+            panic!("n should dispatch the selected conversation");
+        };
+        assert_eq!(
+            plan.prompt,
+            format!("bbb222: fix pricing\n{CONVERSATION_B}")
+        );
+        assert_eq!(
+            plan.work_context_patch.missive_urls,
+            Some(vec![CONVERSATION_B.into()])
+        );
+    }
+
+    #[test]
+    fn plus_target_on_unassigned_row_builds_direct_spawn_with_work_context_patch() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        let header = compute_sidebar_nested_header_areas(&app, app.view.sidebar_rect)
+            .into_iter()
+            .find(|header| header.key == "linear:OPS-12")
+            .expect("unassigned ticket row");
+
+        let key =
+            sidebar_unassigned_spawn_at(&app, header.rect.right().saturating_sub(1), header.rect.y)
+                .expect("trailing plus target");
+        let plan = app
+            .sidebar_unassigned_dispatch_plan(&key)
+            .expect("direct spawn plan");
+        assert!(plan.prompt.contains("OPS-12: pixel EMQ drop"));
+        assert!(plan.prompt.ends_with("\nOPS-12"));
+        assert_eq!(
+            plan.work_context_patch.ticket_ids,
+            Some(vec!["OPS-12".into()])
+        );
+    }
+
+    #[test]
+    fn f12_7_n_on_unassigned_pull_request_builds_a_spawn_plan() {
+        use crate::app::SidebarWorkGroupKeyAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = sidebar_work_item_fixture();
 
         app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         app.sidebar_work_filter.github.assignee = None;
@@ -10069,26 +10159,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(plan.directory, checkout);
         assert_eq!(plan.prompt, plan.directory.display().to_string());
         assert_eq!(plan.work_context_patch.repo.as_deref(), Some("owner/repo"));
-    }
-
-    #[test]
-    fn enter_on_an_unassigned_conversation_builds_a_linked_spawn_plan() {
-        use crate::app::SidebarWorkGroupKeyAction;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-        let mut app = sidebar_work_item_fixture();
-        app.sidebar_group_mode = SidebarGroupMode::Missive;
-        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_B}"));
-        let SidebarWorkGroupKeyAction::Dispatch(plan) =
-            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
-        else {
-            panic!("Enter should dispatch the selected conversation");
-        };
-        assert_eq!(plan.prompt, CONVERSATION_B);
-        assert_eq!(
-            plan.work_context_patch.missive_urls,
-            Some(vec![CONVERSATION_B.into()])
-        );
     }
 
     #[test]
