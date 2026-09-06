@@ -15,6 +15,12 @@ pub(crate) enum SettledMenuAction {
     Delete(crate::app::state::PaneFocusTarget),
 }
 
+pub(crate) enum SidebarWorkGroupKeyAction {
+    Ignored,
+    Consumed,
+    Dispatch(Box<crate::app::home::HomeDispatchPlan>),
+}
+
 impl AppState {
     pub(crate) fn sidebar_settled_target_at(
         &self,
@@ -185,21 +191,39 @@ impl AppState {
     /// `Enter` on a selected dim work-item header starts its thread. The
     /// selection only exists while one is selected, so this never swallows a
     /// keystroke meant for a pane.
-    pub(crate) fn handle_sidebar_work_group_key(&mut self, key: KeyEvent) -> bool {
+    pub(crate) fn handle_sidebar_work_group_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> SidebarWorkGroupKeyAction {
         let Some(selected) = self.sidebar_selected_work_group.clone() else {
-            return false;
+            return SidebarWorkGroupKeyAction::Ignored;
         };
         match key.code {
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('n') if key.modifiers.is_empty() => {
                 self.sidebar_selected_work_group = None;
-                self.open_home_composer_for_work_group(&selected);
-                true
+                if selected == crate::ui::sidebar_show_more_key(self.sidebar_group_mode) {
+                    self.sidebar_unassigned_expanded_views
+                        .insert(self.sidebar_group_mode);
+                    self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                        self,
+                        self.view.sidebar_rect,
+                        self.workspace_scroll,
+                    );
+                    return SidebarWorkGroupKeyAction::Consumed;
+                }
+                match self.sidebar_unassigned_dispatch_plan(&selected) {
+                    Ok(plan) => SidebarWorkGroupKeyAction::Dispatch(Box::new(plan)),
+                    Err(error) => {
+                        self.config_diagnostic = Some(error);
+                        SidebarWorkGroupKeyAction::Consumed
+                    }
+                }
             }
             KeyCode::Esc => {
                 self.sidebar_selected_work_group = None;
-                true
+                SidebarWorkGroupKeyAction::Consumed
             }
-            _ => false,
+            _ => SidebarWorkGroupKeyAction::Ignored,
         }
     }
 

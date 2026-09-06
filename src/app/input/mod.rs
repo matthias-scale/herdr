@@ -49,6 +49,8 @@ mod settings;
 mod sidebar;
 mod terminal;
 
+#[cfg(test)]
+pub(crate) use self::sidebar::SidebarWorkGroupKeyAction;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
@@ -168,8 +170,13 @@ impl App {
         if self.state.handle_sidebar_filter_menu_key(key_event) {
             return None;
         }
-        if self.state.handle_sidebar_work_group_key(key_event) {
-            return None;
+        match self.state.handle_sidebar_work_group_key(key_event) {
+            sidebar::SidebarWorkGroupKeyAction::Ignored => {}
+            sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
+            sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                self.dispatch_sidebar_work_group_plan(*plan);
+                return None;
+            }
         }
         if self.handle_sidebar_settled_key(key_event) {
             return None;
@@ -836,6 +843,30 @@ impl App {
             return;
         };
 
+        let dispatch = self.dispatch_home_plan(plan);
+        self.finish_home_dispatch(dispatch);
+    }
+
+    fn dispatch_sidebar_work_group_plan(&mut self, plan: crate::app::home::HomeDispatchPlan) {
+        let mut home = self.state.new_home_state();
+        home.prompt = plan.prompt.clone();
+        home.directory = plan.directory.clone();
+        home.ref_directory = plan.directory.clone();
+        home.workspace = plan.workspace.clone();
+        home.selected_ref = plan.git_ref.clone();
+        home.pr = plan.pr.clone();
+        home.ticket = plan.ticket.clone();
+        home.target = plan.target.clone();
+        self.state.home = Some(home);
+        self.state.inbox = None;
+        let dispatch = self.dispatch_home_plan(plan);
+        self.finish_home_dispatch(dispatch);
+    }
+
+    fn dispatch_home_plan(
+        &mut self,
+        plan: crate::app::home::HomeDispatchPlan,
+    ) -> Result<(), String> {
         crate::logging::home_dispatch_started(
             &format!("{:?}", plan.agent),
             plan.argv.first().map(String::as_str),
@@ -844,7 +875,7 @@ impl App {
             &plan.directory,
         );
 
-        let dispatch = match plan.workspace {
+        match plan.workspace {
             crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),
             crate::app::home::HomeWorkspace::CurrentCheckout
                 if plan
@@ -858,7 +889,10 @@ impl App {
             | crate::app::home::HomeWorkspace::PreviousWorktree(_) => self
                 .dispatch_home_composer(plan)
                 .map_err(|error| error.to_string()),
-        };
+        }
+    }
+
+    fn finish_home_dispatch(&mut self, dispatch: Result<(), String>) {
         match dispatch {
             Ok(()) => {
                 if self
@@ -2605,6 +2639,9 @@ impl App {
                     }
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")
+                    }
+                    MouseAction::DispatchSidebarWork(plan) => {
+                        self.dispatch_sidebar_work_group_plan(*plan)
                     }
                     MouseAction::Settings(action) => self.apply_settings_action(action),
                     // Home is a full-terminal overlay, but the sidebar sits

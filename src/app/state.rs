@@ -1299,6 +1299,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
     pub(crate) selected_work_group: Option<String>,
+    pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
@@ -2811,6 +2812,10 @@ pub struct AppState {
     /// Dim work-item header the operator selected with the mouse. Enter on it
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
+    /// Views whose Unassigned section has expanded past its ten newest rows.
+    /// Attach-local TUI state; provider objects remain shared work-index facts.
+    pub(crate) sidebar_unassigned_expanded_views:
+        std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
@@ -3636,6 +3641,10 @@ impl AppState {
             &mut other.selected_work_group,
         );
         std::mem::swap(
+            &mut self.sidebar_unassigned_expanded_views,
+            &mut other.unassigned_expanded_views,
+        );
+        std::mem::swap(
             &mut self.sidebar_selected_settled,
             &mut other.selected_settled,
         );
@@ -4179,6 +4188,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,

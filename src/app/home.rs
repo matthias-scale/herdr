@@ -326,6 +326,8 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) git_ref: Option<HomeRef>,
     pub(crate) pr: Option<HomePrContext>,
     pub(crate) ticket: Option<HomeTicketContext>,
+    /// Manual context bound to the spawned pane in the same operation.
+    pub(crate) work_context_patch: crate::work_context::PaneWorkContextPatch,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
@@ -780,6 +782,15 @@ impl HomeState {
             git_ref: self.selected_ref.clone(),
             pr: self.pr.clone(),
             ticket: self.ticket.clone(),
+            work_context_patch: crate::work_context::PaneWorkContextPatch {
+                repo: self.pr.as_ref().map(|pr| pr.repo.clone()),
+                pr_urls: self.pr.as_ref().map(|pr| vec![pr.url.clone()]),
+                ticket_ids: self
+                    .ticket
+                    .as_ref()
+                    .map(|ticket| vec![ticket.identifier.clone()]),
+                ..Default::default()
+            },
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -980,24 +991,45 @@ impl crate::app::state::AppState {
         }
     }
 
-    /// Start a thread for a work item that has no pane yet: home opens with the
-    /// item as the prompt, in the checkout the item is linked to when one is
-    /// known and on the last used directory otherwise.
-    pub(crate) fn open_home_composer_for_work_group(&mut self, key: &str) -> bool {
-        let Some(activation) = crate::ui::sidebar_work_group_activation(self, key) else {
-            return false;
-        };
-        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
-        home.prompt = activation.prompt;
-        home.focus = Some(HomeFocus::Prompt);
-        home.picker = None;
+    /// Build the same launch plan as the home composer without opening it.
+    /// Unassigned sidebar rows use this for their one-key spawn action.
+    pub(crate) fn sidebar_unassigned_dispatch_plan(
+        &self,
+        key: &str,
+    ) -> Result<HomeDispatchPlan, String> {
+        let activation = crate::ui::sidebar_work_group_activation(self, key)
+            .ok_or_else(|| "unassigned object is no longer available".to_string())?;
+        let mut home = self.new_home_state();
+        home.prompt = activation.spawn_prompt;
+        home.pr = activation.pr;
+        home.ticket = activation.ticket;
+        home.selected_ref = activation.git_ref;
         if let Some(directory) = activation.directory {
-            home.directory = directory;
+            home.directory = directory.clone();
+            home.ref_directory = directory.clone();
+            if home.workspace == HomeWorkspace::CurrentCheckout {
+                home.target = self
+                    .workspaces
+                    .iter()
+                    .find(|workspace| {
+                        workspace.identity_cwd == directory
+                            || workspace
+                                .tabs
+                                .iter()
+                                .flat_map(|tab| tab.panes.values())
+                                .any(|pane| {
+                                    self.terminals
+                                        .get(&pane.attached_terminal_id)
+                                        .is_some_and(|terminal| terminal.cwd == directory)
+                                })
+                    })
+                    .map(|workspace| HomeTarget::Existing(workspace.id.clone()))
+                    .unwrap_or(HomeTarget::NewSpace);
+            }
         }
-        self.inbox = None;
-        self.home = Some(home);
-        self.reset_home_ref_context(false);
-        true
+        let mut plan = home.dispatch_plan()?;
+        plan.work_context_patch = activation.work_context_patch;
+        Ok(plan)
     }
 
     pub(crate) fn open_home_composer_in_directory(
@@ -1992,6 +2024,7 @@ mod tests {
                 git_ref: None,
                 pr: None,
                 ticket: None,
+                work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![

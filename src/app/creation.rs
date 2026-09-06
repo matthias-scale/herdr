@@ -322,7 +322,12 @@ impl App {
                         self.render_dirty.clone(),
                         Vec::new(),
                     )?;
-                apply_home_work_context(&mut terminal, plan.pr.as_ref(), plan.ticket.as_ref())?;
+                apply_home_work_context(
+                    &mut terminal,
+                    &plan.work_context_patch,
+                    plan.pr.as_ref(),
+                    plan.ticket.as_ref(),
+                )?;
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
                 self.pending_first_frame_pane = Some(workspace.tabs[0].root_pane);
@@ -363,7 +368,12 @@ impl App {
                     let root_pane = workspace.tabs[tab_idx].root_pane;
                     (tab_idx, terminal, runtime, root_pane)
                 };
-                apply_home_work_context(&mut terminal, plan.pr.as_ref(), plan.ticket.as_ref())?;
+                apply_home_work_context(
+                    &mut terminal,
+                    &plan.work_context_patch,
+                    plan.pr.as_ref(),
+                    plan.ticket.as_ref(),
+                )?;
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
                 self.pending_first_frame_pane = Some(root_pane);
@@ -745,19 +755,25 @@ fn terminal_agent_session_info(
 
 fn apply_home_work_context(
     terminal: &mut crate::terminal::TerminalState,
+    patch: &crate::work_context::PaneWorkContextPatch,
     pr: Option<&crate::app::home::HomePrContext>,
     ticket: Option<&crate::app::home::HomeTicketContext>,
 ) -> std::io::Result<()> {
-    if pr.is_none() && ticket.is_none() {
+    let mut patch = patch.clone();
+    if patch.repo.is_none() {
+        patch.repo = pr.map(|pr| pr.repo.clone());
+    }
+    if patch.pr_urls.is_none() {
+        patch.pr_urls = pr.map(|pr| vec![pr.url.clone()]);
+    }
+    if patch.ticket_ids.is_none() {
+        patch.ticket_ids = ticket.map(|ticket| vec![ticket.identifier.clone()]);
+    }
+    if patch.is_empty() {
         return Ok(());
     }
     terminal
-        .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
-            repo: pr.map(|pr| pr.repo.clone()),
-            pr_urls: pr.map(|pr| vec![pr.url.clone()]),
-            ticket_ids: ticket.map(|ticket| vec![ticket.identifier.clone()]),
-            ..Default::default()
-        })
+        .apply_manual_work_context_patch(patch)
         .map(|_| ())
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
@@ -955,6 +971,7 @@ mod tests {
             git_ref: None,
             pr: None,
             ticket: None,
+            work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
