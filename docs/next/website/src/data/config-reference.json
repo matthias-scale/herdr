@@ -830,7 +830,35 @@
           "key": "ui.confirm_close",
           "type": "boolean",
           "default": "true",
-          "description": "Ask for confirmation before closing a workspace."
+          "description": "Ask for confirmation before closing a workspace, and before deleting a settled thread."
+        },
+        {
+          "key": "ui.combine_repos_across_hosts",
+          "type": "boolean",
+          "default": "false",
+          "description": "Group workspaces that check out the same repository under one project header even when their checkout roots differ."
+        },
+        {
+          "key": "ui.hide_whitespace_in_diff",
+          "type": "boolean",
+          "default": "false",
+          "description": "Hide whitespace-only changes in the diff surface."
+        },
+        {
+          "key": "ui.new_thread_workspace",
+          "type": "string",
+          "default": "\"current_checkout\"",
+          "description": "Workspace preselected in the Home composer for a new thread: current_checkout or new_worktree.",
+          "values": [
+            "current_checkout",
+            "new_worktree"
+          ]
+        },
+        {
+          "key": "ui.add_project_start_dir",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Directory the add-project picker starts in. Empty keeps the last used directory."
         },
         {
           "key": "ui.prompt_new_tab_name",
@@ -1311,6 +1339,18 @@
           "type": "integer",
           "default": "3",
           "description": "Move completed or inactive panes into the Settled sidebar section after this many days without activity."
+        },
+        {
+          "key": "session.auto_settle_finished",
+          "type": "boolean",
+          "default": "true",
+          "description": "Settle a pane when the work it is linked to finishes, such as its pull request merging or its ticket reaching Done."
+        },
+        {
+          "key": "session.auto_settle_inactive",
+          "type": "boolean",
+          "default": "true",
+          "description": "Settle a pane that has had no activity for settle_after_days."
         }
       ]
     },

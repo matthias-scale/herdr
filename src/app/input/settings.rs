@@ -723,10 +723,7 @@ mod tests {
         let area = app.state.settings_content_rect();
         // Every row that fits maps back to itself, including the hinted first
         // row whose second line belongs to the same row.
-        for (index, (offset, height)) in crate::ui::general_row_offsets()
-            .into_iter()
-            .enumerate()
-        {
+        for (index, (offset, height)) in crate::ui::general_row_offsets().into_iter().enumerate() {
             for line in 0..height {
                 let row = area.y + 2 + offset + line;
                 if row >= area.y + area.height {
