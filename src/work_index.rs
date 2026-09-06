@@ -1547,12 +1547,27 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
     }
 }
 
+pub(crate) fn work_index_snapshot_path() -> std::path::PathBuf {
+    crate::config::state_dir().join("work-index.json")
+}
+
 pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot).map_err(io::Error::other)?;
     std::fs::write(path, bytes)
+}
+
+/// Read back a snapshot persisted by [`write_snapshot`].
+///
+/// Cold start should show the last known work index rather than an empty
+/// view until the first refresh completes, but the persisted file is best
+/// effort: a missing or corrupt file (partial write, format change) must
+/// fall back to `None` rather than panic or block startup.
+pub(crate) fn load_snapshot(path: &Path) -> Option<Snapshot> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Locate a CLI herdr shells out to.
@@ -1693,10 +1708,7 @@ impl crate::app::App {
         }
         self.work_index_refresh_in_flight = None;
         self.last_applied_work_index_refresh_generation = generation;
-        if let Err(error) = write_snapshot(
-            &crate::config::state_dir().join("work-index.json"),
-            &snapshot,
-        ) {
+        if let Err(error) = write_snapshot(&work_index_snapshot_path(), &snapshot) {
             tracing::warn!(error = %error, "failed to persist work index snapshot");
         }
         if let Some(work_view) = self.state.work_view.as_mut() {
@@ -2719,6 +2731,39 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
             serde_json::from_str(&std::fs::read_to_string(path).expect("read snapshot"))
                 .expect("valid JSON");
         assert!(value.get("items").is_some());
+    }
+
+    #[test]
+    fn load_snapshot_round_trips_a_written_snapshot() {
+        let dir = fixture_dir("load-round-trip");
+        let path = dir.join("work-index.json");
+        let snapshot = Snapshot {
+            items: Vec::new(),
+            unavailable: Some("Linear observation timed out".to_string()),
+            observed_at: SystemTime::now(),
+        };
+        write_snapshot(&path, &snapshot).expect("write snapshot");
+
+        let loaded = load_snapshot(&path).expect("snapshot loads back");
+
+        assert_eq!(loaded, snapshot);
+    }
+
+    #[test]
+    fn load_snapshot_returns_none_for_missing_file() {
+        let dir = fixture_dir("load-missing");
+        let path = dir.join("does-not-exist.json");
+
+        assert!(load_snapshot(&path).is_none());
+    }
+
+    #[test]
+    fn load_snapshot_returns_none_for_corrupt_file() {
+        let dir = fixture_dir("load-corrupt");
+        let path = dir.join("work-index.json");
+        std::fs::write(&path, b"not valid json").expect("write corrupt fixture");
+
+        assert!(load_snapshot(&path).is_none());
     }
 }
 
