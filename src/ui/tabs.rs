@@ -833,7 +833,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
             Style::default()
-                .fg(p.overlay0)
+                .fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                ))
                 .bg(p.surface0)
                 .add_modifier(Modifier::DIM)
         };
@@ -848,7 +851,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
             Style::default()
-                .fg(p.overlay0)
+                .fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                ))
                 .bg(p.surface0)
                 .add_modifier(Modifier::DIM)
         };
@@ -928,7 +934,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         if x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
                 .set_symbol("…")
-                .set_style(Style::default().fg(p.overlay0));
+                .set_style(Style::default().fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                )));
         }
     }
     if last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len()) {
@@ -940,7 +949,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         if x >= area.x && x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
                 .set_symbol("…")
-                .set_style(Style::default().fg(p.overlay0));
+                .set_style(Style::default().fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                )));
         }
     }
 }
