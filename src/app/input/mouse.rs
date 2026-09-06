@@ -38,6 +38,7 @@ pub(super) enum MouseAction {
         index: usize,
     },
     NewWorkspace,
+    DispatchSidebarWork(Box<crate::app::home::HomeDispatchPlan>),
     Settings(SettingsAction),
     FocusWorkspace {
         ws_idx: usize,
@@ -1038,6 +1039,29 @@ impl AppState {
                     }
                     if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
                         self.toggle_sidebar_group(&key);
+                        return None;
+                    }
+                    if let Some(key) =
+                        crate::ui::sidebar_unassigned_spawn_at(self, mouse.column, mouse.row)
+                    {
+                        self.sidebar_selected_work_group = None;
+                        match self.sidebar_unassigned_dispatch_plan(&key) {
+                            Ok(plan) => {
+                                return Some(MouseAction::DispatchSidebarWork(Box::new(plan)));
+                            }
+                            Err(error) => self.config_diagnostic = Some(error),
+                        }
+                        return None;
+                    }
+                    if crate::ui::sidebar_show_more_at(self, mouse.row) {
+                        self.sidebar_unassigned_expanded_views
+                            .insert(self.sidebar_group_mode);
+                        self.sidebar_selected_work_group = None;
+                        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                            self,
+                            self.view.sidebar_rect,
+                            self.workspace_scroll,
+                        );
                         return None;
                     }
                     if let Some(key) = crate::ui::sidebar_dim_header_at(self, mouse.row) {
