@@ -36,6 +36,7 @@ pub(crate) fn surface_available(
         DockSurface::Diff => in_git_repo,
         DockSurface::Pr => !ctx.pr_urls.is_empty(),
         DockSurface::Linear => !ctx.ticket_ids.is_empty(),
+        DockSurface::Missive => !ctx.missive_urls.is_empty(),
         _ => true,
     }
 }

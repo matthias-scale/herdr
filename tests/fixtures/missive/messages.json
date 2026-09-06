@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {
+      "id": "message-1",
+      "from_field": {"name": "Customer Example", "address": "customer@example.test"},
+      "delivered_at": 1788688700,
+      "preview": "Could you clarify the latest invoice?"
+    },
+    {
+      "id": "message-2",
+      "from_field": {"name": "Ada Example", "address": "ada@example.test"},
+      "delivered_at": 1788688600,
+      "body": "<p>I am checking that now.</p>"
+    }
+  ]
+}

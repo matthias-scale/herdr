@@ -1952,6 +1952,7 @@ mod tests {
             git_ref: None,
             pr: None,
             ticket: None,
+            missive: None,
             target: HomeTarget::NewSpace,
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],

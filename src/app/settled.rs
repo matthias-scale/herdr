@@ -343,6 +343,8 @@ mod tests {
     fn snapshot(item: crate::work_index::WorkItem) -> crate::work_index::Snapshot {
         crate::work_index::Snapshot {
             items: vec![item],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::now(),
         }

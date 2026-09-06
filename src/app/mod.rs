@@ -192,6 +192,7 @@ pub struct App {
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
     pub(crate) work_index_config: crate::config::WorkIndexConfig,
+    pub(crate) missive_config: crate::config::MissiveConfig,
     pub(crate) work_index_refresh_in_flight: Option<crate::work_index::WorkIndexRefreshInFlight>,
     pub(crate) last_work_index_refresh_generation: u64,
     pub(crate) last_applied_work_index_refresh_generation: u64,
@@ -221,6 +222,8 @@ pub struct App {
     pub(crate) work_index_gh_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) work_index_linearis_program_override: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    pub(crate) work_index_curl_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -832,6 +835,7 @@ impl App {
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
+                sidebar_footer_missive_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -1157,6 +1161,7 @@ impl App {
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
             work_index_config: config.work_index.clone(),
+            missive_config: config.missive.clone(),
             work_index_refresh_in_flight: None,
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
@@ -1183,6 +1188,8 @@ impl App {
             work_index_gh_program_override: None,
             #[cfg(test)]
             work_index_linearis_program_override: None,
+            #[cfg(test)]
+            work_index_curl_program_override: None,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
@@ -2263,6 +2270,11 @@ impl App {
             }
         }
 
+        if !invalid_section("missive") {
+            self.missive_config = config.missive.clone();
+            self.next_work_index_refresh = Instant::now();
+        }
+
         if !invalid_section("theme") {
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
             self.refresh_effective_app_theme();
@@ -2990,6 +3002,8 @@ mod tests {
         app.last_applied_work_index_refresh_generation = 4;
         let snapshot = crate::work_index::Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: std::time::SystemTime::now(),
         };

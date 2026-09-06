@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::schema::{AgentInfo, AgentStatus};
-use crate::config::WorkIndexConfig;
+use crate::config::{MissiveConfig, WorkIndexConfig};
 use crate::work_context::{
     linear_ticket_url, normalize_repo_slug, normalize_ticket_id, repo_slug_from_pr_url,
     repo_slugs_match, PaneWorkRole,
@@ -303,6 +303,42 @@ pub(crate) struct WorkTicket {
     pub(crate) relations: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissiveUser {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) email: Option<String>,
+    #[serde(default)]
+    pub(crate) is_me: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissiveEntry {
+    pub(crate) id: String,
+    pub(crate) author: Option<String>,
+    pub(crate) preview: String,
+    pub(crate) created_at: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissiveConversation {
+    pub(crate) id: String,
+    pub(crate) subject: String,
+    pub(crate) app_url: String,
+    pub(crate) web_url: String,
+    pub(crate) assignees: Vec<MissiveUser>,
+    pub(crate) last_activity_at: Option<SystemTime>,
+    pub(crate) closed: bool,
+    #[serde(default)]
+    pub(crate) messages: Vec<MissiveEntry>,
+    #[serde(default)]
+    pub(crate) notes: Vec<MissiveEntry>,
+    #[serde(default)]
+    pub(crate) drafts: Vec<MissiveEntry>,
+    #[serde(default)]
+    pub(crate) posts: Vec<MissiveEntry>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TicketGroup {
@@ -315,6 +351,10 @@ pub(crate) enum TicketGroup {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     pub items: Vec<WorkItem>,
+    #[serde(default)]
+    pub conversations: Vec<MissiveConversation>,
+    #[serde(default)]
+    pub missive_users: Vec<MissiveUser>,
     pub unavailable: Option<String>,
     pub observed_at: SystemTime,
 }
@@ -378,6 +418,431 @@ enum RefreshError {
     Failed(String),
 }
 
+const MISSIVE_API_BASE: &str = "https://public.missiveapp.com/v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MissiveRequest {
+    Conversations { team: String },
+    Conversation { id: String },
+    ConversationMessages { id: String },
+    Message { id: String },
+    ConversationDrafts { id: String },
+    ConversationPosts { id: String },
+    ConversationNotes { id: String },
+    Users { organization: Option<String> },
+}
+
+impl MissiveRequest {
+    const fn method(&self) -> &'static str {
+        "GET"
+    }
+
+    fn url(&self) -> String {
+        match self {
+            Self::Conversations { team } => format!(
+                "{MISSIVE_API_BASE}/conversations?team_all={}",
+                percent_encode(team)
+            ),
+            Self::Conversation { id } => {
+                format!("{MISSIVE_API_BASE}/conversations/{}", percent_encode(id))
+            }
+            Self::ConversationMessages { id } => format!(
+                "{MISSIVE_API_BASE}/conversations/{}/messages",
+                percent_encode(id)
+            ),
+            Self::Message { id } => {
+                format!("{MISSIVE_API_BASE}/messages/{}", percent_encode(id))
+            }
+            Self::ConversationDrafts { id } => format!(
+                "{MISSIVE_API_BASE}/conversations/{}/drafts",
+                percent_encode(id)
+            ),
+            Self::ConversationPosts { id } => format!(
+                "{MISSIVE_API_BASE}/conversations/{}/posts",
+                percent_encode(id)
+            ),
+            Self::ConversationNotes { id } => format!(
+                "{MISSIVE_API_BASE}/conversations/{}/comments",
+                percent_encode(id)
+            ),
+            Self::Users { organization } => organization.as_ref().map_or_else(
+                || format!("{MISSIVE_API_BASE}/users"),
+                |organization| {
+                    format!(
+                        "{MISSIVE_API_BASE}/users?organization={}",
+                        percent_encode(organization)
+                    )
+                },
+            ),
+        }
+    }
+}
+
+fn percent_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+fn run_missive_get(
+    request: &MissiveRequest,
+    config: &MissiveConfig,
+    program: &Path,
+    deadline: Instant,
+) -> Result<Value, RefreshError> {
+    let token = std::env::var(&config.token_env).map_err(|_| {
+        RefreshError::Failed(format!(
+            "Missive token environment variable {} is not set",
+            config.token_env
+        ))
+    })?;
+    if token.trim().is_empty() {
+        return Err(RefreshError::Failed(format!(
+            "Missive token environment variable {} is empty",
+            config.token_env
+        )));
+    }
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "--fail-with-body",
+        "--silent",
+        "--show-error",
+        "--request",
+        request.method(),
+        "--header",
+        &format!("Authorization: Bearer {token}"),
+        &request.url(),
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed("Missive GET could not be run".into())
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(format!(
+            "Missive GET failed with status {}",
+            output.status
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| RefreshError::Failed("Missive GET returned invalid JSON".into()))
+}
+
+fn value_array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+fn missive_user(value: &Value) -> Option<MissiveUser> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let email = value_text(value.get("email"));
+    let name = value_text(value.get("name"))
+        .or_else(|| value_text(value.get("display_name")))
+        .or_else(|| email.clone())
+        .unwrap_or_else(|| id.clone());
+    Some(MissiveUser {
+        id,
+        name,
+        email,
+        is_me: value
+            .get("me")
+            .or_else(|| value.get("is_me"))
+            .or_else(|| value.get("current"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn missive_time(value: Option<&Value>) -> Option<SystemTime> {
+    if let Some(seconds) = value.and_then(Value::as_u64) {
+        return Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+    }
+    value
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_system_time)
+}
+
+fn missive_preview(value: &Value) -> String {
+    let text = ["preview", "body", "text", "markdown", "subject"]
+        .into_iter()
+        .find_map(|key| value_text(value.get(key)))
+        .or_else(|| {
+            value
+                .get("notification")
+                .and_then(|notification| value_text(notification.get("body")))
+        })
+        .or_else(|| {
+            value
+                .get("notification")
+                .and_then(|notification| value_text(notification.get("title")))
+        })
+        .unwrap_or_default();
+    let mut plain = String::with_capacity(text.len().min(240));
+    let mut in_tag = false;
+    for character in text.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => plain.push(character),
+            _ => {}
+        }
+        if plain.chars().count() >= 240 {
+            break;
+        }
+    }
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn missive_author(value: &Value) -> Option<String> {
+    value
+        .get("author")
+        .or_else(|| value.get("from_field"))
+        .and_then(|author| {
+            value_text(author.get("name")).or_else(|| value_text(author.get("address")))
+        })
+        .or_else(|| value_text(value.get("username")))
+}
+
+fn missive_entry(value: &Value) -> Option<MissiveEntry> {
+    Some(MissiveEntry {
+        id: value_text(value.get("id")).unwrap_or_default(),
+        author: missive_author(value),
+        preview: missive_preview(value),
+        created_at: missive_time(
+            value
+                .get("delivered_at")
+                .or_else(|| value.get("created_at")),
+        ),
+    })
+}
+
+fn parse_missive_entries(value: &Value, key: &str) -> Vec<MissiveEntry> {
+    value_array(value, key)
+        .iter()
+        .filter_map(missive_entry)
+        .collect()
+}
+
+fn parse_missive_conversation_for_user(
+    value: &Value,
+    current_user_id: Option<&str>,
+) -> Option<MissiveConversation> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let fallback_url = format!("https://mail.missiveapp.com/#inbox/conversations/{id}");
+    let web_url = value_text(value.get("web_url")).unwrap_or_else(|| fallback_url.clone());
+    let app_url = value_text(value.get("app_url")).unwrap_or_else(|| web_url.clone());
+    let closed_for_user = current_user_id.is_some_and(|current_user_id| {
+        value_array(value.get("users").unwrap_or(&Value::Null), "users")
+            .iter()
+            .find(|user| user.get("id").and_then(Value::as_str) == Some(current_user_id))
+            .and_then(|user| user.get("closed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    Some(MissiveConversation {
+        subject: value_text(value.get("subject"))
+            .or_else(|| value_text(value.get("latest_message_subject")))
+            .unwrap_or_else(|| "(no subject)".into()),
+        assignees: value_array(value.get("assignees").unwrap_or(&Value::Null), "users")
+            .iter()
+            .filter_map(missive_user)
+            .collect(),
+        last_activity_at: missive_time(value.get("last_activity_at")),
+        closed: value
+            .get("closed")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                value
+                    .get("closed_at")
+                    .is_some_and(|closed| !closed.is_null())
+            })
+            || closed_for_user,
+        id,
+        app_url,
+        web_url,
+        messages: Vec::new(),
+        notes: Vec::new(),
+        drafts: Vec::new(),
+        posts: Vec::new(),
+    })
+}
+
+fn parse_missive_conversations_for_user(
+    value: &Value,
+    current_user_id: Option<&str>,
+) -> Vec<MissiveConversation> {
+    value_array(value, "conversations")
+        .iter()
+        .filter_map(|value| parse_missive_conversation_for_user(value, current_user_id))
+        .collect()
+}
+
+fn missive_resource<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    match value.get(key) {
+        Some(Value::Array(values)) => values.first(),
+        Some(value) => Some(value),
+        None if value.is_object() => Some(value),
+        None => None,
+    }
+}
+
+fn missive_conversation_id(url: &str) -> Option<&str> {
+    url.split("/conversations/")
+        .nth(1)
+        .and_then(|tail| tail.split(['?', '#', '/']).next())
+        .filter(|id| !id.is_empty())
+}
+
+fn fetch_missive_conversation_detail(
+    id: &str,
+    current_user_id: Option<&str>,
+    config: &MissiveConfig,
+    program: &Path,
+    batch_deadline: Instant,
+    target_timeout: Duration,
+) -> Result<MissiveConversation, RefreshError> {
+    let get = |request| {
+        run_missive_get(
+            &request,
+            config,
+            program,
+            target_deadline(batch_deadline, target_timeout),
+        )
+    };
+    let value = get(MissiveRequest::Conversation { id: id.into() })?;
+    let object = missive_resource(&value, "conversations")
+        .ok_or_else(|| RefreshError::Failed("Missive returned no conversation".into()))?;
+    let mut conversation = parse_missive_conversation_for_user(object, current_user_id)
+        .ok_or_else(|| RefreshError::Failed("Missive returned an invalid conversation".into()))?;
+    let messages = get(MissiveRequest::ConversationMessages { id: id.into() })?;
+    conversation.messages = parse_missive_entries(&messages, "messages");
+    for message in &mut conversation.messages {
+        if message.id.is_empty() {
+            continue;
+        }
+        let detail = get(MissiveRequest::Message {
+            id: message.id.clone(),
+        })?;
+        if let Some(hydrated) = missive_resource(&detail, "messages").and_then(missive_entry) {
+            *message = hydrated;
+        }
+    }
+    conversation.drafts = parse_missive_entries(
+        &get(MissiveRequest::ConversationDrafts { id: id.into() })?,
+        "drafts",
+    );
+    conversation.posts = parse_missive_entries(
+        &get(MissiveRequest::ConversationPosts { id: id.into() })?,
+        "posts",
+    );
+    conversation.notes = parse_missive_entries(
+        &get(MissiveRequest::ConversationNotes { id: id.into() })?,
+        "comments",
+    );
+    Ok(conversation)
+}
+
+fn fetch_missive_snapshot(
+    config: &MissiveConfig,
+    panes: &[AgentInfo],
+    selected_conversation: Option<&str>,
+    program: &Path,
+    batch_deadline: Instant,
+    target_timeout: Duration,
+) -> Result<(Vec<MissiveConversation>, Vec<MissiveUser>), RefreshError> {
+    let configured = config
+        .team
+        .as_deref()
+        .is_some_and(|team| !team.trim().is_empty());
+    let token_available =
+        std::env::var_os(&config.token_env).is_some_and(|value| !value.is_empty());
+    if !configured || !token_available {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let team = config.team.clone().unwrap_or_default();
+    let users_value = run_missive_get(
+        &MissiveRequest::Users {
+            organization: config.organization.clone(),
+        },
+        config,
+        program,
+        target_deadline(batch_deadline, target_timeout),
+    )?;
+    let users = value_array(&users_value, "users")
+        .iter()
+        .filter_map(missive_user)
+        .collect::<Vec<_>>();
+    let current_user_id = users
+        .iter()
+        .find(|user| user.is_me)
+        .map(|user| user.id.as_str());
+    let conversations_value = run_missive_get(
+        &MissiveRequest::Conversations { team },
+        config,
+        program,
+        target_deadline(batch_deadline, target_timeout),
+    )?;
+    let mut conversations =
+        parse_missive_conversations_for_user(&conversations_value, current_user_id);
+    let mut detail_ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.missive_urls.iter())
+        .filter_map(|url| missive_conversation_id(url).map(str::to_string))
+        .collect::<HashSet<_>>();
+    if let Some(selected) = selected_conversation {
+        detail_ids.insert(selected.to_string());
+    } else if let Some(first) = conversations.first() {
+        detail_ids.insert(first.id.clone());
+    }
+    for id in detail_ids {
+        let Ok(detail) = fetch_missive_conversation_detail(
+            &id,
+            current_user_id,
+            config,
+            program,
+            batch_deadline,
+            target_timeout,
+        ) else {
+            continue;
+        };
+        if let Some(index) = conversations
+            .iter()
+            .position(|conversation| conversation.id == detail.id)
+        {
+            conversations[index] = detail;
+        } else {
+            conversations.push(detail);
+        }
+    }
+    conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.last_activity_at));
+    Ok((conversations, users))
+}
+
+/// Stable assignee hook for the sidebar filter slice.
+pub(crate) fn missive_assignees(snapshot: Option<&Snapshot>) -> &[MissiveUser] {
+    snapshot
+        .map(|snapshot| snapshot.missive_users.as_slice())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
 pub(crate) fn refresh_work_index(
     config: &WorkIndexConfig,
     panes: &[AgentInfo],
@@ -386,6 +851,32 @@ pub(crate) fn refresh_work_index(
     target_timeout: Duration,
     gh_program: &Path,
     linearis_program: &Path,
+) -> Snapshot {
+    refresh_work_index_with_missive(
+        config,
+        &MissiveConfig::default(),
+        panes,
+        None,
+        now,
+        batch_deadline,
+        target_timeout,
+        gh_program,
+        linearis_program,
+        Path::new("curl"),
+    )
+}
+
+pub(crate) fn refresh_work_index_with_missive(
+    config: &WorkIndexConfig,
+    missive: &MissiveConfig,
+    panes: &[AgentInfo],
+    selected_missive: Option<&str>,
+    now: Instant,
+    batch_deadline: Instant,
+    target_timeout: Duration,
+    gh_program: &Path,
+    linearis_program: &Path,
+    curl_program: &Path,
 ) -> Snapshot {
     if !config.enabled {
         return unavailable_snapshot("work index disabled");
@@ -459,6 +950,24 @@ pub(crate) fn refresh_work_index(
         _ => Vec::new(),
     };
     let attachments = fetch_attachments(&tickets, linearis_program, batch_deadline, target_timeout);
+    let (conversations, missive_users) = match fetch_missive_snapshot(
+        missive,
+        panes,
+        selected_missive,
+        curl_program,
+        batch_deadline,
+        target_timeout,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(RefreshError::TimedOut) => {
+            degraded = degraded.or_else(|| Some("Missive observation timed out".into()));
+            (Vec::new(), Vec::new())
+        }
+        Err(RefreshError::Failed(message)) => {
+            degraded = degraded.or(Some(message));
+            (Vec::new(), Vec::new())
+        }
+    };
 
     let mut items = github
         .into_iter()
@@ -619,6 +1128,8 @@ pub(crate) fn refresh_work_index(
     let _ = now;
     Snapshot {
         items,
+        conversations,
+        missive_users,
         unavailable: degraded,
         observed_at: SystemTime::now(),
     }
@@ -648,6 +1159,8 @@ fn exit_detail(label: &str, output: &std::process::Output) -> String {
 fn unavailable_snapshot(message: impl Into<String>) -> Snapshot {
     Snapshot {
         items: Vec::new(),
+        conversations: Vec::new(),
+        missive_users: Vec::new(),
         unavailable: Some(message.into()),
         observed_at: SystemTime::now(),
     }
@@ -1856,6 +2369,14 @@ impl crate::app::App {
         resolve_program("linearis")
     }
 
+    pub(crate) fn work_index_curl_program(&self) -> std::path::PathBuf {
+        #[cfg(test)]
+        if let Some(program) = self.work_index_curl_program_override.as_ref() {
+            return program.clone();
+        }
+        resolve_program("curl")
+    }
+
     pub(crate) fn work_index_refresh_deadline(&self) -> Option<Instant> {
         self.work_index_config.enabled.then(|| {
             self.work_index_refresh_in_flight
@@ -1899,21 +2420,31 @@ impl crate::app::App {
         }
         let config = self.work_index_config.clone();
         let panes = self.collect_agent_infos();
+        let selected_missive = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected_missive.clone());
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
         let session = self.work_index_session.clone();
+        let curl_program = self.work_index_curl_program();
+        let missive = self.missive_config.clone();
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
-                let snapshot = refresh_work_index(
+                let snapshot = refresh_work_index_with_missive(
                     &config,
+                    &missive,
                     &panes,
+                    selected_missive.as_deref(),
                     Instant::now(),
                     deadline,
                     WORK_INDEX_TARGET_TIMEOUT,
                     &gh_program,
                     &linearis_program,
+                    &curl_program,
                 );
                 let session = resolve_work_index_session(
                     &config,
@@ -2224,6 +2755,198 @@ mod tests {
         assert!(linear_comments(None).is_empty());
         let empty: Value = serde_json::from_str(r#"{"nodes":[]}"#).expect("fixture");
         assert!(linear_comments(Some(&empty)).is_empty());
+    }
+
+    #[test]
+    fn missive_client_request_catalog_is_get_only() {
+        let requests = [
+            MissiveRequest::Conversations {
+                team: "team".into(),
+            },
+            MissiveRequest::Conversation {
+                id: "conversation".into(),
+            },
+            MissiveRequest::ConversationMessages {
+                id: "conversation".into(),
+            },
+            MissiveRequest::Message {
+                id: "message".into(),
+            },
+            MissiveRequest::ConversationDrafts {
+                id: "conversation".into(),
+            },
+            MissiveRequest::ConversationPosts {
+                id: "conversation".into(),
+            },
+            MissiveRequest::ConversationNotes {
+                id: "conversation".into(),
+            },
+            MissiveRequest::Users {
+                organization: Some("organization".into()),
+            },
+        ];
+        assert!(requests.iter().all(|request| request.method() == "GET"));
+        assert!(requests
+            .iter()
+            .all(|request| request.url().starts_with(MISSIVE_API_BASE)));
+        assert_eq!(
+            requests[0].url(),
+            "https://public.missiveapp.com/v1/conversations?team_all=team"
+        );
+    }
+
+    #[test]
+    fn missive_fixture_parsers_cover_conversations_messages_drafts_and_posts() {
+        let conversations: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/missive/conversations.json"))
+                .expect("conversation fixture");
+        let messages: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/missive/messages.json"))
+                .expect("message fixture");
+        let drafts: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/missive/drafts.json"))
+                .expect("draft fixture");
+        let posts: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/missive/posts.json"))
+                .expect("post fixture");
+
+        let parsed = parse_missive_conversations_for_user(&conversations, Some("user-1"));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].subject, "Billing question from fixture");
+        assert_eq!(parsed[0].assignees[0].name, "Ada Example");
+        assert!(!parsed[0].assignees[0].is_me);
+        assert_eq!(
+            parsed[0].app_url,
+            "missive://mail.missiveapp.com/#inbox/conversations/11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            parsed[0].web_url,
+            "https://mail.missiveapp.com/#inbox/conversations/11111111-1111-4111-8111-111111111111"
+        );
+        assert!(!parsed[0].closed);
+        assert!(parsed[1].closed);
+        assert_eq!(parsed[1].subject, "Archived fixture conversation");
+        assert_eq!(parse_missive_entries(&messages, "messages").len(), 2);
+        assert_eq!(
+            parse_missive_entries(&messages, "messages")[1].preview,
+            "I am checking that now."
+        );
+        assert_eq!(parse_missive_entries(&drafts, "drafts").len(), 1);
+        assert_eq!(
+            parse_missive_entries(&posts, "posts")[0].preview,
+            "Invoice lookup completed."
+        );
+        assert_eq!(parse_missive_entries(&posts, "comments").len(), 1);
+
+        let conversation_response = serde_json::json!({
+            "conversations": [conversations["conversations"][0].clone()]
+        });
+        assert_eq!(
+            missive_resource(&conversation_response, "conversations")
+                .and_then(|value| parse_missive_conversation_for_user(value, None))
+                .map(|conversation| conversation.id),
+            Some("11111111-1111-4111-8111-111111111111".into())
+        );
+        let message_response = serde_json::json!({
+            "messages": messages["messages"][0].clone()
+        });
+        assert_eq!(
+            missive_resource(&message_response, "messages")
+                .and_then(missive_entry)
+                .map(|message| message.preview),
+            Some("Could you clarify the latest invoice?".into())
+        );
+    }
+
+    #[test]
+    fn missive_selected_conversation_hydrates_every_read_only_detail() {
+        let dir = fixture_dir("missive-selected-detail");
+        let curl = dir.join("curl");
+        write_executable(
+            &curl,
+            r#"#!/bin/sh
+case "$*" in
+  *"--request GET"*) ;;
+  *) exit 64 ;;
+esac
+for argument do url="$argument"; done
+case "$url" in
+  *"/users?organization=org") printf '%s' '{"users":[{"id":"me","name":"Ada","me":true}]}' ;;
+  *"/conversations?team_all=team") printf '%s' '{"conversations":[{"id":"first","subject":"First","app_url":"missive://first","web_url":"https://mail.missiveapp.com/#inbox/conversations/first"},{"id":"selected","subject":"Selected","app_url":"missive://selected","web_url":"https://mail.missiveapp.com/#inbox/conversations/selected"}]}' ;;
+  *"/conversations/selected/messages") printf '%s' '{"messages":[{"id":"message-1","preview":"list preview"}]}' ;;
+  *"/messages/message-1") printf '%s' '{"messages":{"id":"message-1","preview":"hydrated message"}}' ;;
+  *"/conversations/selected/drafts") printf '%s' '{"drafts":[{"id":"draft-1","preview":"draft"}]}' ;;
+  *"/conversations/selected/posts") printf '%s' '{"posts":[{"id":"post-1","preview":"post"}]}' ;;
+  *"/conversations/selected/comments") printf '%s' '{"comments":[{"id":"note-1","preview":"note"}]}' ;;
+  *"/conversations/selected") printf '%s' '{"conversations":[{"id":"selected","subject":"Selected detail","app_url":"missive://selected","web_url":"https://mail.missiveapp.com/#inbox/conversations/selected"}]}' ;;
+  *) exit 65 ;;
+esac
+"#,
+        );
+        let token_env = format!(
+            "HERDR_TEST_MISSIVE_TOKEN_{}",
+            crate::config::test_unique_suffix().replace('-', "_")
+        );
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(&token_env, "test-token");
+        let config = MissiveConfig {
+            token_env,
+            team: Some("team".into()),
+            organization: Some("org".into()),
+        };
+
+        let (conversations, users) = fetch_missive_snapshot(
+            &config,
+            &[],
+            Some("selected"),
+            &curl,
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(2),
+        )
+        .expect("Missive snapshot");
+
+        let selected = conversations
+            .iter()
+            .find(|conversation| conversation.id == "selected")
+            .expect("selected conversation");
+        assert_eq!(selected.subject, "Selected detail");
+        assert_eq!(selected.messages[0].preview, "hydrated message");
+        assert_eq!(selected.drafts[0].preview, "draft");
+        assert_eq!(selected.posts[0].preview, "post");
+        assert_eq!(selected.notes[0].preview, "note");
+        assert!(users[0].is_me);
+        assert!(conversations
+            .iter()
+            .find(|conversation| conversation.id == "first")
+            .is_some_and(|conversation| conversation.messages.is_empty()));
+    }
+
+    #[test]
+    fn missive_assignee_hook_reads_snapshot_users() {
+        let snapshot = Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: vec![MissiveUser {
+                id: "user-1".into(),
+                name: "Ada".into(),
+                email: None,
+                is_me: true,
+            }],
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        assert_eq!(missive_assignees(Some(&snapshot))[0].name, "Ada");
+        assert!(missive_assignees(None).is_empty());
+    }
+
+    #[test]
+    fn missive_curl_program_can_be_overridden_without_changing_global_path() {
+        let mut app = test_app_with_work_index();
+        app.work_index_curl_program_override = Some(Path::new("/tmp/fake-missive-curl").into());
+        assert_eq!(
+            app.work_index_curl_program(),
+            Path::new("/tmp/fake-missive-curl")
+        );
     }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -3191,6 +3914,8 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
         let path = dir.join("nested/work-index.json");
         let snapshot = Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::now(),
         };
