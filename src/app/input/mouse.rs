@@ -5091,6 +5091,35 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_footer_ticket_entry_opens_tickets_at_supported_widths() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let work = app.state.view.sidebar_footer_work_hit_area;
+            let hit = app.state.view.sidebar_footer_ticket_hit_area;
+            assert_eq!(
+                hit.height, 1,
+                "ticket footer must render at {width} columns"
+            );
+            assert_eq!(hit.x, work.right(), "ticket entry follows PR entry");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+
+            assert!(app.state.work_view.as_ref().is_some_and(|view| {
+                view.projection == crate::app::state::WorkProjection::Tickets
+            }));
+        }
+    }
+
+    #[test]
     fn sidebar_footer_usage_entry_and_every_view_toggle_are_clickable() {
         use crate::app::state::{UsageBreakdown, UsageHitTarget, UsageMetric, UsageRange};
 
@@ -5099,9 +5128,13 @@ mod tests {
             app.state.workspaces = vec![Workspace::test_new("one")];
             app.state.ensure_test_terminals();
             app.state.active = Some(0);
+            app.state.selected = 0;
+
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let tickets = app.state.view.sidebar_footer_ticket_hit_area;
             let footer = app.state.view.sidebar_footer_usage_hit_area;
             assert!(footer.width > 0);
+            assert_eq!(footer.x, tickets.right(), "usage entry follows tickets");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 footer.x,

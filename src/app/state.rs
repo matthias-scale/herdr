@@ -1275,11 +1275,8 @@ impl DockSurface {
 
     /// Placeholder body until the surface gets its implementation slice.
     pub fn placeholder(self) -> Option<String> {
-        matches!(
-            self,
-            Self::Terminal | Self::Files | Self::Linear | Self::Agents
-        )
-        .then(|| format!("{}: coming in a later slice", self.title()))
+        matches!(self, Self::Terminal | Self::Files | Self::Agents)
+            .then(|| format!("{}: coming in a later slice", self.title()))
     }
 }
 
@@ -1403,6 +1400,8 @@ pub struct ViewState {
     pub(crate) sidebar_footer_usage_hit_area: Rect,
     /// Header and breakdown controls inside the historical usage view.
     pub(crate) usage_hit_areas: Vec<UsageHitArea>,
+    /// Sidebar-footer entry for the full-screen Linear ticket view.
+    pub(crate) sidebar_footer_ticket_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -2688,10 +2687,17 @@ pub(crate) struct WorkViewState {
     pub(crate) search: String,
     pub(crate) search_focused: bool,
     pub(crate) sort: crate::ui::work_list_detail::PrSort,
+    pub(crate) ticket_sort: crate::ui::work_list_detail::TicketSort,
     pub(crate) open_only: bool,
+    pub(crate) ticket_open_only: bool,
     pub(crate) detail_tab: PrDetailTab,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) pending_land: Option<PrLandConfirmation>,
+    pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
+    pub(crate) ticket_more_menu: Option<TicketMoreChoice>,
+    pub(crate) ticket_comment_draft: Option<String>,
+    pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
     pub(crate) refreshing: bool,
 }
 
@@ -2752,6 +2758,64 @@ impl UsageViewState {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TicketTransitionChoice {
+    #[default]
+    Todo,
+    InProgress,
+    InReview,
+    Done,
+}
+
+impl TicketTransitionChoice {
+    pub(crate) const ALL: [Self; 4] = [Self::Todo, Self::InProgress, Self::InReview, Self::Done];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Todo => "Todo",
+            Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
+            Self::Done => "Done",
+        }
+    }
+
+    pub(crate) fn move_by(self, delta: i8) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|choice| *choice == self)
+            .unwrap_or(0) as i8;
+        Self::ALL[(index + delta).clamp(0, 3) as usize]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TicketMoreChoice {
+    #[default]
+    Open,
+    CopyIdentifier,
+    Comment,
+}
+
+impl TicketMoreChoice {
+    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::CopyIdentifier, Self::Comment];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open in browser",
+            Self::CopyIdentifier => "Copy identifier",
+            Self::Comment => "Comment",
+        }
+    }
+
+    pub(crate) fn move_by(self, delta: i8) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|choice| *choice == self)
+            .unwrap_or(0) as i8;
+        Self::ALL[(index + delta).clamp(0, 2) as usize]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PrDetailTab {
     #[default]
     Summary,
@@ -2796,10 +2860,17 @@ impl WorkViewState {
             search: String::new(),
             search_focused: false,
             sort: crate::ui::work_list_detail::PrSort::Updated,
+            ticket_sort: crate::ui::work_list_detail::TicketSort::Updated,
             open_only: true,
+            ticket_open_only: false,
             detail_tab: PrDetailTab::Summary,
             checkout_menu: None,
             pending_land: None,
+            ticket_start_menu: None,
+            ticket_transition_menu: None,
+            ticket_more_menu: None,
+            ticket_comment_draft: None,
+            pending_write: None,
             refreshing: false,
         }
     }
@@ -2828,19 +2899,6 @@ impl AppState {
 
     pub(crate) fn swap_work_view(&mut self, other: &mut Option<WorkViewState>) {
         std::mem::swap(&mut self.work_view, other);
-    }
-
-    pub(crate) fn toggle_work_view(
-        &mut self,
-        enabled: bool,
-        snapshot: Option<crate::work_index::Snapshot>,
-    ) {
-        if self.work_view.is_some() {
-            self.work_view = None;
-            return;
-        }
-        self.usage_view = None;
-        self.work_view = Some(WorkViewState::new(enabled, snapshot));
     }
 
     pub(crate) fn clear_work_view(&mut self) {
@@ -3565,6 +3623,7 @@ impl AppState {
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
+                sidebar_footer_ticket_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),

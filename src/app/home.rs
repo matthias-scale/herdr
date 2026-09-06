@@ -310,6 +310,13 @@ pub(crate) struct HomePrContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeTicketContext {
+    pub(crate) identifier: String,
+    pub(crate) title: String,
+    pub(crate) url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeDispatchPlan {
     pub(crate) agent: Agent,
     pub(crate) model: String,
@@ -318,6 +325,7 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) workspace: HomeWorkspace,
     pub(crate) git_ref: Option<HomeRef>,
     pub(crate) pr: Option<HomePrContext>,
+    pub(crate) ticket: Option<HomeTicketContext>,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
@@ -395,6 +403,8 @@ pub(crate) struct HomeState {
     pub(crate) selected_ref: Option<HomeRef>,
     /// Pull request that opened this composer. TUI-only launch context.
     pub(crate) pr: Option<HomePrContext>,
+    /// Linear ticket that opened this composer. TUI-only launch context.
+    pub(crate) ticket: Option<HomeTicketContext>,
     pub(crate) ref_repo_root: Option<PathBuf>,
     pub(crate) ref_directory: PathBuf,
     workspace_options: Vec<HomeWorkspace>,
@@ -426,6 +436,7 @@ impl Default for HomeState {
             ref_filter: DropdownFilterState::default(),
             selected_ref: None,
             pr: None,
+            ticket: None,
             ref_repo_root: None,
             ref_directory: default_directory(),
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
@@ -764,6 +775,7 @@ impl HomeState {
             workspace: self.workspace.clone(),
             git_ref: self.selected_ref.clone(),
             pr: self.pr.clone(),
+            ticket: self.ticket.clone(),
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -1896,6 +1908,7 @@ mod tests {
                 workspace: HomeWorkspace::CurrentCheckout,
                 git_ref: None,
                 pr: None,
+                ticket: None,
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![

@@ -286,6 +286,12 @@ pub(crate) struct WorkTicket {
     pub(crate) description: Option<String>,
     pub(crate) state: Option<String>,
     pub(crate) assignee: Option<String>,
+    #[serde(default)]
+    pub(crate) priority: Option<u8>,
+    #[serde(default)]
+    pub(crate) cycle: Option<String>,
+    #[serde(default)]
+    pub(crate) group: TicketGroup,
     pub(crate) created_at: Option<SystemTime>,
     pub(crate) updated_at: Option<SystemTime>,
     pub(crate) branch: Option<String>,
@@ -293,6 +299,15 @@ pub(crate) struct WorkTicket {
     pub(crate) url: Option<String>,
     pub(crate) parent: Option<String>,
     pub(crate) relations: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TicketGroup {
+    #[default]
+    Assigned,
+    Triage,
+    DoneThisCycle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +323,7 @@ struct GithubPullRequest {
     number: u64,
     url: String,
     title: String,
+    body: String,
     branch: String,
     draft: bool,
     review_decision: Option<String>,
@@ -426,33 +442,41 @@ pub(crate) fn refresh_work_index(
 
     let mut items = github
         .into_iter()
-        .map(|pr| WorkItem {
-            repo: pr.repo,
-            pr_number: Some(pr.number),
-            pr_url: Some(pr.url),
-            pr_title: Some(pr.title),
-            pr_state: Some("open".into()),
-            draft: pr.draft,
-            review_decision: pr.review_decision,
-            created_at: pr.created_at,
-            updated_at: pr.updated_at,
-            additions: pr.additions,
-            deletions: pr.deletions,
-            author: pr.author,
-            labels: pr.labels,
-            check_state: pr.check_state,
-            audience: pr.audience,
-            ticket_ids: Vec::new(),
-            ticket_title: None,
-            ticket_state: None,
-            ticket_details: Vec::new(),
-            branch: Some(pr.branch),
-            preview_urls: Vec::new(),
-            panes: Vec::new(),
-            source: WorkItemSource {
-                github: true,
-                ..WorkItemSource::default()
-            },
+        .map(|pr| {
+            let searchable = format!("{}\n{}", pr.branch, pr.body).to_ascii_lowercase();
+            let ticket_ids = tickets
+                .iter()
+                .filter(|ticket| searchable.contains(&ticket.identifier.to_ascii_lowercase()))
+                .map(|ticket| ticket.identifier.clone())
+                .collect();
+            WorkItem {
+                repo: pr.repo,
+                pr_number: Some(pr.number),
+                pr_url: Some(pr.url),
+                pr_title: Some(pr.title),
+                pr_state: Some("open".into()),
+                draft: pr.draft,
+                review_decision: pr.review_decision,
+                created_at: pr.created_at,
+                updated_at: pr.updated_at,
+                additions: pr.additions,
+                deletions: pr.deletions,
+                author: pr.author,
+                labels: pr.labels,
+                check_state: pr.check_state,
+                audience: pr.audience,
+                ticket_ids,
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: Some(pr.branch),
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: WorkItemSource {
+                    github: true,
+                    ..WorkItemSource::default()
+                },
+            }
         })
         .collect::<Vec<_>>();
 
@@ -626,7 +650,7 @@ fn fetch_github_pull_requests(
         "--limit",
         "200",
         "--json",
-        "number,title,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
+        "number,title,body,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
     ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
@@ -654,6 +678,7 @@ fn fetch_github_pull_requests(
                 number: value.get("number")?.as_u64()?,
                 url,
                 title: value.get("title")?.as_str()?.to_string(),
+                body: value_text(value.get("body")).unwrap_or_default(),
                 branch: value.get("headRefName")?.as_str()?.to_string(),
                 draft: value
                     .get("isDraft")
@@ -865,23 +890,29 @@ fn fetch_linear_ticket_detail(
     program: &Path,
     deadline: Instant,
 ) -> Result<WorkItemDetail, RefreshError> {
-    let mut command = crate::noninteractive_process::command(program);
-    command.args([
-        "issues",
-        "read",
-        identifier,
-        "--with-comment-threads",
-        "--compact",
-    ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
+    let run = |args: &[&str]| {
+        let mut command = crate::noninteractive_process::command(program);
+        command.args(args);
+        crate::noninteractive_process::output_with_deadline(command, deadline).map_err(|error| {
             if error.kind() == std::io::ErrorKind::TimedOut {
                 RefreshError::TimedOut
             } else {
                 RefreshError::Failed(format!("linearis could not be run ({})", program.display()))
             }
-        },
-    )?;
+        })
+    };
+    // Newer linearis builds expose `issues get`; keep the installed `read`
+    // spelling as a compatibility fallback until every host has upgraded.
+    let mut output = run(&["issues", "get", identifier])?;
+    if !output.status.success() {
+        output = run(&[
+            "issues",
+            "read",
+            identifier,
+            "--with-comment-threads",
+            "--compact",
+        ])?;
+    }
     if !output.status.success() {
         return Err(RefreshError::Failed(format!(
             "linearis issues read failed: {}",
@@ -1134,18 +1165,98 @@ fn fetch_linear_tickets(
     program: &Path,
     deadline: Instant,
 ) -> Result<Vec<LinearTicket>, RefreshError> {
-    let mut command = crate::noninteractive_process::command(program);
-    command.args([
-        "issues",
-        "list",
-        "--team",
+    let mut tickets = Vec::new();
+    tickets.extend(fetch_linear_ticket_group(
         team,
-        "--status",
-        "In Progress,In Review",
-        "-l",
-        "100",
-        "--compact",
-    ]);
+        program,
+        deadline,
+        TicketGroup::Assigned,
+        &["--assignee", "me"],
+    )?);
+    tickets.extend(fetch_linear_ticket_group(
+        team,
+        program,
+        deadline,
+        TicketGroup::Triage,
+        &["--status", "Triage"],
+    )?);
+    if let Some(cycle) = fetch_active_linear_cycle(team, program, deadline)? {
+        tickets.extend(fetch_linear_ticket_group(
+            team,
+            program,
+            deadline,
+            TicketGroup::DoneThisCycle,
+            &["--cycle", &cycle, "--status", "Done"],
+        )?);
+    }
+
+    let mut deduplicated: Vec<LinearTicket> = Vec::new();
+    for ticket in tickets {
+        if let Some(existing) = deduplicated
+            .iter_mut()
+            .find(|existing| existing.identifier == ticket.identifier)
+        {
+            if ticket_group_rank(ticket.group) > ticket_group_rank(existing.group) {
+                *existing = ticket;
+            }
+        } else {
+            deduplicated.push(ticket);
+        }
+    }
+    Ok(deduplicated)
+}
+
+fn ticket_group_rank(group: TicketGroup) -> u8 {
+    match group {
+        TicketGroup::Assigned => 0,
+        TicketGroup::Triage => 1,
+        TicketGroup::DoneThisCycle => 2,
+    }
+}
+
+fn fetch_active_linear_cycle(
+    team: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<Option<String>, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args(["cycles", "list", "--team", team, "--active", "--compact"]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("Linear cycle observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "Linear cycle observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("Linear cycle observation returned invalid JSON".into())
+    })?;
+    Ok(value
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.first())
+        .and_then(|cycle| value_text(cycle.get("name"))))
+}
+
+fn fetch_linear_ticket_group(
+    team: &str,
+    program: &Path,
+    deadline: Instant,
+    group: TicketGroup,
+    filters: &[&str],
+) -> Result<Vec<LinearTicket>, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args(["issues", "list", "--team", team]);
+    command.args(filters);
+    command.args(["-l", "100", "--compact"]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
             if error.kind() == io::ErrorKind::TimedOut {
@@ -1179,6 +1290,12 @@ fn fetch_linear_tickets(
                 description: value_text(node.get("description")),
                 state: nested_text(node.get("state"), "name"),
                 assignee: nested_text(node.get("assignee"), "name"),
+                priority: node
+                    .get("priority")
+                    .and_then(Value::as_u64)
+                    .and_then(|priority| u8::try_from(priority).ok()),
+                cycle: nested_text(node.get("cycle"), "name"),
+                group,
                 created_at: node
                     .get("createdAt")
                     .and_then(Value::as_str)
@@ -2034,7 +2151,7 @@ mod tests {
         let (gh, _linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
+test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,body,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
 printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"headRefName":"branch","baseRefName":"main","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","additions":12,"deletions":3,"labels":[{"name":"bug"}],"statusCheckRollup":[{"name":"test","conclusion":"SUCCESS"}]}]'
 "#,
             "#!/bin/sh\nprintf '%s' '[]'\n",
@@ -2133,6 +2250,104 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
                 "duplicated by  SCA-5  original"
             ]
         );
+    }
+
+    #[test]
+    fn linear_ticket_sets_use_assignee_triage_and_active_cycle_queries() {
+        let dir = fixture_dir("linear-ticket-sets");
+        let log = dir.join("argv.log");
+        let (_gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "issues list --team SCA --assignee me -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
+  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
+  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[{{"name":"cycle 34"}}]}}' ;;
+  "issues list --team SCA --cycle cycle 34 --status Done -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4,"cycle":{{"name":"cycle 34"}}}}]}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+
+        let tickets =
+            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
+                .expect("Linear ticket sets");
+
+        assert_eq!(tickets.len(), 3);
+        assert_eq!(tickets[0].group, TicketGroup::Assigned);
+        assert_eq!(tickets[1].group, TicketGroup::Triage);
+        assert_eq!(tickets[2].group, TicketGroup::DoneThisCycle);
+        assert_eq!(tickets[0].priority, Some(2));
+        assert_eq!(tickets[2].cycle.as_deref(), Some("cycle 34"));
+        let argv = std::fs::read_to_string(log).expect("read argv log");
+        assert!(argv.contains("--assignee me"));
+        assert!(argv.contains("--status Triage"));
+        assert!(argv.contains("--cycle cycle 34 --status Done"));
+    }
+
+    #[test]
+    fn linear_detail_prefers_get_and_projects_comments() {
+        let dir = fixture_dir("linear-detail-get");
+        let (_gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+test "$*" = "issues get SCA-7" || exit 42
+printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.app/acme/issue/SCA-7","comments":{"nodes":[{"body":"newest","createdAt":"2026-09-01T10:00:00Z","user":{"name":"Ada"}}]}}'
+"#,
+        );
+
+        let detail = fetch_linear_ticket_detail(
+            "SCA-7",
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("Linear ticket detail");
+        assert_eq!(detail.title.as_deref(), Some("ticket"));
+        assert_eq!(detail.body.as_deref(), Some("- [ ] ship"));
+        assert_eq!(detail.comments[0].author.as_deref(), Some("Ada"));
+    }
+
+    #[test]
+    fn branch_and_body_mentions_join_pull_requests_to_tickets() {
+        let dir = fixture_dir("ticket-pr-join");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+case "$*" in
+  *"--author @me"*|*"review-requested:@me"*) printf '%s' '[]' ;;
+  *) printf '%s' '[{"number":7,"title":"branch match","body":"","headRefName":"issue/sca-7-fix","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"body match","body":"Tracks SCA-7.","headRefName":"plain","url":"https://github.com/owner/repo/pull/8"}]' ;;
+esac
+"#,
+            r#"#!/bin/sh
+case "$*" in
+  *"issues list"*) printf '%s' '{"nodes":[{"identifier":"SCA-7","title":"ticket","state":{"name":"In Progress"}}]}' ;;
+  *"cycles list"*) printf '%s' '{"nodes":[]}' ;;
+  *) printf '%s' '[]' ;;
+esac
+"#,
+        );
+        let snapshot = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+        let linked = snapshot
+            .items
+            .iter()
+            .filter(|item| item.pr_number.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(linked.len(), 2);
+        assert!(linked.iter().all(|item| item.ticket_ids == ["SCA-7"]));
     }
 
     #[test]
@@ -2646,6 +2861,15 @@ pub(crate) enum WorkItemWrite {
         identifier: String,
         body: String,
     },
+    TransitionTicket {
+        identifier: String,
+        state: String,
+    },
+    LinkTicketPullRequest {
+        identifier: String,
+        title: String,
+        url: String,
+    },
     ApprovePullRequest {
         repo: String,
         number: u64,
@@ -2669,6 +2893,12 @@ impl WorkItemWrite {
                 format!("comment on {repo}#{number}")
             }
             Self::CommentOnTicket { identifier, .. } => format!("comment on {identifier}"),
+            Self::TransitionTicket { identifier, state } => {
+                format!("move {identifier} to {state}")
+            }
+            Self::LinkTicketPullRequest { identifier, .. } => {
+                format!("link pull request to {identifier}")
+            }
             Self::ApprovePullRequest { repo, number } => format!("approve {repo}#{number}"),
             Self::MergePullRequest { repo, number } => {
                 format!("squash-merge {repo}#{number}")
@@ -2690,7 +2920,16 @@ impl WorkItemWrite {
                 pr_url: None,
                 ticket_id: None,
             }),
-            Self::CommentOnTicket { .. } => None,
+            Self::CommentOnTicket { identifier, .. }
+            | Self::TransitionTicket { identifier, .. }
+            | Self::LinkTicketPullRequest { identifier, .. } => {
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(identifier.clone()),
+                })
+            }
         }
     }
 }
@@ -2721,6 +2960,28 @@ pub(crate) fn run_work_item_write(
         WorkItemWrite::CommentOnTicket { identifier, body } => {
             let mut command = crate::noninteractive_process::command(linearis_program);
             command.args(["issues", "discuss", identifier, "--body", body]);
+            (command, None)
+        }
+        WorkItemWrite::TransitionTicket { identifier, state } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args(["issues", "update", identifier, "--status", state]);
+            (command, None)
+        }
+        WorkItemWrite::LinkTicketPullRequest {
+            identifier,
+            title,
+            url,
+        } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args([
+                "attachments",
+                "create",
+                identifier,
+                "--title",
+                title,
+                "--url",
+                url,
+            ]);
             (command, None)
         }
         WorkItemWrite::ApprovePullRequest { repo, number } => {
@@ -2766,4 +3027,68 @@ pub(crate) fn run_work_item_write(
         .trim()
         .to_string();
     Err(format!("{} failed: {reason}", write.describe()))
+}
+
+#[cfg(all(test, unix))]
+mod work_item_write_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn recorder() -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-linear-write-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).expect("create recorder directory");
+        let program = root.join("linearis");
+        let log = root.join("argv.log");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+        )
+        .expect("write recorder");
+        let mut permissions = std::fs::metadata(&program)
+            .expect("recorder metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).expect("make recorder executable");
+        (program, log)
+    }
+
+    #[test]
+    fn ticket_writes_map_to_linearis_argv() {
+        let (linearis, log) = recorder();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        run_work_item_write(
+            &WorkItemWrite::TransitionTicket {
+                identifier: "SCA-7".into(),
+                state: "In Review".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("transition command");
+        run_work_item_write(
+            &WorkItemWrite::LinkTicketPullRequest {
+                identifier: "SCA-7".into(),
+                title: "owner/repo#42".into(),
+                url: "https://github.com/owner/repo/pull/42".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("link command");
+
+        let argv = std::fs::read_to_string(log).expect("read recorder log");
+        assert!(argv.contains("issues update SCA-7 --status In Review"));
+        assert!(argv.contains(
+            "attachments create SCA-7 --title owner/repo#42 --url https://github.com/owner/repo/pull/42"
+        ));
+    }
 }

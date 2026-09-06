@@ -70,6 +70,15 @@ fn generated_home_worktree_name(agent: crate::detect::Agent, seed_micros: u64) -
     )
 }
 
+fn home_worktree_name(plan: &crate::app::home::HomeDispatchPlan, seed_micros: u64) -> String {
+    plan.ticket.as_ref().map_or_else(
+        || generated_home_worktree_name(plan.agent, seed_micros),
+        |ticket| {
+            crate::ui::work_list_detail::ticket_worktree_branch(&ticket.identifier, &ticket.title)
+        },
+    )
+}
+
 fn pending_home_worktree_base(home: Option<&crate::app::home::HomeState>) -> String {
     home.and_then(|home| home.pending_dispatch.as_ref())
         .and_then(|plan| plan.git_ref.as_ref())
@@ -222,7 +231,7 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_micros().min(u128::from(u64::MAX)) as u64)
             .unwrap_or(0);
-        let branch = generated_home_worktree_name(plan.agent, seed);
+        let branch = home_worktree_name(&plan, seed);
         let checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &space.repo_name,
@@ -1325,6 +1334,7 @@ mod tests {
             workspace: crate::app::home::HomeWorkspace::NewWorktree,
             git_ref: None,
             pr: None,
+            ticket: None,
             target,
             prompt: home.prompt.clone(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
@@ -1351,6 +1361,20 @@ mod tests {
             generated_home_worktree_name(crate::detect::Agent::Codex, 1_788_566_400_000_000),
             "codex-260905-e000"
         );
+    }
+
+    #[test]
+    fn ticket_home_worktree_uses_issue_branch_contract() {
+        let mut home = crate::app::home::HomeState::test_with_prompt("start ticket");
+        home.ticket = Some(crate::app::home::HomeTicketContext {
+            identifier: "SCA-3165".into(),
+            title: "Image edit simple v3 reference addendum".into(),
+            url: "https://linear.app/scalable/issue/SCA-3165".into(),
+        });
+        let plan = home.dispatch_plan().expect("ticket dispatch plan");
+        let branch = home_worktree_name(&plan, 1_788_566_400_000_000);
+        assert_eq!(branch, "issue/sca-3165-image-edit-simple-v3-refe");
+        assert!(branch.len() <= 40);
     }
 
     #[test]
@@ -1424,6 +1448,7 @@ mod tests {
             workspace: crate::app::home::HomeWorkspace::NewWorktree,
             git_ref: None,
             pr: None,
+            ticket: None,
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "dispatch after worktree add".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
