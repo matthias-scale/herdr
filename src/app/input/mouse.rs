@@ -391,6 +391,21 @@ impl AppState {
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && rect_contains(
+                self.view.repo_editor_button_hit_area,
+                mouse.column,
+                mouse.row,
+            )
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+        {
+            if self.repo_editor_available() {
+                self.request_open_repo_editor = true;
+                self.mode = Mode::Terminal;
+            }
+            return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && rect_contains(
                 self.view.add_action_button_hit_area,
                 mouse.column,
                 mouse.row,
@@ -5567,6 +5582,35 @@ mod tests {
             // No sibling on that side, so the toggle resolves to a split.
             assert_eq!(app.state.pane_toggle_sibling(direction), None);
         }
+    }
+
+    #[test]
+    fn repo_editor_button_queues_only_when_an_editor_is_available() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        app.state.repo_editor_argv = None;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let button = app.state.view.repo_editor_button_hit_area;
+        assert_eq!(button.width, crate::ui::REPO_EDITOR_BUTTON_WIDTH);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert!(!app.state.request_open_repo_editor);
+
+        app.state.repo_editor_argv = Some(vec!["nvim".into()]);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert!(app.state.request_open_repo_editor);
     }
 
     #[test]

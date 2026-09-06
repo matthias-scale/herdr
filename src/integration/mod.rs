@@ -17,8 +17,8 @@ pub(crate) use env::{
 #[cfg(test)]
 pub(crate) use env::{integration_env_lock, HERDR_BIN_PATH_ENV_VAR};
 pub(crate) use registry::{
-    installed_integration_statuses, integration_recommendations, integration_target_label,
-    print_outdated_update_notice,
+    command_available, installed_integration_statuses, integration_recommendations,
+    integration_target_label, print_outdated_update_notice,
 };
 pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind};
 

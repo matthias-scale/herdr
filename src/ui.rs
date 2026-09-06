@@ -143,6 +143,8 @@ pub(crate) use self::{
 };
 use crate::render_signal::RenderSignal;
 
+#[cfg(test)]
+pub(crate) use self::tabs::REPO_EDITOR_BUTTON_WIDTH;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -396,6 +398,7 @@ fn compute_view_internal(
     app.tab_scroll = tab_bar_view.scroll;
     // A hidden tab row leaves the toggles homeless; the status row takes them.
     let (
+        repo_editor_button_hit_area,
         add_action_button_hit_area,
         user_action_hit_areas,
         git_menu_button_hit_area,
@@ -403,6 +406,7 @@ fn compute_view_internal(
         pane_toggle_right_hit_area,
     ) = if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
         (
+            tab_bar_view.repo_editor_button_hit_area,
             tab_bar_view.add_action_button_hit_area,
             tab_bar_view.user_action_hit_areas.clone(),
             tab_bar_view.git_menu_button_hit_area,
@@ -417,6 +421,7 @@ fn compute_view_internal(
         )
     } else {
         (
+            Rect::default(),
             Rect::default(),
             Vec::new(),
             Rect::default(),
@@ -634,6 +639,7 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        repo_editor_button_hit_area,
         add_action_button_hit_area,
         user_action_hit_areas,
         add_action_close_hit_area: add_action_layout.close,
@@ -892,6 +898,7 @@ fn compute_mobile_view(
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
+        repo_editor_button_hit_area: Rect::default(),
         add_action_button_hit_area: Rect::default(),
         user_action_hit_areas: Vec::new(),
         add_action_close_hit_area: Rect::default(),
