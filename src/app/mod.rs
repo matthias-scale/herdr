@@ -136,7 +136,7 @@ pub struct App {
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
-    /// Runtime-only markers for shell panes launched from the git menu.
+    /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
