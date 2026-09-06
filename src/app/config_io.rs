@@ -457,3 +457,92 @@ mod keybinding_capture_tests {
         assert_eq!(scratch.read(), "[ui]\nsidebar_width = 31\n");
     }
 }
+
+#[cfg(test)]
+mod general_round_trip_tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::app::{settings_general::GeneralRow, state::SettingsSection, App};
+
+    /// Every General row must survive the full loop the operator sees: press
+    /// enter, have the key written to the config file, reload the file, and
+    /// read the new value back off live state.
+    #[test]
+    fn every_general_row_round_trips_through_a_temp_config_file() {
+        for (index, row) in GeneralRow::ALL.iter().enumerate() {
+            let mut env = crate::config::TestConfigEnvGuard::acquire();
+            let directory = std::env::temp_dir().join(format!(
+                "herdr-general-round-trip-{}",
+                crate::config::test_unique_suffix()
+            ));
+            std::fs::create_dir_all(&directory).expect("temp config directory");
+            let path = directory.join("config.toml");
+            std::fs::write(&path, "# keep this comment\n").expect("seed config");
+            env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+            let mut app = App::new(
+                &crate::config::Config::load().config,
+                true,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                crate::api::EventHub::default(),
+            );
+            crate::app::input::open_settings_at(&mut app.state, SettingsSection::General);
+            app.state.settings.list.select(index);
+
+            let (section, key) = row.config_key();
+            let before = row.value(&app.state);
+            let expected = crate::app::settings_general::cycle_general_row(&app.state, *row);
+            app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+            let saved = std::fs::read_to_string(&path).expect("saved config");
+
+            match expected {
+                None => {
+                    // A row with no in-place edit must not write anything, and
+                    // must still name a real key for the operator to edit.
+                    assert_eq!(
+                        saved, "# keep this comment\n",
+                        "{key} wrote without an edit"
+                    );
+                    assert!(
+                        !row.is_editable(),
+                        "{key} is editable but cycles to nothing"
+                    );
+                }
+                Some(_) => {
+                    assert!(
+                        saved.starts_with("# keep this comment\n"),
+                        "{key} rewrote unrelated bytes: {saved}"
+                    );
+                    assert!(saved.contains(&format!("[{section}]")), "{key}: {saved}");
+                    assert!(saved.contains(&format!("{key} = ")), "{key}: {saved}");
+                    assert_ne!(
+                        row.value(&app.state),
+                        before,
+                        "{key} did not take effect after the reload"
+                    );
+
+                    // Read the file back through a fresh load: the value the
+                    // row shows must come from the file, not from the click.
+                    let reloaded = crate::config::Config::load().config;
+                    let mut fresh = App::new(
+                        &reloaded,
+                        true,
+                        None,
+                        tokio::sync::mpsc::unbounded_channel().1,
+                        crate::api::EventHub::default(),
+                    );
+                    fresh.state.settings.list.select(index);
+                    assert_eq!(
+                        row.value(&fresh.state),
+                        row.value(&app.state),
+                        "{key} did not survive a reload from disk"
+                    );
+                }
+            }
+
+            env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+            std::fs::remove_dir_all(&directory).ok();
+        }
+    }
+}
