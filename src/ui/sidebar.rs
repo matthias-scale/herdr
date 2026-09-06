@@ -9016,8 +9016,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             linear_titles,
             [
-                "SCA-3102 annual credits  P1",
-                "SCA-3165 image-edit v3  P2",
+                "SCA-3102 · annual credits",
+                "SCA-3165 · image-edit v3",
                 "unlinked",
             ]
         );
@@ -10796,6 +10796,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ("OPS-7", "Triage"),
         ];
         let mut app = linear_state_fixture(&states);
+        // The default Linear filter hides Canceled tickets (F12-5); this test
+        // checks every state glyph, so widen the filter to all statuses.
+        app.sidebar_work_filter.linear_statuses = crate::app::state::LinearStatusFilter::ALL
+            .into_iter()
+            .collect();
         let palette = app.palette.clone();
         let expected = [
             ("◌ OPS-1 · pixel", palette.work_status_neutral()),
