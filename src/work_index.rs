@@ -925,7 +925,7 @@ fn fetch_linear_ticket_detail(
     let mut detail = WorkItemDetail::empty();
     detail.title = value_text(value.get("title"));
     detail.body = value_text(value.get("description"));
-    detail.url = value_text(value.get("url"));
+    detail.url = value_text(value.get("url")).or_else(|| linear_ticket_url(identifier));
     detail.created_at = value_time(value.get("createdAt"));
     detail.updated_at = value_time(value.get("updatedAt"));
     detail.comments = linear_comments(value.get("comments"));
@@ -2313,6 +2313,39 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
         assert_eq!(detail.title.as_deref(), Some("ticket"));
         assert_eq!(detail.body.as_deref(), Some("- [ ] ship"));
         assert_eq!(detail.comments[0].author.as_deref(), Some("Ada"));
+    }
+
+    #[test]
+    fn linear_detail_maps_the_real_cli_shape() {
+        let dir = fixture_dir("linear-detail-real-shape");
+        let fixture = include_str!("../tests/fixtures/work-index/linear-issue-read.json");
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  \"issues get SCA-3165\") exit 42 ;;\n  \"issues read SCA-3165 --with-comment-threads --compact\") printf '%s' '{fixture}' ;;\n  *) exit 43 ;;\nesac\n"
+        );
+        let (_gh, linearis) = fake_programs(&dir, "#!/bin/sh\nprintf '%s' '[]'\n", &script);
+
+        let detail = fetch_linear_ticket_detail(
+            "SCA-3165",
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("Linear ticket detail from captured CLI fixture");
+
+        assert_eq!(
+            detail.title.as_deref(),
+            Some("Render ticket details from the CLI response")
+        );
+        assert!(detail
+            .body
+            .as_deref()
+            .is_some_and(|body| body.contains("Shows the full ticket body")));
+        assert_eq!(
+            detail.url.as_deref(),
+            Some("https://linear.app/scalable/issue/SCA-3165")
+        );
+        assert!(detail.created_at.is_some());
+        assert!(detail.updated_at.is_some());
+        assert_eq!(detail.comments.len(), 1);
     }
 
     #[test]
