@@ -188,9 +188,9 @@ impl AppState {
         true
     }
 
-    /// `Enter` on a selected dim work-item header starts its thread. The
-    /// selection only exists while one is selected, so this never swallows a
-    /// keystroke meant for a pane.
+    /// `Enter` on a selected dim Linear or Missive item opens its composer;
+    /// `n` dispatches immediately. The selection only exists while one is
+    /// selected, so this never swallows a keystroke meant for a pane.
     pub(crate) fn handle_sidebar_work_group_key(
         &mut self,
         key: KeyEvent,
@@ -199,6 +199,22 @@ impl AppState {
             return SidebarWorkGroupKeyAction::Ignored;
         };
         match key.code {
+            KeyCode::Enter
+                if key.modifiers.is_empty()
+                    && selected != crate::ui::sidebar_show_more_key(self.sidebar_group_mode)
+                    && matches!(
+                        self.sidebar_group_mode,
+                        crate::app::state::SidebarGroupMode::LinearTeam
+                            | crate::app::state::SidebarGroupMode::Missive
+                    ) =>
+            {
+                self.sidebar_selected_work_group = None;
+                if !self.open_home_composer_for_work_group(&selected) {
+                    self.config_diagnostic =
+                        Some("unassigned object is no longer available".to_string());
+                }
+                SidebarWorkGroupKeyAction::Consumed
+            }
             KeyCode::Enter | KeyCode::Char('n') if key.modifiers.is_empty() => {
                 self.sidebar_selected_work_group = None;
                 if selected == crate::ui::sidebar_show_more_key(self.sidebar_group_mode) {
