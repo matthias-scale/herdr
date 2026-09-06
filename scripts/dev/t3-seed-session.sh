@@ -138,6 +138,31 @@ wait_for_agent_startup() {
     return 1
 }
 
+wait_for_agent_quiet() {
+    # Settling during agent startup is undone by the startup screen changes
+    # (f11: non-chrome snapshot changes unsettle). Wait until the pane is not
+    # working and its revision has been stable for three polls, 5 s apart.
+    local pane_id=$1
+    local pane_json status revision last_revision="" stable=0 attempt
+    for attempt in {1..18}; do
+        pane_json=$(run_herdr pane get "$pane_id")
+        status=$(jq -r '.result.pane.agent_status // "unknown"' <<<"$pane_json")
+        revision=$(jq -r '.result.pane.revision // 0' <<<"$pane_json")
+        if [[ $status != "working" && $revision == "$last_revision" ]]; then
+            stable=$((stable + 1))
+            if [[ $stable -ge 2 ]]; then
+                return 0
+            fi
+        else
+            stable=0
+        fi
+        last_revision=$revision
+        sleep 5
+    done
+    printf 'pane %s did not go quiet within 90 seconds\n' "$pane_id" >&2
+    return 1
+}
+
 start_sample_agents() {
     local pane_id
     local command
@@ -171,6 +196,7 @@ start_sample_agents() {
         fi
     done
     wait_for_agent_startup "$sample_settled"
+    wait_for_agent_quiet "$sample_settled"
     settle_and_assert "$sample_settled"
 }
 
