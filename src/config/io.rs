@@ -20,6 +20,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "onboarding",
     "remote",
     "session",
+    "source_control",
     "terminal",
     "theme",
     "ui",
@@ -374,6 +375,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.land = section,
+    );
+    load_live_section(
+        table,
+        "source_control",
+        "source control config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.source_control = section,
     );
     load_live_section(
         table,
