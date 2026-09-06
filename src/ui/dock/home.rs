@@ -403,8 +403,8 @@ fn loaded_detail_lines(
         .unwrap_or("—");
     let review_threads = detail
         .unresolved_review_threads
-        .map(|count| format!("{count} unresolved"))
-        .unwrap_or_else(|| "unknown".to_string());
+        .filter(|count| *count > 0)
+        .map(|count| format!("{count} unresolved"));
     let checks = detail
         .checks
         .as_ref()
@@ -465,14 +465,16 @@ fn loaded_detail_lines(
         }
     }
     lines.push(Line::default());
-    lines.push(field_line(
-        app,
-        [(
-            "● review threads  ".into(),
-            review_threads,
-            app.palette.text,
-        )],
-    ));
+    if let Some(review_threads) = review_threads {
+        lines.push(field_line(
+            app,
+            [(
+                "● review threads  ".into(),
+                review_threads,
+                app.palette.text,
+            )],
+        ));
+    }
     let check_color = detail.checks.as_ref().map_or(app.palette.text, |summary| {
         if summary.failing == 0 {
             app.palette.green
@@ -1327,7 +1329,7 @@ mod tests {
                 short_id: "abc1234".into(),
                 subject: "fix dock detail".into(),
             }],
-            unresolved_review_threads: None,
+            unresolved_review_threads: Some(3),
             unavailable: None,
             observed_at: SystemTime::now(),
         }
@@ -2057,7 +2059,7 @@ mod tests {
             .map(|offset| links + offset)
             .expect("tickets heading");
         let review = text
-            .find("review threads  unknown")
+            .find("review threads  3 unresolved")
             .expect("review threads");
         let checks = text.find("checks  2 failing of 8").expect("checks");
         let body = text.find("what it does").expect("body heading");
@@ -2070,6 +2072,18 @@ mod tests {
     }
 
     #[test]
+    fn zero_unresolved_review_threads_hides_the_review_threads_line() {
+        let mut detail = full_detail();
+        detail.unresolved_review_threads = Some(0);
+        let app = selected_with_detail(bound_app(true), Some(detail));
+        let terminal = render(&app, Rect::new(0, 0, 60, 40));
+        let text = text(&terminal);
+
+        assert!(!text.contains("review threads"), "{text:?}");
+        assert!(text.contains("checks  2 failing of 8"), "{text:?}");
+    }
+
+    #[test]
     fn optional_detail_fields_render_explicit_unknown_values() {
         let app = selected_with_detail(bound_app(false), Some(missing_optional_detail()));
         let terminal = render(&app, Rect::new(0, 0, 50, 35));
@@ -2078,7 +2092,7 @@ mod tests {
         assert!(line_text(&terminal, 2).starts_with("#125"), "{text:?}");
         assert!(line_text(&terminal, 3).starts_with("overview"), "{text:?}");
         assert!(text.contains("opened — · updated —"), "{text:?}");
-        assert!(text.contains("review threads  unknown"), "{text:?}");
+        assert!(!text.contains("review threads"), "{text:?}");
         assert!(text.contains("checks  —"), "{text:?}");
     }
 
