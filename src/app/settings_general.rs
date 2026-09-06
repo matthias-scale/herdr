@@ -81,7 +81,7 @@ impl GeneralRow {
                 .as_secs()
                 .div_ceil(24 * 60 * 60)
                 .to_string(),
-            Self::HideWhitespace => on_off(state.hide_whitespace_in_diff),
+            Self::HideWhitespace => on_off(state.dock_diff_ignore_whitespace),
             Self::NewThreadWorkspace => state.new_thread_workspace.label().to_string(),
             Self::AddProjectStartDir => {
                 if state.add_project_start_dir.trim().is_empty() {
@@ -135,7 +135,7 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
         GeneralRow::ProjectGrouping => toggle(state.combine_repos_across_hosts),
         GeneralRow::AutoSettleFinished => toggle(state.auto_settle_finished),
         GeneralRow::AutoSettleInactive => toggle(state.auto_settle_inactive),
-        GeneralRow::HideWhitespace => toggle(state.hide_whitespace_in_diff),
+        GeneralRow::HideWhitespace => toggle(state.dock_diff_ignore_whitespace),
         GeneralRow::DeleteConfirmation => toggle(state.confirm_close),
         GeneralRow::SettleAfterDays => {
             let current = state.settle_after.as_secs().div_ceil(24 * 60 * 60);

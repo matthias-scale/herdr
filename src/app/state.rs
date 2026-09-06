@@ -2475,6 +2475,9 @@ pub struct AppState {
     pub(crate) dock_pr_focused: bool,
     pub(crate) dock_pr_checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) dock_pr_pending_land: Option<PrLandConfirmation>,
+    /// `git diff -w` for the Diff surface. Initialised from
+    /// `ui.hide_whitespace_in_diff` and written by both the dock's own
+    /// whitespace toggle and the General settings row, so the two never drift.
     pub(crate) dock_diff_ignore_whitespace: bool,
     pub(crate) dock_diff_selected: usize,
     pub(crate) dock_diff_collapsed: std::collections::HashSet<String>,
@@ -2571,8 +2574,6 @@ pub struct AppState {
     /// Group workspaces that check out the same repository under one project
     /// header even when the checkout roots differ (`ui.combine_repos_across_hosts`).
     pub combine_repos_across_hosts: bool,
-    /// Hide whitespace-only changes in the diff surface (`ui.hide_whitespace_in_diff`).
-    pub hide_whitespace_in_diff: bool,
     /// Workspace preselected for a new Home thread (`ui.new_thread_workspace`).
     pub new_thread_workspace: crate::config::NewThreadWorkspaceConfig,
     /// Directory the add-project picker starts in (`ui.add_project_start_dir`).
@@ -3902,7 +3903,6 @@ impl AppState {
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
             combine_repos_across_hosts: false,
-            hide_whitespace_in_diff: false,
             new_thread_workspace: crate::config::NewThreadWorkspaceConfig::CurrentCheckout,
             add_project_start_dir: String::new(),
             auto_settle_finished: true,

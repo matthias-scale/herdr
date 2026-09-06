@@ -130,9 +130,16 @@ impl AppState {
 
     pub(crate) fn toggle_dock_diff_whitespace(&mut self) {
         self.dock_diff_ignore_whitespace = !self.dock_diff_ignore_whitespace;
+        self.invalidate_dock_diff();
+        self.dock_scroll = 0;
+    }
+
+    /// Drop the rendered diff so the next frame re-runs `git diff` with the
+    /// current whitespace choice. Every writer of
+    /// `dock_diff_ignore_whitespace` calls this, not only the dock toggle.
+    pub(crate) fn invalidate_dock_diff(&mut self) {
         self.dock_diff_active_key = None;
         self.dock_diff_request = None;
-        self.dock_scroll = 0;
     }
 
     pub(crate) fn toggle_selected_dock_diff_file(&mut self) -> bool {
