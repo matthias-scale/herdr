@@ -479,6 +479,19 @@ impl MissiveRequest {
             ),
         }
     }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Conversations { .. } => "conversation list",
+            Self::Conversation { .. } => "conversation",
+            Self::ConversationMessages { .. } => "conversation messages",
+            Self::Message { .. } => "message",
+            Self::ConversationDrafts { .. } => "conversation drafts",
+            Self::ConversationPosts { .. } => "conversation posts",
+            Self::ConversationNotes { .. } => "conversation comments",
+            Self::Users { .. } => "users",
+        }
+    }
 }
 
 fn percent_encode(value: &str) -> String {
@@ -530,13 +543,14 @@ fn run_missive_get(
             if error.kind() == io::ErrorKind::TimedOut {
                 RefreshError::TimedOut
             } else {
-                RefreshError::Failed("Missive GET could not be run".into())
+                RefreshError::Failed(format!("Missive {} GET could not run", request.label()))
             }
         },
     )?;
     if !output.status.success() {
         return Err(RefreshError::Failed(format!(
-            "Missive GET failed with status {}",
+            "Missive {} GET failed with status {}",
+            request.label(),
             output.status
         )));
     }
