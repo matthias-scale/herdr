@@ -22,6 +22,7 @@ use crate::detect::{Agent, AgentState};
 use crate::terminal::state::derive_completion_tier;
 use crate::terminal::state::CompletionTier;
 use crate::terminal::TerminalRuntimeRegistry;
+use crate::ui::work_status::WorkGroupStatus;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
@@ -1106,6 +1107,10 @@ pub(crate) enum SidebarRow {
         collapsed: bool,
         /// A work item with no pane: rendered dim, never collapsible.
         dim: bool,
+        /// Where the work item stands, rendered as a glyph before the id.
+        /// `None` for a group that names no work item (the unlinked bucket,
+        /// a worktree branch).
+        status: Option<WorkGroupStatus>,
     },
 }
 
@@ -1252,6 +1257,7 @@ fn compact_sidebar_rows_inner(
                 count: group.entries.len(),
                 collapsed,
                 dim,
+                status: group.status,
             });
             if !collapsed {
                 rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
@@ -1309,6 +1315,7 @@ fn compact_sidebar_rows_inner(
                 count: group.entries.len(),
                 collapsed,
                 dim: false,
+                status: group.status,
             });
             if !collapsed {
                 rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
@@ -1352,6 +1359,7 @@ fn append_settled_rows(
                 count: group.entries.len(),
                 collapsed,
                 dim: false,
+                status: group.status,
             });
             if !collapsed {
                 rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
@@ -1405,6 +1413,7 @@ fn append_settled_rows(
                 count: group.entries.len(),
                 collapsed,
                 dim: false,
+                status: group.status,
             });
             if !collapsed {
                 rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
@@ -1421,6 +1430,7 @@ struct SidebarTabGroup {
     title: String,
     entries: Vec<AgentPanelEntry>,
     unlinked: bool,
+    status: Option<WorkGroupStatus>,
 }
 
 fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
@@ -1462,6 +1472,7 @@ fn push_sidebar_tab_group(
     title: String,
     entry: AgentPanelEntry,
     unlinked: bool,
+    status: Option<WorkGroupStatus>,
 ) {
     if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
         group.entries.push(entry);
@@ -1471,6 +1482,7 @@ fn push_sidebar_tab_group(
             title,
             entries: vec![entry],
             unlinked,
+            status,
         });
     }
 }
@@ -1492,6 +1504,7 @@ fn sidebar_tab_groups(
                         "unlinked".into(),
                         entry,
                         true,
+                        None,
                     );
                     continue;
                 };
@@ -1501,10 +1514,15 @@ fn sidebar_tab_groups(
                     .or(context.session_name.as_deref());
                 for url in &context.pr_urls {
                     let number = pull_request_number(url).unwrap_or(url);
-                    let title = title_suffix
-                        .map(|suffix| format!("#{number} {suffix}"))
-                        .unwrap_or_else(|| format!("#{number}"));
-                    push_sidebar_tab_group(&mut groups, url.clone(), title, entry.clone(), false);
+                    let title = work_group_header_title(&format!("#{number}"), title_suffix);
+                    push_sidebar_tab_group(
+                        &mut groups,
+                        url.clone(),
+                        title,
+                        entry.clone(),
+                        false,
+                        Some(pull_request_status(app, url)),
+                    );
                 }
             }
             SidebarGroupMode::RepoWorktree => {
@@ -1515,6 +1533,7 @@ fn sidebar_tab_groups(
                         format!("⎇ {branch}"),
                         entry,
                         false,
+                        None,
                     );
                 } else {
                     push_sidebar_tab_group(
@@ -1523,6 +1542,7 @@ fn sidebar_tab_groups(
                         "unlinked".into(),
                         entry,
                         true,
+                        None,
                     );
                 }
             }
@@ -1543,6 +1563,8 @@ pub(crate) struct SidebarWorkGroup {
     pub(crate) title: String,
     pub(crate) entries: Vec<AgentPanelEntry>,
     pub(crate) unlinked: bool,
+    /// Where the work item stands, rendered as a glyph before the id.
+    pub(crate) status: Option<WorkGroupStatus>,
     /// What `Enter` on the dim header starts. `None` for the unlinked bucket,
     /// which names no work item.
     pub(crate) activation: Option<SidebarWorkGroupActivation>,
@@ -1558,22 +1580,6 @@ pub(crate) struct SidebarWorkGroupActivation {
 }
 
 const UNLINKED_GROUP_KEY: &str = "unlinked";
-
-/// Linear ships priority as a label; nothing in the projection carries a
-/// separate field, so the header reads the label vocabulary rather than
-/// inventing a fetch for it.
-fn ticket_priority(ticket: &crate::work_index::WorkTicket) -> Option<String> {
-    ticket
-        .labels
-        .iter()
-        .find(|label| {
-            let mut characters = label.chars();
-            matches!(characters.next(), Some('P' | 'p'))
-                && matches!(characters.next(), Some(digit) if digit.is_ascii_digit())
-                && characters.next().is_none()
-        })
-        .map(|label| label.to_uppercase())
-}
 
 /// `SCA-3165` -> `SCA`. The team is the identifier prefix; the projection
 /// carries no separate team field.
@@ -1602,16 +1608,32 @@ fn ticket_matches_filter(
 }
 
 fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
-    let mut title = ticket.identifier.clone();
-    if let Some(ticket_title) = ticket.title.as_deref() {
-        title.push(' ');
-        title.push_str(ticket_title);
+    work_group_header_title(&ticket.identifier, ticket.title.as_deref())
+}
+
+/// `<id> · <title>` (F12-3). The id alone is the header when the work item
+/// carries no title: a separator with nothing after it reads as missing text.
+fn work_group_header_title(id: &str, title: Option<&str>) -> String {
+    match title.map(str::trim).filter(|title| !title.is_empty()) {
+        Some(title) if title != id => format!("{id} · {title}"),
+        _ => id.to_string(),
     }
-    if let Some(priority) = ticket_priority(ticket) {
-        title.push_str("  ");
-        title.push_str(&priority);
-    }
-    title
+}
+
+/// The state of a pull request a pane declares, from the work index cache.
+/// A URL the index has never seen has no state to show, and
+/// `from_pull_request` reads that absence as open.
+fn pull_request_status(app: &AppState, url: &str) -> WorkGroupStatus {
+    let item = app.work_index_snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .items
+            .iter()
+            .find(|item| item.pr_url.as_deref() == Some(url))
+    });
+    WorkGroupStatus::from_pull_request(
+        item.and_then(|item| item.pr_state.as_deref()),
+        item.is_some_and(|item| item.draft),
+    )
 }
 
 fn ticket_prompt(ticket: &crate::work_index::WorkTicket) -> String {
@@ -1703,6 +1725,22 @@ fn missive_subject_from(link_label: Option<&str>, work_title: Option<&str>, url:
         .unwrap_or_else(|| missive_url_tail(url))
 }
 
+/// `<conversation id> · <subject>` (F12-3). The URL tail is the only id a
+/// conversation has here, so a subject that resolved to nothing but the tail
+/// leaves the header as the id alone.
+fn missive_group_title(app: &AppState, url: &str) -> String {
+    let tail = missive_url_tail(url);
+    work_group_header_title(&tail, Some(missive_subject(app, url)).as_deref())
+}
+
+/// Where a Missive conversation stands. Nothing on this base caches
+/// conversation records -- the read-only Missive client (F12-4) is the first
+/// thing that will -- so a conversation Herdr only knows from a pane link
+/// reads as open, and this is the single seam the cached record plugs into.
+fn missive_group_status(_app: &AppState, _url: &str) -> WorkGroupStatus {
+    WorkGroupStatus::from_conversation(false, true)
+}
+
 /// Every pane's effective work context, in workspace order.
 fn context_panes(app: &AppState) -> impl Iterator<Item = &crate::work_context::PaneWorkContext> {
     app.workspaces
@@ -1725,6 +1763,7 @@ fn push_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntr
             title: "unlinked".into(),
             entries: vec![entry],
             unlinked: true,
+            status: None,
             activation: None,
         }),
     }
@@ -1755,6 +1794,9 @@ pub(crate) fn sidebar_work_groups(
                 title: ticket_group_title(&row.ticket),
                 entries: Vec::new(),
                 unlinked: false,
+                status: Some(WorkGroupStatus::from_ticket_state(
+                    row.ticket.state.as_deref(),
+                )),
                 activation: Some(SidebarWorkGroupActivation {
                     prompt: ticket_prompt(&row.ticket),
                     directory: ticket_directory(app, &row),
@@ -1799,9 +1841,10 @@ pub(crate) fn sidebar_work_groups(
                         None => {
                             groups.push(SidebarWorkGroup {
                                 key,
-                                title: missive_subject(app, url),
+                                title: missive_group_title(app, url),
                                 entries: Vec::new(),
                                 unlinked: false,
+                                status: Some(missive_group_status(app, url)),
                                 activation: Some(SidebarWorkGroupActivation {
                                     prompt: url.clone(),
                                     directory: None,
@@ -2453,6 +2496,7 @@ struct NestedHeaderArea {
     count: usize,
     collapsed: bool,
     dim: bool,
+    status: Option<WorkGroupStatus>,
     rect: Rect,
 }
 
@@ -2478,6 +2522,7 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
             count,
             collapsed,
             dim,
+            status,
         } = row
         {
             out.push(NestedHeaderArea {
@@ -2486,6 +2531,7 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
                 count: *count,
                 collapsed: *collapsed,
                 dim: *dim,
+                status: *status,
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
@@ -3319,31 +3365,49 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
         .map(display_width)
         .unwrap_or_default();
     let prefix = if header.dim { "   " } else { "  ▸ " };
+    // The status glyph sits before the id, so it costs the title its width.
+    let glyph = header.status.map(WorkGroupStatus::glyph);
+    let glyph_width = glyph.map(|glyph| display_width(glyph) + 1).unwrap_or(0);
     let title = truncate_end(
         &header.title,
         usize::from(header.rect.width)
             .saturating_sub(display_width(prefix))
+            .saturating_sub(glyph_width)
             .saturating_sub(count_width),
     );
     // A dim header carries no live state colour: nothing is running under it.
     let color = if header.dim { p.overlay0 } else { p.subtext0 };
-    let mut spans = vec![
-        Span::raw(if header.dim {
-            "   "
-        } else if header.collapsed {
-            "  ▸ "
+    let mut spans = vec![Span::raw(if header.dim {
+        "   "
+    } else if header.collapsed {
+        "  ▸ "
+    } else {
+        "  ▾ "
+    })];
+    if let Some(glyph) = glyph {
+        let status_color = header
+            .status
+            .map(|status| status.color(p))
+            .unwrap_or(p.overlay0);
+        spans.push(Span::styled(
+            format!("{glyph} "),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(if header.dim {
+                    Modifier::DIM
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    }
+    spans.push(Span::styled(
+        title,
+        Style::default().fg(color).add_modifier(if header.dim {
+            Modifier::DIM
         } else {
-            "  ▾ "
+            Modifier::BOLD
         }),
-        Span::styled(
-            title,
-            Style::default().fg(color).add_modifier(if header.dim {
-                Modifier::DIM
-            } else {
-                Modifier::BOLD
-            }),
-        ),
-    ];
+    ));
     if let Some(count_label) = count_label {
         spans.push(Span::styled(
             count_label,
@@ -8536,11 +8600,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             work_group_shape(&app),
             vec![
-                ("OPS-12 pixel EMQ drop".to_string(), 0, true),
-                ("SCA-3102 annual credits  P1".to_string(), 1, false),
-                ("SCA-3165 image-edit v3  P2".to_string(), 1, false),
+                ("OPS-12 · pixel EMQ drop".to_string(), 0, true),
+                ("SCA-3102 · annual credits".to_string(), 1, false),
+                ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 // The two-ticket pane is listed under both of its tickets.
-                ("SCA-3170 ads skill map  P3".to_string(), 1, false),
+                ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
         );
@@ -8554,9 +8618,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             work_group_shape(&app),
             vec![
                 // The pane replies in both conversations, so it is listed under
-                // both; its declared work title is each header's subject.
-                ("fix pricing".to_string(), 1, false),
-                ("fix pricing".to_string(), 1, false),
+                // both; its declared work title is each header's subject, and
+                // the conversation id keeps the two headers apart.
+                ("aaa111 · fix pricing".to_string(), 1, false),
+                ("bbb222 · fix pricing".to_string(), 1, false),
                 ("unlinked".to_string(), 2, false),
             ]
         );
@@ -8583,7 +8648,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             work_group_shape(&app),
             vec![
-                ("refund for invoice 42".to_string(), 1, false),
+                ("aaa111 · refund for invoice 42".to_string(), 1, false),
                 ("unlinked".to_string(), 2, false),
             ]
         );
@@ -8683,15 +8748,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .find(|header| header.dim)
             .expect("a dim header on screen");
         let line = row_text(buffer, dim.rect.y, dim.rect.width.saturating_sub(1));
-        assert!(
-            !line.contains('●') && !line.contains('○') && !line.contains('·'),
-            "{line:?}"
-        );
-        let styled = buffer[(dim.rect.x + 3, dim.rect.y)].style();
+        // The ticket's own state is not a live agent state: the header shows
+        // the Linear glyph, and the text stays in the dim chrome tone.
+        assert!(line.contains("◐ OPS-12 · pixel EMQ"), "{line:?}");
+        let glyph = buffer[(dim.rect.x + 3, dim.rect.y)].style();
+        assert_eq!(glyph.fg, Some(app.palette.work_status_active()));
+        let styled = buffer[(dim.rect.x + 5, dim.rect.y)].style();
         assert_eq!(styled.fg, Some(app.palette.overlay0));
         for state in [AgentState::Working, AgentState::Blocked, AgentState::Idle] {
             assert_ne!(
                 styled.fg,
+                Some(state_label_color(state, true, &app.palette)),
+                "dim rows must not take a live state colour"
+            );
+            assert_ne!(
+                glyph.fg,
                 Some(state_label_color(state, true, &app.palette)),
                 "dim rows must not take a live state colour"
             );
@@ -8712,9 +8783,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .map(|(title, ..)| title)
                 .collect::<Vec<_>>(),
             vec![
-                "SCA-3102 annual credits  P1",
-                "SCA-3165 image-edit v3  P2",
-                "SCA-3170 ads skill map  P3",
+                "SCA-3102 · annual credits",
+                "SCA-3165 · image-edit v3",
+                "SCA-3170 · ads skill map",
                 "unlinked",
             ]
         );
@@ -8725,7 +8796,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             work_group_shape(&app),
             vec![
-                ("SCA-3170 ads skill map  P3".to_string(), 1, false),
+                ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
         );
@@ -8974,8 +9045,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             tree(SidebarGroupMode::RepoPr),
             [
                 "repo:0:false",
-                "#159 pricing",
-                "#160 session fallback",
+                "#159 · pricing",
+                "#160 · session fallback",
                 "unlinked",
             ]
         );
@@ -9019,7 +9090,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
-                        ["#159 pricing", "#160 session fallback", "unlinked"]
+                        ["#159 · pricing", "#160 · session fallback", "unlinked"]
                     )
                 }
                 SidebarGroupMode::RepoWorktree => assert_eq!(
@@ -10446,5 +10517,193 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 );
             }
         }
+    }
+
+    /// Every nested header on screen as `(line, glyph colour)`. The glyph sits
+    /// right after the disclosure prefix, which is one cell narrower on a dim
+    /// header because a header nobody can collapse shows no arrow.
+    fn rendered_nested_headers(
+        app: &mut AppState,
+        width: u16,
+        height: u16,
+    ) -> Vec<(String, Option<Color>)> {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("test terminal for headers");
+        crate::ui::compute_view(app, Rect::new(0, 0, width, height));
+        terminal
+            .draw(|frame| {
+                render_sidebar(
+                    app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    app.view.sidebar_rect,
+                )
+            })
+            .expect("render sidebar");
+        let buffer = terminal.backend().buffer().clone();
+        compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
+            .into_iter()
+            .map(|header| {
+                let glyph_x = header.rect.x + if header.dim { 3 } else { 4 };
+                (
+                    row_text(&buffer, header.rect.y, header.rect.width),
+                    buffer[(glyph_x, header.rect.y)].style().fg,
+                )
+            })
+            .collect()
+    }
+
+    /// One unworked ticket per state, so every Linear status class is on
+    /// screen in the same render.
+    fn linear_state_fixture(states: &[(&str, &str)]) -> AppState {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let items = states
+            .iter()
+            .map(|(identifier, state)| {
+                let mut ticket = work_ticket(identifier, "pixel EMQ drop", "matthias", &[]);
+                ticket.state = Some((*state).to_string());
+                work_item("scalable-so/110x", None, vec![ticket])
+            })
+            .collect();
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items,
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        });
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    #[test]
+    fn linear_group_headers_render_a_glyph_and_palette_colour_per_state() {
+        let states = [
+            ("OPS-1", "Backlog"),
+            ("OPS-2", "Todo"),
+            ("OPS-3", "In Progress"),
+            ("OPS-4", "In Review"),
+            ("OPS-5", "Done"),
+            ("OPS-6", "Canceled"),
+            ("OPS-7", "Triage"),
+        ];
+        let mut app = linear_state_fixture(&states);
+        let palette = app.palette.clone();
+        let expected = [
+            ("◌ OPS-1 · pixel", palette.work_status_neutral()),
+            ("○ OPS-2 · pixel", palette.work_status_neutral()),
+            ("◐ OPS-3 · pixel", palette.work_status_active()),
+            ("◑ OPS-4 · pixel", palette.work_status_review()),
+            ("● OPS-5 · pixel", palette.work_status_done()),
+            ("⊗ OPS-6 · pixel", palette.work_status_neutral()),
+            ("◍ OPS-7 · pixel", palette.work_status_triage()),
+        ];
+
+        let headers = rendered_nested_headers(&mut app, 120, 40);
+        for (text, color) in expected {
+            let header = headers
+                .iter()
+                .find(|(line, _)| line.contains(text))
+                .unwrap_or_else(|| panic!("header {text:?} in {headers:?}"));
+            assert_eq!(header.1, Some(color), "colour for {text:?}");
+        }
+    }
+
+    /// The PR headers read their state from the work-index cache, which is the
+    /// only place a pane's declared PR URL gains a state at all.
+    fn pull_request_state_fixture(state: &str, draft: bool) -> AppState {
+        let mut app = sidebar_grouping_fixture();
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+        let mut item = work_item("scalable-so/herdr", Some(159), Vec::new());
+        item.pr_state = Some(state.to_string());
+        item.draft = draft;
+        app.work_index_enabled = true;
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: vec![item],
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        });
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    #[test]
+    fn pull_request_group_headers_render_a_glyph_and_palette_colour_per_state() {
+        for (state, draft, glyph, color) in [
+            ("open", false, "○", Palette::catppuccin().work_status_open()),
+            (
+                "merged",
+                false,
+                "●",
+                Palette::catppuccin().work_status_merged(),
+            ),
+            (
+                "open",
+                true,
+                "◌",
+                Palette::catppuccin().work_status_neutral(),
+            ),
+            (
+                "closed",
+                false,
+                "⊗",
+                Palette::catppuccin().work_status_neutral(),
+            ),
+        ] {
+            let mut app = pull_request_state_fixture(state, draft);
+            let headers = rendered_nested_headers(&mut app, 120, 40);
+            let header = headers
+                .iter()
+                .find(|(line, _)| line.contains("#159 · pric"))
+                .unwrap_or_else(|| panic!("#159 header in {headers:?}"));
+            assert!(
+                header.0.contains(&format!("{glyph} #159 · pric")),
+                "{state} draft={draft}: {:?}",
+                header.0
+            );
+            assert_eq!(header.1, Some(color), "colour for {state} draft={draft}");
+        }
+    }
+
+    #[test]
+    fn missive_group_headers_render_the_conversation_glyph_and_palette_colour() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let expected = app.palette.work_status_open();
+
+        let headers = rendered_nested_headers(&mut app, 120, 40);
+
+        let header = headers
+            .iter()
+            .find(|(line, _)| line.contains("aaa111 · fix p"))
+            .unwrap_or_else(|| panic!("conversation header in {headers:?}"));
+        assert!(header.0.contains("○ aaa111 · fix p"), "{:?}", header.0);
+        assert_eq!(header.1, Some(expected));
+        // Nothing caches conversation state on this base, so no header may
+        // claim a closed or unassigned conversation.
+        assert!(
+            headers.iter().all(|(line, _)| !line.contains('●')),
+            "{headers:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_group_headers_truncate_the_title_and_keep_the_glyph_and_id() {
+        let mut app = linear_state_fixture(&[("OPS-3", "In Progress")]);
+        app.dock_width = 26;
+
+        let headers = rendered_nested_headers(&mut app, 80, 24);
+
+        let header = headers
+            .iter()
+            .find(|(line, _)| line.contains("OPS-3"))
+            .unwrap_or_else(|| panic!("ticket header in {headers:?}"));
+        assert!(header.0.starts_with("   ◐ OPS-3 · pixel"), "{:?}", header.0);
+        assert!(header.0.ends_with('…'), "{:?}", header.0);
+        assert!(
+            crate::ui::text::display_width(&header.0) <= 26,
+            "{:?}",
+            header.0
+        );
+        assert_eq!(header.1, Some(app.palette.work_status_active()));
     }
 }
