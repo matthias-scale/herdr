@@ -864,16 +864,45 @@ impl Config {
             keybinds.copy_work_link = keybinds.copy_work_url.clone();
         }
 
-        append_user_actions(
-            self,
-            prefix,
-            &mut keybinds,
-            &mut registry,
-            &mut diagnostics,
-        );
+        append_user_actions(self, prefix, &mut keybinds, &mut registry, &mut diagnostics);
 
         (prefix_diag, prefix, diagnostics, keybinds)
     }
+}
+
+pub fn validate_user_action_key(config: &mut Config, key: &str) -> Result<String, String> {
+    let mut suffix = 0usize;
+    let name = loop {
+        let name = format!("__herdr_action_key_capture_{suffix}");
+        if !config
+            .actions
+            .iter()
+            .any(|action| action.name.eq_ignore_ascii_case(&name))
+        {
+            break name;
+        }
+        suffix = suffix.saturating_add(1);
+    };
+    config.actions.push(crate::config::ActionConfig {
+        name: name.clone(),
+        command: "true".into(),
+        key: Some(key.into()),
+        ..Default::default()
+    });
+    let (.., diagnostics, keybinds) = config.validated_keybinds();
+    let result = keybinds
+        .user_actions
+        .iter()
+        .find(|action| action.name == name)
+        .and_then(|action| action.bindings.label())
+        .ok_or_else(|| {
+            diagnostics
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "keybinding is already bound".into())
+        });
+    config.actions.pop();
+    result
 }
 
 fn append_user_actions(
@@ -887,16 +916,16 @@ fn append_user_actions(
     for (index, action) in config.actions.iter().enumerate() {
         let name = action.name.trim();
         if name.is_empty() {
-            let diagnostic = format!("empty user action name: actions[{index}].name; disabling action");
+            let diagnostic =
+                format!("empty user action name: actions[{index}].name; disabling action");
             warn!(message = %diagnostic, "config diagnostic");
             diagnostics.push(diagnostic);
             continue;
         }
         let command = action.command.trim();
         if command.is_empty() {
-            let diagnostic = format!(
-                "empty user action command: actions[{index}].command; disabling action"
-            );
+            let diagnostic =
+                format!("empty user action command: actions[{index}].command; disabling action");
             warn!(message = %diagnostic, "config diagnostic");
             diagnostics.push(diagnostic);
             continue;
@@ -948,7 +977,8 @@ fn normalize_user_action_key(raw: &str, prefix: KeyCombo) -> String {
     let parts = raw.split_whitespace().collect::<Vec<_>>();
     if let [physical_prefix, rhs] = parts.as_slice() {
         let physical_prefix = physical_prefix.replace('-', "+");
-        if parse_key_combo(&physical_prefix).map(normalize_key_combo) == Some(normalize_key_combo(prefix))
+        if parse_key_combo(&physical_prefix).map(normalize_key_combo)
+            == Some(normalize_key_combo(prefix))
         {
             return format!("prefix+{rhs}");
         }
@@ -2749,8 +2779,7 @@ command = "  "
         assert_eq!(actions[0].name, "help collision");
         assert!(actions[0].bindings.bindings.is_empty());
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.contains("disabled actions[0].key")
-                && diagnostic.contains("keys.help")
+            diagnostic.contains("disabled actions[0].key") && diagnostic.contains("keys.help")
         }));
         assert!(diagnostics
             .iter()

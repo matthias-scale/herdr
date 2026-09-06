@@ -117,6 +117,16 @@ impl App {
             return None;
         }
 
+        if let Some(index) = super::navigate::user_action_for_key(
+            &self.state,
+            &key,
+            super::navigate::BindingDispatch::Direct,
+        ) {
+            debug!(index, "intercepted terminal user action keybinding");
+            self.state.request_user_action = Some(index);
+            return None;
+        }
+
         if let Some(action) = super::terminal_direct_indexed_navigation_action(&self.state, &key) {
             debug!(
                 code = ?key_event.code,

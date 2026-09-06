@@ -1410,6 +1410,12 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub add_action_button_hit_area: Rect,
+    pub user_action_hit_areas: Vec<(usize, Rect)>,
+    pub add_action_close_hit_area: Rect,
+    pub add_action_field_hit_areas: Vec<(AddActionField, Rect)>,
+    pub add_action_cancel_hit_area: Rect,
+    pub add_action_save_hit_area: Rect,
     pub git_menu_button_hit_area: Rect,
     pub git_menu_popup_rect: Rect,
     pub git_menu_first_visible: usize,
@@ -1521,11 +1527,56 @@ pub enum Mode {
     ConfirmClose,
     ContextMenu,
     GitMenu,
+    AddAction,
     Settings,
     GlobalMenu,
     KeybindHelp,
     Navigator,
     WorkLinkPicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddActionField {
+    Name,
+    Key,
+    Command,
+    RunOnWorktreeCreate,
+    OpenInBottomPane,
+}
+
+impl AddActionField {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Key,
+        Self::Command,
+        Self::RunOnWorktreeCreate,
+        Self::OpenInBottomPane,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddActionState {
+    pub(crate) name: String,
+    pub(crate) key: String,
+    pub(crate) command: String,
+    pub(crate) run_on_worktree_create: bool,
+    pub(crate) open_in_bottom_pane: bool,
+    pub(crate) field: AddActionField,
+    pub(crate) error: Option<String>,
+}
+
+impl Default for AddActionState {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            key: String::new(),
+            command: String::new(),
+            run_on_worktree_create: false,
+            open_in_bottom_pane: true,
+            field: AddActionField::Name,
+            error: None,
+        }
+    }
 }
 
 impl Mode {
@@ -2242,6 +2293,8 @@ pub struct AppState {
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
     /// Git action chosen from the tab-row menu, drained by the runtime loop.
     pub(crate) request_git_action: Option<GitAction>,
+    pub(crate) request_user_action: Option<usize>,
+    pub(crate) request_save_add_action: bool,
     pub(crate) request_pr_land: Option<PrLandConfirmation>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
@@ -2302,6 +2355,7 @@ pub struct AppState {
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
     pub work_link_picker: Option<WorkLinkPickerState>,
+    pub(crate) add_action: Option<AddActionState>,
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
     /// Monotonic client-only revision for changes that replace the sidebar row
@@ -3563,6 +3617,8 @@ impl AppState {
             request_new_tab: false,
             request_pane_toggle: None,
             request_git_action: None,
+            request_user_action: None,
+            request_save_add_action: false,
             request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
@@ -3608,6 +3664,7 @@ impl AppState {
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
             work_link_picker: None,
+            add_action: None,
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
             sidebar_projection_revision: 0,
@@ -3632,6 +3689,12 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                add_action_button_hit_area: Rect::default(),
+                user_action_hit_areas: Vec::new(),
+                add_action_close_hit_area: Rect::default(),
+                add_action_field_hit_areas: Vec::new(),
+                add_action_cancel_hit_area: Rect::default(),
+                add_action_save_hit_area: Rect::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,

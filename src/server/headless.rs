@@ -932,6 +932,14 @@ impl HeadlessServer {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_git_action");
         }
+        if self.app.apply_user_action_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_user_action");
+        }
+        if self.app.apply_save_add_action_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_add_action_save");
+        }
 
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
