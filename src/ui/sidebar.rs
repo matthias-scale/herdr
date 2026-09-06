@@ -8982,6 +8982,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn f12_6_view_picker_follows_the_view_and_clears_a_manual_override() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = true;
+
+        app.set_sidebar_group_mode(SidebarGroupMode::LinearTeam);
+        assert!(!app.dock_collapsed);
+        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Linear));
+        assert!(!app.dock_surface_override);
+
+        app.open_dock_surface(crate::app::DockSurface::Files);
+        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(app.dock_surface_override);
+
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Pr));
+        assert!(!app.dock_surface_override);
+    }
+
+    #[test]
     fn per_view_filter_defaults_match_f12() {
         let filters = crate::app::state::SidebarWorkFilter::default();
         assert_eq!(filters.team.as_deref(), Some("SCA"));

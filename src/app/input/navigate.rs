@@ -2543,12 +2543,14 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::OpenWorkView => {
             state.work_view = Some(crate::app::state::WorkViewState::new(false, None));
+            state.follow_view(crate::app::state::SidebarGroupMode::RepoPr);
             leave_navigate_mode(state);
         }
         NavigateAction::OpenTicketView => {
             let mut view = crate::app::state::WorkViewState::new(false, None);
             view.projection = crate::app::state::WorkProjection::Tickets;
             state.work_view = Some(view);
+            state.follow_view(crate::app::state::SidebarGroupMode::LinearTeam);
             leave_navigate_mode(state);
         }
         NavigateAction::OpenUsageView => {

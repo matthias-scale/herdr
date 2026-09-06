@@ -1029,6 +1029,18 @@ impl App {
         if let Some(view) = self.state.work_view.as_mut() {
             view.projection = projection;
         }
+        self.state.follow_view(match projection {
+            crate::app::state::WorkProjection::PullRequests => {
+                crate::app::state::SidebarGroupMode::RepoPr
+            }
+            crate::app::state::WorkProjection::Tickets => {
+                crate::app::state::SidebarGroupMode::LinearTeam
+            }
+            crate::app::state::WorkProjection::Agents
+            | crate::app::state::WorkProjection::ReviewQueue => {
+                crate::app::state::SidebarGroupMode::Repo
+            }
+        });
         self.state.symphony_detail = None;
         self.state.inbox = None;
         self.state.home = None;
@@ -3695,6 +3707,22 @@ mod tests {
             home.dispatch_plan().expect("dispatch plan").ticket,
             home.ticket
         );
+    }
+
+    #[test]
+    fn f12_6_full_screen_work_views_follow_their_compact_surfaces() {
+        let mut app = test_app();
+        app.state.dock_collapsed = true;
+
+        app.toggle_ticket_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Linear));
+        assert!(!app.state.dock_collapsed);
+
+        app.state.open_dock_surface(crate::app::DockSurface::Files);
+        assert!(app.state.dock_surface_override);
+        app.toggle_work_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Pr));
+        assert!(!app.state.dock_surface_override);
     }
 
     #[test]
