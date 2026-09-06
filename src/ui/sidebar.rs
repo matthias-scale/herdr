@@ -1732,26 +1732,43 @@ fn indexed_missive_conversation<'a>(
         })
 }
 
+/// The URL panes use to join an indexed conversation. Pane work context stores
+/// web URLs, so prefer that form while retaining the app URL for sparse cached
+/// fixtures.
+fn indexed_missive_url(conversation: &crate::work_index::MissiveConversation) -> &str {
+    [&conversation.web_url, &conversation.app_url]
+        .into_iter()
+        .map(String::as_str)
+        .find(|url| !url.trim().is_empty())
+        .unwrap_or(&conversation.id)
+}
+
 /// Prefer the indexed subject, then fall back to pane-local context while the
 /// first Missive observation is still pending.
 fn missive_subject(app: &AppState, url: &str) -> String {
-    if let Some(subject) = indexed_missive_conversation(app, url)
-        .map(|conversation| conversation.subject.trim())
-        .filter(|subject| !subject.is_empty())
-    {
-        return subject.to_string();
-    }
     missive_subject_from(
+        indexed_missive_conversation(app, url).map(|conversation| conversation.subject.as_str()),
         cached_missive_link_label(app, url).as_deref(),
         missive_work_title(app, url).as_deref(),
         url,
     )
 }
 
-fn missive_subject_from(link_label: Option<&str>, work_title: Option<&str>, url: &str) -> String {
-    link_label
-        .filter(|label| !missive_label_is_url(label, url))
-        .or(work_title)
+fn missive_subject_from(
+    indexed_subject: Option<&str>,
+    link_label: Option<&str>,
+    work_title: Option<&str>,
+    url: &str,
+) -> String {
+    indexed_subject
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+        .or_else(|| {
+            link_label
+                .map(str::trim)
+                .filter(|label| !label.is_empty() && !missive_label_is_url(label, url))
+        })
+        .or_else(|| work_title.map(str::trim).filter(|title| !title.is_empty()))
         .map(str::to_string)
         .unwrap_or_else(|| missive_url_tail(url))
 }
@@ -1844,6 +1861,40 @@ pub(crate) fn sidebar_work_groups(
             });
         }
     }
+    if mode == SidebarGroupMode::Missive {
+        for conversation in app
+            .work_index_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.conversations.as_slice())
+            .unwrap_or_default()
+        {
+            if !app
+                .sidebar_work_filter
+                .matches_missive_conversation(Some(conversation), &app.work_index_session)
+            {
+                continue;
+            }
+            let url = indexed_missive_url(conversation);
+            let key = format!("missive:{url}");
+            if work_group_index(&groups, &key).is_some() {
+                continue;
+            }
+            groups.push(SidebarWorkGroup {
+                key,
+                title: missive_group_title(app, url),
+                entries: Vec::new(),
+                unlinked: false,
+                status: Some(WorkGroupStatus::from_conversation(
+                    conversation.closed,
+                    !conversation.assignees.is_empty(),
+                )),
+                activation: Some(SidebarWorkGroupActivation {
+                    prompt: url.to_string(),
+                    directory: None,
+                }),
+            });
+        }
+    }
     for entry in ordered_tab_entries(entries) {
         let context = entry_work_context(app, &entry);
         match mode {
@@ -1882,18 +1933,19 @@ pub(crate) fn sidebar_work_groups(
                     {
                         continue;
                     }
-                    let key = format!("missive:{url}");
+                    let group_url = conversation.map(indexed_missive_url).unwrap_or(url);
+                    let key = format!("missive:{group_url}");
                     let index = match work_group_index(&groups, &key) {
                         Some(index) => index,
                         None => {
                             groups.push(SidebarWorkGroup {
                                 key,
-                                title: missive_group_title(app, url),
+                                title: missive_group_title(app, group_url),
                                 entries: Vec::new(),
                                 unlinked: false,
-                                status: Some(missive_group_status(app, url)),
+                                status: Some(missive_group_status(app, group_url)),
                                 activation: Some(SidebarWorkGroupActivation {
-                                    prompt: url.clone(),
+                                    prompt: group_url.to_string(),
                                     directory: None,
                                 }),
                             });
@@ -8602,6 +8654,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     const CONVERSATION_A: &str = "https://mail.missiveapp.com/#inbox/conversations/aaa111";
     const CONVERSATION_B: &str = "https://mail.missiveapp.com/#inbox/conversations/bbb222";
+    const CONVERSATION_C: &str = "https://mail.missiveapp.com/#inbox/conversations/ccc333";
+
+    fn missive_conversation(
+        id: &str,
+        subject: &str,
+        url: &str,
+    ) -> crate::work_index::MissiveConversation {
+        crate::work_index::MissiveConversation {
+            id: id.into(),
+            subject: subject.into(),
+            app_url: url.into(),
+            web_url: url.into(),
+            assignees: Vec::new(),
+            last_activity_at: None,
+            closed: false,
+            messages: Vec::new(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        }
+    }
 
     /// Three panes: one on a ticket and two conversations, one on two tickets,
     /// one on nothing. The snapshot knows a fourth ticket nobody works on.
@@ -8842,10 +8915,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn missive_subject_prefers_cached_link_label_then_work_title_then_url_tail() {
-        // A cached subject wins over everything else.
+    fn pane_url_absent_from_index_groups_and_resolves_label_then_title_then_tail() {
+        let app = sidebar_work_item_fixture();
+        let groups =
+            sidebar_work_groups(&app, &agent_panel_entries(&app), SidebarGroupMode::Missive);
+        let pane_only = groups
+            .iter()
+            .find(|group| group.key == format!("missive:{CONVERSATION_A}"))
+            .expect("pane-only conversation group");
+        assert_eq!(pane_only.title, "aaa111 · fix pricing");
+        assert_eq!(pane_only.entries.len(), 1);
+
+        // A cached link label wins over the pane's declared work title.
         assert_eq!(
             missive_subject_from(
+                Some("   "),
                 Some("refund for invoice 42"),
                 Some("fix pricing"),
                 CONVERSATION_A
@@ -8854,22 +8938,97 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         // A label that only restates the URL is no subject at all.
         assert_eq!(
-            missive_subject_from(Some("missive/aaa111"), Some("fix pricing"), CONVERSATION_A),
+            missive_subject_from(
+                None,
+                Some("missive/aaa111"),
+                Some("fix pricing"),
+                CONVERSATION_A
+            ),
             "fix pricing"
         );
-        assert_eq!(missive_subject_from(None, None, CONVERSATION_A), "aaa111");
-
-        // The same order against real state: the dock has no cached subject
-        // yet, so the pane's declared title titles the header.
-        let app = sidebar_work_item_fixture();
-        assert_eq!(missive_subject(&app, CONVERSATION_A), "fix pricing");
-        // A conversation no pane carries falls back to the URL tail.
         assert_eq!(
-            missive_subject(
-                &app,
-                "https://mail.missiveapp.com/#inbox/conversations/ccc333"
+            missive_subject_from(None, None, None, CONVERSATION_A),
+            "aaa111"
+        );
+
+        // The dock has no indexed subject yet, so real state follows the same
+        // pane-title fallback.
+        assert_eq!(missive_subject(&app, CONVERSATION_A), "fix pricing");
+        assert_eq!(missive_subject(&app, CONVERSATION_C), "ccc333");
+    }
+
+    #[test]
+    fn indexed_missive_conversation_without_pane_is_dim_and_enter_prefills() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.sidebar_work_filter.missive.assignee = None;
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index snapshot")
+            .conversations = vec![missive_conversation(
+            "ccc333",
+            "Customer cannot update card",
+            CONVERSATION_C,
+        )];
+
+        let header = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::NestedHeader {
+                    key,
+                    title,
+                    count,
+                    dim,
+                    ..
+                } if key == format!("missive:{CONVERSATION_C}") => Some((title, count, dim)),
+                _ => None,
+            })
+            .expect("indexed no-pane conversation header");
+        assert_eq!(
+            header,
+            ("ccc333 · Customer cannot update card".into(), 0, true)
+        );
+
+        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_C}"));
+        assert!(
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        );
+        let home = app.home.as_ref().expect("home composer remains open");
+        assert_eq!(home.prompt, CONVERSATION_C);
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+    }
+
+    #[test]
+    fn indexed_missive_subject_overrides_pane_fallbacks() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_work_filter.missive.assignee = None;
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index snapshot")
+            .conversations = vec![missive_conversation(
+            "aaa111",
+            "Indexed refund subject",
+            CONVERSATION_A,
+        )];
+
+        let group =
+            sidebar_work_groups(&app, &agent_panel_entries(&app), SidebarGroupMode::Missive)
+                .into_iter()
+                .find(|group| group.key == format!("missive:{CONVERSATION_A}"))
+                .expect("indexed conversation with pane");
+        assert_eq!(group.title, "aaa111 · Indexed refund subject");
+        assert_eq!(group.entries.len(), 1);
+
+        assert_eq!(
+            missive_subject_from(
+                Some("Indexed refund subject"),
+                Some("cached link label"),
+                Some("declared pane title"),
+                CONVERSATION_A,
             ),
-            "ccc333"
+            "Indexed refund subject"
         );
     }
 
