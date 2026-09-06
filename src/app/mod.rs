@@ -2263,6 +2263,9 @@ impl App {
 
         if !invalid_section("land") {
             self.state.land_approval_label = config.land.approval_label.clone();
+        }
+
+        if !invalid_section("source_control") {
             self.state.branch_prefix = config.source_control.branch_prefix.clone();
             self.state.commit_message_model = config.source_control.commit_message_model.clone();
         }
@@ -4910,6 +4913,77 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("delivery = \"terminal\""));
         assert!(app.state.config_diagnostic.is_none());
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn settings_source_control_edits_reach_live_consumers_without_restart() {
+        use crate::app::settings_general::ConfigEdit;
+
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("settings-source-control-live-reload");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[land]\napproval_label = 17\n").unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        for (section, key, value) in [
+            ("source_control", "commit_message_model", "claude-opus-5"),
+            ("source_control", "branch_prefix", "live/"),
+            ("worktrees", "directory", "/tmp/herdr-live-worktrees"),
+        ] {
+            app.save_config_edit(ConfigEdit::Text {
+                section,
+                key,
+                value: value.into(),
+            });
+        }
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid land config")));
+        assert_eq!(app.state.land_approval_label, "approved");
+        assert!(crate::app::git_actions::wrapped_command(
+            state::GitAction::Commit,
+            &app.state.commit_message_model,
+        )
+        .contains("HERDR_COMMIT_MESSAGE_MODEL=claude-opus-5"));
+        assert_eq!(
+            crate::ui::work_list_detail::ticket_worktree_branch(
+                &app.state.branch_prefix,
+                "T3-9F",
+                "Live reload",
+            ),
+            "live/t3-9f-live-reload"
+        );
+        assert_eq!(
+            crate::worktree::default_checkout_path(
+                &app.state.worktree_directory,
+                "herdr",
+                "live/t3-9f-live-reload",
+            ),
+            std::path::PathBuf::from("/tmp/herdr-live-worktrees/herdr/live-t3-9f-live-reload")
+        );
+
+        std::fs::write(
+            &path,
+            "[land]\napproval_label = \"ship-it\"\n[source_control]\ncommit_message_model = 17\nbranch_prefix = \"ignored/\"\n[worktrees]\ndirectory = \"/tmp/herdr-live-worktrees\"\n",
+        )
+        .unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid source control config")));
+        assert_eq!(app.state.land_approval_label, "ship-it");
+        assert_eq!(app.state.commit_message_model, "claude-opus-5");
+        assert_eq!(app.state.branch_prefix, "live/");
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
