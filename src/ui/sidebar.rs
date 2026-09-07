@@ -32,6 +32,8 @@ const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
+const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
+const SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH: usize = 16;
 
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
@@ -497,26 +499,31 @@ pub(super) fn render_compact_agent_row(
         + SIDEBAR_PROVIDER_FIELD_WIDTH
         + SIDEBAR_AGE_FIELD_WIDTH;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let title = pad_right(&layout.title, title_width);
-    let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
-    let provider = pad_left(&layout.provider, SIDEBAR_PROVIDER_FIELD_WIDTH);
     let trailing_tag = tab
         .then_some(entry.space_label.as_str())
         .filter(|tag| !tag.is_empty());
-    let age = trailing_tag.map_or_else(
-        || {
-            layout
-                .activity_age
-                .as_deref()
-                .map_or_else(String::new, |age| pad_left(age, SIDEBAR_AGE_FIELD_WIDTH))
-        },
-        |tag| {
-            pad_left(
-                &truncate_end(tag, SIDEBAR_AGE_FIELD_WIDTH),
-                SIDEBAR_AGE_FIELD_WIDTH,
-            )
-        },
+    let mut space_suffix = None;
+    let mut displayed_title_width = title_width;
+    if let Some(tag) = trailing_tag {
+        if usize::from(rect.width) >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+            let suffix = format!(" · {tag}");
+            let candidate_title_width = title_width.saturating_sub(display_width(&suffix));
+            if candidate_title_width >= SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH {
+                space_suffix = Some(suffix);
+                displayed_title_width = candidate_title_width;
+            }
+        }
+    }
+    let title = pad_right(
+        &truncate_end(&layout.title, displayed_title_width),
+        displayed_title_width,
     );
+    let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
+    let provider = pad_left(&layout.provider, SIDEBAR_PROVIDER_FIELD_WIDTH);
+    let age = layout
+        .activity_age
+        .as_deref()
+        .map_or_else(String::new, |age| pad_left(age, SIDEBAR_AGE_FIELD_WIDTH));
     let is_active = tab
         && app.active == Some(entry.ws_idx)
         && app
@@ -535,26 +542,27 @@ pub(super) fn render_compact_agent_row(
     let provider_style = Style::default()
         .fg(provider_color(entry, p))
         .add_modifier(Modifier::DIM);
-    let age_style = Style::default()
-        .fg(if trailing_tag.is_some() {
-            p.overlay0
-        } else if entry.state == AgentState::Working {
-            p.blue
-        } else {
-            p.overlay0
-        })
-        .add_modifier(if trailing_tag.is_some() {
-            Modifier::DIM
-        } else {
-            Modifier::empty()
-        });
-    let spans = vec![
+    let age_style = Style::default().fg(if entry.state == AgentState::Working {
+        p.blue
+    } else {
+        p.overlay0
+    });
+    let mut spans = vec![
         Span::styled(prefix, compact_row_style(Style::default(), bg)),
         Span::styled(dot, compact_row_style(dot_style, bg)),
         Span::styled(title, compact_row_style(title_style, bg)),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
     ];
+    if let Some(suffix) = space_suffix.as_deref() {
+        spans.push(Span::styled(
+            suffix,
+            compact_row_style(
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                bg,
+            ),
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
@@ -5166,9 +5174,6 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            if !entry.space_label.is_empty() {
-                return None;
-            }
             let layout = tab_row_layout(
                 entry,
                 app.view_observed_at,
@@ -6288,8 +6293,11 @@ pub(crate) mod tests {
             .unwrap()
             .detected_agent = Some(Agent::Claude);
 
-        let labels = sidebar_workspace_labels(&app, &TerminalRuntimeRegistry::new());
-        assert_eq!(labels[&0], ("t3-f19".into(), true));
+        let runtimes = TerminalRuntimeRegistry::new();
+        let expected_server_label = app.workspaces[0].display_name_from(&app.terminals, &runtimes);
+        let labels = sidebar_workspace_labels(&app, &runtimes);
+        assert_eq!(labels[&0], (expected_server_label, true));
+        assert_ne!(labels[&0].0, "agent title");
         assert_eq!(labels[&1], ("manual label".into(), false));
         assert_eq!(labels[&2], ("terminal space¹".into(), true));
         assert_eq!(labels[&3], ("terminal space²".into(), true));
@@ -8690,7 +8698,7 @@ row_gap = 1
     }
 
     #[test]
-    fn reported_at_age_does_not_refresh_behind_space_suffix() {
+    fn reported_at_age_refreshes_with_space_suffix() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -8720,9 +8728,13 @@ row_gap = 1
         let runtimes = TerminalRuntimeRegistry::new();
         let area = Rect::new(0, 0, 80, 20);
         let cards = compute_tab_card_areas(&app, area);
-        assert!(visible_tab_activity_instants_from(&app, &runtimes, &cards).is_empty());
-        assert!(
-            crate::ui::mobile::visible_tab_activity_instants_from(&app, &runtimes, area).is_empty()
+        assert_eq!(
+            visible_tab_activity_instants_from(&app, &runtimes, &cards),
+            vec![reported_at]
+        );
+        assert_eq!(
+            crate::ui::mobile::visible_tab_activity_instants_from(&app, &runtimes, area),
+            vec![reported_at]
         );
     }
 
@@ -8753,7 +8765,7 @@ row_gap = 1
     }
 
     #[test]
-    fn space_suffix_suppresses_hidden_activity_age_deadlines() {
+    fn space_suffix_preserves_visible_activity_age_deadlines() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -8781,7 +8793,7 @@ row_gap = 1
         let runtimes = TerminalRuntimeRegistry::new();
 
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert!(app.view.visible_agent_activity_instants.is_empty());
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
 
         app.sidebar_collapsed = true;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
@@ -8790,7 +8802,7 @@ row_gap = 1
         app.sidebar_collapsed = false;
         app.mobile_width_threshold = 80;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert!(app.view.visible_agent_activity_instants.is_empty());
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
 
         app.mobile_width_threshold = 0;
         app.sidebar_width = 12;
@@ -9539,7 +9551,99 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
+        assert!(rendered.contains('—'), "{rendered:?}");
         assert!(rendered.ends_with("ws0"), "{rendered:?}");
+    }
+
+    #[test]
+    fn f19_1a_keeps_age_and_appends_space_suffix_when_wide() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].custom_name = Some("t3-sample".into());
+        app.workspaces[0].tabs[0].custom_name = Some("sample-pr".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let started = std::time::Instant::now();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                started,
+            );
+        app.view_observed_at = started + std::time::Duration::from_secs(125);
+        app.reconcile_sidebar_presentation();
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("thread entry");
+        assert_eq!(entry.space_label, "t3-sample");
+
+        let render_at_row_width = |width| {
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 1)).expect("test terminal should initialize");
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row(
+                        &app,
+                        frame,
+                        &entry,
+                        Rect::new(0, 0, width, 1),
+                        0,
+                        true,
+                        None,
+                    )
+                })
+                .expect("compact row should render");
+            row_text(terminal.backend().buffer(), 0, width)
+        };
+        let below_suffix_threshold = render_at_row_width(43);
+        assert!(
+            !below_suffix_threshold.contains("· t3-sample"),
+            "{below_suffix_threshold:?}"
+        );
+        let at_suffix_threshold = render_at_row_width(44);
+        assert!(
+            at_suffix_threshold.contains("2m · t3-sample"),
+            "{at_suffix_threshold:?}"
+        );
+
+        let default_width = render_first_tab_row(&app, 40);
+        assert!(default_width.contains("sample-pr"), "{default_width:?}");
+        assert!(default_width.contains("2m"), "{default_width:?}");
+        assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
+
+        let area = Rect::new(0, 0, 80, 12);
+        let cards = compute_tab_card_areas(&app, area);
+        let card = cards[0].clone();
+        let prefix_width = usize::from(card.depth) * 3 + 1;
+        let rect_width = usize::from(card.rect.width);
+        let fixed_width = prefix_width
+            + SIDEBAR_DOT_FIELD_WIDTH
+            + SIDEBAR_PROVIDER_FIELD_WIDTH
+            + SIDEBAR_AGE_FIELD_WIDTH;
+        let retained_title_width = rect_width
+            .saturating_sub(fixed_width)
+            .saturating_sub(display_width(" · t3-sample"));
+        assert!(
+            rect_width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH,
+            "{rect_width}"
+        );
+        assert!(
+            retained_title_width >= SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH,
+            "{retained_title_width}"
+        );
+
+        let wide = render_first_tab_row(&app, 80);
+        assert!(wide.contains("sample-pr"), "{wide:?}");
+        assert!(wide.contains("2m · t3-sample"), "{wide:?}");
     }
 
     #[test]
@@ -12663,7 +12767,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert!(!rendered.contains(">_"), "{rendered:?}");
                 assert!(!rendered.contains("ago"), "{rendered:?}");
             } else {
-                assert!(rendered.ends_with("one"), "{rendered:?}");
+                assert!(rendered.ends_with("1m"), "{rendered:?}");
+                assert!(!rendered.contains(" · one"), "{rendered:?}");
             }
         }
     }
@@ -13535,15 +13640,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .find(|row| row.contains("Approve Bash command"))
             .expect("Claude row");
         assert!(claude.contains("cc"), "{claude:?}");
+        let claude_row_without_space = claude.split(" · ").next().expect("row title and provider");
         assert!(
-            !claude.to_ascii_lowercase().contains("claude"),
+            !claude_row_without_space
+                .to_ascii_lowercase()
+                .contains("claude"),
             "{claude:?}"
         );
         let gemini = rendered
             .iter()
             .find(|row| row.contains("Review release notes"))
             .expect("Gemini row");
-        assert!(!gemini.contains("gemini"), "{gemini:?}");
+        let gemini_row_without_space = gemini.split(" · ").next().expect("row title and provider");
+        assert!(!gemini_row_without_space.contains("gemini"), "{gemini:?}");
     }
 
     #[test]
@@ -13591,20 +13700,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .or_else(|| row.find(title.chars().next().unwrap()))
                     .unwrap();
                 let suffix_start = row.find(suffix).expect("agent suffix");
-                let space = if card.ws_idx == 0 { "cla…" } else { "cod…" };
-                let space_start = row
-                    .rfind(space)
-                    .unwrap_or_else(|| panic!("Space suffix at width {width}: {row:?}"));
-                assert!(
-                    title_start < suffix_start && suffix_start < space_start,
-                    "{row:?}"
-                );
+                assert!(title_start < suffix_start, "{row:?}");
+                let space = if card.ws_idx == 0 {
+                    "claude-code"
+                } else {
+                    "codex"
+                };
+                if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH as u16 {
+                    let space_start = row
+                        .rfind(&format!(" · {space}"))
+                        .unwrap_or_else(|| panic!("Space suffix at width {width}: {row:?}"));
+                    assert!(suffix_start < space_start, "{row:?}");
+                } else {
+                    assert!(!row.contains(&format!(" · {space}")), "{row:?}");
+                }
                 assert!(
                     !row.contains("2.1.237") && !row.contains("0.42.0"),
                     "{row:?}"
                 );
-                assert!(!row.to_ascii_lowercase().contains(" · claude"), "{row:?}");
-                assert!(!row.to_ascii_lowercase().contains(" · codex"), "{row:?}");
                 assert!(
                     !row.contains("reported") && !row.contains(" ago"),
                     "{row:?}"

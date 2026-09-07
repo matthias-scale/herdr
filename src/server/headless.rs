@@ -7552,7 +7552,7 @@ next_tab = ""
     }
 
     #[test]
-    fn headless_space_suffix_does_not_schedule_hidden_age_frames() {
+    fn headless_space_suffix_keeps_age_frame_schedule() {
         let mut server = test_headless_server();
         server.app.state.status_bar_enabled = false;
         server.app.state.mobile_width_threshold = 0;
@@ -7614,10 +7614,10 @@ next_tab = ""
                 .expect("initial clock frame"),
         );
         let first_text = frame_text(&first);
-        assert!(first_text.contains("clo…"), "{first_text:?}");
-        assert!(!first_text.contains("1m"), "{first_text:?}");
+        assert!(first_text.contains("Clock task"), "{first_text:?}");
+        assert!(first_text.contains("1m"), "{first_text:?}");
         assert!(!first_text.contains("ago"), "{first_text:?}");
-        assert!(server.app.agent_activity_refresh_deadline.is_none());
+        assert!(server.app.agent_activity_refresh_deadline.is_some());
         assert!(!server.handle_scheduled_tasks_headless(Instant::now(), false));
     }
 
