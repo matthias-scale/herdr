@@ -112,10 +112,12 @@ herdr session delete <name> [--json]
 
 ```bash
 herdr workspace list
-herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace bind <workspace_id> <owner/repo> [--reconcile]
+herdr workspace bind <workspace_id> --clear
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id> [--group]
 ```
@@ -123,7 +125,7 @@ herdr workspace close <workspace_id> [--group]
 フォーカスを奪わずにワークスペースを作成します:
 
 ```bash
-herdr workspace create --cwd ~/project --label api --no-focus
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 ```
 
 ワークスペースは最上位のプロジェクトまたは作業コンテキストです。作成時に最初のタブとルートペインも作られます。JSON レスポンスの `.result.workspace.workspace_id`、`.result.tab.tab_id`、`.result.root_pane.pane_id` から各 ID を取得できます。
@@ -132,8 +134,8 @@ herdr workspace create --cwd ~/project --label api --no-focus
 
 ```bash
 herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]
-herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]
-herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--ticket ID]... [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus] [--trust-repository]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--ticket ID]... [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus] [--trust-repository]
 herdr worktree remove --workspace ID [--force] [--trust-repository]
 ```
 
@@ -147,7 +149,7 @@ Git はデフォルトで、別のユーザーが所有するリポジトリを�
 
 ```bash
 herdr tab list [--workspace <workspace_id>]
-herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
@@ -181,7 +183,9 @@ herdr pane focus --direction left|right|up|down [--pane ID|--current]
 herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
-herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane work-context get <pane_id>
+herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--clear FIELD]...
+herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
 herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
@@ -309,6 +313,35 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 `agent explain` は、スクリーン検出が使うのと同じ下部バッファの検出スナップショットの分類を実行中のサーバーに依頼します。そのためライブの出力はサーバーのアクティブなマニフェストキャッシュを反映します。これは `agent.explain` ソケットメソッドを使うので、Herdr のアップグレード後にライブ explain を使う前に、サーバーを再起動するか更新済みサーバーへハンドオフしてください。保存済みフィクスチャをローカルで説明するには `--file PATH --agent LABEL` を使います。デフォルトの出力には、エージェント、最終状態、マニフェストのソースとバージョン、リージョンの証拠付きでマッチしたルール、そしてフォールバック・スキップ・警告の理由が表示されます。`--verbose` を付けると、可視の証拠フラグ、キャッシュされたリモートバージョン、ローカルオーバーライドのシャドーイング、リモート更新状況、マッチャーとリージョンの証拠付きの評価済みルール全リストが表示されます。issue の報告やテストには `--json` を付けてください。
 
 通常のターミナル、サーバー、テスト、シェル、低レベルなターミナル制御には `pane send-text`、`pane send-keys`、`pane run`、`terminal attach` を使ってください。Enter 付きでコマンドを送信したいときは `pane run` を使います。
+
+## フリートステータス
+
+```bash
+herdr fleet status
+herdr fleet status --hosts laptop,workbox --blocked-only
+herdr fleet status --json
+herdr fleet status --watch
+```
+
+フリートステータスは設定済みのすべてのホストを並列に読み取り、ペインを持つ Herdr エージェントとウィンドウレスな `~/.agents/runs/<run_id>/state.json` レコードを統合します。JSON の `source` フィールドは常に `herdr` または `run_state` のいずれかなので、利用側が証拠の種類を取り違えることはありません。run-state ファイルが存在しないのは正常です。`schema` が `1` 以外の run-state ファイルは、目立つ `run_state` エラー行として表示されます。
+
+人間向けのテーブルはブロック中の行を先頭に、次に作業中またはアクティブな行を並べます。`--blocked-only` は生存状態とは独立にブロック事実だけで絞り込みます。`--watch` は初回スナップショットの後にのみ JSON Lines を出力し、観測した状態遷移をそれぞれ一度だけ出力します。新たにブロックされたイベントにはゲートの要約が含まれます。
+
+フリートステータスは 2 つの独立した事実をモデル化します:
+
+| 入力の証拠 | 生存状態 | ブロック |
+| --- | --- | --- |
+| Herdr の `idle`、`working`、`blocked` | live | `blocked` または未回答のゲートがあれば true |
+| Herdr の `done` | そのエージェントに限り terminal | 未回答のゲートが残っていれば true |
+| Herdr の `stale` または `unknown` | unknown | 未回答のゲートが残っていれば true |
+| 新しいハートビートを持つ実行の `active`、`waiting`、`blocked` | live | `blocked` の場合のみ true |
+| ハートビートが古い、または無効な非終了の実行 | unknown | 実行のブロック事実を保持 |
+| 実行の `done` または `failed` | terminal | false |
+| ホストの読み取り失敗、または消えた行 | unknown | 保持された証拠がブロックを示さない限り false |
+
+この分離により、静かなゲートが stale に格下げされることを防ぎます。未回答のゲートを持つ古い Herdr レコードは `BLOCKED · UNKNOWN` として表示されます。また、証拠なしに沈黙を完了やブロックと呼ぶことも防ぎます。
+
+ウィンドウレスな実行レコードは、親の実行やネイティブのエージェントセッションを指定できます。フリートステータスは `closure_liveness` と `closure_blocked` を計算するとき、既知のすべての子孫を評価します。`done` を報告する親は自分の行に対してのみ terminal であり、live、unknown、またはブロック中の子があれば親のクロージャは非終了またはブロックのままです。run-state コントラクトにない関係は推測されません。
 
 ## ダイレクトターミナルアタッチ
 
