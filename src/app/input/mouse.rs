@@ -135,10 +135,28 @@ impl AppState {
             return None;
         }
         if self.add_project_active() {
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) {
+                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    -3
+                } else {
+                    3
+                };
+                self.add_project_scroll(delta);
+                return None;
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let layout = self.view.add_project_layout.clone();
                 if rect_contains(layout.close, mouse.column, mouse.row) {
                     self.close_add_project();
+                } else if rect_contains(layout.hidden_toggle, mouse.column, mouse.row) {
+                    self.add_project_toggle_hidden();
+                } else if let Some(path) = layout.breadcrumbs.iter().find_map(|(path, rect)| {
+                    rect_contains(*rect, mouse.column, mouse.row).then(|| path.clone())
+                }) {
+                    self.add_project_jump_to_breadcrumb(path);
                 } else if let Some(tab) = layout.tabs.iter().find_map(|(tab, rect)| {
                     rect_contains(*rect, mouse.column, mouse.row).then_some(*tab)
                 }) {
@@ -151,9 +169,17 @@ impl AppState {
                         .as_ref()
                         .and_then(|home| home.add_project.as_ref())
                         .map(|project| project.tab);
-                    self.add_project_select_row(index);
-                    if tab == Some(crate::app::home::AddProjectTab::GitHub) {
-                        self.accept_add_project();
+                    match tab {
+                        Some(crate::app::home::AddProjectTab::LocalFolder) => {
+                            if let Some(entry_index) = index.checked_sub(1) {
+                                self.add_project_select_row(entry_index);
+                            }
+                        }
+                        Some(crate::app::home::AddProjectTab::GitHub) => {
+                            self.add_project_select_row(index);
+                            self.accept_add_project();
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -5583,6 +5609,96 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), hit.x, hit.y));
 
         assert!(app.state.add_project_active());
+    }
+
+    #[test]
+    fn folder_browser_mouse_enters_rows_jumps_breadcrumbs_toggles_hidden_and_scrolls() {
+        let root =
+            std::env::temp_dir().join(format!("herdr-folder-browser-mouse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("alpha")).expect("visible directory");
+        std::fs::create_dir_all(root.join(".secret")).expect("hidden directory");
+        std::fs::create_dir_all(root.join("zulu")).expect("second visible directory");
+
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.add_project_start_dir = root.display().to_string();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let add = crate::ui::sidebar_header_add_project_rect(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), add.x, add.y));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        let layout = app.state.view.add_project_layout.clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.hidden_toggle.x,
+            layout.hidden_toggle.y,
+        ));
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .and_then(|home| home.add_project.as_ref())
+            .is_some_and(|project| project.browse.show_hidden));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            layout.input.x,
+            layout.input.y,
+        ));
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .and_then(|home| home.add_project.as_ref())
+            .is_some_and(|project| project.browse.selected > 0));
+
+        app.state.add_project_toggle_hidden();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let list = app
+            .state
+            .view
+            .add_project_layout
+            .list
+            .as_ref()
+            .expect("folder rows")
+            .list_rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x,
+            list.y + 1,
+        ));
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .and_then(|home| home.add_project.as_ref())
+            .is_some_and(|project| project.browse.directory == root.join("alpha")));
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let root_crumb = app
+            .state
+            .view
+            .add_project_layout
+            .breadcrumbs
+            .iter()
+            .find(|(path, _)| path == &root)
+            .map(|(_, rect)| *rect)
+            .expect("fixture root breadcrumb");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            root_crumb.x,
+            root_crumb.y,
+        ));
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .and_then(|home| home.add_project.as_ref())
+            .is_some_and(|project| project.browse.directory == root));
     }
 
     #[test]

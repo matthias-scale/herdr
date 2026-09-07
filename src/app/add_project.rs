@@ -128,7 +128,7 @@ impl AddProjectState {
         match self.tab {
             AddProjectTab::LocalFolder => {
                 for character in text.chars().filter(|character| !character.is_control()) {
-                    self.browse.push(character);
+                    self.browse.push_filter(character);
                 }
             }
             AddProjectTab::GitUrl => self
@@ -148,7 +148,7 @@ impl AddProjectState {
             return;
         }
         match self.tab {
-            AddProjectTab::LocalFolder => self.browse.pop(),
+            AddProjectTab::LocalFolder => self.browse.backspace(),
             AddProjectTab::GitUrl => {
                 self.git_url.pop();
             }
@@ -193,8 +193,46 @@ impl AppState {
             return;
         };
         match project.tab {
-            AddProjectTab::LocalFolder => project.browse.select_child(index),
+            AddProjectTab::LocalFolder => project.browse.open_entry(index),
             AddProjectTab::GitHub => project.github_filter.selected = index,
+            AddProjectTab::GitUrl => {}
+        }
+    }
+
+    pub(crate) fn add_project_jump_to_breadcrumb(&mut self, directory: PathBuf) {
+        if let Some(project) = self
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+        {
+            project.browse.jump_to(directory);
+        }
+    }
+
+    pub(crate) fn add_project_toggle_hidden(&mut self) {
+        if let Some(project) = self
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+        {
+            project.browse.toggle_hidden();
+        }
+    }
+
+    pub(crate) fn add_project_scroll(&mut self, delta: i32) {
+        let Some(project) = self
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+        else {
+            return;
+        };
+        match project.tab {
+            AddProjectTab::LocalFolder => project.browse.move_selection(delta),
+            AddProjectTab::GitHub => {
+                let count = project.github_matches().len();
+                project.github_filter.move_selection(delta, count);
+            }
             AddProjectTab::GitUrl => {}
         }
     }
@@ -330,17 +368,12 @@ impl AppState {
             KeyCode::Esc => self.close_add_project(),
             KeyCode::Left if key.modifiers.is_empty() => project.move_tab(-1),
             KeyCode::Right if key.modifiers.is_empty() => project.move_tab(1),
-            KeyCode::Tab
-                if key.modifiers.is_empty() && project.tab == AddProjectTab::LocalFolder =>
-            {
-                project.browse.complete();
-            }
             KeyCode::Up if key.modifiers.is_empty() => match project.tab {
                 AddProjectTab::GitHub => {
                     let count = project.github_matches().len();
                     project.github_filter.move_selection(-1, count);
                 }
-                AddProjectTab::LocalFolder => {}
+                AddProjectTab::LocalFolder => project.browse.move_selection(-1),
                 AddProjectTab::GitUrl => {}
             },
             KeyCode::Down if key.modifiers.is_empty() => match project.tab {
@@ -348,14 +381,32 @@ impl AppState {
                     let count = project.github_matches().len();
                     project.github_filter.move_selection(1, count);
                 }
-                AddProjectTab::LocalFolder => {}
+                AddProjectTab::LocalFolder => project.browse.move_selection(1),
                 AddProjectTab::GitUrl => {}
             },
             KeyCode::Backspace if key.modifiers.is_empty() => project.pop(),
+            KeyCode::Char('.') if key.modifiers.is_empty() => match project.tab {
+                AddProjectTab::LocalFolder => project.browse.toggle_hidden(),
+                _ => project.push_text("."),
+            },
+            KeyCode::Char(' ')
+                if key.modifiers.is_empty()
+                    && !project.clone_pending
+                    && project.tab == AddProjectTab::LocalFolder =>
+            {
+                self.accept_add_project();
+            }
             KeyCode::Char(character)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 project.push_text(&character.to_string());
+            }
+            KeyCode::Enter
+                if key.modifiers.is_empty()
+                    && !project.clone_pending
+                    && project.tab == AddProjectTab::LocalFolder =>
+            {
+                project.browse.open_selected();
             }
             KeyCode::Enter if key.modifiers.is_empty() && !project.clone_pending => {
                 self.accept_add_project();
@@ -417,6 +468,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::home::FolderBrowser;
+
+    fn folder_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-folder-browser-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("alpha/.git")).expect("alpha repository");
+        std::fs::create_dir_all(root.join(".secret")).expect("hidden directory");
+        std::fs::write(
+            root.join("alpha/.git/HEAD"),
+            "ref: refs/heads/feature/f24\n",
+        )
+        .expect("git head");
+        std::fs::write(root.join("notes.txt"), "fixture").expect("file row");
+        root
+    }
 
     #[cfg(unix)]
     fn fake_program(name: &str, body: &str) -> PathBuf {
@@ -491,6 +560,74 @@ mod tests {
             repo_name_from_url("git@github.com:acme/project.git"),
             Some("project".into())
         );
+    }
+
+    #[test]
+    fn folder_filter_updates_immediately_and_keeps_dim_file_candidates() {
+        let root = folder_fixture("filter");
+        let mut browser = FolderBrowser::starting_at(&root);
+
+        browser.push_filter('n');
+
+        assert_eq!(browser.filter, "n");
+        assert_eq!(browser.entries.len(), 1);
+        assert_eq!(browser.entries[0].name, "notes.txt");
+        assert!(!browser.entries[0].is_dir);
+    }
+
+    #[test]
+    fn folder_hidden_toggle_and_git_branch_are_projected_into_rows() {
+        let root = folder_fixture("hidden-git");
+        let mut browser = FolderBrowser::starting_at(&root);
+
+        assert!(!browser.entries.iter().any(|entry| entry.name == ".secret"));
+        assert_eq!(
+            browser
+                .entries
+                .iter()
+                .find(|entry| entry.name == "alpha")
+                .and_then(|entry| entry.branch.as_deref()),
+            Some("feature/f24")
+        );
+
+        browser.toggle_hidden();
+
+        assert!(browser.entries.iter().any(|entry| entry.name == ".secret"));
+    }
+
+    #[test]
+    fn folder_navigation_opens_rows_and_backspace_moves_to_parent() {
+        let root = folder_fixture("navigation");
+        let mut browser = FolderBrowser::starting_at(&root);
+        let alpha = browser
+            .entries
+            .iter()
+            .position(|entry| entry.name == "alpha")
+            .expect("alpha row");
+
+        browser.open_entry(alpha);
+        assert_eq!(browser.directory, root.join("alpha"));
+
+        browser.backspace();
+        assert_eq!(browser.directory, root);
+    }
+
+    #[test]
+    fn space_selects_the_current_folder() {
+        let root = folder_fixture("select");
+        let mut state = AppState::test_new();
+        let mut home = super::super::home::HomeState::default();
+        home.add_project = Some(AddProjectState::starting_at(&root));
+        state.home = Some(home);
+
+        state.handle_add_project_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let home = state.home.as_ref().expect("home remains open");
+        assert_eq!(
+            home.directory,
+            crate::worktree::canonical_or_original(&root)
+        );
+        assert!(home.add_project.is_none());
     }
 
     #[test]
