@@ -432,10 +432,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
-# File tree badges are portable. Set this to "nerd" only when the terminal font
-# includes Nerd Font glyphs.
+# File rows use Nerd Font glyphs by default. Disable them for terminals without
+# a Nerd Font; rows then use portable two-character kinds.
+# nerd_font = true
+
+# Legacy per-surface override. "badges" also forces portable file kinds.
 [files]
-# icons = "badges"
+# icons = "nerd"
 
 # Full-width top status row on desktop layouts.
 [ui.status_bar]

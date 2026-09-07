@@ -529,8 +529,8 @@ impl Default for UsageConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilesIconConfig {
-    #[default]
     Badges,
+    #[default]
     Nerd,
 }
 
@@ -1384,6 +1384,8 @@ pub struct UiConfig {
     pub combine_repos_across_hosts: bool,
     /// Hide whitespace-only changes in the diff surface. Default: false.
     pub hide_whitespace_in_diff: bool,
+    /// Render Nerd Font file glyphs. Default: true.
+    pub nerd_font: bool,
     /// Workspace preselected in the Home composer for a new thread.
     /// Default: current_checkout.
     pub new_thread_workspace: NewThreadWorkspaceConfig,
@@ -1717,6 +1719,7 @@ impl Default for UiConfig {
             confirm_close: true,
             combine_repos_across_hosts: false,
             hide_whitespace_in_diff: false,
+            nerd_font: true,
             new_thread_workspace: NewThreadWorkspaceConfig::CurrentCheckout,
             add_project_start_dir: String::new(),
             prompt_new_tab_name: true,
@@ -2605,10 +2608,11 @@ scrollback_lines = 12345
     }
 
     #[test]
-    fn files_icons_default_to_badges_and_parse_nerd() {
-        assert_eq!(Config::default().files.icons, FilesIconConfig::Badges);
-        let config: Config = toml::from_str("[files]\nicons = \"nerd\"\n").unwrap();
-        assert_eq!(config.files.icons, FilesIconConfig::Nerd);
+    fn nerd_font_defaults_on_and_accepts_an_ascii_fallback() {
+        assert!(Config::default().ui.nerd_font);
+        assert_eq!(Config::default().files.icons, FilesIconConfig::Nerd);
+        let config: Config = toml::from_str("[ui]\nnerd_font = false\n").unwrap();
+        assert!(!config.ui.nerd_font);
     }
 
     #[test]
