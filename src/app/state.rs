@@ -1401,7 +1401,9 @@ pub(crate) struct DockPresentationState {
     pub(crate) open_surfaces: Vec<DockSurface>,
     pub(crate) tab_bindings: Vec<Option<DockTabBinding>>,
     pub(crate) active_tab_index: Option<usize>,
-    pub(crate) hovered_tab_index: Option<usize>,
+    pub(crate) hovered_control: Option<ControlId>,
+    pub(crate) hover_started_at: Option<Instant>,
+    pub(crate) hover_tooltip_visible: bool,
     pub(crate) pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
     pub(crate) followed_pane: Option<PaneFocusTarget>,
     pub(crate) context_objects: Vec<DockObjectRef>,
@@ -1456,7 +1458,9 @@ impl Default for DockPresentationState {
             open_surfaces: Vec::new(),
             tab_bindings: Vec::new(),
             active_tab_index: None,
-            hovered_tab_index: None,
+            hovered_control: None,
+            hover_started_at: None,
+            hover_tooltip_visible: false,
             pane_tabs: std::collections::HashMap::new(),
             followed_pane: None,
             context_objects: Vec::new(),
@@ -1495,6 +1499,27 @@ impl Default for DockPresentationState {
             home_focused: false,
             home_followed_pane: None,
         }
+    }
+}
+
+impl DockPresentationState {
+    pub(crate) fn hover_tooltip_deadline(&self) -> Option<Instant> {
+        if self.hover_tooltip_visible || self.hovered_control.is_none() {
+            return None;
+        }
+        self.hover_started_at
+            .map(|started| started + super::HOVER_TOOLTIP_DELAY)
+    }
+
+    pub(crate) fn reveal_hover_tooltip_at(&mut self, now: Instant) -> bool {
+        if self
+            .hover_tooltip_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.hover_tooltip_visible = true;
+            return true;
+        }
+        false
     }
 }
 
@@ -2846,9 +2871,12 @@ pub struct AppState {
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
-    /// Defaults and hover state owned by the TUI client.
+    /// Defaults owned by the TUI client.
     pub(crate) linear_default_layout: LinearViewLayout,
-    pub(crate) sidebar_footer_hover: Option<SidebarFooterItem>,
+    /// Hover state is presentation-only and never enters the session protocol.
+    pub(crate) hovered_control: Option<ControlId>,
+    pub(crate) hover_started_at: Option<Instant>,
+    pub(crate) hover_tooltip_visible: bool,
     /// Client-local historical usage view and its scan result.
     pub(crate) usage_view: Option<UsageViewState>,
     /// Cached local usage loaded before the first background rescan.
@@ -3079,8 +3107,6 @@ pub struct AppState {
     /// several PR, Linear, or Missive tabs at once.
     pub(crate) dock_tab_bindings: Vec<Option<DockTabBinding>>,
     pub(crate) dock_active_tab_index: Option<usize>,
-    /// Tab under the client pointer, used only to expose an object's full title.
-    pub(crate) dock_hovered_tab_index: Option<usize>,
     /// Per-pane tab memory and context suppression. This is swapped per client
     /// and never enters server or protocol state.
     pub(crate) dock_pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
@@ -3526,6 +3552,63 @@ pub(crate) enum SidebarFooterItem {
     Linear,
     Missive,
     Refresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlId {
+    SidebarNewThread,
+    SidebarAddProject,
+    SidebarNewSpace,
+    SidebarMore,
+    SidebarFooter(SidebarFooterItem),
+    DockTab(usize),
+    DockClose,
+    DockAdd,
+    TopBarScrollLeft,
+    TopBarScrollRight,
+    TopBarNewTab,
+    TopBarRepoEditor,
+    TopBarAddAction,
+    TopBarUserAction(usize),
+    TopBarGitMenu,
+    TopBarPaneBelow,
+    TopBarPaneRight,
+}
+
+impl AppState {
+    pub(crate) fn set_hovered_control_at(&mut self, control: Option<ControlId>, now: Instant) {
+        if self.hovered_control == control {
+            return;
+        }
+        self.hovered_control = control;
+        self.hover_started_at = control.map(|_| now);
+        self.hover_tooltip_visible = false;
+    }
+
+    pub(crate) fn clear_hovered_control(&mut self) {
+        self.hovered_control = None;
+        self.hover_started_at = None;
+        self.hover_tooltip_visible = false;
+    }
+
+    pub(crate) fn hover_tooltip_deadline(&self) -> Option<Instant> {
+        if self.hover_tooltip_visible || self.hovered_control.is_none() {
+            return None;
+        }
+        self.hover_started_at
+            .map(|started| started + super::HOVER_TOOLTIP_DELAY)
+    }
+
+    pub(crate) fn reveal_hover_tooltip_at(&mut self, now: Instant) -> bool {
+        if self
+            .hover_tooltip_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.hover_tooltip_visible = true;
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -4266,7 +4349,7 @@ impl AppState {
             self.dock_active_tab_index = restored.active_index;
             self.dock_context_objects = restored.context_objects;
             self.dock_suppressed_context = restored.suppressed_context;
-            self.dock_hovered_tab_index = None;
+            self.clear_hovered_control();
             self.dock_followed_pane = target;
             self.dock_tab = self
                 .dock_active_tab_index
@@ -4278,7 +4361,7 @@ impl AppState {
             return;
         }
         self.align_dock_tab_bindings();
-        self.dock_hovered_tab_index = None;
+        self.clear_hovered_control();
         let active = self.active_dock_tab_index().and_then(|index| {
             self.dock_open_surfaces.get(index).copied().map(|surface| {
                 (
@@ -4385,7 +4468,7 @@ impl AppState {
         }
         self.dock_open_surfaces.remove(index);
         self.dock_tab_bindings.remove(index);
-        self.dock_hovered_tab_index = None;
+        self.clear_hovered_control();
         if !was_active {
             return;
         }
@@ -4430,9 +4513,11 @@ impl AppState {
         std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
         std::mem::swap(&mut self.dock_tab_bindings, &mut other.tab_bindings);
         std::mem::swap(&mut self.dock_active_tab_index, &mut other.active_tab_index);
+        std::mem::swap(&mut self.hovered_control, &mut other.hovered_control);
+        std::mem::swap(&mut self.hover_started_at, &mut other.hover_started_at);
         std::mem::swap(
-            &mut self.dock_hovered_tab_index,
-            &mut other.hovered_tab_index,
+            &mut self.hover_tooltip_visible,
+            &mut other.hover_tooltip_visible,
         );
         std::mem::swap(&mut self.dock_pane_tabs, &mut other.pane_tabs);
         std::mem::swap(&mut self.dock_followed_pane, &mut other.followed_pane);
@@ -4817,7 +4902,9 @@ impl AppState {
             symphony_detail: None,
             work_view: None,
             linear_default_layout: LinearViewLayout::List,
-            sidebar_footer_hover: None,
+            hovered_control: None,
+            hover_started_at: None,
+            hover_tooltip_visible: false,
             usage_view: None,
             usage_snapshot: None,
             usage_pricing: crate::config::UsageConfig::default(),
@@ -5032,7 +5119,6 @@ impl AppState {
             dock_open_surfaces: Vec::new(),
             dock_tab_bindings: Vec::new(),
             dock_active_tab_index: None,
-            dock_hovered_tab_index: None,
             dock_pane_tabs: std::collections::HashMap::new(),
             dock_followed_pane: None,
             dock_context_objects: Vec::new(),

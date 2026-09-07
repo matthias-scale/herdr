@@ -69,6 +69,7 @@ const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(500);
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
+pub(crate) const HOVER_TOOLTIP_DELAY: Duration = Duration::from_millis(400);
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -762,7 +763,9 @@ impl App {
             symphony_detail: None,
             work_view: None,
             linear_default_layout: config.linear.default_layout.into(),
-            sidebar_footer_hover: None,
+            hovered_control: None,
+            hover_started_at: None,
+            hover_tooltip_visible: false,
             usage_view: None,
             usage_snapshot: if cfg!(test) {
                 None
@@ -976,7 +979,6 @@ impl App {
             dock_open_surfaces: dock_default_surfaces.clone(),
             dock_tab_bindings: vec![None; dock_default_surfaces.len()],
             dock_active_tab_index: (!dock_default_surfaces.is_empty()).then_some(0),
-            dock_hovered_tab_index: None,
             dock_pane_tabs: std::collections::HashMap::new(),
             dock_followed_pane: None,
             dock_context_objects: Vec::new(),
@@ -2545,6 +2547,7 @@ impl App {
             let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
+                    self.state.clear_hovered_control();
                     let lease_key = input::InputLeaseKey::new(source_id, &key);
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
@@ -2636,6 +2639,7 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Text(text) => {
+                    self.state.clear_hovered_control();
                     self.handle_text_commit_headless(text.as_str());
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
@@ -2653,6 +2657,7 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
+                    self.state.clear_hovered_control();
                     if self.state.symphony_detail.is_some()
                         || self.state.work_view.is_some()
                         || self.try_route_paste_to_popup(&text)

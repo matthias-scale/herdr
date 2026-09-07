@@ -145,6 +145,7 @@ impl App {
         &mut self,
         key: TerminalKey,
     ) -> Option<super::TerminalInputTarget> {
+        self.state.clear_hovered_control();
         let target = self.handle_key_inner(key).await;
         // Every keyboard path that can enter a probed settings section runs
         // through here, so the probes start once from one place.
@@ -3770,6 +3771,13 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            let hovered = crate::ui::hovered_control_at(&self.state, mouse.column, mouse.row);
+            self.state
+                .set_hovered_control_at(hovered, std::time::Instant::now());
+        } else {
+            self.state.clear_hovered_control();
+        }
         if self.state.pr_action_confirmation.is_some() {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some((cancel, confirm)) = crate::ui::pr_actions::confirmation_button_rects(
@@ -3843,42 +3851,6 @@ impl App {
         }
         if self.handle_overlay_mouse(mouse) {
             return;
-        }
-
-        if matches!(mouse.kind, MouseEventKind::Moved) {
-            use crate::app::state::SidebarFooterItem;
-            self.state.sidebar_footer_hover = [
-                (
-                    SidebarFooterItem::Settings,
-                    self.state.view.sidebar_footer_settings_hit_area,
-                ),
-                (
-                    SidebarFooterItem::PullRequests,
-                    self.state.view.sidebar_footer_work_hit_area,
-                ),
-                (
-                    SidebarFooterItem::Usage,
-                    self.state.view.sidebar_footer_usage_hit_area,
-                ),
-                (
-                    SidebarFooterItem::Linear,
-                    self.state.view.sidebar_footer_ticket_hit_area,
-                ),
-                (
-                    SidebarFooterItem::Missive,
-                    self.state.view.sidebar_footer_missive_hit_area,
-                ),
-                (
-                    SidebarFooterItem::Refresh,
-                    self.state.view.sidebar_footer_refresh_hit_area,
-                ),
-            ]
-            .into_iter()
-            .find_map(|(item, rect)| {
-                self.state
-                    .point_in_rect(rect, mouse.column, mouse.row)
-                    .then_some(item)
-            });
         }
 
         if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
@@ -5413,6 +5385,20 @@ mod tests {
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
         assert!(app.state.dock_files_focused);
         assert_eq!(app.state.dock_files_filter, "needle");
+    }
+
+    #[tokio::test]
+    async fn key_dismisses_a_visible_hover_tooltip() {
+        let mut app = app_for_mouse_test();
+        app.state.hovered_control = Some(crate::app::state::ControlId::SidebarMore);
+        app.state.hover_tooltip_visible = true;
+
+        let _ = app
+            .handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.hovered_control, None);
+        assert!(!app.state.hover_tooltip_visible);
     }
 
     #[test]

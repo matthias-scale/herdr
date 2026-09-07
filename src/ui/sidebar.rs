@@ -4560,7 +4560,7 @@ fn sidebar_footer_style(
             .fg(palette.accent)
             .bg(palette.surface0)
             .add_modifier(Modifier::BOLD)
-    } else if app.sidebar_footer_hover == Some(item) {
+    } else if app.hovered_control == Some(crate::app::state::ControlId::SidebarFooter(item)) {
         Style::default().fg(palette.text).bg(palette.surface0)
     } else {
         Style::default().fg(palette.overlay0)
