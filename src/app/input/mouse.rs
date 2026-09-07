@@ -2723,7 +2723,11 @@ fn apply_scroll(scroll: &mut usize, delta: i16, max_scroll: usize) {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-    use ratatui::layout::{Direction, Rect};
+    use ratatui::{
+        backend::TestBackend,
+        layout::{Direction, Rect},
+        Terminal,
+    };
 
     use super::super::{
         app_for_mouse_test, capture_snapshot, mouse, numbered_lines_bytes, root_layout_ratio,
@@ -2734,7 +2738,9 @@ mod tests {
         app::state::{
             ContextMenuKind, ContextMenuState, InfoPanelLinkRow, MenuListState, Mode, ViewLayout,
         },
+        app::App,
         detect::{Agent, AgentState},
+        input::TerminalKey,
         workspace::Workspace,
     };
 
@@ -2746,6 +2752,111 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    fn seeded_wide_sidebar_app() -> App {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = false;
+        app.state.sidebar_min_width = 18;
+        app.state.sidebar_max_width = 60;
+        app.state.sidebar_width = 50;
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app
+    }
+
+    fn render_wide_app(app: &mut App) {
+        const WIDTH: u16 = 269;
+        const HEIGHT: u16 = 84;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, WIDTH, HEIGHT));
+        let mut terminal =
+            Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("wide test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .expect("wide app render");
+    }
+
+    #[tokio::test]
+    async fn sidebar_search_mouse_character_flow_renders_seeded_wide_view() {
+        let mut app = seeded_wide_sidebar_app();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 269, 84));
+        assert_eq!(app.state.view.sidebar_rect.width, 50);
+        let sidebar = app.state.view.sidebar_rect;
+        let search = crate::ui::sidebar_header_search_rect(sidebar);
+        let header_areas = [
+            crate::ui::expanded_sidebar_toggle_rect(sidebar),
+            search,
+            crate::ui::sidebar_header_new_thread_rect(sidebar),
+            crate::ui::sidebar_header_add_project_rect(sidebar),
+            crate::ui::sidebar_header_new_space_rect(sidebar),
+            crate::ui::sidebar_header_overflow_rect(sidebar),
+            crate::ui::sidebar_group_mode_anchor_rect(sidebar),
+        ];
+        assert!(header_areas
+            .iter()
+            .all(|area| area.width > 0 && area.height == 1));
+        assert!(header_areas
+            .iter()
+            .all(|area| area.x >= sidebar.x && area.right() <= sidebar.right()));
+
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse(mouse(kind, search.x, search.y));
+        }
+        assert!(app.state.sidebar_search_active);
+
+        app.handle_key(TerminalKey::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::empty(),
+        ))
+        .await;
+        assert_eq!(app.state.sidebar_work_filter.query, "a");
+        render_wide_app(&mut app);
+    }
+
+    #[test]
+    fn sidebar_linear_footer_mouse_flow_renders_seeded_wide_view() {
+        use crate::app::state::{SidebarFooterItem, WorkProjection};
+
+        let mut app = seeded_wide_sidebar_app();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 269, 84));
+        assert_eq!(app.state.view.sidebar_rect.width, 50);
+        let areas = [
+            app.state.view.sidebar_footer_settings_hit_area,
+            app.state.view.sidebar_footer_work_hit_area,
+            app.state.view.sidebar_footer_usage_hit_area,
+            app.state.view.sidebar_footer_ticket_hit_area,
+            app.state.view.sidebar_footer_missive_hit_area,
+            app.state.view.sidebar_footer_refresh_hit_area,
+        ];
+        assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
+        assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+        let linear = areas[3];
+
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse(mouse(kind, linear.x, linear.y));
+        }
+
+        assert_eq!(
+            app.state.sidebar_footer_hover,
+            Some(SidebarFooterItem::Linear)
+        );
+        assert!(app
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == WorkProjection::Tickets));
+        render_wide_app(&mut app);
     }
 
     #[test]
