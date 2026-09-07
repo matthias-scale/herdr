@@ -1793,7 +1793,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.list_rect.x,
-            menu.list_rect.y + 1,
+            menu.list_rect.y + 2,
         ));
         assert_eq!(
             app.state.sidebar_group_mode,
