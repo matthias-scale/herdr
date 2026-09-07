@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
     Frame,
 };
 
@@ -21,7 +21,7 @@ pub(crate) fn focused_ticket_key(app: &AppState) -> Option<WorkItemKey> {
     })
 }
 
-fn focused_ticket_item(app: &AppState) -> Option<TicketItem<'_>> {
+pub(crate) fn focused_ticket_item(app: &AppState) -> Option<TicketItem<'_>> {
     let key = focused_ticket_key(app)?;
     let ticket_id = key.ticket_id.as_deref()?;
     let snapshot = app.work_index_snapshot.as_ref()?;
@@ -45,7 +45,7 @@ fn focused_ticket_item(app: &AppState) -> Option<TicketItem<'_>> {
             })
             .collect(),
         observed_at: snapshot.observed_at,
-        has_context_pr: false,
+        has_context_pr: super::pr::focused_pr_key(app).is_some(),
     })
 }
 
@@ -87,6 +87,10 @@ pub(crate) fn render_ticket_item(
         Line::from(Span::styled(
             format!(" {}", detail.byline),
             Style::default().fg(app.palette.subtext0),
+        )),
+        Line::from(Span::styled(
+            " [Start thread ▾] [⋯]",
+            Style::default().fg(app.palette.accent),
         )),
     ];
     lines.extend(section_separator(
@@ -149,7 +153,99 @@ pub(crate) fn render_ticket_item(
             "    ",
         ));
     }
+    if let Some(draft) = app.dock_ticket_comment_draft.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!(" Comment: {draft}▏  Enter to stage · Esc cancel"),
+            Style::default().fg(app.palette.yellow),
+        )));
+    }
+    if let Some(write) = app.dock_pending_write.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(" Confirm {}? [y/N]", write.describe()),
+            Style::default()
+                .fg(app.palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(notice) = app.dock_write_notice.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(" {notice}"),
+            Style::default().fg(app.palette.subtext0),
+        )));
+    }
     frame.render_widget(Paragraph::new(lines).scroll((app.dock_scroll, 0)), area);
+
+    if let Some(choice) = app.dock_ticket_start_menu {
+        render_start_menu(app, frame, area, choice);
+    } else if let Some(menu) = app.dock_ticket_action_menu {
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            item.summary,
+            item.cached_detail,
+            app.work_index_session.linear.viewer.as_deref(),
+            app.work_index_session.linear_viewer_identity(),
+            item.has_context_pr,
+        );
+        crate::ui::ticket_actions::render_ticket_action_menu(
+            &app.palette,
+            frame,
+            area,
+            ticket_action_menu_anchor(area),
+            &context,
+            menu,
+        );
+    }
+}
+
+fn ticket_action_menu_anchor(area: Rect) -> Rect {
+    Rect::new(
+        area.right().saturating_sub(3),
+        area.y.saturating_add(2),
+        3.min(area.width),
+        1,
+    )
+}
+
+fn render_start_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    choice: crate::app::state::PrCheckoutChoice,
+) {
+    let anchor = Rect::new(area.x.saturating_add(1), area.y.saturating_add(2), 16, 1);
+    let Some(layout) = crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor,
+            item_count: 2,
+            selected: usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree),
+            has_filter: false,
+            max_rows: 2,
+            min_width: 20,
+        },
+        area,
+    ) else {
+        return;
+    };
+    let lines = [
+        (
+            crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            "Current checkout",
+        ),
+        (
+            crate::app::state::PrCheckoutChoice::NewWorktree,
+            "New worktree",
+        ),
+    ]
+    .into_iter()
+    .map(|(option, label)| {
+        Line::from(Span::styled(
+            format!("{} {label}", if option == choice { "▸" } else { " " }),
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.panel_bg),
+        ))
+    })
+    .collect::<Vec<_>>();
+    frame.render_widget(Clear, layout.rect);
+    frame.render_widget(Paragraph::new(lines), layout.rect);
 }
 
 #[cfg(test)]
@@ -260,6 +356,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(text.contains("SCA-3165"));
+        assert!(text.contains("[Start thread ▾] [⋯]"));
         assert!(text.contains("In Progress · P2 · matthias · cycle 34"));
         assert!(text.contains("#166 skill data  ✓"));
         assert!(text.contains("Description"));
@@ -276,6 +373,58 @@ mod tests {
             .expect("newer comment row");
         assert!(rows[newer_body + 1].is_empty());
         assert_eq!(rows[newer_body + 2], "  ada · 2m");
+    }
+
+    #[test]
+    fn compact_linear_menu_uses_shared_ticket_actions() {
+        let mut app = AppState::test_new();
+        app.dock_ticket_action_menu = Some(Default::default());
+        let ticket = ticket();
+        let item = TicketItem {
+            summary: &ticket,
+            cached_detail: None,
+            linked_prs: Vec::new(),
+            observed_at: SystemTime::UNIX_EPOCH,
+            has_context_pr: false,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| render_ticket_item(&app, frame, frame.area(), &item))
+            .expect("render compact ticket menu");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for label in ["Refresh", "Ask a question", "Priority ▸", "Cancel ticket"] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+    }
+
+    #[test]
+    fn compact_linear_menu_opens_downward_and_clamps() {
+        let ticket = ticket();
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket, None, None, None, false,
+        );
+        let area = Rect::new(40, 3, 50, 7);
+        let anchor = ticket_action_menu_anchor(area);
+        let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
+            anchor,
+            area,
+            &context,
+            crate::ui::ticket_actions::TicketActionMenuState {
+                selected: 12,
+                ..Default::default()
+            },
+        )
+        .expect("rows below the dock action row");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert_eq!(layout.rect.bottom(), area.bottom());
+        assert!(layout.first_visible <= 12);
+        assert!(12 < layout.first_visible + layout.visible_rows);
     }
 
     #[test]

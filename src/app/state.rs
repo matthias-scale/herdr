@@ -1344,6 +1344,7 @@ pub(crate) enum SidebarObjectMenuPage {
     #[default]
     Actions,
     TicketTransitions,
+    TicketPriorities,
     Confirmation,
 }
 
@@ -1377,6 +1378,10 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_search_active: bool,
     pub(crate) agents_focused: bool,
     pub(crate) agents_selection: Option<String>,
+    pub(crate) linear_focused: bool,
+    pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
+    pub(crate) ticket_comment_draft: Option<String>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -1418,6 +1423,10 @@ impl Default for DockPresentationState {
             files_search_active: false,
             agents_focused: false,
             agents_selection: None,
+            linear_focused: false,
+            ticket_start_menu: None,
+            ticket_action_menu: None,
+            ticket_comment_draft: None,
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -3003,6 +3012,10 @@ pub struct AppState {
     /// Both fields are attach-local TUI presentation state.
     pub(crate) dock_agents_focused: bool,
     pub(crate) dock_agents_selection: Option<String>,
+    pub(crate) dock_linear_focused: bool,
+    pub(crate) dock_ticket_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) dock_ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
+    pub(crate) dock_ticket_comment_draft: Option<String>,
     /// Cached client-side file snapshots, keyed by repository root.
     pub(crate) dock_file_cache:
         std::collections::HashMap<std::path::PathBuf, crate::files::FileTreeSnapshot>,
@@ -3357,7 +3370,7 @@ pub(crate) struct WorkViewState {
     pub(crate) pending_land: Option<PrLandConfirmation>,
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
-    pub(crate) ticket_more_menu: Option<TicketMoreChoice>,
+    pub(crate) ticket_more_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
     pub(crate) missive_start_menu: Option<PrCheckoutChoice>,
     pub(crate) selected_missive: Option<String>,
     pub(crate) missive_detail_scroll: u16,
@@ -3449,34 +3462,6 @@ impl TicketTransitionChoice {
             .position(|choice| *choice == self)
             .unwrap_or(0) as i8;
         Self::ALL[(index + delta).clamp(0, 3) as usize]
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum TicketMoreChoice {
-    #[default]
-    Open,
-    CopyIdentifier,
-    Comment,
-}
-
-impl TicketMoreChoice {
-    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::CopyIdentifier, Self::Comment];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Open => "Open in browser",
-            Self::CopyIdentifier => "Copy identifier",
-            Self::Comment => "Comment",
-        }
-    }
-
-    pub(crate) fn move_by(self, delta: i8) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|choice| *choice == self)
-            .unwrap_or(0) as i8;
-        Self::ALL[(index + delta).clamp(0, 2) as usize]
     }
 }
 
@@ -3895,6 +3880,19 @@ impl AppState {
         );
         std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
         std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
+        std::mem::swap(&mut self.dock_linear_focused, &mut other.linear_focused);
+        std::mem::swap(
+            &mut self.dock_ticket_start_menu,
+            &mut other.ticket_start_menu,
+        );
+        std::mem::swap(
+            &mut self.dock_ticket_action_menu,
+            &mut other.ticket_action_menu,
+        );
+        std::mem::swap(
+            &mut self.dock_ticket_comment_draft,
+            &mut other.ticket_comment_draft,
+        );
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -4463,6 +4461,10 @@ impl AppState {
             dock_files_search_active: false,
             dock_agents_focused: false,
             dock_agents_selection: None,
+            dock_linear_focused: false,
+            dock_ticket_start_menu: None,
+            dock_ticket_action_menu: None,
+            dock_ticket_comment_draft: None,
             dock_file_cache: std::collections::HashMap::new(),
             dock_files_root: None,
             dock_files_cwd: None,

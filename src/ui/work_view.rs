@@ -8,8 +8,7 @@ use ratatui::{
 
 use crate::{
     app::state::{
-        AppState, Palette, PrDetailTab, TicketMoreChoice, TicketTransitionChoice, WorkProjection,
-        WorkViewState,
+        AppState, Palette, PrDetailTab, TicketTransitionChoice, WorkProjection, WorkViewState,
     },
     ui::work_list_detail::{
         comment_header, section_separator, sorted_filtered_conversations, sorted_filtered_prs,
@@ -702,27 +701,13 @@ fn render_ticket_detail(
 ) {
     let palette = &app.palette;
     let detail = item.detail();
-    let link_enabled = item.actions().iter().any(|action| {
-        action.kind == crate::ui::work_list_detail::WorkActionKind::LinkPr && action.enabled
-    });
-    let link_style = if link_enabled {
-        Style::default().fg(palette.accent)
-    } else {
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::DIM)
-    };
     let mut lines = vec![
-        Line::from(vec![
-            ratatui::text::Span::styled(
-                format!(" {}   [Start thread ▾] [Transition ▾] ", detail.heading),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            ratatui::text::Span::styled("[Link PR] ", link_style),
-            ratatui::text::Span::styled("⋯", Style::default().fg(palette.accent)),
-        ]),
+        Line::from(vec![ratatui::text::Span::styled(
+            format!(" {}   [Start thread ▾] [⋯]", detail.heading),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::styled(
             format!(" {}", detail.title),
             Style::default()
@@ -814,9 +799,27 @@ fn render_ticket_detail(
         render_ticket_start_menu(app, frame, area, item, choice);
     } else if let Some(choice) = state.ticket_transition_menu {
         render_ticket_transition_menu(app, frame, area, item, choice);
-    } else if let Some(choice) = state.ticket_more_menu {
-        render_ticket_more_menu(app, frame, area, choice);
+    } else if let Some(menu) = state.ticket_more_menu {
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            item.summary,
+            item.cached_detail,
+            app.work_index_session.linear.viewer.as_deref(),
+            app.work_index_session.linear_viewer_identity(),
+            item.has_context_pr,
+        );
+        crate::ui::ticket_actions::render_ticket_action_menu(
+            palette,
+            frame,
+            area,
+            ticket_action_menu_anchor(area),
+            &context,
+            menu,
+        );
     }
+}
+
+fn ticket_action_menu_anchor(area: Rect) -> Rect {
+    Rect::new(area.right().saturating_sub(3), area.y, 3.min(area.width), 1)
 }
 
 fn render_pr_detail(
@@ -1145,41 +1148,6 @@ fn render_ticket_transition_menu(
                             } else {
                                 app.palette.overlay0
                             })
-                            .bg(app.palette.panel_bg),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ),
-        layout.rect,
-    );
-}
-
-fn render_ticket_more_menu(
-    app: &AppState,
-    frame: &mut Frame,
-    area: Rect,
-    choice: TicketMoreChoice,
-) {
-    let selected = TicketMoreChoice::ALL
-        .iter()
-        .position(|option| *option == choice)
-        .unwrap_or(0);
-    let Some(layout) = ticket_menu_layout(area, 54, 3, selected, 20) else {
-        return;
-    };
-    frame.render_widget(
-        Paragraph::new(
-            TicketMoreChoice::ALL
-                .into_iter()
-                .map(|option| {
-                    Line::styled(
-                        format!(
-                            "{} {}",
-                            if option == choice { "▸" } else { " " },
-                            option.label()
-                        ),
-                        Style::default()
-                            .fg(app.palette.text)
                             .bg(app.palette.panel_bg),
                     )
                 })
@@ -1673,8 +1641,57 @@ mod tests {
         assert!(text.contains("Ticket body with"), "{text}");
         assert!(text.contains("https://example.invalid"), "{text}");
         assert!(text.contains("Acceptance criteria"), "{text}");
-        assert!(text.contains("[Start thread ▾]"), "{text}");
-        assert!(text.contains("[Transition ▾]"), "{text}");
+        assert!(text.contains("[Start thread ▾] [⋯]"), "{text}");
+    }
+
+    #[test]
+    fn full_ticket_action_menu_uses_shared_rows_below_header() {
+        let mut state = WorkViewState::new(
+            true,
+            Some(snapshot(vec![ticket(
+                "SCA-3165",
+                crate::work_index::TicketGroup::Assigned,
+            )])),
+        );
+        state.projection = WorkProjection::Tickets;
+        state.ticket_more_menu = Some(Default::default());
+        let text = rendered_text_at(&state, 120, 40);
+        for label in [
+            "Refresh",
+            "Ask a question",
+            "Explain this ticket",
+            "Transition ▸",
+            "Priority ▸",
+            "Copy identifier",
+            "Cancel ticket",
+        ] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+    }
+
+    #[test]
+    fn full_ticket_action_menu_opens_downward_and_clamps() {
+        let item = ticket("SCA-3165", crate::work_index::TicketGroup::Assigned);
+        let ticket = item.ticket_details.first().expect("ticket fixture");
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            ticket, None, None, None, false,
+        );
+        let area = Rect::new(40, 3, 50, 5);
+        let anchor = ticket_action_menu_anchor(area);
+        let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
+            anchor,
+            area,
+            &context,
+            crate::ui::ticket_actions::TicketActionMenuState {
+                selected: 12,
+                ..Default::default()
+            },
+        )
+        .expect("rows below the ticket header");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert_eq!(layout.rect.bottom(), area.bottom());
+        assert!(layout.first_visible <= 12);
+        assert!(12 < layout.first_visible + layout.visible_rows);
     }
 
     #[test]

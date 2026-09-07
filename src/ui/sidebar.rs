@@ -3444,25 +3444,70 @@ pub(crate) enum SidebarObjectMenuItem {
     MarkPullRequestDraft,
     MarkPullRequestReady,
     CheckOut,
-    TicketTransitions,
-    TransitionTicket(crate::app::state::TicketTransitionChoice),
+    Ticket(crate::ui::ticket_actions::TicketAction),
     StartThread,
     CopyMissiveUrl,
 }
 
 impl SidebarObjectMenuItem {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> String {
         match self {
-            Self::ClosePullRequest => "Close",
-            Self::MarkPullRequestDraft => "Mark draft",
-            Self::MarkPullRequestReady => "Mark ready",
-            Self::CheckOut => "Check out",
-            Self::TicketTransitions => "Transition ▸",
-            Self::TransitionTicket(choice) => choice.label(),
-            Self::StartThread => "Start thread",
-            Self::CopyMissiveUrl => "Open in Missive",
+            Self::ClosePullRequest => "Close".into(),
+            Self::MarkPullRequestDraft => "Mark draft".into(),
+            Self::MarkPullRequestReady => "Mark ready".into(),
+            Self::CheckOut => "Check out".into(),
+            Self::Ticket(action) => action.label(),
+            Self::StartThread => "Start thread".into(),
+            Self::CopyMissiveUrl => "Open in Missive".into(),
         }
     }
+}
+
+fn sidebar_ticket_action_context(
+    app: &AppState,
+) -> Option<crate::ui::ticket_actions::TicketActionContext> {
+    let identifier = sidebar_ticket_target(app)?;
+    let ticket = app
+        .work_index_snapshot
+        .as_ref()?
+        .items
+        .iter()
+        .flat_map(|item| item.ticket_details.iter())
+        .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))?;
+    let key = crate::app::state::WorkItemKey {
+        repo: String::new(),
+        pr_number: None,
+        pr_url: None,
+        ticket_id: Some(identifier),
+    };
+    Some(crate::ui::ticket_actions::TicketActionContext::from_ticket(
+        ticket,
+        app.work_item_detail_cache.get(&key),
+        app.work_index_session.linear.viewer.as_deref(),
+        app.work_index_session.linear_viewer_identity(),
+        crate::ui::dock::pr::focused_pr_key(app).is_some(),
+    ))
+}
+
+pub(crate) fn sidebar_ticket_action_entries(
+    app: &AppState,
+) -> Vec<crate::ui::ticket_actions::TicketActionEntry> {
+    let Some(menu) = app.sidebar_object_menu.as_ref() else {
+        return Vec::new();
+    };
+    let Some(context) = sidebar_ticket_action_context(app) else {
+        return Vec::new();
+    };
+    let page = match menu.page {
+        crate::app::state::SidebarObjectMenuPage::TicketTransitions => {
+            crate::ui::ticket_actions::TicketActionMenuPage::Transitions
+        }
+        crate::app::state::SidebarObjectMenuPage::TicketPriorities => {
+            crate::ui::ticket_actions::TicketActionMenuPage::Priorities
+        }
+        _ => crate::ui::ticket_actions::TicketActionMenuPage::Actions,
+    };
+    crate::ui::ticket_actions::ticket_action_table(&context, page)
 }
 
 pub(crate) fn sidebar_object_menu_items(app: &AppState) -> Vec<SidebarObjectMenuItem> {
@@ -3473,12 +3518,6 @@ pub(crate) fn sidebar_object_menu_items(app: &AppState) -> Vec<SidebarObjectMenu
     if menu.page == SidebarObjectMenuPage::Confirmation {
         return Vec::new();
     }
-    if menu.page == SidebarObjectMenuPage::TicketTransitions {
-        return crate::app::state::TicketTransitionChoice::ALL
-            .into_iter()
-            .map(SidebarObjectMenuItem::TransitionTicket)
-            .collect();
-    }
     if menu.target.starts_with("github:") {
         vec![
             SidebarObjectMenuItem::ClosePullRequest,
@@ -3487,10 +3526,10 @@ pub(crate) fn sidebar_object_menu_items(app: &AppState) -> Vec<SidebarObjectMenu
             SidebarObjectMenuItem::CheckOut,
         ]
     } else if menu.target.starts_with("linear:") {
-        vec![
-            SidebarObjectMenuItem::TicketTransitions,
-            SidebarObjectMenuItem::StartThread,
-        ]
+        sidebar_ticket_action_entries(app)
+            .into_iter()
+            .map(|entry| SidebarObjectMenuItem::Ticket(entry.action))
+            .collect()
     } else if menu.target.starts_with("missive:") {
         vec![
             SidebarObjectMenuItem::CopyMissiveUrl,
@@ -5011,9 +5050,19 @@ pub(crate) fn sidebar_object_menu_labels(app: &AppState) -> Vec<String> {
             .map(|write| vec![format!("Confirm {}? [y/N]", write.describe())])
             .unwrap_or_default();
     }
+    if app
+        .sidebar_object_menu
+        .as_ref()
+        .is_some_and(|menu| menu.target.starts_with("linear:"))
+    {
+        return sidebar_ticket_action_entries(app)
+            .iter()
+            .map(crate::ui::ticket_actions::TicketActionEntry::display_label)
+            .collect();
+    }
     sidebar_object_menu_items(app)
         .into_iter()
-        .map(|item| item.label().to_string())
+        .map(SidebarObjectMenuItem::label)
         .collect()
 }
 
@@ -5077,7 +5126,23 @@ pub(super) fn render_sidebar_object_menu(app: &AppState, frame: &mut Frame) {
         .take(layout.visible_rows)
         .map(|(index, label)| {
             let selected = index == menu.selected;
-            let style = if selected {
+            let enabled = if menu.target.starts_with("linear:") {
+                sidebar_ticket_action_entries(app)
+                    .get(index)
+                    .is_some_and(crate::ui::ticket_actions::TicketActionEntry::enabled)
+            } else {
+                true
+            };
+            let style = if !enabled {
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .bg(if selected {
+                        app.palette.surface1
+                    } else {
+                        app.palette.panel_bg
+                    })
+                    .add_modifier(Modifier::DIM)
+            } else if selected {
                 Style::default()
                     .fg(app.palette.text)
                     .bg(app.palette.surface1)
@@ -10415,7 +10480,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "github:https://github.com/scalable-so/herdr/pull/159",
                 vec!["Close", "Mark draft", "Mark ready", "Check out"],
             ),
-            ("linear:SCA-3102", vec!["Transition ▸", "Start thread"]),
+            (
+                "linear:SCA-3102",
+                vec![
+                    "Refresh",
+                    "Ask a question",
+                    "Explain this ticket",
+                    "Work on it in a thread",
+                    "Transition ▸",
+                    "Assign to me · viewer unavailable",
+                    "Priority ▸",
+                    "Link PR · no PR in pane",
+                    "Comment",
+                    "Open in Linear",
+                    "Copy link",
+                    "Copy identifier",
+                    "Cancel ticket",
+                ],
+            ),
             (
                 &format!("missive:{CONVERSATION_A}"),
                 vec!["Open in Missive", "Start thread"],
@@ -10434,7 +10516,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::app::state::SidebarObjectMenuPage::TicketTransitions;
         assert_eq!(
             sidebar_object_menu_labels(&app),
-            ["Todo", "In Progress", "In Review", "Done"]
+            ["Todo", "In Progress · current state", "In Review", "Done"]
         );
     }
 
@@ -10458,6 +10540,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(layout.rect.y, anchor.bottom());
         assert_eq!(layout.visible_rows, 2);
         assert!(layout.rect.y >= anchor.bottom());
+        assert!(layout.rect.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn sidebar_ticket_action_menu_opens_downward_and_clamps() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+        open_object_menu(&mut app, "linear:SCA-3102");
+        let anchor = sidebar_object_menu_anchor_rect(&app).expect("ticket action anchor");
+        let area = Rect::new(0, 0, 80, anchor.bottom().saturating_add(3));
+        let layout = sidebar_object_menu_layout(&app, area).expect("clamped ticket dropdown");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert_eq!(layout.visible_rows, 3);
         assert!(layout.rect.bottom() <= area.bottom());
     }
 
