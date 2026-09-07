@@ -290,6 +290,15 @@ impl AppState {
         let group_menu_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
+        let new_thread_anchor = crate::ui::sidebar_header_new_thread_rect(self.view.sidebar_rect);
+        let add_project_anchor = crate::ui::sidebar_header_add_project_rect(self.view.sidebar_rect);
+        let search_anchor = crate::ui::sidebar_header_search_rect(self.view.sidebar_rect);
+        let new_thread_hit =
+            group_menu_enabled && self.point_in_rect(new_thread_anchor, mouse.column, mouse.row);
+        let add_project_hit =
+            group_menu_enabled && self.point_in_rect(add_project_anchor, mouse.column, mouse.row);
+        let search_hit =
+            group_menu_enabled && self.point_in_rect(search_anchor, mouse.column, mouse.row);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
         let filter_anchor = self.sidebar_filter_anchor_rect();
         let filter_anchor_hit =
@@ -299,6 +308,41 @@ impl AppState {
         let group_anchor_hit = group_menu_enabled
             && !filter_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_thread.is_some() {
+            if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
+                if let Some(picker) = self.sidebar_new_thread.as_mut() {
+                    picker.filter.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_new_thread.is_some()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            if new_thread_hit {
+                self.sidebar_new_thread = None;
+            } else if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
+                self.accept_sidebar_new_thread(index);
+            } else {
+                self.sidebar_new_thread = None;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && new_thread_hit {
+            self.open_sidebar_new_thread();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && add_project_hit {
+            self.open_add_project_from_sidebar();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && search_hit {
+            self.sidebar_group_menu_open = false;
+            self.sidebar_filter_menu_open = false;
+            self.sidebar_object_menu = None;
+            self.sidebar_search_active = true;
+            return None;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_object_menu.is_some() {
             if let Some(index) = crate::ui::sidebar_object_menu_item_at(
                 self,
@@ -5350,6 +5394,55 @@ mod tests {
                 view.projection == crate::app::state::WorkProjection::Missive
             }));
         }
+    }
+
+    #[test]
+    fn sidebar_footer_refresh_follows_missive_and_is_single_flight() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let missive = app.state.view.sidebar_footer_missive_hit_area;
+            let hit = app.state.view.sidebar_footer_refresh_hit_area;
+            assert_eq!(hit.height, 1, "refresh footer renders at {width} columns");
+            assert_eq!(hit.x, missive.right(), "refresh follows Missive");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+            assert!(app.state.sidebar_refreshing);
+            assert!(app.state.sidebar_refresh_requested);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+            assert!(
+                app.state.sidebar_refresh_requested,
+                "second click is ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_header_add_project_click_opens_existing_modal_directly() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let hit = crate::ui::sidebar_header_add_project_rect(app.state.view.sidebar_rect);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), hit.x, hit.y));
+
+        assert!(app.state.add_project_active());
     }
 
     #[test]

@@ -674,6 +674,12 @@
           "description": "Cycle the sidebar grouping mode."
         },
         {
+          "key": "keys.sidebar_refresh",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Refresh sidebar work and Git metadata."
+        },
+        {
           "key": "keys.toggle_blocked_filter",
           "type": "keybinding",
           "default": "\"prefix+f\"",

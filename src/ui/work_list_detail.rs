@@ -1098,6 +1098,7 @@ mod tests {
                 .collect(),
             last_activity_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
             closed,
+            labels: Vec::new(),
             pane_bound: false,
             messages: vec![crate::work_index::MissiveEntry {
                 id: "message".into(),

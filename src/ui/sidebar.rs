@@ -24,7 +24,7 @@ use crate::terminal::state::CompletionTier;
 use crate::terminal::TerminalRuntimeRegistry;
 use crate::ui::work_status::WorkGroupStatus;
 
-const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
+const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 #[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
@@ -692,6 +692,19 @@ pub(crate) fn sidebar_footer_missive_hit_area(area: Rect) -> Rect {
     )
 }
 
+pub(crate) fn sidebar_footer_refresh_hit_area(area: Rect) -> Rect {
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 15 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(13),
+        area.bottom().saturating_sub(1),
+        3,
+        1,
+    )
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -1167,6 +1180,71 @@ pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
     sidebar_rows_inner(app, None, false)
 }
 
+fn sidebar_query_parts(query: &str) -> (Vec<&str>, Vec<&str>) {
+    query
+        .split_whitespace()
+        .fold((Vec::new(), Vec::new()), |(mut text, mut labels), token| {
+            if let Some(label) = token
+                .strip_prefix("label:")
+                .filter(|label| !label.is_empty())
+            {
+                labels.push(label);
+            } else {
+                text.push(token);
+            }
+            (text, labels)
+        })
+}
+
+fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool {
+    let (terms, _) = sidebar_query_parts(&app.sidebar_work_filter.query);
+    if terms.is_empty() {
+        return true;
+    }
+    let workspace = app.workspaces.get(entry.ws_idx);
+    let context = entry_work_context(app, entry);
+    let haystack = format!(
+        "{} {} {} {} {} {} {} {} {} {}",
+        entry.primary_label,
+        entry.primary_tab_label.as_deref().unwrap_or_default(),
+        entry.pane_label.as_deref().unwrap_or_default(),
+        entry.terminal_title.as_deref().unwrap_or_default(),
+        entry.agent_label.as_deref().unwrap_or_default(),
+        workspace
+            .map(|workspace| workspace.display_name_from_terminals(&app.terminals))
+            .unwrap_or_default(),
+        workspace
+            .map(|workspace| workspace.identity_cwd.display().to_string())
+            .unwrap_or_default(),
+        context
+            .and_then(|context| context.repo.as_deref())
+            .unwrap_or_default(),
+        context
+            .and_then(|context| context.work_title.as_deref())
+            .unwrap_or_default(),
+        context
+            .map(|context| context.ticket_ids.join(" "))
+            .unwrap_or_default(),
+    )
+    .to_ascii_lowercase();
+    terms
+        .iter()
+        .all(|term| haystack.contains(&term.to_ascii_lowercase()))
+}
+
+fn labels_match_sidebar_query(labels: &[String], query: &str) -> bool {
+    let (_, required) = sidebar_query_parts(query);
+    required.iter().all(|required| {
+        labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(required))
+    })
+}
+
+fn sidebar_query_has_labels(query: &str) -> bool {
+    !sidebar_query_parts(query).1.is_empty()
+}
+
 fn sidebar_rows_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1201,7 +1279,10 @@ fn compact_sidebar_rows_inner(
     let entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
-    };
+    }
+    .into_iter()
+    .filter(|entry| sidebar_entry_matches_query(app, entry))
+    .collect::<Vec<_>>();
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
@@ -1217,6 +1298,13 @@ fn compact_sidebar_rows_inner(
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
+    if !app.sidebar_work_filter.query.is_empty()
+        && visible_entries.is_empty()
+        && recently_done.is_empty()
+        && settled_entries.is_empty()
+    {
+        return Vec::new();
+    }
     if !app.sidebar_shows_spaces_tree() {
         let mut rows = Vec::with_capacity(visible_entries.len() + recently_done.len() + 2);
         if !visible_entries.is_empty() {
@@ -1333,16 +1421,19 @@ fn compact_sidebar_rows_inner(
         if indented {
             continue;
         }
-        rows.push(SidebarRow::Workspace { ws_idx, indented });
-        if !app.workspace_agents_expanded(ws_idx) {
-            continue;
-        }
         let mut member_entries = Vec::new();
         for member_idx in sidebar_space_member_indices(app, ws_idx) {
             let Some(workspace_entries) = entries_by_workspace.remove(&member_idx) else {
                 continue;
             };
             member_entries.extend(workspace_entries);
+        }
+        if !app.sidebar_work_filter.query.is_empty() && member_entries.is_empty() {
+            continue;
+        }
+        rows.push(SidebarRow::Workspace { ws_idx, indented });
+        if !app.workspace_agents_expanded(ws_idx) {
+            continue;
         }
         if matches!(
             app.sidebar_group_mode,
@@ -1966,6 +2057,9 @@ pub(crate) fn sidebar_work_groups(
     let mut groups: Vec<SidebarWorkGroup> = Vec::new();
     if mode == SidebarGroupMode::LinearTeam {
         for row in app.dock_home_projection().ticket_rows {
+            if !labels_match_sidebar_query(&row.ticket.labels, &app.sidebar_work_filter.query) {
+                continue;
+            }
             if !pane_bound_ticket(app, &row.ticket.identifier)
                 && !app
                     .sidebar_work_filter
@@ -1997,6 +2091,9 @@ pub(crate) fn sidebar_work_groups(
             .map(|snapshot| snapshot.conversations.as_slice())
             .unwrap_or_default()
         {
+            if !labels_match_sidebar_query(&conversation.labels, &app.sidebar_work_filter.query) {
+                continue;
+            }
             if !pane_bound_conversation(app, indexed_missive_url(conversation))
                 && !app
                     .sidebar_work_filter
@@ -2046,7 +2143,9 @@ pub(crate) fn sidebar_work_groups(
                     .map(|context| context.ticket_ids.as_slice())
                     .unwrap_or_default();
                 if ticket_ids.is_empty() {
-                    push_unlinked_entry(&mut groups, entry);
+                    if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
+                        push_unlinked_entry(&mut groups, entry);
+                    }
                     continue;
                 }
                 for ticket_id in ticket_ids {
@@ -2061,13 +2160,24 @@ pub(crate) fn sidebar_work_groups(
                     .map(|context| context.missive_urls.as_slice())
                     .unwrap_or_default();
                 if urls.is_empty() {
-                    push_unlinked_entry(&mut groups, entry);
+                    if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
+                        push_unlinked_entry(&mut groups, entry);
+                    }
                     continue;
                 }
                 // A pane replying in several conversations belongs under each
                 // of them.
                 for url in urls {
                     let conversation = indexed_missive_conversation(app, url);
+                    if !conversation.is_some_and(|conversation| {
+                        labels_match_sidebar_query(
+                            &conversation.labels,
+                            &app.sidebar_work_filter.query,
+                        )
+                    }) && sidebar_query_has_labels(&app.sidebar_work_filter.query)
+                    {
+                        continue;
+                    }
                     let group_url = conversation.map(indexed_missive_url).unwrap_or(url);
                     let key = format!("missive:{group_url}");
                     let index = match work_group_index(&groups, &key) {
@@ -2354,6 +2464,14 @@ pub(crate) fn sidebar_unassigned_objects(
             .created_at
             .cmp(&left.created_at)
             .then_with(|| left.key.cmp(&right.key))
+    });
+    let (terms, _) = sidebar_query_parts(&app.sidebar_work_filter.query);
+    objects.retain(|object| {
+        let haystack =
+            format!("{} {}", object.title, object.activation.object_link).to_ascii_lowercase();
+        terms
+            .iter()
+            .all(|term| haystack.contains(&term.to_ascii_lowercase()))
     });
     objects
 }
@@ -3878,6 +3996,15 @@ pub(super) fn render_sidebar(
         };
         frame.render_widget(Paragraph::new(Span::styled(" ✉ ", style)), missive);
     }
+    let refresh = sidebar_footer_refresh_hit_area(area);
+    if refresh.width > 0 {
+        let style = if app.sidebar_refreshing {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(" ⟳ ", style)), refresh);
+    }
 }
 
 fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Palette) {
@@ -3885,11 +4012,46 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         return;
     }
     let toggle = expanded_sidebar_toggle_rect(area);
+    let search = sidebar_header_search_rect(area);
+    let new_thread = sidebar_header_new_thread_rect(area);
+    let add_project = sidebar_header_add_project_rect(area);
     let new_space = sidebar_header_new_space_rect(area);
     let overflow = sidebar_header_overflow_rect(area);
     frame.render_widget(
         Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
         toggle,
+    );
+    if search.width > 0 {
+        let query = app.sidebar_work_filter.query.as_str();
+        let text = if query.is_empty() && app.sidebar_search_active {
+            "🔍 ▏".to_string()
+        } else if query.is_empty() {
+            "🔍 Search".to_string()
+        } else {
+            format!(
+                "🔍 {query}{}",
+                if app.sidebar_search_active { "▏" } else { "" }
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate_end(&text, usize::from(search.width)),
+                Style::default().fg(if app.sidebar_search_active {
+                    p.text
+                } else {
+                    p.overlay0
+                }),
+            )),
+            search,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
+        new_thread,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("+", Style::default().fg(p.accent))),
+        add_project,
     );
     let mode_anchor = sidebar_group_mode_anchor_rect(area);
     if mode_anchor.width > 0 {
@@ -4412,13 +4574,30 @@ fn render_workspace_list(
     }
 
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
-    if row_entries.is_empty() && !app.sidebar_shows_spaces_tree() {
+    let section_headers = compute_sidebar_section_header_areas(app, sidebar_area);
+    let has_matching_rows = row_entries.iter().any(|row| {
+        matches!(
+            row,
+            SidebarRow::Workspace { .. }
+                | SidebarRow::Tab { .. }
+                | SidebarRow::Agent { .. }
+                | SidebarRow::NestedHeader { .. }
+        )
+    });
+    if (!has_matching_rows && !app.sidebar_work_filter.query.is_empty())
+        || (row_entries.is_empty() && !app.sidebar_shows_spaces_tree())
+    {
         let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
-        if body.width > 0 && body.height > 0 {
+        let empty_y = section_headers
+            .iter()
+            .map(|header| header.rect.bottom())
+            .max()
+            .unwrap_or(body.y);
+        if body.width > 0 && empty_y < body.bottom() {
             frame.render_widget(
                 Paragraph::new(" no matching agents")
                     .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
-                Rect::new(body.x, body.y, body.width, 1),
+                Rect::new(body.x, empty_y, body.width, 1),
             );
         }
     }
@@ -4427,7 +4606,7 @@ fn render_workspace_list(
     } else {
         app.view.agent_card_areas.clone()
     };
-    for header in compute_sidebar_section_header_areas(app, sidebar_area) {
+    for header in section_headers {
         let Some((count, collapsed)) = row_entries.iter().find_map(|row| match row {
             SidebarRow::SectionHeader {
                 title,
@@ -4578,6 +4757,35 @@ pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
     )
 }
 
+pub(crate) fn sidebar_header_add_project_rect(area: Rect) -> Rect {
+    let next = sidebar_header_new_space_rect(area);
+    if next.width == 0 || next.x < area.x.saturating_add(3) {
+        return Rect::default();
+    }
+    Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
+}
+
+pub(crate) fn sidebar_header_new_thread_rect(area: Rect) -> Rect {
+    let next = sidebar_header_add_project_rect(area);
+    if next.width == 0 || next.x < area.x.saturating_add(3) {
+        return Rect::default();
+    }
+    Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
+}
+
+pub(crate) fn sidebar_header_search_rect(area: Rect) -> Rect {
+    let control = sidebar_header_new_thread_rect(area);
+    if control.width == 0 || control.x <= area.x.saturating_add(1) {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        control.x.saturating_sub(area.x.saturating_add(2)),
+        1,
+    )
+}
+
 pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
     let view = format!("View: {} ▾", app.sidebar_group_mode.view_label());
     let filters = match app.sidebar_group_mode {
@@ -4622,12 +4830,119 @@ pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
 }
 
 pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
-    if area.width < 8 || area.height == 0 {
+    if area.width < 8 || area.height < 2 {
         return Rect::default();
     }
     let x = area.x.saturating_add(if area.width < 20 { 1 } else { 2 });
-    let right = sidebar_header_new_space_rect(area).x.saturating_sub(1);
-    Rect::new(x, area.y, right.saturating_sub(x), 1)
+    let right = area.right().saturating_sub(2);
+    Rect::new(x, area.y.saturating_add(1), right.saturating_sub(x), 1)
+}
+
+fn sidebar_new_thread_paths(app: &AppState) -> Vec<std::path::PathBuf> {
+    app.home_directory_options()
+}
+
+fn sidebar_new_thread_labels(app: &AppState) -> Vec<String> {
+    sidebar_new_thread_paths(app)
+        .iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            format!("📁 {name}  {}", crate::app::home::directory_label(path))
+        })
+        .collect()
+}
+
+pub(crate) fn sidebar_new_thread_matches(app: &AppState) -> Vec<(usize, String)> {
+    let labels = sidebar_new_thread_labels(app);
+    let query = app
+        .sidebar_new_thread
+        .as_ref()
+        .map(|state| state.filter.query.as_str())
+        .unwrap_or_default();
+    super::dropdown::filter_items(&labels, query)
+        .into_iter()
+        .map(|(index, label)| (index, label.to_string()))
+        .collect()
+}
+
+pub(crate) fn sidebar_new_thread_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let state = app.sidebar_new_thread.as_ref()?;
+    let matches = sidebar_new_thread_matches(app);
+    let width = matches
+        .iter()
+        .map(|(_, label)| display_width(label).saturating_add(4))
+        .max()
+        .unwrap_or(24);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor: sidebar_header_new_thread_rect(app.view.sidebar_rect),
+            item_count: matches.len(),
+            selected: state.filter.selected,
+            has_filter: true,
+            max_rows: 9,
+            min_width: u16::try_from(width).unwrap_or(u16::MAX),
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_new_thread(app: &AppState, frame: &mut Frame) {
+    let Some(state) = app.sidebar_new_thread.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_new_thread_layout(app, frame.area()) else {
+        return;
+    };
+    let matches = sidebar_new_thread_matches(app);
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    if let Some(filter) = layout.filter_rect {
+        frame.render_widget(
+            Paragraph::new(format!(" 🔍 {}▏", state.filter.query)).style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg),
+            ),
+            filter,
+        );
+    }
+    let lines = matches
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(position, (_, label))| {
+            let selected = position == state.filter.selected;
+            let accelerator = if position < 9 {
+                char::from_digit((position + 1) as u32, 10).unwrap_or(' ')
+            } else {
+                ' '
+            };
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                format!("{} {accelerator} {label}", if selected { "▸" } else { " " }),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
 }
 
 pub(crate) fn sidebar_group_menu_layout(
@@ -8428,11 +8743,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .map(|workspace| workspace.id.clone())
             .collect();
 
-        let area = Rect::new(0, 0, 20, 5);
+        // Slice 10a adds the search row above the existing View row, so this
+        // fixture needs enough height to retain its two-row list viewport.
+        let area = Rect::new(0, 0, 20, 10);
         let ws_area = workspace_list_rect(area, app.sidebar_section_split);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
         let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
-        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
@@ -8581,9 +8898,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
         let (cards, _) = compute_workspace_list_areas(&app, area);
 
-        // The unified list counts the Spaces header alongside the workspace
-        // cards that fit beneath it.
-        assert_eq!(metrics.viewport_rows, 3);
+        // The search and View header rows leave two list rows here; legacy
+        // space-row configuration still cannot turn either card multiline.
+        assert_eq!(metrics.viewport_rows, 2);
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].ws_idx, 0);
         assert_eq!(cards[0].rect.height, 1);
@@ -8606,7 +8923,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         app.agent_panel_sort = AgentPanelSort::Priority;
         app.active = Some(0);
-        let panel = Rect::new(0, 0, 20, 5);
+        // Preserve the three-row panel body now that the header has search and
+        // view rows.
+        let panel = Rect::new(0, 0, 20, 6);
         let cards = compute_tab_card_areas(&app, panel);
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].rect.height, 1);
@@ -8714,12 +9033,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .expect("sidebar should render");
 
-            let header = row_text(terminal.backend().buffer(), 0, width - 1);
-            assert!(header.starts_with('«'));
-            assert!(header.contains("Repo"));
-            assert!(header.contains('▾'));
-            assert!(header.contains('＋'));
-            assert!(header.contains('…'));
+            let controls = row_text(terminal.backend().buffer(), 0, width - 1);
+            let view = row_text(terminal.backend().buffer(), 1, width - 1);
+            assert!(controls.starts_with('«'));
+            assert!(controls.contains('✎'));
+            assert!(controls.contains('+'));
+            assert!(controls.contains('＋'));
+            assert!(controls.contains('…'));
+            assert!(view.contains("Repo"));
+            assert!(view.contains('▾'));
             assert!(!row_text(terminal.backend().buffer(), 7, width - 1).contains("menu"));
         }
     }
@@ -9468,6 +9790,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assignees: Vec::new(),
             last_activity_at: None,
             closed: false,
+            labels: Vec::new(),
             pane_bound: false,
             messages: Vec::new(),
             notes: Vec::new(),
@@ -11534,7 +11857,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spacious[1].rect.y,
             spacious[0].rect.y + spacious[0].rect.height + 2
         );
-        let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
+        let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
         assert_eq!(spacious_metrics.viewport_rows, 2);
         assert_eq!(spacious_metrics.max_offset_from_bottom, 1);
 
@@ -11543,7 +11866,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(packed
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
-        let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
+        let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
         assert_eq!(packed_metrics.viewport_rows, 3);
         assert_eq!(packed_metrics.max_offset_from_bottom, 0);
     }
@@ -11678,7 +12001,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.active = None;
         app.mode = Mode::Terminal;
 
-        let ws_area = Rect::new(0, 0, 30, 5);
+        // Search adds one header row without changing the three-row viewport
+        // this metric contract exercises.
+        let ws_area = Rect::new(0, 0, 30, 6);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
         assert_eq!(metrics.viewport_rows, 3);
@@ -11704,7 +12029,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .position(|row| matches!(row, SidebarRow::Workspace { ws_idx: 2, .. }))
             .expect("notes workspace row");
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 3));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);
@@ -12461,6 +12786,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 }],
                 last_activity_at: None,
                 closed: true,
+                labels: Vec::new(),
                 pane_bound: false,
                 messages: Vec::new(),
                 notes: Vec::new(),
@@ -12480,6 +12806,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 }],
                 last_activity_at: None,
                 closed: false,
+                labels: Vec::new(),
                 pane_bound: false,
                 messages: Vec::new(),
                 notes: Vec::new(),
@@ -12535,5 +12862,161 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             header.0
         );
         assert_eq!(header.1, Some(app.palette.work_status_active()));
+    }
+
+    fn visible_sidebar_panes(
+        app: &AppState,
+    ) -> std::collections::BTreeSet<(usize, crate::layout::PaneId)> {
+        sidebar_rows(app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => {
+                    Some((entry.ws_idx, entry.pane_id))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sidebar_search_matches_the_same_pane_in_every_view_and_settled() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_work_filter.query = "addendum".into();
+        let target = app.workspaces[0].tabs[1].root_pane;
+        let expected = std::collections::BTreeSet::from([(0, target)]);
+
+        for mode in SidebarGroupMode::ALL {
+            app.sidebar_group_mode = mode;
+            assert_eq!(visible_sidebar_panes(&app), expected, "view {mode:?}");
+        }
+
+        app.workspaces[0].tabs[1]
+            .panes
+            .get_mut(&target)
+            .expect("query target pane")
+            .settled_at = Some(1_725_000_000);
+        for mode in SidebarGroupMode::ALL {
+            app.sidebar_group_mode = mode;
+            assert_eq!(visible_sidebar_panes(&app), expected, "settled {mode:?}");
+        }
+
+        app.sidebar_work_filter.query = "does-not-exist".into();
+        assert!(sidebar_rows(&app).is_empty(), "empty headers must collapse");
+    }
+
+    #[test]
+    fn sidebar_label_query_filters_linear_and_missive_sources() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter.query = "label:p1".into();
+        assert_eq!(
+            work_group_shape(&app)
+                .into_iter()
+                .map(|(title, ..)| title)
+                .collect::<Vec<_>>(),
+            vec!["SCA-3102 · annual credits"]
+        );
+
+        let mut billing = missive_conversation("aaa111", "Billing", CONVERSATION_A);
+        billing.labels = vec!["billing".into(), "customer".into()];
+        let mut support = missive_conversation("bbb222", "Support", CONVERSATION_B);
+        support.labels = vec!["support".into()];
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index snapshot")
+            .conversations = vec![billing, support];
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.sidebar_work_filter.missive.assignee = None;
+        app.sidebar_work_filter.query = "label:billing".into();
+        assert_eq!(
+            work_group_shape(&app)
+                .into_iter()
+                .map(|(title, ..)| title)
+                .collect::<Vec<_>>(),
+            vec!["aaa111 · Billing"]
+        );
+
+        app.sidebar_work_filter.query = "label:unknown".into();
+        assert!(visible_sidebar_panes(&app).is_empty());
+        assert!(work_group_shape(&app).is_empty());
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("label empty-state terminal");
+        terminal
+            .draw(|frame| {
+                render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+            })
+            .expect("render label empty state");
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("no matching agents"), "{rendered}");
+        assert!(!rendered.contains("Spaces (0)agents"), "{rendered}");
+    }
+
+    #[test]
+    fn sidebar_header_controls_keep_hit_areas_and_recent_picker_opens_downward() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = AppState::test_new();
+        let mut alpha = Workspace::test_new("alpha");
+        alpha.identity_cwd = std::path::PathBuf::from("/tmp/t3-10a/alpha");
+        let mut beta = Workspace::test_new("beta");
+        beta.identity_cwd = std::path::PathBuf::from("/tmp/t3-10a/beta");
+        app.workspaces = vec![alpha, beta];
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app, area);
+
+        let edit = sidebar_header_new_thread_rect(app.view.sidebar_rect);
+        let add = sidebar_header_add_project_rect(app.view.sidebar_rect);
+        let existing_add = sidebar_header_new_space_rect(app.view.sidebar_rect);
+        assert_eq!((edit.width, add.width, existing_add.width), (2, 2, 2));
+        assert_eq!(edit.right().saturating_add(1), add.x);
+        assert_eq!(add.right().saturating_add(1), existing_add.x);
+
+        app.open_sidebar_new_thread();
+        let layout = sidebar_new_thread_layout(&app, area).expect("recent-project dropdown");
+        assert_eq!(layout.rect.y, edit.bottom());
+        assert!(layout.rect.bottom() <= area.bottom());
+        app.sidebar_new_thread
+            .as_mut()
+            .expect("recent-project picker")
+            .filter
+            .set_query("alpha");
+        assert_eq!(
+            sidebar_new_thread_matches(&app)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            vec!["📁 alpha  /tmp/t3-10a/alpha"]
+        );
+        assert!(app.handle_sidebar_new_thread_key(KeyEvent::new(
+            KeyCode::Char('1'),
+            KeyModifiers::empty(),
+        )));
+        assert_eq!(
+            app.home.as_ref().map(|home| home.directory.as_path()),
+            Some(std::path::Path::new("/tmp/t3-10a/alpha"))
+        );
+
+        app.open_sidebar_new_thread();
+        assert!(
+            app.handle_sidebar_new_thread_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
+        );
+        assert!(app.sidebar_new_thread.is_none());
+    }
+
+    #[test]
+    fn sidebar_add_project_reuses_the_existing_modal() {
+        let mut app = AppState::test_new();
+        app.open_add_project_from_sidebar();
+        assert!(app.add_project_active());
+        assert!(app
+            .home
+            .as_ref()
+            .and_then(|home| home.add_project.as_ref())
+            .is_some());
     }
 }

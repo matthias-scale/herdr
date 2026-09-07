@@ -129,6 +129,7 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            labels: Vec::new(),
             pane_bound: false,
             messages: vec![MissiveEntry {
                 id: "message".into(),

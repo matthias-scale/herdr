@@ -98,7 +98,8 @@ pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
-    render_sidebar_group_menu, render_sidebar_object_menu, render_sidebar_settled_menu,
+    render_sidebar_group_menu, render_sidebar_new_thread, render_sidebar_object_menu,
+    render_sidebar_settled_menu,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -136,8 +137,10 @@ pub(crate) use self::{
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
         sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
-        sidebar_group_mode_anchor_rect, sidebar_header_new_space_rect,
-        sidebar_header_overflow_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
+        sidebar_group_mode_anchor_rect, sidebar_header_add_project_rect,
+        sidebar_header_new_space_rect, sidebar_header_new_thread_rect,
+        sidebar_header_overflow_rect, sidebar_header_search_rect, sidebar_missive_copy_url,
+        sidebar_nested_header_at, sidebar_new_thread_layout, sidebar_new_thread_matches,
         sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
         sidebar_object_menu_items, sidebar_pull_request_target, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
@@ -536,6 +539,11 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_missive_hit_area(sidebar_area)
     };
+    let sidebar_footer_refresh_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_refresh_hit_area(sidebar_area)
+    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let DockGeometry {
@@ -650,6 +658,7 @@ fn compute_view_internal(
         usage_hit_areas,
         sidebar_footer_ticket_hit_area,
         sidebar_footer_missive_hit_area,
+        sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
         visible_agent_activity_instants,
@@ -911,6 +920,7 @@ fn compute_mobile_view(
         usage_hit_areas: Vec::new(),
         sidebar_footer_ticket_hit_area: Rect::default(),
         sidebar_footer_missive_hit_area: Rect::default(),
+        sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
@@ -1137,6 +1147,7 @@ fn render_with_runtime_registry_inner(
     }
     render_sidebar_group_menu(app, frame);
     render_sidebar_filter_menu(app, frame);
+    render_sidebar_new_thread(app, frame);
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
 }
