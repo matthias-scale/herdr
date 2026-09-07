@@ -1217,6 +1217,7 @@ mod tests {
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Unclassified,
+            cached_pr_detail: None,
             ticket_ids: tickets.iter().map(|ticket| ticket.to_string()).collect(),
             ticket_title: None,
             ticket_state: None,

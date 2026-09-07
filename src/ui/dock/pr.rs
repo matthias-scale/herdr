@@ -328,6 +328,7 @@ mod tests {
             labels: Vec::new(),
             check_state: PrCheckState::Passing,
             audience: PrAudience::Authored,
+            cached_pr_detail: None,
             ticket_ids: Vec::new(),
             ticket_title: None,
             ticket_state: None,

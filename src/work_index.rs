@@ -30,39 +30,39 @@ pub(crate) struct WorkItemDetailRefreshInFlight {
     pub(crate) deadline: Instant,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemCheckSummary {
     pub(crate) failing: usize,
     pub(crate) total: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemComment {
     pub(crate) author: Option<String>,
     pub(crate) body: String,
     pub(crate) created_at: Option<SystemTime>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemAction {
     pub(crate) name: String,
     pub(crate) state: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemFile {
     pub(crate) path: String,
     pub(crate) additions: u64,
     pub(crate) deletions: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemCommit {
     pub(crate) short_id: String,
     pub(crate) subject: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemDetail {
     pub(crate) number: Option<u64>,
     pub(crate) title: Option<String>,
@@ -143,6 +143,26 @@ struct CachedWorkItemDetail {
 }
 
 impl WorkItemDetailCache {
+    pub(crate) fn from_snapshot(snapshot: Option<&Snapshot>) -> Self {
+        let mut cache = Self::default();
+        for item in snapshot.into_iter().flat_map(|snapshot| &snapshot.items) {
+            let (Some(number), Some(detail)) = (item.pr_number, item.cached_pr_detail.clone())
+            else {
+                continue;
+            };
+            cache.insert(
+                crate::app::state::WorkItemKey {
+                    repo: item.repo.clone(),
+                    pr_number: Some(number),
+                    pr_url: item.pr_url.clone(),
+                    ticket_id: None,
+                },
+                detail,
+            );
+        }
+        cache
+    }
+
     pub(crate) fn get(&self, key: &crate::app::state::WorkItemKey) -> Option<&WorkItemDetail> {
         self.entries.get(key).map(|cached| &cached.detail)
     }
@@ -251,6 +271,8 @@ pub(crate) struct WorkItem {
     pub check_state: PrCheckState,
     #[serde(default)]
     pub audience: PrAudience,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cached_pr_detail: Option<WorkItemDetail>,
     pub ticket_ids: Vec<String>,
     pub ticket_title: Option<String>,
     pub ticket_state: Option<String>,
@@ -454,6 +476,25 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    fn cache_pr_detail(
+        &mut self,
+        key: &crate::app::state::WorkItemKey,
+        detail: &WorkItemDetail,
+    ) -> bool {
+        let Some(number) = key.pr_number else {
+            return false;
+        };
+        let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.pr_number == Some(number) && repo_slugs_match(&item.repo, &key.repo))
+        else {
+            return false;
+        };
+        item.cached_pr_detail = Some(detail.clone());
+        true
+    }
+
     pub(crate) fn unavailable_reason(&self, source: WorkIndexSource) -> Option<&str> {
         self.unavailable
             .as_ref()
@@ -1119,6 +1160,24 @@ fn previous_missive(previous: Option<&Snapshot>, panes: &[AgentInfo]) -> Vec<Mis
         .unwrap_or_default()
 }
 
+fn carry_cached_pr_details(items: &mut [WorkItem], previous: Option<&Snapshot>) {
+    let Some(previous) = previous else {
+        return;
+    };
+    for item in items {
+        let Some(number) = item.pr_number else {
+            continue;
+        };
+        item.cached_pr_detail = previous
+            .items
+            .iter()
+            .find(|previous| {
+                previous.pr_number == Some(number) && repo_slugs_match(&previous.repo, &item.repo)
+            })
+            .and_then(|previous| previous.cached_pr_detail.clone());
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn refresh_work_index(
     config: &WorkIndexConfig,
@@ -1419,6 +1478,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 labels: pr.labels,
                 check_state: pr.check_state,
                 audience: pr.audience,
+                cached_pr_detail: None,
                 ticket_ids,
                 ticket_title: None,
                 ticket_state: None,
@@ -1464,6 +1524,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
@@ -1528,6 +1589,7 @@ pub(crate) fn refresh_work_index_with_missive(
             labels: Vec::new(),
             check_state: PrCheckState::Unknown,
             audience: PrAudience::Unclassified,
+            cached_pr_detail: None,
             ticket_ids: vec![ticket.identifier.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
@@ -1543,6 +1605,7 @@ pub(crate) fn refresh_work_index_with_missive(
     }
 
     join_panes(&mut items, panes);
+    carry_cached_pr_details(&mut items, previous);
     items.sort_by(|left, right| {
         left.repo
             .cmp(&right.repo)
@@ -2828,6 +2891,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
                 ticket_ids: {
                     // Sorted so the snapshot is byte-stable across refreshes:
                     // it is consumed as JSON by ghx and diffed by hand.
@@ -3109,6 +3173,8 @@ impl crate::app::App {
         self.work_index_snapshot = Some(snapshot);
         self.refresh_pane_settlement_at(Instant::now());
         self.invalidate_work_item_details();
+        self.state.work_item_detail_cache =
+            WorkItemDetailCache::from_snapshot(self.work_index_snapshot.as_ref());
         true
     }
 
@@ -3297,8 +3363,32 @@ impl crate::app::App {
                 self.state.work_item_detail_loading.remove(&key);
             }
         }
+        let mut snapshot_changed = false;
         for (key, detail) in details {
+            if detail.unavailable.is_none() {
+                if let Some(snapshot) = self.work_index_snapshot.as_mut() {
+                    snapshot_changed |= snapshot.cache_pr_detail(&key, &detail);
+                }
+                if let Some(snapshot) = self.state.work_index_snapshot.as_mut() {
+                    snapshot.cache_pr_detail(&key, &detail);
+                }
+                if let Some(snapshot) = self
+                    .state
+                    .work_view
+                    .as_mut()
+                    .and_then(|view| view.snapshot.as_mut())
+                {
+                    snapshot.cache_pr_detail(&key, &detail);
+                }
+            }
             self.state.work_item_detail_cache.insert(key, detail);
+        }
+        if snapshot_changed {
+            if let Some(snapshot) = self.work_index_snapshot.as_ref() {
+                if let Err(error) = write_snapshot(&work_index_snapshot_path(), snapshot) {
+                    tracing::warn!(error = %error, "failed to persist work item detail");
+                }
+            }
         }
         true
     }
@@ -3974,6 +4064,7 @@ esac
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
@@ -4382,6 +4473,92 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         );
         assert_eq!(detail.commits[0].short_id, "abcdef0");
         assert_eq!(detail.commits[0].subject, "fix detail");
+    }
+
+    #[test]
+    fn on_demand_github_detail_is_cached_in_snapshot_item_and_round_trips() {
+        let dir = fixture_dir("github-detail-snapshot-cache");
+        let (gh, _linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
+printf '%s' '{{"number":7,"title":"Detail","body":"Fetched on demand","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","url":"https://github.com/owner/repo/pull/7","statusCheckRollup":[{{"name":"test","conclusion":"SUCCESS"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}]}}'
+"#
+            ),
+            "#!/bin/sh\nexit 42\n",
+        );
+        let detail = fetch_github_pull_request_detail(
+            "owner/repo",
+            7,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("on-demand GitHub detail");
+        let key = work_item_key(7);
+        let mut snapshot = Snapshot {
+            items: vec![WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(7),
+                pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+                pr_title: Some("Lean summary".into()),
+                pr_state: Some("open".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: PrCheckState::Unknown,
+                audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: Some("feat/detail".into()),
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: WorkItemSource {
+                    github: true,
+                    ..WorkItemSource::default()
+                },
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        assert!(snapshot.cache_pr_detail(&key, &detail));
+        let path = dir.join("snapshot.json");
+        write_snapshot(&path, &snapshot).expect("persist snapshot detail");
+
+        let loaded = load_snapshot(&path).expect("load snapshot detail");
+        let cached = loaded.items[0]
+            .cached_pr_detail
+            .as_ref()
+            .expect("cached PR detail");
+        assert_eq!(cached.body.as_deref(), Some("Fetched on demand"));
+        assert_eq!(cached.checks.as_ref().map(|checks| checks.total), Some(1));
+        assert_eq!(cached.files[0].additions, 4);
+        let cache = WorkItemDetailCache::from_snapshot(Some(&loaded));
+        assert_eq!(
+            cache.get(&key).and_then(|detail| detail.body.as_deref()),
+            Some("Fetched on demand")
+        );
+        let mut refreshed_items = loaded.items.clone();
+        refreshed_items[0].cached_pr_detail = None;
+        carry_cached_pr_details(&mut refreshed_items, Some(&loaded));
+        assert_eq!(
+            refreshed_items[0]
+                .cached_pr_detail
+                .as_ref()
+                .and_then(|detail| detail.body.as_deref()),
+            Some("Fetched on demand")
+        );
     }
 
     #[test]
