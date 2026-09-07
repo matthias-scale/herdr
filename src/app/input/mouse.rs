@@ -5619,6 +5619,8 @@ mod tests {
         std::fs::create_dir_all(root.join("alpha")).expect("visible directory");
         std::fs::create_dir_all(root.join(".secret")).expect("hidden directory");
         std::fs::create_dir_all(root.join("zulu")).expect("second visible directory");
+        // macOS: temp_dir() is /var/… while the browser canonicalizes to /private/var/….
+        let root = crate::worktree::canonical_or_original(&root);
 
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
