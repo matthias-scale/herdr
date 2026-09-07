@@ -1018,6 +1018,7 @@ impl App {
             dock_files_cwd: None,
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
             files_icons: config.files.icons,
+            nerd_font: config.ui.nerd_font,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -2350,6 +2351,9 @@ impl App {
 
         if !invalid_section("files") {
             self.state.files_icons = config.files.icons;
+        }
+        if !invalid_section("ui") {
+            self.state.nerd_font = config.ui.nerd_font;
         }
 
         if !invalid_section("usage") {
