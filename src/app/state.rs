@@ -1000,12 +1000,36 @@ impl SidebarWorkFilter {
                 return false;
             }
         }
-        if !assignee_filter_matches(
-            self.assignee.as_deref(),
-            ticket.assignee.as_deref(),
-            session.linear.viewer.as_deref(),
-        ) {
-            return false;
+        if let Some(selected) = self.assignee.as_deref() {
+            let identities = if selected == "me" {
+                [
+                    session.linear.viewer.as_deref(),
+                    session.linear_viewer_identity(),
+                ]
+            } else {
+                [Some(selected), None]
+            };
+            let assigned = identities.iter().flatten().any(|identity| {
+                ticket
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|assignee| assignee.eq_ignore_ascii_case(identity))
+            });
+            let authored = identities.iter().flatten().any(|identity| {
+                ticket.creator.as_ref().is_some_and(|creator| {
+                    creator.id.eq_ignore_ascii_case(identity)
+                        || creator.name.eq_ignore_ascii_case(identity)
+                })
+            });
+            let matches_ownership = identities.iter().all(Option::is_none)
+                || match self.linear_ownership {
+                    WorkOwnershipFilter::Assigned => assigned,
+                    WorkOwnershipFilter::Authored => authored,
+                    WorkOwnershipFilter::Both => assigned || authored,
+                };
+            if !matches_ownership {
+                return false;
+            }
         }
         ticket
             .state
@@ -1104,25 +1128,6 @@ impl Default for SidebarWorkFilter {
 
 fn assignee_filter_label(value: Option<&str>) -> &str {
     value.unwrap_or("all")
-}
-
-fn assignee_filter_matches(
-    selected: Option<&str>,
-    actual: Option<&str>,
-    viewer: Option<&str>,
-) -> bool {
-    let Some(selected) = selected else {
-        return true;
-    };
-    let selected = if selected == "me" {
-        let Some(viewer) = viewer else {
-            return true;
-        };
-        viewer
-    } else {
-        selected
-    };
-    actual.is_some_and(|actual| actual.eq_ignore_ascii_case(selected))
 }
 
 #[derive(
@@ -5535,6 +5540,64 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    fn linear_ownership_ticket(
+        identifier: &str,
+        assignee: Option<&str>,
+        creator: Option<(&str, &str)>,
+    ) -> crate::work_index::WorkTicket {
+        crate::work_index::WorkTicket {
+            identifier: identifier.into(),
+            title: None,
+            description: None,
+            state: Some("In Progress".into()),
+            assignee: assignee.map(str::to_string),
+            creator: creator.map(|(id, name)| crate::work_index::WorkPerson {
+                id: id.into(),
+                name: name.into(),
+            }),
+            priority: None,
+            cycle: None,
+            group: crate::work_index::TicketGroup::Assigned,
+            created_at: None,
+            updated_at: None,
+            branch: None,
+            labels: Vec::new(),
+            url: None,
+            parent: None,
+            relations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn linear_ownership_matches_assigned_authored_and_both_for_me() {
+        let creator_only =
+            linear_ownership_ticket("SCA-1", Some("Ada"), Some(("viewer-id", "Matthias")));
+        let assignee_only = linear_ownership_ticket("SCA-2", Some("Matthias"), None);
+        let foreign = linear_ownership_ticket("SCA-3", Some("Ada"), Some(("ada-id", "Ada")));
+        let mut session = crate::work_index::WorkIndexSession::default();
+        session.linear.viewer = Some("Matthias".into());
+        session.set_linear_viewer_identity_for_test("viewer-id");
+        let mut filter = SidebarWorkFilter::default();
+
+        for (ownership, expected) in [
+            (WorkOwnershipFilter::Assigned, [false, true, false]),
+            (WorkOwnershipFilter::Authored, [true, false, false]),
+            (WorkOwnershipFilter::Both, [true, true, false]),
+        ] {
+            filter.linear_ownership = ownership;
+            assert_eq!(
+                [
+                    filter.matches_linear(&creator_only, &session),
+                    filter.matches_linear(&assignee_only, &session),
+                    filter.matches_linear(&foreign, &session),
+                ],
+                expected,
+                "{} ownership",
+                ownership.label()
+            );
+        }
+    }
 
     #[test]
     fn sidebar_refresh_request_remains_server_owned_during_presentation_swaps() {

@@ -5508,6 +5508,7 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
             description: Some("Add the reference.\n- [ ] registry entry".into()),
             state: Some("In Progress".into()),
             assignee: Some("matthias".into()),
+            creator: None,
             priority: Some(2),
             cycle: Some("cycle 34".into()),
             group: crate::work_index::TicketGroup::Assigned,

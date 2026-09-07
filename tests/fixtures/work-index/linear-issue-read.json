@@ -12,6 +12,10 @@
     "id": "user_redacted",
     "name": "Example User"
   },
+  "creator": {
+    "id": "creator_redacted",
+    "name": "Example Creator"
+  },
   "team": {
     "id": "team_redacted",
     "key": "SCA",

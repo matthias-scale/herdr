@@ -373,12 +373,20 @@ pub(crate) enum PrAudience {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkPerson {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkTicket {
     pub(crate) identifier: String,
     pub(crate) title: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) state: Option<String>,
     pub(crate) assignee: Option<String>,
+    #[serde(default)]
+    pub(crate) creator: Option<WorkPerson>,
     #[serde(default)]
     pub(crate) priority: Option<u8>,
     #[serde(default)]
@@ -3066,6 +3074,12 @@ fn parse_linear_ticket(value: &Value, group: TicketGroup) -> Option<LinearTicket
         description: value_text(value.get("description")),
         state: nested_text(value.get("state"), "name"),
         assignee: nested_text(value.get("assignee"), "name"),
+        creator: value.get("creator").and_then(|creator| {
+            Some(WorkPerson {
+                id: nested_text(Some(creator), "id")?,
+                name: nested_text(Some(creator), "name")?,
+            })
+        }),
         priority: value
             .get("priority")
             .and_then(Value::as_u64)
@@ -5705,6 +5719,37 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
         assert!(detail.created_at.is_some());
         assert!(detail.updated_at.is_some());
         assert_eq!(detail.comments.len(), 1);
+    }
+
+    #[test]
+    fn linear_ticket_fixture_round_trips_creator() {
+        let fixture = include_str!("../tests/fixtures/work-index/linear-issue-read.json");
+        let value = serde_json::from_str(fixture).expect("Linear ticket fixture");
+        let ticket = parse_linear_ticket(&value, TicketGroup::Assigned)
+            .expect("ticket parsed from captured CLI fixture");
+
+        assert_eq!(
+            ticket.creator.as_ref(),
+            Some(&WorkPerson {
+                id: "creator_redacted".into(),
+                name: "Example Creator".into(),
+            })
+        );
+        let encoded = serde_json::to_string(&ticket).expect("serialize ticket");
+        let decoded = serde_json::from_str::<WorkTicket>(&encoded).expect("deserialize ticket");
+        assert_eq!(decoded, ticket);
+    }
+
+    #[test]
+    fn linear_ticket_without_creator_parses_with_none() {
+        let value = serde_json::json!({
+            "identifier": "SCA-1",
+            "title": "No creator in compact output"
+        });
+        let ticket =
+            parse_linear_ticket(&value, TicketGroup::Assigned).expect("ticket without creator");
+
+        assert_eq!(ticket.creator, None);
     }
 
     #[test]

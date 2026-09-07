@@ -9961,6 +9961,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             description: None,
             state: Some("In Progress".into()),
             assignee: Some(assignee.into()),
+            creator: None,
             priority: None,
             cycle: None,
             group: crate::work_index::TicketGroup::Assigned,

@@ -722,6 +722,7 @@ fn push_ticket_row(
             description: None,
             state: None,
             assignee: None,
+            creator: None,
             priority: None,
             cycle: None,
             group: crate::work_index::TicketGroup::Assigned,
