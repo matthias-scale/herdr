@@ -11,13 +11,11 @@ pub fn build_id() -> Option<&'static str> {
 }
 
 pub fn version() -> String {
-    match channel() {
-        "stable" => BASE_VERSION.to_string(),
-        channel => match build_id() {
-            Some(build_id) => format!("{BASE_VERSION}-{channel}.{build_id}"),
-            None => format!("{BASE_VERSION}-{channel}"),
-        },
-    }
+    fork_version(
+        BASE_VERSION,
+        env!("HERDR_BUILD_GIT_SHA"),
+        env!("HERDR_BUILD_DIRTY") == "1",
+    )
 }
 
 pub fn is_preview() -> bool {
@@ -35,10 +33,34 @@ fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
     })
 }
 
+fn fork_version(base_version: &str, git_sha: &str, dirty: bool) -> String {
+    let dirty_suffix = if dirty { "-dirty" } else { "" };
+    format!("{base_version}+fork.{git_sha}{dirty_suffix}")
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
-    fn stable_version_defaults_to_cargo_version() {
-        assert!(!super::version().is_empty());
+    fn fork_version_formats_git_sha() {
+        assert_eq!(
+            super::fork_version("0.8.0", "0123456789ab", false),
+            "0.8.0+fork.0123456789ab"
+        );
+    }
+
+    #[test]
+    fn fork_version_marks_dirty_worktree() {
+        assert_eq!(
+            super::fork_version("0.8.0", "0123456789ab", true),
+            "0.8.0+fork.0123456789ab-dirty"
+        );
+    }
+
+    #[test]
+    fn fork_version_formats_unknown_git_sha() {
+        assert_eq!(
+            super::fork_version("0.8.0", "unknown", false),
+            "0.8.0+fork.unknown"
+        );
     }
 }
