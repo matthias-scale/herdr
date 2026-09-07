@@ -413,10 +413,14 @@ impl App {
         self.start_work_index_refresh_if_due(now);
         self.start_usage_scan_if_requested();
         let work_view_selection = self.state.work_view.as_ref().and_then(|view| {
-            view.selected.clone().or_else(|| {
-                (view.projection == crate::app::state::WorkProjection::Tickets)
-                    .then(|| self.visible_ticket_view_keys().into_iter().next())
-                    .flatten()
+            view.selected.clone().or_else(|| match view.projection {
+                crate::app::state::WorkProjection::PullRequests => {
+                    self.visible_pr_view_keys().into_iter().next()
+                }
+                crate::app::state::WorkProjection::Tickets => {
+                    self.visible_ticket_view_keys().into_iter().next()
+                }
+                _ => None,
             })
         });
         let dock_pr_visible =

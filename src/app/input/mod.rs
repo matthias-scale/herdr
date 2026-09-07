@@ -1301,6 +1301,83 @@ impl App {
             }
             return true;
         }
+        if state.reviewer_picker.is_some() {
+            let collaborators = self
+                .selected_pr_detail()
+                .map(|(_, detail)| detail.collaborators.clone())
+                .unwrap_or_default();
+            let matches = self
+                .state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.reviewer_picker.as_ref())
+                .map(|picker| picker.filter.matches(&collaborators))
+                .unwrap_or_default();
+            match key.code {
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(view) = self.state.work_view.as_mut() {
+                        view.reviewer_picker = None;
+                    }
+                }
+                KeyCode::Backspace if key.modifiers.is_empty() => {
+                    if let Some(picker) = self
+                        .state
+                        .work_view
+                        .as_mut()
+                        .and_then(|view| view.reviewer_picker.as_mut())
+                    {
+                        picker.filter.pop();
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                    if let Some(picker) = self
+                        .state
+                        .work_view
+                        .as_mut()
+                        .and_then(|view| view.reviewer_picker.as_mut())
+                    {
+                        picker.filter.move_selection(-1, matches.len());
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                    if let Some(picker) = self
+                        .state
+                        .work_view
+                        .as_mut()
+                        .and_then(|view| view.reviewer_picker.as_mut())
+                    {
+                        picker.filter.move_selection(1, matches.len());
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    let selected = self
+                        .state
+                        .work_view
+                        .as_ref()
+                        .and_then(|view| view.reviewer_picker.as_ref())
+                        .map(|picker| picker.filter.selected)
+                        .unwrap_or_default();
+                    if let Some((_, login)) = matches.get(selected) {
+                        self.add_selected_pr_reviewer((*login).to_string());
+                    }
+                }
+                KeyCode::Char(character)
+                    if key.modifiers.is_empty()
+                        || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    if let Some(picker) = self
+                        .state
+                        .work_view
+                        .as_mut()
+                        .and_then(|view| view.reviewer_picker.as_mut())
+                    {
+                        picker.filter.push(character);
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         if state.ticket_comment_draft.is_some() {
             match key.code {
                 KeyCode::Esc if key.modifiers.is_empty() => {
@@ -1696,6 +1773,17 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('+')
+                if key.modifiers.is_empty()
+                    || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+            {
+                if self.state.work_view.as_ref().is_some_and(|state| {
+                    state.projection == crate::app::state::WorkProjection::PullRequests
+                        && state.detail_tab == crate::app::state::PrDetailTab::Summary
+                }) {
+                    self.open_selected_pr_reviewer_picker();
+                }
+            }
             KeyCode::Char('o') if key.modifiers.is_empty() => {
                 if self.state.work_view.as_ref().is_some_and(|state| {
                     state.projection == crate::app::state::WorkProjection::Missive
@@ -1728,6 +1816,99 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    fn selected_pr_detail(
+        &self,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        &crate::work_index::WorkItemDetail,
+    )> {
+        let keys = self.visible_pr_view_keys();
+        let key = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone())
+            .or_else(|| keys.first().cloned())?;
+        let detail = self.state.work_item_detail_cache.get(&key)?;
+        Some((key, detail))
+    }
+
+    fn open_selected_pr_reviewer_picker(&mut self) {
+        let keys = self.visible_pr_view_keys();
+        let Some(key) = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone())
+            .or_else(|| keys.first().cloned())
+        else {
+            return;
+        };
+        let needs_fetch = self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .is_none_or(|detail| {
+                detail.collaborators.is_empty() && detail.collaborators_unavailable.is_none()
+            });
+        if needs_fetch {
+            let result = crate::work_index::fetch_github_collaborators(
+                &key.repo,
+                &self.work_index_gh_program(),
+                std::time::Instant::now() + crate::work_index::WORK_INDEX_TARGET_TIMEOUT,
+            );
+            let mut detail = self
+                .state
+                .work_item_detail_cache
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(crate::work_index::WorkItemDetail::empty);
+            match result {
+                Ok(collaborators) => {
+                    detail.collaborators = collaborators;
+                    detail.collaborators_unavailable = None;
+                }
+                Err(message) => {
+                    detail.collaborators_unavailable = Some(message.clone());
+                    if let Some(view) = self.state.work_view.as_mut() {
+                        view.hint = Some(message);
+                    }
+                }
+            }
+            self.state
+                .work_item_detail_cache
+                .insert(key.clone(), detail);
+        }
+        if self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .is_some_and(|detail| detail.collaborators_unavailable.is_none())
+        {
+            if let Some(view) = self.state.work_view.as_mut() {
+                view.reviewer_picker = Some(Default::default());
+            }
+        }
+    }
+
+    fn add_selected_pr_reviewer(&mut self, login: String) {
+        let Some((key, _)) = self.selected_pr_detail() else {
+            return;
+        };
+        let Some(number) = key.pr_number else {
+            return;
+        };
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.reviewer_picker = None;
+            view.pending_write = Some(crate::work_index::WorkItemWrite::AddPullRequestReviewer {
+                repo: key.repo,
+                number,
+                login,
+            });
+        }
+        self.run_pending_work_view_write();
     }
 
     fn move_ticket_board_column(&mut self, delta: i64) {
@@ -1782,7 +1963,7 @@ impl App {
         }
     }
 
-    fn visible_pr_view_keys(&self) -> Vec<crate::app::state::WorkItemKey> {
+    pub(crate) fn visible_pr_view_keys(&self) -> Vec<crate::app::state::WorkItemKey> {
         let Some(view) = self.state.work_view.as_ref() else {
             return Vec::new();
         };

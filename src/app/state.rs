@@ -3484,6 +3484,7 @@ pub(crate) struct WorkViewState {
     pub(crate) detail_tab: PrDetailTab,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) pr_action_menu: Option<PrActionMenuState>,
+    pub(crate) reviewer_picker: Option<ReviewerPickerState>,
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
     pub(crate) ticket_more_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
@@ -3643,6 +3644,11 @@ pub(crate) struct PrActionMenuState {
     pub(crate) selected: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ReviewerPickerState {
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrActionConfirmation {
     pub(crate) key: WorkItemKey,
@@ -3729,6 +3735,7 @@ impl WorkViewState {
             detail_tab: PrDetailTab::Summary,
             checkout_menu: None,
             pr_action_menu: None,
+            reviewer_picker: None,
             ticket_start_menu: None,
             ticket_transition_menu: None,
             ticket_more_menu: None,

@@ -35,6 +35,7 @@ pub(crate) struct WorkIndexCacheBypass {
     pub(crate) linear: bool,
     pub(crate) missive: bool,
 }
+pub(crate) const PR_DETAIL_FOCUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkIndexPane {
@@ -104,6 +105,14 @@ pub(crate) struct WorkItemCommit {
     pub(crate) subject: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkItemTimelineEvent {
+    pub(crate) kind: String,
+    pub(crate) actor: Option<String>,
+    pub(crate) summary: String,
+    pub(crate) created_at: Option<SystemTime>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReviewThreadComment {
     pub(crate) path: String,
@@ -143,6 +152,14 @@ pub(crate) struct WorkItemDetail {
     pub(crate) actions: Vec<WorkItemAction>,
     pub(crate) files: Vec<WorkItemFile>,
     pub(crate) commits: Vec<WorkItemCommit>,
+    #[serde(default)]
+    pub(crate) timeline: Vec<WorkItemTimelineEvent>,
+    #[serde(default)]
+    pub(crate) timeline_unavailable: Option<String>,
+    #[serde(default)]
+    pub(crate) collaborators: Vec<String>,
+    #[serde(default)]
+    pub(crate) collaborators_unavailable: Option<String>,
     /// GitHub's `gh pr view --json` payload does not expose review threads.
     /// Keep the absence explicit rather than substituting review count data.
     pub(crate) unresolved_review_threads: Option<usize>,
@@ -182,6 +199,10 @@ impl WorkItemDetail {
             actions: Vec::new(),
             files: Vec::new(),
             commits: Vec::new(),
+            timeline: Vec::new(),
+            timeline_unavailable: None,
+            collaborators: Vec::new(),
+            collaborators_unavailable: None,
             unresolved_review_threads: None,
             unavailable: Some(message.into()),
             observed_at: SystemTime::now(),
@@ -2430,6 +2451,181 @@ fn pr_check_state(value: Option<&Value>) -> PrCheckState {
 const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
     "number,title,body,author,baseRefName,headRefName,headRefOid,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,reviews,comments,files,commits,mergeable,mergeStateStatus,autoMergeRequest";
 
+const GITHUB_TIMELINE_JQ: &str =
+    ".[] | {event,created_at,submitted_at,authored_at,committed_at,author_date:.author.date,sha,message,state,body,actor:.actor.login,user:.user.login,author:(.author.login//.author.name),requested_reviewer:.requested_reviewer.login,label:.label.name,commit_id} | @json";
+
+fn github_api_values(value: Value) -> Vec<Value> {
+    fn flatten(value: Value, values: &mut Vec<Value>) {
+        if let Value::Array(nested) = value {
+            for value in nested {
+                flatten(value, values);
+            }
+        } else {
+            values.push(value);
+        }
+    }
+    let mut values = Vec::new();
+    flatten(value, &mut values);
+    values
+}
+
+fn parse_github_json_lines(bytes: &[u8]) -> Result<Value, ()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ())?;
+    let values = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()
+        .map_err(|_| ())?;
+    Ok(Value::Array(values))
+}
+
+fn github_identity(value: &Value, key: &str) -> Option<String> {
+    value_text(value.get(key))
+        .or_else(|| nested_text(value.get(key), "login"))
+        .or_else(|| nested_text(value.get(key), "name"))
+}
+
+fn github_login(value: &Value) -> Option<String> {
+    ["actor", "user", "author"]
+        .into_iter()
+        .find_map(|key| github_identity(value, key))
+}
+
+fn first_line(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .and_then(|text| text.lines().next())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn short_hash(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(|hash| hash.chars().take(7).collect())
+}
+
+pub(crate) fn parse_github_timeline(value: Value) -> Vec<WorkItemTimelineEvent> {
+    let mut events = github_api_values(value)
+        .into_iter()
+        .filter_map(|value| {
+            let kind = value.get("event")?.as_str()?.to_string();
+            let summary = match kind.as_str() {
+                "committed" => first_line(value.get("message"))
+                    .or_else(|| short_hash(value.get("sha")))
+                    .unwrap_or_else(|| "commit".into()),
+                "reviewed" => value
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(|state| format!("review {state}"))
+                    .unwrap_or_else(|| "review".into()),
+                "review_requested" => github_identity(&value, "requested_reviewer")
+                    .map(|login| format!("review requested from {login}"))
+                    .unwrap_or_else(|| "review requested".into()),
+                "labeled" | "unlabeled" => value_text(value.get("label"))
+                    .or_else(|| nested_text(value.get("label"), "name"))
+                    .map(|label| format!("{kind} {label}"))
+                    .unwrap_or_else(|| kind.clone()),
+                "merged" => short_hash(value.get("commit_id"))
+                    .map(|hash| format!("merged {hash}"))
+                    .unwrap_or_else(|| "merged".into()),
+                "closed" | "reopened" => kind.clone(),
+                "commented" => first_line(value.get("body")).unwrap_or_else(|| "commented".into()),
+                _ => return None,
+            };
+            let created_at = [
+                "created_at",
+                "submitted_at",
+                "authored_at",
+                "committed_at",
+                "author_date",
+            ]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned))
+            .or_else(|| nested_text(value.get("author"), "date"))
+            .as_deref()
+            .and_then(parse_rfc3339_system_time);
+            Some(WorkItemTimelineEvent {
+                kind,
+                actor: github_login(&value),
+                summary,
+                created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
+    events
+}
+
+fn fetch_github_timeline(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Result<Vec<WorkItemTimelineEvent>, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    let endpoint = format!("repos/{repo}/issues/{number}/timeline");
+    command.args(["api", &endpoint, "--paginate", "--jq", GITHUB_TIMELINE_JQ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("GitHub timeline observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub timeline observation",
+            &output,
+        )));
+    }
+    let value = parse_github_json_lines(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub timeline observation returned invalid JSON".into())
+    })?;
+    Ok(parse_github_timeline(value))
+}
+
+pub(crate) fn fetch_github_collaborators(
+    repo: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<Vec<String>, String> {
+    let mut command = crate::noninteractive_process::command(program);
+    let endpoint = format!("repos/{repo}/collaborators");
+    command.args([
+        "api",
+        &endpoint,
+        "--paginate",
+        "--jq",
+        ".[] | {login} | @json",
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                "GitHub collaborators observation timed out".to_string()
+            } else {
+                format!("GitHub collaborators observation failed: {error}")
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(exit_detail("GitHub collaborators observation", &output));
+    }
+    let value = parse_github_json_lines(&output.stdout)
+        .map_err(|_| "GitHub collaborators observation returned invalid JSON".to_string())?;
+    let mut collaborators = github_api_values(value)
+        .iter()
+        .filter_map(|value| value_text(value.get("login")))
+        .collect::<Vec<_>>();
+    collaborators.sort_by_key(|login| login.to_ascii_lowercase());
+    collaborators.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(collaborators)
+}
+
 fn fetch_github_pull_request_detail(
     repo: &str,
     number: u64,
@@ -2473,6 +2669,15 @@ fn fetch_github_pull_request_detail(
     let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
         RefreshError::Failed("GitHub PR detail observation returned invalid JSON".into())
     })?;
+    let (timeline, timeline_unavailable) =
+        match fetch_github_timeline(repo, number, program, deadline) {
+            Ok(timeline) => (timeline, None),
+            Err(RefreshError::TimedOut) => (
+                Vec::new(),
+                Some("GitHub timeline observation timed out".into()),
+            ),
+            Err(RefreshError::Failed(message)) => (Vec::new(), Some(message)),
+        };
     Ok(WorkItemDetail {
         number: value.get("number").and_then(Value::as_u64),
         title: value_text(value.get("title")),
@@ -2531,6 +2736,10 @@ fn fetch_github_pull_request_detail(
         actions: github_actions(value.get("statusCheckRollup")),
         files: github_files(value.get("files")),
         commits: github_commits(value.get("commits")),
+        timeline,
+        timeline_unavailable,
+        collaborators: Vec::new(),
+        collaborators_unavailable: None,
         unresolved_review_threads: fetch_unresolved_review_thread_count(
             repo, number, program, deadline, cache, bypass,
         ),
@@ -3964,18 +4173,25 @@ impl crate::app::App {
                 keys.insert(0, selection.clone());
             }
         }
-        keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
-        let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
+        if section == crate::app::state::DockHomeSection::Prs {
+            keys.truncate(1);
+        } else {
+            keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
+        }
+        let configured_interval =
+            Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         keys.retain(|key| {
-            // Pull requests are prefetched across the whole section: one `gh`
-            // call each, and the tab strip gets walked often. A ticket costs a
-            // separate `linearis` read, so only the one actually being looked
-            // at is worth fetching - prefetching the section would mean a
-            // process per ticket for detail nobody has asked to see.
+            // Detail follows the selected object. The list refresh stays lean,
+            // and opening a large PR section never starts one process per row.
             let fetchable = if key.pr_number.is_some() {
                 !key.repo.is_empty()
             } else {
                 key.ticket_id.is_some() && selection.as_ref() == Some(key)
+            };
+            let interval = if key.pr_number.is_some() {
+                PR_DETAIL_FOCUS_REFRESH_INTERVAL
+            } else {
+                configured_interval
             };
             fetchable
                 && !self
@@ -5315,6 +5531,82 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
     }
 
     #[test]
+    fn github_timeline_maps_real_shape_fixture_newest_first() {
+        let fixture = include_str!("../tests/fixtures/work-index/github-pr-timeline.json");
+        let events = parse_github_timeline(
+            serde_json::from_str(fixture).expect("real-shape GitHub timeline fixture"),
+        );
+
+        assert_eq!(events.len(), 7);
+        assert_eq!(events[0].kind, "commented");
+        assert_eq!(events[0].actor.as_deref(), Some("reviewer"));
+        assert_eq!(events[0].summary, "First line of the comment");
+        assert_eq!(events[1].summary, "merged 1234567");
+        assert_eq!(events[2].summary, "labeled approved");
+        assert_eq!(events[3].summary, "review requested from reviewer");
+        assert_eq!(events[4].summary, "review approved");
+        assert_eq!(events[5].summary, "fix: map timeline events");
+        assert_eq!(events[6].summary, "closed");
+    }
+
+    #[test]
+    fn github_timeline_uses_paginated_lean_api_argv() {
+        let dir = fixture_dir("github-timeline-argv");
+        let log = dir.join("argv.log");
+        let gh = dir.join("gh");
+        write_executable(
+            &gh,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s' '[]'\n",
+                log.display()
+            ),
+        );
+
+        assert!(fetch_github_timeline(
+            "owner/repo",
+            42,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("GitHub timeline")
+        .is_empty());
+        let argv = std::fs::read_to_string(log).expect("timeline argv");
+        assert!(
+            argv.starts_with("api repos/owner/repo/issues/42/timeline --paginate --jq "),
+            "{argv}"
+        );
+        assert!(argv.contains("{event,created_at"), "{argv}");
+        assert!(argv.contains("| @json"), "{argv}");
+    }
+
+    #[test]
+    fn github_collaborators_use_paginated_lean_api_argv() {
+        let dir = fixture_dir("github-collaborators");
+        let log = dir.join("argv.log");
+        let gh = dir.join("gh");
+        write_executable(
+            &gh,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s' '[[{{\"login\":\"Zed\"}},{{\"login\":\"ada\"}},{{\"login\":\"Ada\"}}]]'\n",
+                log.display()
+            ),
+        );
+
+        let collaborators = fetch_github_collaborators(
+            "owner/repo",
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("GitHub collaborators");
+
+        assert_eq!(collaborators, ["ada", "Zed"]);
+        assert_eq!(
+            std::fs::read_to_string(log).expect("collaborator argv"),
+            "api repos/owner/repo/collaborators --paginate --jq .[] | {login} | @json\n"
+        );
+    }
+
+    #[test]
     fn on_demand_github_detail_is_cached_in_snapshot_item_and_round_trips() {
         let dir = fixture_dir("github-detail-snapshot-cache");
         let (gh, _linearis) = fake_programs(
@@ -5913,7 +6205,7 @@ esac
     }
 
     #[test]
-    fn one_bounded_batch_prefetches_the_active_pr_section_selected_first() {
+    fn one_bounded_batch_fetches_only_the_selected_pr_detail() {
         let mut app = test_app_with_work_index();
         app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
         app.state.workspaces = vec![
@@ -5968,7 +6260,7 @@ esac
             .as_ref()
             .expect("detail batch");
         assert_eq!(refresh.generation, 1, "second call must not start a batch");
-        assert_eq!(refresh.keys.len(), 2);
+        assert_eq!(refresh.keys.len(), 1);
         assert_eq!(refresh.keys.first(), Some(&key));
         assert!(refresh
             .keys
@@ -5977,7 +6269,7 @@ esac
     }
 
     #[test]
-    fn detail_prefetch_batch_is_capped_at_cache_capacity() {
+    fn pr_detail_refresh_does_not_prefetch_the_visible_list() {
         let mut app = test_app_with_work_index();
         app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
         app.state.workspaces = (1_u64..=20)
@@ -6015,7 +6307,83 @@ esac
                 .expect("detail batch")
                 .keys
                 .len(),
-            WORK_ITEM_DETAIL_CACHE_CAPACITY
+            1
+        );
+    }
+
+    #[test]
+    fn focused_pr_detail_refresh_is_debounced_for_thirty_seconds() {
+        let dir = fixture_dir("focused-pr-detail-debounce");
+        let log = dir.join("detail.log");
+        let gh = dir.join("gh");
+        write_executable(
+            &gh,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}")
+    printf '%s\n' detail >> '{}'
+    printf '%s' '{{"number":7,"title":"Detail","url":"https://github.com/owner/repo/pull/7"}}'
+    ;;
+  "api repos/owner/repo/issues/7/timeline"*) printf '%s' '[]' ;;
+  "api graphql"*) printf '%s' '{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[]}}}}}}}}}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(gh);
+        let key = work_item_key(7);
+        let now = Instant::now();
+
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        let event = app.event_rx.blocking_recv().expect("first detail result");
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(app.handle_work_item_detail_refreshed(generation, details));
+
+        app.start_work_item_detail_refresh_if_due(
+            now + Duration::from_secs(29),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("first count"),
+            "detail\n"
+        );
+
+        app.start_work_item_detail_refresh_if_due(
+            now + Duration::from_secs(31),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key),
+            true,
+        );
+        let event = app.event_rx.blocking_recv().expect("second detail result");
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(app.handle_work_item_detail_refreshed(generation, details));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("second count"),
+            "detail\ndetail\n"
         );
     }
 
@@ -6780,6 +7148,11 @@ pub(crate) enum WorkItemWrite {
         repo: String,
         number: u64,
     },
+    AddPullRequestReviewer {
+        repo: String,
+        number: u64,
+        login: String,
+    },
     SetPullRequestAutoMerge {
         repo: String,
         number: u64,
@@ -6822,6 +7195,11 @@ impl WorkItemWrite {
             Self::MarkPullRequestReady { repo, number } => {
                 format!("mark {repo}#{number} ready")
             }
+            Self::AddPullRequestReviewer {
+                repo,
+                number,
+                login,
+            } => format!("request review from {login} on {repo}#{number}"),
             Self::SetPullRequestAutoMerge {
                 repo,
                 number,
@@ -6844,6 +7222,7 @@ impl WorkItemWrite {
             | Self::ClosePullRequest { repo, number }
             | Self::MarkPullRequestDraft { repo, number }
             | Self::MarkPullRequestReady { repo, number }
+            | Self::AddPullRequestReviewer { repo, number, .. }
             | Self::SetPullRequestAutoMerge { repo, number, .. } => {
                 Some(crate::app::state::WorkItemKey {
                     repo: repo.clone(),
@@ -6963,6 +7342,23 @@ pub(crate) fn run_work_item_write(
         WorkItemWrite::MarkPullRequestReady { repo, number } => {
             let mut command = crate::noninteractive_process::command(gh_program);
             command.args(["pr", "ready", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+        WorkItemWrite::AddPullRequestReviewer {
+            repo,
+            number,
+            login,
+        } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args([
+                "pr",
+                "edit",
+                &number.to_string(),
+                "--add-reviewer",
+                login,
+                "-R",
+                repo,
+            ]);
             (command, None)
         }
         WorkItemWrite::SetPullRequestAutoMerge {
@@ -7148,6 +7544,11 @@ mod work_item_write_tests {
                 repo: "owner/repo".into(),
                 number: 42,
             },
+            WorkItemWrite::AddPullRequestReviewer {
+                repo: "owner/repo".into(),
+                number: 42,
+                login: "grace".into(),
+            },
             WorkItemWrite::SetPullRequestAutoMerge {
                 repo: "owner/repo".into(),
                 number: 42,
@@ -7171,6 +7572,7 @@ mod work_item_write_tests {
                 "pr close 42 -R owner/repo",
                 "pr ready --undo 42 -R owner/repo",
                 "pr ready 42 -R owner/repo",
+                "pr edit 42 --add-reviewer grace -R owner/repo",
                 "pr merge 42 --auto --rebase -R owner/repo",
                 "pr merge 42 --disable-auto -R owner/repo",
                 "",

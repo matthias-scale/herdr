@@ -258,6 +258,19 @@ impl PrItem<'_> {
                 {
                     return false;
                 }
+            } else if let Some(author) = token.strip_prefix("author:") {
+                if !self
+                    .summary
+                    .author
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(author))
+                {
+                    return false;
+                }
+            } else if token.eq_ignore_ascii_case("is:draft") {
+                if !self.summary.draft {
+                    return false;
+                }
             } else {
                 text_terms.push(token.to_ascii_lowercase());
             }
@@ -1329,6 +1342,31 @@ mod tests {
             [Some(3), Some(1), Some(2)]
         );
         assert!(rows[0].matches("#3"));
+    }
+
+    #[test]
+    fn pr_search_combines_label_author_draft_and_free_text_tokens() {
+        let mut draft = item(42, PrAudience::Authored, 30);
+        draft.pr_title = Some("Fix parser edge case".into());
+        draft.labels = vec!["bug".into(), "parser".into()];
+        draft.author = Some("Ada".into());
+        draft.draft = true;
+        let pr = PrItem {
+            summary: &draft,
+            cached_detail: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        assert!(pr.matches("label:BUG author:ada is:draft parser #42"));
+        assert!(!pr.matches("label:docs author:ada is:draft parser"));
+        assert!(!pr.matches("label:bug author:grace is:draft parser"));
+        draft.draft = false;
+        let ready = PrItem {
+            summary: &draft,
+            cached_detail: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        assert!(!ready.matches("is:draft parser"));
     }
 
     #[test]

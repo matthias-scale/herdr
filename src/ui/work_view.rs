@@ -1273,10 +1273,18 @@ fn render_pr_detail(
             ),
         );
     }
+    let mut reviewer_anchor = None;
     match state.detail_tab {
         PrDetailTab::Summary => {
+            reviewer_anchor = Some(Rect::new(
+                area.right().saturating_sub(4),
+                area.y
+                    .saturating_add(u16::try_from(lines.len()).unwrap_or(u16::MAX)),
+                4.min(area.width),
+                1,
+            ));
             lines.push(Line::styled(
-                format!(" Reviewers  {}", detail.reviewers),
+                format!(" Reviewers  {}  ✦ +", detail.reviewers),
                 Style::default().fg(palette.text),
             ));
             lines.extend(section_separator(palette, "Description", area.width));
@@ -1336,21 +1344,59 @@ fn render_pr_detail(
                 "Timeline · newest first",
                 area.width,
             ));
-            for (index, comment) in detail.comments.iter().enumerate() {
+            if let Some(message) = item
+                .cached_detail
+                .and_then(|detail| detail.timeline_unavailable.as_deref())
+            {
+                lines.push(Line::styled(
+                    format!(" {message}"),
+                    Style::default().fg(palette.red),
+                ));
+            }
+            let timeline = item
+                .cached_detail
+                .map(|detail| detail.timeline.as_slice())
+                .unwrap_or_default();
+            for (index, event) in timeline.iter().enumerate() {
                 if index > 0 {
                     lines.push(Line::default());
                 }
+                let age = event
+                    .created_at
+                    .map(|created_at| {
+                        comment_header(
+                            &crate::work_index::WorkItemComment {
+                                author: event.actor.clone(),
+                                body: String::new(),
+                                created_at: Some(created_at),
+                            },
+                            item.observed_at,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!("{} · —", event.actor.as_deref().unwrap_or("unknown"))
+                    });
                 lines.push(Line::styled(
-                    format!("  {}", comment_header(comment, item.observed_at)),
+                    format!("  {} · {}", event.kind.replace('_', " "), age),
                     Style::default()
                         .fg(palette.subtext0)
                         .add_modifier(Modifier::DIM),
                 ));
                 lines.extend(crate::ui::markdown::body_lines(
                     palette,
-                    Some(&comment.body),
+                    Some(&event.summary),
                     usize::from(area.width.saturating_sub(4)),
                     "    ",
+                ));
+            }
+            if timeline.is_empty()
+                && item
+                    .cached_detail
+                    .is_some_and(|detail| detail.timeline_unavailable.is_none())
+            {
+                lines.push(Line::styled(
+                    " no timeline events",
+                    Style::default().fg(palette.subtext0),
                 ));
             }
         }
@@ -1358,6 +1404,20 @@ fn render_pr_detail(
     }
     if state.detail_tab != PrDetailTab::Code {
         frame.render_widget(Paragraph::new(lines), area);
+    }
+    if let (Some(picker), Some(anchor), Some(detail)) = (
+        state.reviewer_picker.as_ref(),
+        reviewer_anchor,
+        item.cached_detail,
+    ) {
+        render_reviewer_picker(
+            app,
+            frame,
+            frame.area(),
+            anchor,
+            picker,
+            &detail.collaborators,
+        );
     }
     if let Some(choice) = state.checkout_menu {
         if let Some(layout) = checkout_menu_layout(area, choice) {
@@ -1400,6 +1460,62 @@ fn render_pr_detail(
             );
         }
     }
+}
+
+fn render_reviewer_picker(
+    app: &AppState,
+    frame: &mut Frame,
+    containing_area: Rect,
+    anchor: Rect,
+    picker: &crate::app::state::ReviewerPickerState,
+    collaborators: &[String],
+) {
+    let matches = picker.filter.matches(collaborators);
+    let Some(layout) = reviewer_picker_layout(
+        containing_area,
+        anchor,
+        matches.len(),
+        picker.filter.selected,
+    ) else {
+        return;
+    };
+    let rows = matches
+        .iter()
+        .map(|(_, login)| crate::ui::dropdown::DropdownMenuRow::Item {
+            label: (*login).to_string(),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    crate::ui::dropdown::render_menu(&app.palette, frame, &layout, &rows, picker.filter.selected);
+    if let Some(filter_rect) = layout.filter_rect {
+        frame.render_widget(
+            Paragraph::new(format!(" 🔍 {}▏", picker.filter.query)).style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg),
+            ),
+            filter_rect,
+        );
+    }
+}
+
+fn reviewer_picker_layout(
+    containing_area: Rect,
+    anchor: Rect,
+    item_count: usize,
+    selected: usize,
+) -> Option<crate::ui::dropdown::DropdownLayout> {
+    crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor,
+            item_count,
+            selected,
+            has_filter: true,
+            max_rows: 8,
+            min_width: 28,
+        },
+        containing_area,
+    )
 }
 
 fn pr_action_menu_anchor(area: Rect) -> Rect {
@@ -1557,7 +1673,7 @@ fn render_placeholder(
 fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
     let base = match state.projection {
         WorkProjection::PullRequests => {
-            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   c checkout   l merge   m actions"
+            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   + reviewer   c checkout   l merge   m actions"
         }
         WorkProjection::Tickets
             if state.ticket_layout == crate::app::state::LinearViewLayout::Board
@@ -1985,6 +2101,73 @@ mod tests {
         )
         .expect("menu fits below the full-view header");
         assert_eq!(layout.rect.y, anchor.bottom());
+    }
+
+    #[test]
+    fn timeline_tab_renders_cached_events_and_inline_failure() {
+        let item = pr("owner/repo", 42, &[]);
+        let key = crate::app::state::WorkItemKey {
+            repo: item.repo.clone(),
+            pr_number: item.pr_number,
+            pr_url: item.pr_url.clone(),
+            ticket_id: None,
+        };
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.timeline = crate::work_index::parse_github_timeline(
+            serde_json::from_str(include_str!(
+                "../../tests/fixtures/work-index/github-pr-timeline.json"
+            ))
+            .expect("timeline fixture"),
+        );
+        let mut app = AppState::test_new();
+        app.work_item_detail_cache.insert(key.clone(), detail);
+        let mut view = WorkViewState::new(true, Some(snapshot(vec![item])));
+        view.detail_tab = PrDetailTab::Timeline;
+        app.work_view = Some(view);
+
+        let rendered = rendered_app_text_at(&app, 120, 40);
+        assert!(rendered.contains("Timeline · newest first"), "{rendered}");
+        assert!(rendered.contains("First line of the comment"), "{rendered}");
+        assert!(!rendered.contains("Second line is omitted"), "{rendered}");
+
+        let mut failed = crate::work_index::WorkItemDetail::empty();
+        failed.timeline_unavailable = Some("timeline unavailable".into());
+        app.work_item_detail_cache.insert(key, failed);
+        let rendered = rendered_app_text_at(&app, 120, 40);
+        assert!(rendered.contains("timeline unavailable"), "{rendered}");
+    }
+
+    #[test]
+    fn reviewer_picker_filters_and_opens_downward() {
+        let anchor = Rect::new(80, 8, 4, 1);
+        let layout = reviewer_picker_layout(Rect::new(26, 2, 94, 38), anchor, 12, 9)
+            .expect("reviewer picker fits below row");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert!(layout.first_visible <= 9);
+        assert!(9 < layout.first_visible + layout.visible_rows);
+
+        let item = pr("owner/repo", 42, &[]);
+        let key = crate::app::state::WorkItemKey {
+            repo: item.repo.clone(),
+            pr_number: item.pr_number,
+            pr_url: item.pr_url.clone(),
+            ticket_id: None,
+        };
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.collaborators = vec!["ada".into(), "grace".into()];
+        let mut app = AppState::test_new();
+        app.work_item_detail_cache.insert(key, detail);
+        let mut view = WorkViewState::new(true, Some(snapshot(vec![item])));
+        let mut picker = crate::app::state::ReviewerPickerState::default();
+        picker.filter.set_query("ad");
+        view.reviewer_picker = Some(picker);
+        app.work_view = Some(view);
+
+        let rendered = rendered_app_text_at(&app, 120, 40);
+        assert!(rendered.contains("Reviewers  —  ✦ +"), "{rendered}");
+        assert!(rendered.contains("ad▏"), "{rendered}");
+        assert!(rendered.contains("ada"), "{rendered}");
+        assert!(!rendered.contains("grace"), "{rendered}");
     }
 
     #[test]
