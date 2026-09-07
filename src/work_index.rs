@@ -516,6 +516,7 @@ pub(crate) struct WorkIndexSession {
     pub(crate) linear: ProviderDirectory,
     pub(crate) github: ProviderDirectory,
     pub(crate) missive: ProviderDirectory,
+    linear_query_identity: Option<String>,
     missive_users: Vec<MissiveUser>,
 }
 
@@ -523,7 +524,6 @@ pub(crate) struct WorkIndexSession {
 pub(crate) struct ProviderDirectory {
     pub(crate) viewer: Option<String>,
     pub(crate) assignees: Vec<String>,
-    query_identity: Option<String>,
     resolved: bool,
 }
 
@@ -1659,7 +1659,7 @@ pub(crate) fn resolve_work_index_session(
     linearis_program: &Path,
 ) -> WorkIndexSession {
     if !session.linear.resolved {
-        session.linear = fetch_linear_directory(
+        (session.linear, session.linear_query_identity) = fetch_linear_directory(
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
         );
@@ -1677,7 +1677,10 @@ pub(crate) fn resolve_work_index_session(
     session
 }
 
-fn fetch_linear_directory(program: &Path, deadline: Instant) -> ProviderDirectory {
+fn fetch_linear_directory(
+    program: &Path,
+    deadline: Instant,
+) -> (ProviderDirectory, Option<String>) {
     let (viewer, query_identity) = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["auth", "status", "--compact"]);
@@ -1707,12 +1710,14 @@ fn fetch_linear_directory(program: &Path, deadline: Instant) -> ProviderDirector
             .collect::<Vec<_>>()
     };
     include_viewer(&mut assignees, viewer.as_deref());
-    ProviderDirectory {
-        viewer,
-        assignees,
+    (
+        ProviderDirectory {
+            viewer,
+            assignees,
+            resolved: true,
+        },
         query_identity,
-        resolved: true,
-    }
+    )
 }
 
 fn fetch_github_directory(
@@ -1760,7 +1765,6 @@ fn fetch_github_directory(
     ProviderDirectory {
         viewer,
         assignees,
-        query_identity: None,
         resolved: true,
     }
 }
@@ -1799,7 +1803,6 @@ pub(crate) fn resolve_missive_assignees(users: &[MissiveUser]) -> ProviderDirect
     ProviderDirectory {
         viewer,
         assignees,
-        query_identity: None,
         resolved: true,
     }
 }
@@ -3107,7 +3110,7 @@ impl crate::app::App {
             .name("herdr-work-index".into())
             .spawn(move || {
                 if !session.linear.resolved {
-                    session.linear = fetch_linear_directory(
+                    (session.linear, session.linear_query_identity) = fetch_linear_directory(
                         &linearis_program,
                         target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
                     );
@@ -3121,7 +3124,7 @@ impl crate::app::App {
                         selected_missive: selected_missive.as_deref(),
                         session_missive_users: session_missive_users.as_deref(),
                         previous: previous_snapshot.as_ref(),
-                        linear_assignee: session.linear.query_identity.as_deref(),
+                        linear_assignee: session.linear_query_identity.as_deref(),
                     },
                     Instant::now(),
                     deadline,
@@ -4300,7 +4303,7 @@ esac
 
         assert_eq!(session.linear.viewer.as_deref(), Some("Matthias"));
         assert_eq!(
-            session.linear.query_identity.as_deref(),
+            session.linear_query_identity.as_deref(),
             Some("linear-user-1")
         );
         assert_eq!(session.linear.assignees, ["Ada", "Matthias"]);
@@ -4339,12 +4342,12 @@ case "$*" in
 esac
 "#,
         );
-        let fallback = fetch_linear_directory(
+        let (fallback, fallback_identity) = fetch_linear_directory(
             &fallback_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         );
         assert_eq!(fallback.viewer.as_deref(), Some("Matthias"));
-        assert_eq!(fallback.query_identity.as_deref(), Some("Matthias"));
+        assert_eq!(fallback_identity.as_deref(), Some("Matthias"));
 
         let unresolved_dir = fixture_dir("linear-viewer-unresolved");
         let argv_log = unresolved_dir.join("linearis-argv.log");
@@ -4366,15 +4369,15 @@ esac
                 argv_log.display()
             ),
         );
-        let unresolved = fetch_linear_directory(
+        let (unresolved, unresolved_identity) = fetch_linear_directory(
             &unresolved_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         );
         assert!(unresolved.viewer.is_none());
-        assert!(unresolved.query_identity.is_none());
+        assert!(unresolved_identity.is_none());
         let tickets = fetch_linear_tickets(
             "SCA",
-            unresolved.query_identity.as_deref(),
+            unresolved_identity.as_deref(),
             &unresolved_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         )
