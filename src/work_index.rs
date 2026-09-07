@@ -2564,19 +2564,27 @@ fn fetch_github_timeline(
     number: u64,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<WorkItemTimelineEvent>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     let endpoint = format!("repos/{repo}/issues/{number}/timeline");
     command.args(["api", &endpoint, "--paginate", "--jq", GITHUB_TIMELINE_JQ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub timeline observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub timeline observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub timeline observation",
@@ -2603,15 +2611,21 @@ pub(crate) fn fetch_github_collaborators(
         "--jq",
         ".[] | {login} | @json",
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                "GitHub collaborators observation timed out".to_string()
-            } else {
-                format!("GitHub collaborators observation failed: {error}")
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        None,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        true,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            "GitHub collaborators observation timed out".to_string()
+        } else {
+            format!("GitHub collaborators observation failed: {error}")
+        }
+    })?;
     if !output.status.success() {
         return Err(exit_detail("GitHub collaborators observation", &output));
     }
@@ -2670,7 +2684,7 @@ fn fetch_github_pull_request_detail(
         RefreshError::Failed("GitHub PR detail observation returned invalid JSON".into())
     })?;
     let (timeline, timeline_unavailable) =
-        match fetch_github_timeline(repo, number, program, deadline) {
+        match fetch_github_timeline(repo, number, program, deadline, cache, bypass) {
             Ok(timeline) => (timeline, None),
             Err(RefreshError::TimedOut) => (
                 Vec::new(),
@@ -5567,6 +5581,8 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
             42,
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            true,
         )
         .expect("GitHub timeline")
         .is_empty());
