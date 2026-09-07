@@ -2974,9 +2974,9 @@ struct ActiveLinearCycle {
     name: String,
 }
 
-const LINEAR_LIST_FIELDS: &str = "nodes.identifier,nodes.title,nodes.state.name,nodes.priority,nodes.assignee.name,nodes.labels.nodes.name,nodes.cycle.name,nodes.updatedAt,nodes.url";
+const LINEAR_LIST_FIELDS: &str = "nodes.identifier,nodes.title,nodes.state.name,nodes.priority,nodes.assignee.name,nodes.creator.id,nodes.creator.name,nodes.labels.nodes.name,nodes.cycle.name,nodes.updatedAt,nodes.url";
 const LINEAR_ITEM_FIELDS: &str =
-    "identifier,title,description,state.name,priority,assignee.name,labels.nodes.name,cycle.name,updatedAt,url";
+    "identifier,title,description,state.name,priority,assignee.name,creator.id,creator.name,labels.nodes.name,cycle.name,updatedAt,url";
 
 fn fetch_linear_tickets(
     team: &str,
