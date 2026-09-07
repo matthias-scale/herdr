@@ -239,6 +239,15 @@ fn auto_merge_disabled_reason(
 }
 
 impl PrItem<'_> {
+    pub(crate) fn stable_key(&self) -> crate::app::state::WorkItemKey {
+        crate::app::state::WorkItemKey {
+            repo: self.summary.repo.clone(),
+            pr_number: self.summary.pr_number,
+            pr_url: self.summary.pr_url.clone(),
+            ticket_id: None,
+        }
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         self.summary
             .pr_state
@@ -707,6 +716,15 @@ pub(crate) fn sorted_filtered_conversations<'a>(
 }
 
 impl TicketItem<'_> {
+    pub(crate) fn stable_key(&self) -> crate::app::state::WorkItemKey {
+        crate::app::state::WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some(self.summary.identifier.clone()),
+        }
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         !self
             .summary

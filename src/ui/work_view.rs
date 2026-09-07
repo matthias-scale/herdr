@@ -8,7 +8,8 @@ use ratatui::{
 
 use crate::{
     app::state::{
-        AppState, Palette, PrDetailTab, TicketTransitionChoice, WorkProjection, WorkViewState,
+        AppState, ObjectViewState, Palette, PrDetailTab, TicketTransitionChoice, WorkProjection,
+        WorkViewState,
     },
     ui::work_list_detail::{
         comment_header, section_separator, sorted_filtered_conversations, sorted_filtered_prs,
@@ -258,7 +259,7 @@ fn render_missive_start_menu(
     choice: crate::app::state::PrCheckoutChoice,
 ) {
     let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
-    let Some(layout) = ticket_menu_layout(area, 12, 2, selected, 24) else {
+    let Some(layout) = ticket_menu_layout(area, 12, 0, 2, selected, 24) else {
         return;
     };
     let labels = ["Current checkout", "New worktree"];
@@ -413,7 +414,26 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     let detail_inner = detail_block.inner(columns[1]);
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
-        render_ticket_detail(app, state, item, detail_inner, frame);
+        let object_view = state
+            .object_views
+            .get(&item.stable_key())
+            .cloned()
+            .unwrap_or_default();
+        render_ticket_detail(
+            app,
+            item,
+            &object_view,
+            TicketDetailControls {
+                start_menu: state.ticket_start_menu,
+                transition_menu: state.ticket_transition_menu,
+                action_menu: state.ticket_more_menu,
+                comment_draft: state.ticket_comment_draft.as_deref(),
+                pending_write: state.pending_write.as_ref(),
+                notice: state.hint.as_deref(),
+            },
+            detail_inner,
+            frame,
+        );
     } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
         snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Linear)
     }) {
@@ -959,7 +979,25 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
     let detail_inner = detail_block.inner(columns[1]);
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
-        render_pr_detail(app, state, item, detail_inner, frame);
+        let object_view = state
+            .object_views
+            .get(&item.stable_key())
+            .cloned()
+            .unwrap_or_default();
+        render_pr_detail(
+            app,
+            item,
+            &object_view,
+            PrDetailControls {
+                checkout_menu: state.checkout_menu,
+                action_menu: state.pr_action_menu,
+                reviewer_picker: state.reviewer_picker.as_ref(),
+                pending_write: state.pending_write.as_ref(),
+                notice: state.hint.as_deref(),
+            },
+            detail_inner,
+            frame,
+        );
     } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
         snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
     }) {
@@ -1052,22 +1090,34 @@ fn push_missive_row(
     ));
 }
 
-fn render_ticket_detail(
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TicketDetailControls<'a> {
+    pub(crate) start_menu: Option<crate::app::state::PrCheckoutChoice>,
+    pub(crate) transition_menu: Option<TicketTransitionChoice>,
+    pub(crate) action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
+    pub(crate) comment_draft: Option<&'a str>,
+    pub(crate) pending_write: Option<&'a crate::work_index::WorkItemWrite>,
+    pub(crate) notice: Option<&'a str>,
+}
+
+pub(crate) fn render_ticket_detail(
     app: &AppState,
-    state: &WorkViewState,
     item: &TicketItem<'_>,
+    view: &ObjectViewState,
+    controls: TicketDetailControls<'_>,
     area: Rect,
     frame: &mut Frame,
 ) {
     let palette = &app.palette;
     let detail = item.detail();
-    let mut lines = vec![
-        Line::from(vec![ratatui::text::Span::styled(
-            format!(" {}   [Start thread ▾] [⋯]", detail.heading),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        )]),
+    let mut lines = vec![Line::from(vec![ratatui::text::Span::styled(
+        format!(" {}", detail.heading),
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    )])];
+    let action_rows = push_ticket_action_rows(&mut lines, palette, area.width);
+    lines.extend([
         Line::styled(
             format!(" {}", detail.title),
             Style::default()
@@ -1078,7 +1128,7 @@ fn render_ticket_detail(
             format!(" {}", detail.byline),
             Style::default().fg(palette.subtext0),
         ),
-    ];
+    ]);
     lines.extend(section_separator(
         palette,
         format!("Linked PRs  {}", detail.linked_prs.len()),
@@ -1139,27 +1189,34 @@ fn render_ticket_detail(
             "    ",
         ));
     }
-    if let Some(draft) = state.ticket_comment_draft.as_deref() {
+    if let Some(draft) = controls.comment_draft {
         lines.push(Line::styled(
             format!(" Comment: {draft}▏  Enter to stage · Esc cancel"),
             Style::default().fg(palette.yellow),
         ));
     }
-    if let Some(write) = state.pending_write.as_ref() {
+    if let Some(write) = controls.pending_write {
         lines.push(Line::styled(
             format!(" Confirm {}? [y/N]", write.describe()),
             Style::default()
                 .fg(palette.yellow)
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if let Some(notice) = controls.notice {
+        lines.push(Line::styled(
+            format!(" {notice}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    let max_scroll = lines.len().saturating_sub(usize::from(area.height));
+    let scroll = usize::from(view.scroll).min(max_scroll) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 
-    if let Some(choice) = state.ticket_start_menu {
+    if let Some(choice) = controls.start_menu {
         render_ticket_start_menu(app, frame, area, item, choice);
-    } else if let Some(choice) = state.ticket_transition_menu {
+    } else if let Some(choice) = controls.transition_menu {
         render_ticket_transition_menu(app, frame, area, item, choice);
-    } else if let Some(menu) = state.ticket_more_menu {
+    } else if let Some(menu) = controls.action_menu {
         let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
             item.summary,
             item.cached_detail,
@@ -1171,21 +1228,51 @@ fn render_ticket_detail(
             palette,
             frame,
             area,
-            ticket_action_menu_anchor(area),
+            ticket_action_menu_anchor(area, action_rows),
             &context,
             menu,
         );
     }
 }
 
-fn ticket_action_menu_anchor(area: Rect) -> Rect {
-    Rect::new(area.right().saturating_sub(3), area.y, 3.min(area.width), 1)
+fn push_ticket_action_rows(lines: &mut Vec<Line<'static>>, palette: &Palette, width: u16) -> usize {
+    let style = Style::default().fg(palette.accent);
+    let action_width = crate::ui::text::display_width(" [Start thread ▾] [⋯]");
+    if width >= 60 && action_width <= usize::from(width) {
+        lines.push(Line::styled(" [Start thread ▾] [⋯]", style));
+        1
+    } else {
+        lines.push(Line::styled(" [Start thread ▾]", style));
+        lines.push(Line::styled(" [⋯]", style));
+        2
+    }
 }
 
-fn render_pr_detail(
+fn ticket_action_menu_anchor(area: Rect, action_rows: usize) -> Rect {
+    Rect::new(
+        area.right().saturating_sub(3),
+        area.y.saturating_add(action_rows as u16),
+        3.min(area.width),
+        1,
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PrDetailControls<'a> {
+    pub(crate) checkout_menu: Option<crate::app::state::PrCheckoutChoice>,
+    pub(crate) action_menu: Option<crate::app::state::PrActionMenuState>,
+    pub(crate) reviewer_picker: Option<&'a crate::app::state::ReviewerPickerState>,
+    pub(crate) pending_write: Option<&'a crate::work_index::WorkItemWrite>,
+    pub(crate) notice: Option<&'a str>,
+}
+
+/// Render one pull request. The full-screen work view and dock call this exact
+/// function with the same object state, so width is the only host difference.
+pub(crate) fn render_pr_detail(
     app: &AppState,
-    state: &WorkViewState,
     item: &crate::ui::work_list_detail::PrItem<'_>,
+    view: &ObjectViewState,
+    controls: PrDetailControls<'_>,
     area: Rect,
     frame: &mut Frame,
 ) {
@@ -1223,26 +1310,12 @@ fn render_pr_detail(
             )
     });
     let mut lines = vec![
-        Line::from(vec![
-            ratatui::text::Span::styled(
-                format!(
-                    " {}     [{}] ",
-                    detail.heading,
-                    checkout.map_or("Check out ▾", |action| action.label.as_str())
-                ),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            ratatui::text::Span::styled(
-                format!(
-                    "[{}]",
-                    merge.map_or("Merge", |action| action.label.as_str())
-                ),
-                merge_style,
-            ),
-            ratatui::text::Span::styled(" [⋯]", Style::default().fg(palette.accent)),
-        ]),
+        Line::styled(
+            format!(" {}", detail.heading),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
         Line::styled(
             format!(" {}", detail.title),
             Style::default()
@@ -1257,11 +1330,23 @@ fn render_pr_detail(
             format!(" {}", detail.branches),
             Style::default().fg(palette.subtext0),
         ),
-        Line::styled(
-            format!(" [Summary] [Timeline] [Code]   {}", detail.checks_summary),
-            Style::default().fg(palette.accent),
-        ),
     ];
+    let mut action_row = lines.len();
+    let action_rows = push_pr_action_rows(
+        &mut lines,
+        palette,
+        checkout.map_or("Check out ▾", |action| action.label.as_str()),
+        merge.map_or("Merge", |action| action.label.as_str()),
+        merge_style,
+        area.width,
+    );
+    let mut tab_row = lines.len();
+    lines.push(pr_tab_row(
+        palette,
+        view.tab,
+        area.width,
+        &detail.checks_summary,
+    ));
     if let Some(reason) = merge.and_then(|action| action.disabled_reason) {
         lines.insert(
             1,
@@ -1272,10 +1357,12 @@ fn render_pr_detail(
                     .add_modifier(Modifier::DIM),
             ),
         );
+        action_row = action_row.saturating_add(1);
+        tab_row = tab_row.saturating_add(1);
     }
     let mut reviewer_anchor = None;
-    match state.detail_tab {
-        PrDetailTab::Summary => {
+    match view.tab {
+        PrDetailTab::Overview => {
             reviewer_anchor = Some(Rect::new(
                 area.right().saturating_sub(4),
                 area.y
@@ -1317,7 +1404,7 @@ fn render_pr_detail(
                 format!("Comments  {}  newest first", detail.comments.len()),
                 area.width,
             ));
-            for (index, comment) in detail.comments.iter().take(3).enumerate() {
+            for (index, comment) in detail.comments.iter().enumerate() {
                 if index > 0 {
                     lines.push(Line::default());
                 }
@@ -1335,6 +1422,54 @@ fn render_pr_detail(
                     Some(&comment.body),
                     usize::from(area.width.saturating_sub(4)),
                     "    ",
+                ));
+            }
+        }
+        PrDetailTab::Files => {
+            let files = item
+                .cached_detail
+                .map(|detail| detail.files.as_slice())
+                .unwrap_or_default();
+            lines.extend(section_separator(
+                palette,
+                format!("Files  {}", files.len()),
+                area.width,
+            ));
+            for file in files {
+                lines.push(Line::styled(
+                    format!("  {}  +{} −{}", file.path, file.additions, file.deletions),
+                    Style::default().fg(palette.text),
+                ));
+            }
+            if files.is_empty() {
+                lines.push(Line::styled(
+                    " no changed files indexed",
+                    Style::default().fg(palette.subtext0),
+                ));
+            }
+        }
+        PrDetailTab::Diff => {}
+        PrDetailTab::Checks => {
+            lines.extend(section_separator(
+                palette,
+                format!("Checks  {}", detail.checks.len()),
+                area.width,
+            ));
+            for (name, status) in &detail.checks {
+                let glyph = match status.as_str() {
+                    "SUCCESS" => "✓",
+                    "FAILURE" => "✗",
+                    _ => "◌",
+                };
+                lines.push(Line::styled(
+                    format!("  {glyph} {name}  {status}"),
+                    Style::default().fg(palette.subtext0),
+                ));
+            }
+            if detail.checks.is_empty() {
+                lines.push(Line::styled(
+                    " no checks reported",
+                    Style::default().fg(palette.subtext0),
                 ));
             }
         }
@@ -1400,27 +1535,42 @@ fn render_pr_detail(
                 ));
             }
         }
-        PrDetailTab::Code => crate::ui::dock::diff::render_diff(app, frame, area),
     }
-    if state.detail_tab != PrDetailTab::Code {
-        frame.render_widget(Paragraph::new(lines), area);
+    if let Some(write) = controls.pending_write {
+        lines.push(Line::styled(
+            format!(" Confirm {}? [y/N]", write.describe()),
+            Style::default()
+                .fg(palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(notice) = controls.notice {
+        lines.push(Line::styled(
+            format!(" {notice}"),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    if view.tab == PrDetailTab::Diff {
+        let header_height = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let [header, body] =
+            Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(area);
+        frame.render_widget(Paragraph::new(lines), header);
+        crate::ui::dock::diff::render_diff_with_state(app, frame, body, view.scroll, false);
+    } else {
+        let max_scroll = lines.len().saturating_sub(usize::from(area.height));
+        let scroll = usize::from(view.scroll).min(max_scroll) as u16;
+        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
     }
     if let (Some(picker), Some(anchor), Some(detail)) = (
-        state.reviewer_picker.as_ref(),
+        controls.reviewer_picker,
         reviewer_anchor,
         item.cached_detail,
     ) {
-        render_reviewer_picker(
-            app,
-            frame,
-            frame.area(),
-            anchor,
-            picker,
-            &detail.collaborators,
-        );
+        render_reviewer_picker(app, frame, area, anchor, picker, &detail.collaborators);
     }
-    if let Some(choice) = state.checkout_menu {
-        if let Some(layout) = checkout_menu_layout(area, choice) {
+    if let Some(choice) = controls.checkout_menu {
+        if let Some(layout) = checkout_menu_layout(area, action_row, choice) {
             let options = [
                 crate::app::state::PrCheckoutChoice::CurrentCheckout,
                 crate::app::state::PrCheckoutChoice::NewWorktree,
@@ -1450,9 +1600,12 @@ fn render_pr_detail(
                 Rect::new(area.x, area.y, area.width, 1),
             );
         }
-    } else if let Some(menu) = state.pr_action_menu {
-        let anchor = pr_action_menu_anchor(area);
-        if !crate::ui::pr_actions::render(app, frame, frame.area(), anchor, &actions, menu) {
+    } else if let Some(menu) = controls.action_menu {
+        let anchor = pr_action_menu_anchor(
+            area,
+            action_row.saturating_add(action_rows.saturating_sub(1)),
+        );
+        if !crate::ui::pr_actions::render(app, frame, area, anchor, &actions, menu) {
             frame.render_widget(
                 Paragraph::new("action menu needs space below")
                     .style(Style::default().fg(palette.red)),
@@ -1460,6 +1613,118 @@ fn render_pr_detail(
             );
         }
     }
+    if let Some(selected) = view.tab_picker {
+        render_pr_tab_picker(app, frame, area, tab_row, selected);
+    }
+}
+
+fn push_pr_action_rows(
+    lines: &mut Vec<Line<'static>>,
+    palette: &Palette,
+    checkout: &str,
+    merge: &str,
+    merge_style: Style,
+    width: u16,
+) -> usize {
+    let checkout_text = format!(" [{checkout}]");
+    let merge_text = format!(" [{merge}]");
+    let menu_text = " [⋯]";
+    let total = crate::ui::text::display_width(&checkout_text)
+        + crate::ui::text::display_width(&merge_text)
+        + crate::ui::text::display_width(menu_text);
+    let checkout_style = Style::default().fg(palette.accent);
+    if width >= 60 && total <= usize::from(width) {
+        lines.push(Line::from(vec![
+            ratatui::text::Span::styled(checkout_text, checkout_style),
+            ratatui::text::Span::styled(merge_text, merge_style),
+            ratatui::text::Span::styled(menu_text, Style::default().fg(palette.accent)),
+        ]));
+        1
+    } else {
+        lines.push(Line::styled(checkout_text, checkout_style));
+        lines.push(Line::from(vec![
+            ratatui::text::Span::styled(merge_text, merge_style),
+            ratatui::text::Span::styled(menu_text, Style::default().fg(palette.accent)),
+        ]));
+        2
+    }
+}
+
+fn pr_tab_row(
+    palette: &Palette,
+    selected: PrDetailTab,
+    width: u16,
+    checks_summary: &str,
+) -> Line<'static> {
+    if width < 60 {
+        return Line::styled(
+            format!(" [{} ▾]  {checks_summary}", selected.label()),
+            Style::default().fg(palette.accent),
+        );
+    }
+    let mut spans = vec![ratatui::text::Span::raw(" ")];
+    for tab in PrDetailTab::ALL {
+        let style = Style::default()
+            .fg(if tab == selected {
+                palette.text
+            } else {
+                palette.subtext0
+            })
+            .add_modifier(if tab == selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        spans.push(ratatui::text::Span::styled(
+            format!("[{}] ", tab.label()),
+            style,
+        ));
+    }
+    Line::from(spans)
+}
+
+fn render_pr_tab_picker(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    tab_row: usize,
+    selected: usize,
+) {
+    let Some(layout) = pr_tab_picker_layout(area, tab_row, selected) else {
+        return;
+    };
+    let rows = PrDetailTab::ALL
+        .iter()
+        .map(|tab| crate::ui::dropdown::DropdownMenuRow::Item {
+            label: tab.label().to_string(),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    crate::ui::dropdown::render_menu(&app.palette, frame, &layout, &rows, selected);
+}
+
+fn pr_tab_picker_layout(
+    area: Rect,
+    tab_row: usize,
+    selected: usize,
+) -> Option<crate::ui::dropdown::DropdownLayout> {
+    let anchor_row = area.y.saturating_add(
+        u16::try_from(tab_row)
+            .unwrap_or(u16::MAX)
+            .min(area.height.saturating_sub(1)),
+    );
+    let anchor = Rect::new(area.x.saturating_add(1), anchor_row, 16.min(area.width), 1);
+    crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor,
+            item_count: PrDetailTab::ALL.len(),
+            selected,
+            has_filter: false,
+            max_rows: PrDetailTab::ALL.len(),
+            min_width: 18,
+        },
+        area,
+    )
 }
 
 fn render_reviewer_picker(
@@ -1518,15 +1783,34 @@ fn reviewer_picker_layout(
     )
 }
 
-fn pr_action_menu_anchor(area: Rect) -> Rect {
-    Rect::new(area.right().saturating_sub(3), area.y, 3.min(area.width), 1)
+fn pr_action_menu_anchor(area: Rect, action_row: usize) -> Rect {
+    Rect::new(
+        area.right().saturating_sub(3),
+        area.y.saturating_add(
+            u16::try_from(action_row)
+                .unwrap_or(u16::MAX)
+                .min(area.height.saturating_sub(1)),
+        ),
+        3.min(area.width),
+        1,
+    )
 }
 
 fn checkout_menu_layout(
     area: Rect,
+    action_row: usize,
     selected: crate::app::state::PrCheckoutChoice,
 ) -> Option<crate::ui::dropdown::DropdownLayout> {
-    let anchor = Rect::new(area.x.saturating_add(1), area.y, 14.min(area.width), 1);
+    let anchor = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(
+            u16::try_from(action_row)
+                .unwrap_or(u16::MAX)
+                .min(area.height.saturating_sub(1)),
+        ),
+        14.min(area.width),
+        1,
+    );
     crate::ui::dropdown::layout_dropdown(
         &crate::ui::dropdown::DropdownSpec {
             anchor,
@@ -1543,6 +1827,7 @@ fn checkout_menu_layout(
 fn ticket_menu_layout(
     area: Rect,
     anchor_x: u16,
+    anchor_y: u16,
     item_count: usize,
     selected: usize,
     width: u16,
@@ -1551,7 +1836,7 @@ fn ticket_menu_layout(
         &crate::ui::dropdown::DropdownSpec {
             anchor: Rect::new(
                 area.x.saturating_add(anchor_x).min(area.right()),
-                area.y,
+                area.y.saturating_add(anchor_y),
                 width.min(area.width),
                 1,
             ),
@@ -1573,7 +1858,7 @@ fn render_ticket_start_menu(
     choice: crate::app::state::PrCheckoutChoice,
 ) {
     let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
-    let Some(layout) = ticket_menu_layout(area, 12, 2, selected, 42) else {
+    let Some(layout) = ticket_menu_layout(area, 12, 1, 2, selected, 42) else {
         return;
     };
     let branch = crate::ui::work_list_detail::ticket_worktree_branch(
@@ -1620,7 +1905,7 @@ fn render_ticket_transition_menu(
         .iter()
         .position(|option| *option == choice)
         .unwrap_or(0);
-    let Some(layout) = ticket_menu_layout(area, 29, 4, selected, 20) else {
+    let Some(layout) = ticket_menu_layout(area, 29, 1, 4, selected, 20) else {
         return;
     };
     frame.render_widget(
@@ -1673,7 +1958,7 @@ fn render_placeholder(
 fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
     let base = match state.projection {
         WorkProjection::PullRequests => {
-            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   + reviewer   c checkout   l merge   m actions"
+            " / search   ↑/↓ move   s sort   f open/all   Tab detail tabs   PgUp/PgDn detail   + reviewer   c checkout   l merge   m actions"
         }
         WorkProjection::Tickets
             if state.ticket_layout == crate::app::state::LinearViewLayout::Board
@@ -2092,7 +2377,7 @@ mod tests {
         }
         .action_table(crate::config::MergeMethodConfig::Merge, true);
         let area = Rect::new(30, 12, 60, 20);
-        let anchor = pr_action_menu_anchor(area);
+        let anchor = pr_action_menu_anchor(area, 4);
         let layout = crate::ui::pr_actions::layout(
             Rect::new(0, 0, 120, 40),
             anchor,
@@ -2122,7 +2407,8 @@ mod tests {
         let mut app = AppState::test_new();
         app.work_item_detail_cache.insert(key.clone(), detail);
         let mut view = WorkViewState::new(true, Some(snapshot(vec![item])));
-        view.detail_tab = PrDetailTab::Timeline;
+        view.selected = Some(key.clone());
+        view.object_view_mut(key.clone()).tab = PrDetailTab::Timeline;
         app.work_view = Some(view);
 
         let rendered = rendered_app_text_at(&app, 120, 40);
@@ -2294,19 +2580,21 @@ mod tests {
         assert!(text.contains("Others"));
         assert!(text.contains("#3226"));
         assert!(text.contains("#3244"));
-        assert!(text.contains("Tab Summary/Timeline/Code"));
+        assert!(text.contains("Tab detail tabs"));
     }
 
     #[test]
     fn checkout_dropdown_opens_downward_and_clamps() {
         let area = Rect::new(40, 3, 50, 4);
-        let layout = checkout_menu_layout(area, crate::app::state::PrCheckoutChoice::NewWorktree)
-            .expect("two rows fit below the action");
+        let layout =
+            checkout_menu_layout(area, 0, crate::app::state::PrCheckoutChoice::NewWorktree)
+                .expect("two rows fit below the action");
         assert_eq!(layout.rect.y, area.y + 1);
         assert_eq!(layout.visible_rows, 2);
 
         assert!(checkout_menu_layout(
             Rect::new(40, 6, 50, 1),
+            0,
             crate::app::state::PrCheckoutChoice::CurrentCheckout,
         )
         .is_none());
@@ -2371,7 +2659,7 @@ mod tests {
             ticket, None, None, None, false,
         );
         let area = Rect::new(40, 3, 50, 5);
-        let anchor = ticket_action_menu_anchor(area);
+        let anchor = ticket_action_menu_anchor(area, 1);
         let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
             anchor,
             area,
@@ -2448,12 +2736,12 @@ mod tests {
     fn ticket_dropdowns_open_downward_and_clamp() {
         let area = Rect::new(10, 4, 60, 8);
         for (anchor_x, count, selected, width) in [(12, 2, 1, 42), (29, 4, 3, 20), (54, 3, 2, 20)] {
-            let layout = ticket_menu_layout(area, anchor_x, count, selected, width)
+            let layout = ticket_menu_layout(area, anchor_x, 0, count, selected, width)
                 .expect("ticket menu fits below header");
             assert_eq!(layout.rect.y, area.y + 1);
             assert!(layout.rect.bottom() <= area.bottom());
         }
-        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 1, 2, 0, 20).is_none());
+        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 1, 0, 2, 0, 20).is_none());
     }
 
     #[test]
@@ -2583,10 +2871,10 @@ mod tests {
     #[test]
     fn missive_start_dropdown_opens_downward_and_clamps() {
         let area = Rect::new(20, 3, 50, 4);
-        let layout = ticket_menu_layout(area, 12, 2, 1, 24).expect("menu fits below anchor");
+        let layout = ticket_menu_layout(area, 12, 0, 2, 1, 24).expect("menu fits below anchor");
         assert_eq!(layout.rect.y, area.y + 1);
         assert!(layout.rect.bottom() <= area.bottom());
-        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 12, 2, 0, 24).is_none());
+        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 12, 0, 2, 0, 24).is_none());
     }
 
     #[test]
@@ -2615,5 +2903,167 @@ mod tests {
         state.snapshot.as_mut().expect("snapshot").unavailable = None;
         let empty = rendered_text(&state);
         assert!(empty.contains("no matching conversations"), "{empty}");
+    }
+
+    fn render_pr_detail_fixture(tab: PrDetailTab, width: u16) -> String {
+        let summary = pr("owner/repo", 206, &[]);
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.number = Some(206);
+        detail.title = Some("rich dock view".into());
+        detail.body = Some("The full description stays available in either host.".into());
+        detail.base_ref_name = Some("main".into());
+        detail.head_ref_name = Some("feature/rich-dock".into());
+        detail.files = vec![crate::work_index::WorkItemFile {
+            path: "src/ui/work_view.rs".into(),
+            additions: 21,
+            deletions: 4,
+        }];
+        detail.actions = vec![crate::work_index::WorkItemAction {
+            name: "tests".into(),
+            state: "SUCCESS".into(),
+        }];
+        detail.timeline = vec![crate::work_index::WorkItemTimelineEvent {
+            kind: "reviewed".into(),
+            actor: Some("matthias".into()),
+            summary: "approved".into(),
+            created_at: Some(SystemTime::UNIX_EPOCH),
+        }];
+        let item = crate::ui::work_list_detail::PrItem {
+            summary: &summary,
+            cached_detail: Some(&detail),
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        let mut app = AppState::test_new();
+        let diff_key = crate::app::state::DiffCacheKey {
+            root: std::path::PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        };
+        app.dock_diff_cache.insert(
+            diff_key.clone(),
+            crate::app::state::DiffCacheEntry {
+                branch: "feature/rich-dock".into(),
+                files: vec![crate::app::state::DiffFileSummary {
+                    path: "src/ui/work_view.rs".into(),
+                    display_path: "src/ui/work_view.rs".into(),
+                    additions: 1,
+                    deletions: 1,
+                    binary: false,
+                }],
+                contents: std::collections::HashMap::from([(
+                    "src/ui/work_view.rs".into(),
+                    crate::app::state::DiffFileContent {
+                        committed: vec![crate::app::diff::DiffLine {
+                            text: "@@ -1 +1 @@".into(),
+                            kind: crate::app::diff::DiffLineKind::Hunk,
+                        }],
+                        uncommitted: Vec::new(),
+                    },
+                )]),
+                error: None,
+            },
+        );
+        app.dock_diff_active_key = Some(diff_key);
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("detail terminal");
+        terminal
+            .draw(|frame| {
+                render_pr_detail(
+                    &app,
+                    &item,
+                    &ObjectViewState {
+                        tab,
+                        ..Default::default()
+                    },
+                    PrDetailControls::default(),
+                    frame.area(),
+                    frame,
+                )
+            })
+            .expect("render rich PR detail");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn one_pr_detail_renderer_drives_full_and_dock_hosts() {
+        let full_host = render_pr_detail_fixture(PrDetailTab::Overview, 72);
+        let dock_host = render_pr_detail_fixture(PrDetailTab::Overview, 72);
+        assert_eq!(full_host, dock_host);
+        assert!(full_host.contains("full description"), "{full_host}");
+    }
+
+    #[test]
+    fn rich_pr_detail_renders_every_sub_tab() {
+        for (tab, marker) in [
+            (PrDetailTab::Overview, "Description"),
+            (PrDetailTab::Files, "src/ui/work_view.rs"),
+            (PrDetailTab::Diff, "@@ -1 +1 @@"),
+            (PrDetailTab::Checks, "tests  SUCCESS"),
+            (PrDetailTab::Timeline, "approved"),
+        ] {
+            let rendered = render_pr_detail_fixture(tab, 72);
+            assert!(rendered.contains(marker), "{tab:?}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn narrow_pr_detail_collapses_tabs_and_wraps_actions() {
+        let app = AppState::test_new();
+        let tab_row = pr_tab_row(&app.palette, PrDetailTab::Checks, 59, "✓ 1 of 1 passing");
+        let text = tab_row
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("[Checks ▾]"), "{text}");
+        assert!(!text.contains("[Overview]"), "{text}");
+
+        let mut rows = Vec::new();
+        push_pr_action_rows(
+            &mut rows,
+            &app.palette,
+            "Check out ▾",
+            "Merge",
+            Style::default(),
+            59,
+        );
+        assert_eq!(rows.len(), 2);
+        let actions = rows
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        for label in ["Check out ▾", "Merge", "⋯"] {
+            assert!(actions.contains(label), "{actions}");
+        }
+
+        let mut ticket_rows = Vec::new();
+        push_ticket_action_rows(&mut ticket_rows, &app.palette, 59);
+        assert_eq!(ticket_rows.len(), 2);
+        let ticket_actions = ticket_rows
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        for label in ["Start thread ▾", "⋯"] {
+            assert!(ticket_actions.contains(label), "{ticket_actions}");
+        }
+    }
+
+    #[test]
+    fn narrow_pr_tab_picker_opens_downward_and_clamps() {
+        let area = Rect::new(20, 3, 48, 9);
+        let layout = pr_tab_picker_layout(area, 5, 4).expect("picker fits below tab row");
+        assert_eq!(layout.rect.y, area.y + 6);
+        assert!(layout.rect.bottom() <= area.bottom());
+        assert!(layout.first_visible <= 4);
+        assert!(4 < layout.first_visible + layout.visible_rows);
     }
 }

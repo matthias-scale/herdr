@@ -6571,6 +6571,7 @@ esac
                 surface_menu: None,
                 chooser_focused: false,
                 scroll: 0,
+                object_views: std::collections::HashMap::new(),
                 editor_focused,
                 diff_focused: false,
                 pr_focused: false,
