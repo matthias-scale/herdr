@@ -5713,27 +5713,25 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
     }
 
     #[test]
-    fn f12_6_full_screen_work_views_follow_their_compact_surfaces() {
+    fn f20_2_full_screen_work_views_never_create_list_surface_tabs() {
         let mut app = test_app();
         app.state.dock_collapsed = true;
 
         app.toggle_ticket_view();
-        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Linear));
-        assert!(!app.state.dock_collapsed);
+        assert_eq!(app.state.dock_tab, None);
+        assert!(app.state.dock_collapsed);
 
         app.state.open_dock_surface(crate::app::DockSurface::Files);
-        assert!(app.state.dock_surface_override);
         app.toggle_work_view();
-        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Pr));
-        assert!(!app.state.dock_surface_override);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert_eq!(app.state.dock_open_surfaces.len(), 1);
         app.toggle_missive_view();
-        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Missive));
-        assert!(!app.state.dock_surface_override);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert_eq!(app.state.dock_open_surfaces.len(), 1);
 
-        app.state.open_dock_surface(crate::app::DockSurface::Files);
         app.toggle_usage_view();
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
-        assert!(!app.state.dock_surface_override);
+        assert_eq!(app.state.dock_open_surfaces.len(), 1);
     }
 
     #[test]

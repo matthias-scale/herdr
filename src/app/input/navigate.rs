@@ -504,8 +504,8 @@ impl App {
                     previous_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(previous);
-                } else if let Some(previous) = self.state.adjacent_dock_surface(false) {
-                    self.state.dock_tab = Some(previous);
+                } else if let Some(previous) = self.state.adjacent_dock_tab_index(false) {
+                    self.state.select_dock_tab_index(previous);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -516,8 +516,8 @@ impl App {
                     next_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(next);
-                } else if let Some(next) = self.state.adjacent_dock_surface(true) {
-                    self.state.dock_tab = Some(next);
+                } else if let Some(next) = self.state.adjacent_dock_tab_index(true) {
+                    self.state.select_dock_tab_index(next);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -1999,6 +1999,7 @@ fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_diff_focused = state.dock_tab == Some(crate::app::DockSurface::Diff);
     state.dock_files_focused = state.dock_tab == Some(crate::app::DockSurface::Files);
     state.dock_agents_focused = state.dock_tab == Some(crate::app::DockSurface::Agents);
+    state.dock_pr_focused = state.dock_tab == Some(crate::app::DockSurface::Pr);
     state.dock_linear_focused = state.dock_tab == Some(crate::app::DockSurface::Linear);
     if state.dock_agents_focused {
         state.reconcile_dock_agents_selection();
@@ -2508,8 +2509,8 @@ pub(super) fn execute_navigate_action_in_context(
                 previous_home_section(state.dock_home_section),
             ) {
                 state.set_dock_home_section(previous);
-            } else if let Some(previous) = state.adjacent_dock_surface(false) {
-                state.dock_tab = Some(previous);
+            } else if let Some(previous) = state.adjacent_dock_tab_index(false) {
+                state.select_dock_tab_index(previous);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
@@ -2519,8 +2520,8 @@ pub(super) fn execute_navigate_action_in_context(
                 (state.dock_tab, next_home_section(state.dock_home_section))
             {
                 state.set_dock_home_section(next);
-            } else if let Some(next) = state.adjacent_dock_surface(true) {
-                state.dock_tab = Some(next);
+            } else if let Some(next) = state.adjacent_dock_tab_index(true) {
+                state.select_dock_tab_index(next);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);

@@ -43,7 +43,7 @@ mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
-mod text;
+pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;
 mod user_actions;
@@ -305,6 +305,7 @@ fn compute_view_internal(
 ) {
     app.view_observed_at = std::time::Instant::now();
     app.reconcile_sidebar_presentation();
+    app.reconcile_dock_context_tabs();
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -579,13 +580,19 @@ fn compute_view_internal(
     } = dock_geometry(
         dock_area,
         app.dock_collapsed,
-        &app.dock_open_surfaces,
-        app.dock_tab,
+        &(0..app.dock_open_surfaces.len())
+            .map(|index| app.dock_tab_label(index))
+            .collect::<Vec<_>>(),
+        app.active_dock_tab_index(),
     );
     let dock_surface_card_hit_areas = if app.dock_collapsed || app.dock_tab.is_some() {
         Vec::new()
     } else {
-        dock::chooser_card_hit_areas(dock_body_rect, area.width)
+        dock::chooser_card_hit_areas_for_count(
+            dock_body_rect,
+            area.width,
+            dock::chooser::entries(app, true).len(),
+        )
     };
     let (
         dock_home_section_hit_areas,
@@ -806,8 +813,8 @@ impl DockGeometry {
 fn dock_geometry(
     area: Rect,
     collapsed: bool,
-    open: &[crate::app::DockSurface],
-    active: Option<crate::app::DockSurface>,
+    labels: &[String],
+    active_index: Option<usize>,
 ) -> DockGeometry {
     if area.width == 0 || area.height == 0 {
         return DockGeometry::empty(Rect::default());
@@ -826,9 +833,10 @@ fn dock_geometry(
     // Width the strip wants: every open tab, the trailing `+`, and the `⤢`
     // pinned to the right edge. The maximise glyph only claims its two columns
     // when the tabs do not need them.
-    let wanted: u16 = open
+    let wanted: u16 = labels
         .iter()
-        .map(|surface| dock::tab_width(*surface, active == Some(*surface)))
+        .enumerate()
+        .map(|(index, label)| dock::tab_width_label(label, active_index == Some(index)))
         .fold(dock::PLUS_WIDTH, u16::saturating_add);
     let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
         (
@@ -841,7 +849,8 @@ fn dock_geometry(
 
     // The hit areas come from the same layout the strip is drawn from, so the
     // `+` cell a click lands in is the cell the glyph occupies.
-    let dock::StripLayout { tabs, close, plus } = dock::strip_layout(strip, open, active);
+    let dock::StripLayout { tabs, close, plus } =
+        dock::strip_layout_labels(strip, labels, active_index);
 
     DockGeometry {
         handle,
@@ -1715,6 +1724,71 @@ mod tests {
                 assert_eq!(app.dock_tab_at(plus.x, plus.y), None);
             }
         }
+    }
+
+    #[test]
+    fn f20_hovered_object_tab_renders_its_full_title_below_the_strip() {
+        use crate::app::state::{DockObjectRef, DockTabBinding, DockTabOrigin};
+        use crate::app::DockSurface;
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let key = "https://mail.missiveapp.com/#inbox/conversations/abc".to_string();
+        app.dock_open_surfaces = vec![DockSurface::Missive];
+        app.dock_tab = Some(DockSurface::Missive);
+        app.dock_active_tab_index = Some(0);
+        app.dock_hovered_tab_index = Some(0);
+        app.dock_tab_bindings = vec![Some(DockTabBinding {
+            object: DockObjectRef {
+                surface: DockSurface::Missive,
+                key: key.clone(),
+            },
+            origin: DockTabOrigin::Context,
+        })];
+        app.view.dock_tab_hit_areas = vec![Rect::new(
+            app.view.dock_tab_bar_rect.x,
+            app.view.dock_tab_bar_rect.y,
+            14,
+            1,
+        )];
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: vec![crate::work_index::MissiveConversation {
+                id: "abc".into(),
+                subject: "Full conversation subject".into(),
+                app_url: key,
+                web_url: String::new(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                labels: Vec::new(),
+                pane_bound: true,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            }],
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal.draw(|frame| render(&app, frame)).expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Full conversation subject"));
     }
 
     #[test]

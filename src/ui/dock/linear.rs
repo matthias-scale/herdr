@@ -13,11 +13,15 @@ use crate::ui::work_list_detail::{comment_header, section_separator, TicketItem,
 
 pub(crate) fn focused_ticket_key(app: &AppState) -> Option<WorkItemKey> {
     let (context, _) = super::chooser::focused_availability(app);
+    let ticket_id = app
+        .active_dock_object(crate::app::DockSurface::Linear)
+        .map(|object| object.key.as_str())
+        .or_else(|| context.primary_ticket())?;
     Some(WorkItemKey {
         repo: String::new(),
         pr_number: None,
         pr_url: None,
-        ticket_id: Some(context.primary_ticket()?.to_string()),
+        ticket_id: Some(ticket_id.to_string()),
     })
 }
 

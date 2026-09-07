@@ -244,6 +244,9 @@ impl AppState {
         let mut keep_open = false;
         match option {
             crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
+            crate::ui::SidebarFilterOption::LinearOwnership(ownership) => {
+                filter.linear_ownership = ownership;
+            }
             crate::ui::SidebarFilterOption::LinearAssignee(assignee) => {
                 filter.assignee = assignee;
             }
@@ -257,6 +260,9 @@ impl AppState {
             }
             crate::ui::SidebarFilterOption::GithubAssignee(assignee) => {
                 filter.github.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::GithubOwnership(ownership) => {
+                filter.github.ownership = ownership;
             }
             crate::ui::SidebarFilterOption::GithubDrafts(shown) => {
                 filter.github.show_drafts = !shown;

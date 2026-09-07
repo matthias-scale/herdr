@@ -1353,7 +1353,6 @@ fn compact_sidebar_rows_inner(
         if app.sidebar_group_mode == SidebarGroupMode::LinearTeam {
             append_unassigned_rows(app, &mut rows, &visible_entries);
         } else {
-            append_missive_no_pane_rows(app, &mut rows, &visible_entries);
             for group in sidebar_work_groups(app, &visible_entries, app.sidebar_group_mode)
                 .into_iter()
                 .filter(|group| group.unlinked)
@@ -1376,6 +1375,7 @@ fn compact_sidebar_rows_inner(
                     }));
                 }
             }
+            append_unassigned_rows(app, &mut rows, &visible_entries);
         }
         append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
@@ -2456,7 +2456,12 @@ pub(crate) fn sidebar_show_more_key(mode: SidebarGroupMode) -> String {
 
 fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
     let objects = sidebar_unassigned_objects(app, entries, app.sidebar_group_mode);
-    if objects.is_empty() {
+    if objects.is_empty()
+        && !matches!(
+            app.sidebar_group_mode,
+            SidebarGroupMode::LinearTeam | SidebarGroupMode::RepoPr | SidebarGroupMode::Missive
+        )
+    {
         return;
     }
     let collapsed = section_is_collapsed(app, UNASSIGNED_SECTION_TITLE);
@@ -2466,6 +2471,22 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
         collapsed,
     });
     if collapsed {
+        return;
+    }
+    if objects.is_empty() {
+        rows.push(SidebarRow::NestedHeader {
+            key: format!(
+                "unassigned-empty:{}",
+                app.sidebar_group_mode.collapse_namespace()
+            ),
+            action_key: None,
+            title: unassigned_empty_text(app),
+            count: 0,
+            collapsed: false,
+            dim: true,
+            status: None,
+            spawn: false,
+        });
         return;
     }
     let expanded = app
@@ -2507,56 +2528,80 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
     }
 }
 
-/// Missive already projects indexed no-pane conversations as dim work-group
-/// headers. Keep that single projection while applying the shared ten-row cap
-/// and direct-spawn affordance.
-fn append_missive_no_pane_rows(
-    app: &AppState,
-    rows: &mut Vec<SidebarRow>,
-    entries: &[AgentPanelEntry],
-) {
-    let objects = sidebar_unassigned_objects(app, entries, SidebarGroupMode::Missive);
-    let expanded = app
-        .sidebar_unassigned_expanded_views
-        .contains(&SidebarGroupMode::Missive);
-    let shown = if expanded {
-        objects.len()
-    } else {
-        objects.len().min(UNASSIGNED_INITIAL_ROWS)
+fn unassigned_empty_text(app: &AppState) -> String {
+    let ownership_label = |ownership: crate::app::state::WorkOwnershipFilter,
+                           authored: &'static str,
+                           assigned: &'static str,
+                           both: &'static str| {
+        match ownership {
+            crate::app::state::WorkOwnershipFilter::Assigned => assigned,
+            crate::app::state::WorkOwnershipFilter::Authored => authored,
+            crate::app::state::WorkOwnershipFilter::Both => both,
+        }
     };
-    for object in objects.iter().take(shown) {
-        rows.push(SidebarRow::NestedHeader {
-            key: object.key.clone(),
-            action_key: Some(object.key.clone()),
-            title: object.title.clone(),
-            count: 0,
-            collapsed: false,
-            dim: true,
-            status: object.status,
-            spawn: true,
-        });
-    }
-    let remaining = objects.len().saturating_sub(shown);
-    if remaining > 0 {
-        rows.push(SidebarRow::NestedHeader {
-            key: sidebar_show_more_key(SidebarGroupMode::Missive),
-            action_key: None,
-            title: format!("show {remaining} more…"),
-            count: 0,
-            collapsed: false,
-            dim: true,
-            status: None,
-            spawn: false,
-        });
-    }
+    let (source, fallback) = match app.sidebar_group_mode {
+        SidebarGroupMode::RepoPr => (
+            crate::work_index::WorkIndexSource::Github,
+            format!(
+                "no {} PRs for {} · {}",
+                app.sidebar_work_filter.github.state.label(),
+                app.sidebar_work_filter
+                    .github
+                    .assignee
+                    .as_deref()
+                    .unwrap_or("anyone"),
+                ownership_label(
+                    app.sidebar_work_filter.github.ownership,
+                    "author",
+                    "assignee",
+                    "author or assignee"
+                )
+            ),
+        ),
+        SidebarGroupMode::LinearTeam => (
+            crate::work_index::WorkIndexSource::Linear,
+            format!(
+                "no active tickets for {} · {}",
+                app.sidebar_work_filter
+                    .assignee
+                    .as_deref()
+                    .unwrap_or("anyone"),
+                ownership_label(
+                    app.sidebar_work_filter.linear_ownership,
+                    "creator",
+                    "assignee",
+                    "creator or assignee"
+                )
+            ),
+        ),
+        SidebarGroupMode::Missive => (
+            crate::work_index::WorkIndexSource::Missive,
+            format!(
+                "no open conversations for {} · assignee",
+                app.sidebar_work_filter
+                    .missive
+                    .assignee
+                    .as_deref()
+                    .unwrap_or("anyone")
+            ),
+        ),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => return String::new(),
+    };
+    app.work_index_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.unavailable_reason(source))
+        .map(|reason| format!("{}: {reason}", source.label()))
+        .unwrap_or(fallback)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidebarFilterOption {
     LinearTeam(Option<String>),
+    LinearOwnership(crate::app::state::WorkOwnershipFilter),
     LinearAssignee(Option<String>),
     LinearStatus(crate::app::state::LinearStatusFilter, bool),
     GithubAssignee(Option<String>),
+    GithubOwnership(crate::app::state::WorkOwnershipFilter),
     GithubDrafts(bool),
     GithubState(crate::app::state::GithubStateFilter),
     MissiveAssignee(Option<String>),
@@ -2568,6 +2613,7 @@ impl SidebarFilterOption {
         match self {
             Self::LinearTeam(None) => "team: all".into(),
             Self::LinearTeam(Some(team)) => format!("team: {team}"),
+            Self::LinearOwnership(scope) => format!("me: {}", scope.label()),
             Self::LinearAssignee(None) => "assignee: all".into(),
             Self::LinearAssignee(Some(assignee)) => format!("assignee: {assignee}"),
             Self::LinearStatus(status, selected) => format!(
@@ -2577,6 +2623,7 @@ impl SidebarFilterOption {
             ),
             Self::GithubAssignee(None) => "assignee: all".into(),
             Self::GithubAssignee(Some(assignee)) => format!("assignee: {assignee}"),
+            Self::GithubOwnership(scope) => format!("me: {}", scope.label()),
             Self::GithubDrafts(shown) => {
                 format!("{} show drafts", if *shown { "[x]" } else { "[ ]" })
             }
@@ -2611,6 +2658,11 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
                     .map(|team| SidebarFilterOption::LinearTeam(Some(team))),
             );
             options.push(SidebarFilterOption::LinearAssignee(Some("me".into())));
+            options.extend(
+                crate::app::state::WorkOwnershipFilter::ALL
+                    .into_iter()
+                    .map(SidebarFilterOption::LinearOwnership),
+            );
             options.push(SidebarFilterOption::LinearAssignee(None));
             options.extend(
                 app.work_index_session
@@ -2634,10 +2686,13 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
             options
         }
         SidebarGroupMode::RepoPr => {
-            let mut options = vec![
-                SidebarFilterOption::GithubAssignee(Some("me".into())),
-                SidebarFilterOption::GithubAssignee(None),
-            ];
+            let mut options = vec![SidebarFilterOption::GithubAssignee(Some("me".into()))];
+            options.extend(
+                crate::app::state::WorkOwnershipFilter::ALL
+                    .into_iter()
+                    .map(SidebarFilterOption::GithubOwnership),
+            );
+            options.push(SidebarFilterOption::GithubAssignee(None));
             options.extend(
                 app.work_index_session
                     .github
@@ -10121,8 +10176,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .filter_map(|row| match row {
                 SidebarRow::NestedHeader {
-                    title, count, dim, ..
-                } => Some((title, count, dim)),
+                    key,
+                    title,
+                    count,
+                    dim,
+                    ..
+                } if !key.starts_with("unassigned-empty:") => Some((title, count, dim)),
                 _ => None,
             })
             .collect()
@@ -10518,6 +10577,45 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn f20_unassigned_section_renders_when_empty_with_active_filter_text() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.work_index_session.github.viewer = Some("matthias-scale".into());
+        let rows = sidebar_rows(&app);
+
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, count: 0, .. }
+                if *title == UNASSIGNED_SECTION_TITLE
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, title, .. }
+                if key.starts_with("unassigned-empty:")
+                    && title == "no open PRs for me · author or assignee"
+        )));
+    }
+
+    #[test]
+    fn f20_unassigned_empty_section_uses_short_degradation_text() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let snapshot = app.work_index_snapshot.as_mut().expect("snapshot");
+        snapshot.items.clear();
+        snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Linear,
+            "rate limited · retry in 12m",
+        ));
+
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, title, .. }
+                if key.starts_with("unassigned-empty:")
+                    && title == "Linear: rate limited · retry in 12m"
+        )));
+    }
+
+    #[test]
     fn the_linear_filter_dropdown_lists_defaults_users_and_statuses() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
@@ -10533,11 +10631,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "team: OPS",
                 "team: SCA",
                 "assignee: me",
-                "assignee: all",
-                "assignee: Ada",
-                "assignee: Matthias",
+                "me: assigned",
+                "me: authored",
+                "me: both",
             ]
         );
+        assert!(labels.contains(&"assignee: all".into()));
+        assert!(labels.contains(&"assignee: Ada".into()));
+        assert!(labels.contains(&"assignee: Matthias".into()));
         assert!(labels.contains(&"[x] status: In Progress".into()));
         assert!(labels.contains(&"[ ] status: Canceled".into()));
         assert!(labels.contains(&"[ ] status: Duplicate".into()));
@@ -10555,6 +10656,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .collect::<Vec<_>>(),
             [
                 "assignee: me",
+                "me: assigned",
+                "me: authored",
+                "me: both",
                 "assignee: all",
                 "assignee: Ada",
                 "[ ] show drafts",
@@ -10755,34 +10859,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f12_6_view_picker_follows_the_view_and_clears_a_manual_override() {
+    fn f20_2_view_picker_only_focuses_an_existing_object_tab() {
         let mut app = AppState::test_new();
         app.dock_collapsed = true;
 
         app.set_sidebar_group_mode(SidebarGroupMode::LinearTeam);
-        assert!(!app.dock_collapsed);
-        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Linear));
-        assert!(!app.dock_surface_override);
+        assert!(app.dock_collapsed);
+        assert_eq!(app.dock_tab, None);
 
         app.open_dock_surface(crate::app::DockSurface::Files);
         assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Files));
-        assert!(app.dock_surface_override);
 
         app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
-        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Pr));
-        assert!(!app.dock_surface_override);
-
-        app.open_dock_surface(crate::app::DockSurface::Diff);
-        app.set_sidebar_group_mode(SidebarGroupMode::Repo);
-        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Diff));
-        assert!(!app.dock_surface_override);
+        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Files));
     }
 
     #[test]
-    fn per_view_filter_defaults_match_f12() {
+    fn per_view_filter_defaults_match_f20() {
         let filters = crate::app::state::SidebarWorkFilter::default();
         assert_eq!(filters.team.as_deref(), Some("SCA"));
         assert_eq!(filters.assignee.as_deref(), Some("me"));
+        assert_eq!(
+            filters.linear_ownership,
+            crate::app::state::WorkOwnershipFilter::Both
+        );
         assert_eq!(filters.linear_statuses.len(), 8);
         assert!(!filters
             .linear_statuses
@@ -10791,6 +10891,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .linear_statuses
             .contains(&crate::app::state::LinearStatusFilter::Duplicate));
         assert_eq!(filters.github.assignee.as_deref(), Some("me"));
+        assert_eq!(
+            filters.github.ownership,
+            crate::app::state::WorkOwnershipFilter::Both
+        );
         assert!(!filters.github.show_drafts);
         assert_eq!(
             filters.github.state,
@@ -10827,6 +10931,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(app
             .sidebar_work_filter
             .matches_github(&github, &app.work_index_session));
+        github.assignees.clear();
+        github.author = Some("matthias-scale".into());
+        assert!(app
+            .sidebar_work_filter
+            .matches_github(&github, &app.work_index_session));
+        app.sidebar_work_filter.github.ownership = crate::app::state::WorkOwnershipFilter::Assigned;
+        assert!(!app
+            .sidebar_work_filter
+            .matches_github(&github, &app.work_index_session));
+        app.sidebar_work_filter.github.ownership = crate::app::state::WorkOwnershipFilter::Authored;
+        assert!(app
+            .sidebar_work_filter
+            .matches_github(&github, &app.work_index_session));
+        app.sidebar_work_filter.github.ownership = crate::app::state::WorkOwnershipFilter::Both;
         github.draft = true;
         assert!(!app
             .sidebar_work_filter
@@ -11134,7 +11252,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn missive_no_pane_headers_use_one_capped_projection() {
+    fn f20_missive_unassigned_headers_use_one_capped_projection() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -11163,7 +11281,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         });
 
         let rows = sidebar_rows(&app);
-        assert!(!rows.iter().any(|row| {
+        assert!(rows.iter().any(|row| {
             matches!(
                 row,
                 SidebarRow::SectionHeader {
@@ -11385,7 +11503,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
-                        ["#159 · pricing", "#160 · session fallback", "unlinked"]
+                        [
+                            "#159 · pricing",
+                            "#160 · session fallback",
+                            "unlinked",
+                            "no open PRs for me · author or assignee",
+                        ]
                     )
                 }
                 SidebarGroupMode::RepoWorktree => assert_eq!(
@@ -11397,9 +11520,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         "unlinked",
                     ]
                 ),
-                SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
-                    assert_eq!(nested, ["unlinked"])
-                }
+                SidebarGroupMode::LinearTeam => assert_eq!(
+                    nested,
+                    ["unlinked", "no active tickets for me · creator or assignee"]
+                ),
+                SidebarGroupMode::Missive => assert_eq!(
+                    nested,
+                    ["unlinked", "no open conversations for me · assignee"]
+                ),
             }
         }
         assert!(tab_sets.windows(2).all(|pair| pair[0] == pair[1]));
@@ -13179,7 +13307,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .map(|row| row_text(terminal.backend().buffer(), row, area.width))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("no matching agents"), "{rendered}");
+        assert!(
+            rendered.contains("no open conversations for anyone"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("Spaces (0)agents"), "{rendered}");
     }
 
