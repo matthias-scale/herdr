@@ -2915,7 +2915,9 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
         SidebarGroupMode::LinearTeam | SidebarGroupMode::RepoPr | SidebarGroupMode::Missive => {
             NO_AGENT_YET_SECTION_TITLE
         }
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => UNASSIGNED_SECTION_TITLE,
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            UNASSIGNED_SECTION_TITLE
+        }
     };
     let collapsed = section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
@@ -3001,7 +3003,9 @@ pub(crate) fn sidebar_unassigned_dock_object(
             crate::app::DockSurface::Missive,
             object.activation.object_link,
         ),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => return None,
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            return None
+        }
     };
     Some(crate::app::state::DockObjectRef { surface, key })
 }
@@ -3063,7 +3067,9 @@ fn unassigned_empty_text(app: &AppState) -> String {
                     .unwrap_or("anyone")
             ),
         ),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => return String::new(),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            return String::new()
+        }
     };
     app.work_index_snapshot
         .as_ref()
@@ -3211,7 +3217,9 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
             ));
             options
         }
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => Vec::new(),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            Vec::new()
+        }
     }
 }
 
@@ -13306,10 +13314,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // members, and the ungrouped Space beside it.
         let repo = workspace_list_entries_for_mode(&app, false, SidebarGroupMode::Repo);
         assert!(
-            repo.iter().any(|entry| matches!(
-                entry,
-                WorkspaceListEntry::Workspace { indented: true, .. }
-            )),
+            repo.iter()
+                .any(|entry| matches!(entry, WorkspaceListEntry::Workspace { indented: true, .. })),
             "{repo:?}"
         );
 
@@ -13318,7 +13324,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spaces
                 .iter()
                 .filter_map(|entry| match entry {
-                    WorkspaceListEntry::Workspace { ws_idx, indented } => Some((*ws_idx, *indented)),
+                    WorkspaceListEntry::Workspace { ws_idx, indented } =>
+                        Some((*ws_idx, *indented)),
                     WorkspaceListEntry::NestedHeader { .. } => None,
                 })
                 .collect::<Vec<_>>(),
