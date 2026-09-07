@@ -36,7 +36,7 @@ fn pr_number(pr_url: &str) -> Option<u64> {
 pub(crate) fn focused_pr_key(app: &AppState) -> Option<WorkItemKey> {
     let (context, _) = super::chooser::focused_availability(app);
     let url = app
-        .active_dock_object(crate::app::DockSurface::Pr)
+        .presented_dock_object(crate::app::DockSurface::Pr)
         .map(|object| object.key.as_str())
         .or_else(|| primary_pr_url(&context))?;
     let item = app.work_index_snapshot.as_ref().and_then(|snapshot| {

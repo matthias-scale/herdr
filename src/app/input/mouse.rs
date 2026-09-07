@@ -118,6 +118,7 @@ impl AppState {
             || self.symphony_detail.is_some()
             || self.inbox.is_some()
             || self.work_view.is_some()
+            || self.dock_object_preview.is_some()
         {
             return;
         }
@@ -739,6 +740,36 @@ impl AppState {
             return None;
         }
 
+        if self.dock_object_preview.is_some()
+            && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
+        {
+            let delta = match mouse.kind {
+                MouseEventKind::ScrollUp => Some(-3_i16),
+                MouseEventKind::ScrollDown => Some(3_i16),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                let key = match self
+                    .dock_object_preview
+                    .as_ref()
+                    .map(|object| object.surface)
+                {
+                    Some(crate::app::DockSurface::Pr) => crate::ui::dock::pr::focused_pr_key(self),
+                    Some(crate::app::DockSurface::Linear) => {
+                        crate::ui::dock::linear::focused_ticket_key(self)
+                    }
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    let view = self.dock_object_views.entry(key).or_default();
+                    view.scroll = view.scroll.saturating_add_signed(delta);
+                } else {
+                    self.dock_scroll = self.dock_scroll.saturating_add_signed(delta);
+                }
+            }
+            return None;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
@@ -1333,7 +1364,15 @@ impl AppState {
                         return None;
                     }
                     if let Some(key) = crate::ui::sidebar_dim_header_at(self, mouse.row) {
-                        self.sidebar_selected_work_group = Some(key);
+                        if key.starts_with("repo:") {
+                            self.sidebar_selected_work_group = Some(key);
+                        } else {
+                            self.sidebar_selected_work_group = None;
+                            if !self.open_sidebar_unassigned_object(&key) {
+                                self.config_diagnostic =
+                                    Some("unassigned object is no longer available".to_string());
+                            }
+                        }
                         return None;
                     }
                     if let Some(index) = crate::ui::sidebar_symphony_job_at(self, mouse.row) {

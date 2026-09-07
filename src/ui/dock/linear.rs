@@ -11,7 +11,7 @@ use crate::ui::work_list_detail::TicketItem;
 pub(crate) fn focused_ticket_key(app: &AppState) -> Option<WorkItemKey> {
     let (context, _) = super::chooser::focused_availability(app);
     let ticket_id = app
-        .active_dock_object(crate::app::DockSurface::Linear)
+        .presented_dock_object(crate::app::DockSurface::Linear)
         .map(|object| object.key.as_str())
         .or_else(|| context.primary_ticket())?;
     Some(WorkItemKey {

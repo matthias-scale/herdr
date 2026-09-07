@@ -228,6 +228,14 @@ impl App {
         if self.handle_dock_diff_key(&key) {
             return None;
         }
+        if key_event.code == KeyCode::Esc
+            && key_event.modifiers.is_empty()
+            && self.state.dock_object_preview.take().is_some()
+        {
+            self.state.dock_pr_focused = false;
+            self.state.dock_linear_focused = false;
+            return None;
+        }
         if self.handle_dock_linear_key(&key) {
             return None;
         }
@@ -235,6 +243,9 @@ impl App {
             return None;
         }
         if self.handle_dock_chooser_key(&key) {
+            return None;
+        }
+        if self.state.dock_object_preview.is_some() {
             return None;
         }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
@@ -954,6 +965,9 @@ impl App {
         self.state.home = Some(home);
         self.state.inbox = None;
         let dispatch = self.dispatch_home_plan(plan);
+        if dispatch.is_ok() {
+            self.state.dock_object_preview = None;
+        }
         self.finish_home_dispatch(dispatch);
     }
 
@@ -3181,9 +3195,16 @@ impl App {
 
     /// Keys of the dock-hosted PR view, backed by the shared action table.
     fn handle_dock_pr_key(&mut self, key: &TerminalKey) -> bool {
+        let previewed = self.state.dock_collapsed
+            && self
+                .state
+                .dock_object_preview
+                .as_ref()
+                .is_some_and(|object| object.surface == crate::app::DockSurface::Pr);
+        let dock_hosted =
+            !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
         if self.state.mode != Mode::Terminal
-            || self.state.dock_collapsed
-            || self.state.dock_tab != Some(crate::app::DockSurface::Pr)
+            || !(previewed || dock_hosted)
             || !self.state.dock_pr_focused
         {
             return false;
@@ -3357,7 +3378,12 @@ impl App {
         match event.code {
             KeyCode::Tab => {
                 if let Some(object_key) = focused_key {
-                    let narrow = self.state.view.dock_body_rect.width < 60;
+                    let host_width = if previewed {
+                        self.state.view.terminal_area.width
+                    } else {
+                        self.state.view.dock_body_rect.width
+                    };
+                    let narrow = host_width < 60;
                     let view = self.state.dock_object_views.entry(object_key).or_default();
                     if narrow {
                         view.scroll = 0;
@@ -3447,9 +3473,16 @@ impl App {
     }
 
     fn handle_dock_linear_key(&mut self, key: &TerminalKey) -> bool {
+        let previewed = self.state.dock_collapsed
+            && self
+                .state
+                .dock_object_preview
+                .as_ref()
+                .is_some_and(|object| object.surface == crate::app::DockSurface::Linear);
+        let dock_hosted = !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Linear);
         if self.state.mode != Mode::Terminal
-            || self.state.dock_collapsed
-            || self.state.dock_tab != Some(crate::app::DockSurface::Linear)
+            || !(previewed || dock_hosted)
             || !self.state.dock_linear_focused
         {
             return false;
@@ -3823,7 +3856,10 @@ impl App {
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
-        if text.is_empty() || self.state.symphony_detail.is_some() || self.state.work_view.is_some()
+        if text.is_empty()
+            || self.state.symphony_detail.is_some()
+            || self.state.work_view.is_some()
+            || self.state.dock_object_preview.is_some()
         {
             return;
         }
@@ -3869,7 +3905,10 @@ impl App {
     }
 
     pub(super) async fn handle_text_commit(&mut self, text: String) {
-        if text.is_empty() || self.state.symphony_detail.is_some() || self.state.work_view.is_some()
+        if text.is_empty()
+            || self.state.symphony_detail.is_some()
+            || self.state.work_view.is_some()
+            || self.state.dock_object_preview.is_some()
         {
             return;
         }
@@ -3918,7 +3957,10 @@ impl App {
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
-        if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
+        if self.state.symphony_detail.is_some()
+            || self.state.work_view.is_some()
+            || self.state.dock_object_preview.is_some()
+        {
             return;
         }
         if self.state.home.is_some() {

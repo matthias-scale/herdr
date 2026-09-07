@@ -1529,6 +1529,9 @@ pub(crate) struct DockPresentationState {
     pub(crate) surface_menu: Option<DockSurfaceMenu>,
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
+    /// Object shown in the pane area while the dock is collapsed. This is
+    /// attach-local presentation state; opening a thread clears the preview.
+    pub(crate) object_preview: Option<DockObjectRef>,
     /// Rich PR/ticket view state keyed by stable object identity. This is
     /// attach-local TUI state and never enters the session protocol.
     pub(crate) object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
@@ -1595,6 +1598,7 @@ impl Default for DockPresentationState {
             surface_menu: None,
             chooser_focused: false,
             scroll: 0,
+            object_preview: None,
             object_views: std::collections::HashMap::new(),
             editor_focused: false,
             editor_preview: None,
@@ -3226,6 +3230,9 @@ pub struct AppState {
     /// Keyboard focus sits on the chooser card grid. TUI presentation state.
     pub(crate) dock_chooser_focused: bool,
     pub dock_scroll: u16,
+    /// Object preview hosted in the pane area while the dock is collapsed.
+    /// The indexed provider object remains shared work-index data.
+    pub(crate) dock_object_preview: Option<DockObjectRef>,
     /// Rich PR/ticket view state for dock hosts. The indexed object remains a
     /// shared runtime fact; tab, picker, and scroll are client presentation.
     pub(crate) dock_object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
@@ -4299,6 +4306,7 @@ impl AppState {
     }
 
     pub(crate) fn open_dock_object(&mut self, object: DockObjectRef, origin: DockTabOrigin) {
+        self.dock_object_preview = None;
         self.align_dock_tab_bindings();
         let existing = self.dock_tab_bindings.iter().position(|binding| {
             binding
@@ -4349,6 +4357,16 @@ impl AppState {
         let index = self.active_dock_tab_index()?;
         let binding = self.dock_tab_bindings.get(index)?.as_ref()?;
         (binding.object.surface == surface).then_some(&binding.object)
+    }
+
+    /// Object rendered by a dock-compatible host. A collapsed dock can lend
+    /// the same rich renderer to the pane area without creating a dock tab.
+    pub(crate) fn presented_dock_object(&self, surface: DockSurface) -> Option<&DockObjectRef> {
+        self.dock_collapsed
+            .then_some(self.dock_object_preview.as_ref())
+            .flatten()
+            .filter(|object| object.surface == surface)
+            .or_else(|| self.active_dock_object(surface))
     }
 
     pub(crate) fn active_dock_tab_index(&self) -> Option<usize> {
@@ -4720,6 +4738,7 @@ impl AppState {
         std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
+        std::mem::swap(&mut self.dock_object_preview, &mut other.object_preview);
         std::mem::swap(&mut self.dock_object_views, &mut other.object_views);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_editor_preview, &mut other.editor_preview);
@@ -5349,6 +5368,7 @@ impl AppState {
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_object_preview: None,
             dock_object_views: std::collections::HashMap::new(),
             dock_editor_focused: false,
             dock_diff_focused: false,
@@ -6661,6 +6681,10 @@ mod tests {
             ticket_id: Some("SCA-3165".into()),
         };
         let mut state = AppState::test_new();
+        state.dock_object_preview = Some(DockObjectRef {
+            surface: DockSurface::Linear,
+            key: "SCA-3165".into(),
+        });
         state.dock_object_views.insert(
             pr.clone(),
             ObjectViewState {
@@ -6684,7 +6708,15 @@ mod tests {
 
         let mut client = DockPresentationState::default();
         state.swap_dock_presentation(&mut client);
+        assert!(state.dock_object_preview.is_none());
         assert!(state.dock_object_views.is_empty());
+        assert_eq!(
+            client.object_preview,
+            Some(DockObjectRef {
+                surface: DockSurface::Linear,
+                key: "SCA-3165".into(),
+            })
+        );
         assert_eq!(client.object_views[&pr].tab, PrDetailTab::Files);
         assert_eq!(client.object_views[&ticket].scroll, 7);
     }

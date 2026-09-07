@@ -12,7 +12,7 @@ use crate::app::state::AppState;
 use crate::ui::work_list_detail::{ConversationItem, WorkItem as _};
 
 pub(crate) fn focused_conversation_url(app: &AppState) -> Option<String> {
-    if let Some(object) = app.active_dock_object(crate::app::DockSurface::Missive) {
+    if let Some(object) = app.presented_dock_object(crate::app::DockSurface::Missive) {
         return Some(object.key.clone());
     }
     let (context, _) = super::chooser::focused_availability(app);

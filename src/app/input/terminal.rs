@@ -568,35 +568,22 @@ mod tests {
     }
 
     #[test]
-    fn headless_enter_on_selected_missive_row_opens_prefilled_composer() {
+    fn headless_enter_on_selected_agentless_row_opens_object_preview() {
         let mut app = app_for_mouse_test();
-        let workspace = Workspace::test_new("missive");
-        let pane_id = workspace.tabs[0].root_pane;
-        let terminal_id = workspace.tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.state.workspaces = vec![workspace];
-        app.state.ensure_test_terminals();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("test terminal")
-            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
-                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/fix1".into()],
-                work_title: Some("restore Enter composer".into()),
-                ..Default::default()
-            });
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::Missive;
-        app.state.sidebar_selected_work_group =
-            Some("missive:https://mail.missiveapp.com/#inbox/conversations/fix1".into());
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::LinearTeam;
+        app.state.sidebar_selected_work_group = Some("linear:OPS-12".into());
 
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
 
-        let home = app.state.home.as_ref().expect("composer stays open");
-        assert_eq!(home.prompt, "fix1: restore Enter composer");
-        assert!(home.pending_dispatch.is_none());
+        assert!(app.state.home.is_none());
+        assert_eq!(
+            app.state.dock_object_preview,
+            Some(crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Linear,
+                key: "OPS-12".into(),
+            })
+        );
     }
 
     #[test]

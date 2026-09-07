@@ -7312,6 +7312,7 @@ esac
                 surface_menu: None,
                 chooser_focused: false,
                 scroll: 0,
+                object_preview: None,
                 object_views: std::collections::HashMap::new(),
                 editor_focused,
                 editor_preview: None,
