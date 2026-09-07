@@ -484,7 +484,8 @@ mod tests {
         )
         .expect("git head");
         std::fs::write(root.join("notes.txt"), "fixture").expect("file row");
-        root
+        // macOS: temp_dir() is /var/… while the browser canonicalizes to /private/var/….
+        crate::worktree::canonical_or_original(&root)
     }
 
     #[cfg(unix)]
