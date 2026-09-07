@@ -231,6 +231,14 @@ impl Tab {
                 .effective_display_agent()
                 .as_deref()
                 .is_some_and(same_text)
+            // The provider's own product name is not an identity the sidebar
+            // derives, so it survives the checks above and would otherwise
+            // become the row's name once the agent repaints its idle title.
+            || terminal.detected_agent.is_some_and(|agent| {
+                crate::detect::agent_product_titles(agent)
+                    .iter()
+                    .any(|product| same_text(product))
+            })
     }
 
     fn terminal_title_without_leading_agent(terminal: &TerminalState, title: &str) -> String {

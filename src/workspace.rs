@@ -2042,6 +2042,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_product_title_never_becomes_the_tab_name() {
+        let mut ws = Workspace::test_new("ignored");
+        let root_pane = ws.tabs[0].root_pane;
+        let terminal_id = ws.tabs[0].terminal_id(root_pane).unwrap().clone();
+        let mut terminal = TerminalState::new(terminal_id.clone(), PathBuf::from("/repo/herdr"));
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Working,
+        );
+
+        // A real title still names the tab.
+        terminal.set_terminal_title(Some("Escalation queue sweep".into()));
+        let mut terminals = HashMap::from([(terminal_id.clone(), terminal)]);
+        assert_eq!(
+            ws.tab_display_name_from(&terminals, 0).as_deref(),
+            Some("Escalation queue sweep")
+        );
+
+        // The provider's idle product title is not a name.
+        terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_terminal_title(Some("Claude Code".into()));
+        assert_ne!(
+            ws.tab_display_name_from(&terminals, 0).as_deref(),
+            Some("Claude Code")
+        );
+    }
+
+    #[test]
     fn workspace_identity_follows_first_tab_root_pane_cwd() {
         let mut ws = Workspace::test_new("ignored");
         ws.custom_name = None;
