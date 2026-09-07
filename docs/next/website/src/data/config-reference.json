@@ -1098,6 +1098,22 @@
       ]
     },
     {
+      "id": "linear",
+      "title": "Linear",
+      "keys": [
+        {
+          "key": "linear.default_layout",
+          "type": "enum",
+          "default": "\"list\"",
+          "description": "Initial layout for the full-screen Linear tickets view.",
+          "values": [
+            "list",
+            "board"
+          ]
+        }
+      ]
+    },
+    {
       "id": "notifications",
       "title": "Notifications",
       "keys": [
