@@ -6,16 +6,37 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::schema::{AgentInfo, AgentStatus};
+use crate::api::schema::AgentStatus;
 use crate::config::{MissiveConfig, WorkIndexConfig};
 use crate::work_context::{
     linear_ticket_url, normalize_repo_slug, normalize_ticket_id, repo_slug_from_pr_url,
-    repo_slugs_match, PaneWorkRole,
+    repo_slugs_match, PaneWorkContext, PaneWorkRole,
 };
 
 pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const WORK_ITEM_DETAIL_CACHE_CAPACITY: usize = 16;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkIndexPane {
+    pub(crate) work_context: PaneWorkContext,
+    pub(crate) name: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) display_agent: Option<String>,
+    pub(crate) agent_status: AgentStatus,
+    pub(crate) workspace_id: String,
+    pub(crate) tab_id: String,
+    pub(crate) pane_id: String,
+}
+
+impl WorkIndexPane {
+    pub(crate) fn has_indexable_context(&self) -> bool {
+        self.work_context.repo.is_some()
+            || !self.work_context.pr_urls.is_empty()
+            || !self.work_context.ticket_ids.is_empty()
+            || !self.work_context.missive_urls.is_empty()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkIndexRefreshInFlight {
@@ -938,7 +959,7 @@ fn fetch_missive_conversation_detail(
 
 fn fetch_missive_snapshot(
     config: &MissiveConfig,
-    panes: &[AgentInfo],
+    panes: &[WorkIndexPane],
     selected_conversation: Option<&str>,
     session_users: Option<&[MissiveUser]>,
     program: &Path,
@@ -1037,7 +1058,7 @@ fn fetch_missive_snapshot(
     Ok((conversations, users))
 }
 
-fn work_index_repos(config: &WorkIndexConfig, panes: &[AgentInfo]) -> Vec<String> {
+fn work_index_repos(config: &WorkIndexConfig, panes: &[WorkIndexPane]) -> Vec<String> {
     let mut repos: Vec<String> = Vec::new();
     let candidates = config
         .repos
@@ -1063,7 +1084,7 @@ fn work_index_repos(config: &WorkIndexConfig, panes: &[AgentInfo]) -> Vec<String
     repos
 }
 
-fn pane_pr_urls(panes: &[AgentInfo]) -> Vec<String> {
+fn pane_pr_urls(panes: &[WorkIndexPane]) -> Vec<String> {
     let mut urls = panes
         .iter()
         .flat_map(|pane| pane.work_context.pr_urls.iter().cloned())
@@ -1090,7 +1111,7 @@ fn upsert_github(pull_requests: &mut Vec<GithubPullRequest>, pull_request: Githu
     }
 }
 
-fn pane_ticket_ids(panes: &[AgentInfo]) -> Vec<String> {
+fn pane_ticket_ids(panes: &[WorkIndexPane]) -> Vec<String> {
     let mut ids = panes
         .iter()
         .flat_map(|pane| pane.work_context.ticket_ids.iter())
@@ -1149,7 +1170,10 @@ fn previous_linear(previous: Option<&Snapshot>) -> Vec<LinearTicket> {
     tickets
 }
 
-fn previous_missive(previous: Option<&Snapshot>, panes: &[AgentInfo]) -> Vec<MissiveConversation> {
+fn previous_missive(
+    previous: Option<&Snapshot>,
+    panes: &[WorkIndexPane],
+) -> Vec<MissiveConversation> {
     let pane_ids = panes
         .iter()
         .flat_map(|pane| pane.work_context.missive_urls.iter())
@@ -1191,7 +1215,7 @@ fn carry_cached_pr_details(items: &mut [WorkItem], previous: Option<&Snapshot>) 
 #[cfg(test)]
 pub(crate) fn refresh_work_index(
     config: &WorkIndexConfig,
-    panes: &[AgentInfo],
+    panes: &[WorkIndexPane],
     now: Instant,
     batch_deadline: Instant,
     target_timeout: Duration,
@@ -1223,7 +1247,7 @@ pub(crate) struct WorkIndexRefreshContext<'a> {
 pub(crate) fn refresh_work_index_with_missive(
     config: &WorkIndexConfig,
     missive: &MissiveConfig,
-    panes: &[AgentInfo],
+    panes: &[WorkIndexPane],
     context: WorkIndexRefreshContext<'_>,
     now: Instant,
     batch_deadline: Instant,
@@ -2838,7 +2862,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
+fn join_panes(items: &mut Vec<WorkItem>, panes: &[WorkIndexPane]) {
     for pane in panes {
         let pane_ticket_ids = pane
             .work_context
@@ -3099,7 +3123,7 @@ impl crate::app::App {
             view.refreshing = true;
         }
         let config = self.work_index_config.clone();
-        let panes = self.collect_agent_infos();
+        let panes = self.collect_work_index_panes();
         let mut session_config = config.clone();
         session_config.repos = work_index_repos(&config, &panes);
         let selected_missive = self
@@ -3901,37 +3925,16 @@ esac
         }
     }
 
-    fn panes_with_context(context: crate::work_context::PaneWorkContext) -> Vec<AgentInfo> {
-        vec![AgentInfo {
-            terminal_id: "terminal".into(),
+    fn panes_with_context(context: crate::work_context::PaneWorkContext) -> Vec<WorkIndexPane> {
+        vec![WorkIndexPane {
             work_context: context,
             name: Some("fixture".into()),
             agent: Some("codex".into()),
-            title: None,
-            terminal_title: None,
-            terminal_title_stripped: None,
             display_agent: Some("cx".into()),
             agent_status: AgentStatus::Idle,
-            wait: None,
-            eta_s: None,
-            reported_at: None,
-            screen_detection_skipped: false,
-            state_labels: HashMap::new(),
-            tokens: HashMap::new(),
-            gates: Vec::new(),
-            items: Vec::new(),
-            decisions: Vec::new(),
-            agent_session: None,
             workspace_id: "workspace".into(),
             tab_id: "tab".into(),
             pane_id: "pane".into(),
-            focused: true,
-            launch_pending: false,
-            interactive_ready: true,
-            state_change_seq: 0,
-            cwd: None,
-            foreground_cwd: None,
-            revision: 0,
         }]
     }
 
@@ -3945,6 +3948,70 @@ esac
         write_executable(&gh_path, gh);
         write_executable(&linearis_path, linearis);
         (gh_path, linearis_path)
+    }
+
+    #[test]
+    fn shell_pane_declared_pull_request_enters_the_snapshot() {
+        let dir = fixture_dir("shell-pane-pr");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 159 --repo owner/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":159,"title":"Shell pane PR","state":"OPEN","headRefName":"t3/f16","url":"https://github.com/owner/repo/pull/159"}}' ;;
+  *"pr list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#
+            ),
+            "#!/bin/sh\nexit 42\n",
+        );
+        let mut app = test_app_with_work_index();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("shell")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("shell terminal")
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("shell terminal state");
+        assert!(!terminal.is_agent_terminal());
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/owner/repo/pull/159".into()]),
+                ..Default::default()
+            })
+            .expect("shell work context");
+        assert!(app.collect_agent_infos().is_empty());
+
+        let panes = app.collect_work_index_panes();
+        assert_eq!(panes.len(), 1);
+        let mut config = config();
+        config.repos.clear();
+        config.linear_team = None;
+        let snapshot = refresh_work_index(
+            &config,
+            &panes,
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        let pull_request = snapshot
+            .items
+            .iter()
+            .find(|item| item.pr_number == Some(159))
+            .expect("shell pane pull request");
+        assert_eq!(pull_request.pr_title.as_deref(), Some("Shell pane PR"));
+        assert!(pull_request.source.github && pull_request.source.pane);
+        assert_eq!(pull_request.panes[0].pane_id, panes[0].pane_id);
     }
 
     #[test]
