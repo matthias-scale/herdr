@@ -185,6 +185,19 @@ const CODEX_ACCESS_OPTIONS: &[HomeAccess] = &[
     HomeAccess::CodexFull,
 ];
 
+/// Access mode a provider starts on before the operator picks one.
+///
+/// Claude opens on `bypass`: every agent this fork dispatches from a ticket or
+/// the composer is meant to run unattended, and the default permission mode
+/// stops on the first tool prompt with nobody watching the pane. Other
+/// providers keep the first (most restricted) option.
+pub(crate) fn default_access(agent: Agent) -> Option<HomeAccess> {
+    match agent {
+        Agent::Claude => Some(HomeAccess::ClaudeBypass),
+        _ => access_options(agent).first().copied(),
+    }
+}
+
 pub(crate) fn access_options(agent: Agent) -> &'static [HomeAccess] {
     match agent {
         Agent::Claude => CLAUDE_ACCESS_OPTIONS,
@@ -800,7 +813,7 @@ impl Default for HomeState {
             agent: Agent::Claude,
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
-            access: Some(HomeAccess::ClaudeDefault),
+            access: default_access(Agent::Claude),
             context_window: None,
             directory: default_directory(),
             workspace: HomeWorkspace::CurrentCheckout,
@@ -1075,7 +1088,7 @@ impl HomeState {
             .as_ref()
             .and_then(|choice| choice.access)
             .filter(|access| options.contains(access))
-            .or_else(|| options.first().copied());
+            .or_else(|| default_access(agent));
         self.context_window = saved.and_then(|choice| choice.context_window);
         self.reconcile_context_window();
         self.remember_current_choice();
@@ -2533,8 +2546,7 @@ mod tests {
             plan.argv,
             vec![
                 "claude",
-                "--permission-mode",
-                "default",
+                "--dangerously-skip-permissions",
                 "implement the retry cap"
             ]
         );
@@ -2756,8 +2768,7 @@ mod tests {
                 "claude-fable-5-1",
                 "--effort",
                 "high",
-                "--permission-mode",
-                "default",
+                "--dangerously-skip-permissions",
                 "implement the retry cap",
             ]
         );
@@ -2778,6 +2789,21 @@ mod tests {
                 "implement the retry cap",
             ]
         );
+    }
+
+    #[test]
+    fn claude_dispatches_on_bypass_by_default() {
+        let home = HomeState::default();
+        assert_eq!(home.agent, Agent::Claude);
+        assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
+
+        // Switching providers and back keeps the provider default rather than
+        // falling to the first, most restricted option.
+        let mut home = HomeState::default();
+        home.set_agent(Agent::Codex);
+        assert_eq!(home.access, Some(HomeAccess::CodexReadOnly));
+        home.set_agent(Agent::Claude);
+        assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
     }
 
     #[test]
@@ -2897,8 +2923,7 @@ mod tests {
                 "claude",
                 "--model",
                 "claude-opus-5[1m]",
-                "--permission-mode",
-                "default",
+                "--dangerously-skip-permissions",
                 "use the larger window",
             ]
         );
@@ -2922,8 +2947,7 @@ mod tests {
                 "claude-sonnet-5",
                 "--context-window",
                 "1m",
-                "--permission-mode",
-                "default",
+                "--dangerously-skip-permissions",
                 "use the larger window",
             ]
         );
