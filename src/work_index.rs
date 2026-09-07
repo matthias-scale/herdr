@@ -383,6 +383,8 @@ pub(crate) struct MissiveConversation {
     pub(crate) last_activity_at: Option<SystemTime>,
     pub(crate) closed: bool,
     #[serde(default)]
+    pub(crate) labels: Vec<String>,
+    #[serde(default)]
     pub(crate) pane_bound: bool,
     #[serde(default)]
     pub(crate) messages: Vec<MissiveEntry>,
@@ -881,6 +883,15 @@ fn parse_missive_conversation_for_user(
                     .is_some_and(|closed| !closed.is_null())
             })
             || closed_for_user,
+        labels: value_array(value.get("labels").unwrap_or(&Value::Null), "labels")
+            .iter()
+            .filter_map(|label| {
+                label
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value_text(label.get("name")))
+            })
+            .collect(),
         pane_bound: false,
         id,
         app_url,
@@ -3310,6 +3321,7 @@ impl crate::app::App {
         self.invalidate_work_item_details();
         self.state.work_item_detail_cache =
             WorkItemDetailCache::from_snapshot(self.work_index_snapshot.as_ref());
+        self.finish_sidebar_refresh_if_idle();
         true
     }
 
@@ -3690,6 +3702,7 @@ mod tests {
         let parsed = parse_missive_conversations_for_user(&conversations, Some("user-1"));
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].subject, "Billing question from fixture");
+        assert_eq!(parsed[0].labels, ["billing", "customer"]);
         assert_eq!(parsed[0].assignees[0].name, "Ada Example");
         assert!(!parsed[0].assignees[0].is_me);
         assert_eq!(
@@ -3870,6 +3883,7 @@ esac
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,
+                labels: Vec::new(),
                 pane_bound: true,
                 messages: Vec::new(),
                 notes: Vec::new(),
@@ -5556,6 +5570,7 @@ esac
             assignees: Vec::new(),
             last_activity_at: None,
             closed: false,
+            labels: Vec::new(),
             pane_bound: true,
             messages: Vec::new(),
             notes: Vec::new(),

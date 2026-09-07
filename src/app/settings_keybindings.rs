@@ -198,6 +198,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("sidebar_cycle_group_mode", "cycle sidebar grouping", |kb| {
                 &kb.sidebar_cycle_group_mode
             }),
+            built_in("sidebar_refresh", "sidebar.refresh", |kb| {
+                &kb.sidebar_refresh
+            }),
             built_in("toggle_blocked_filter", "toggle blocked filter", |kb| {
                 &kb.toggle_blocked_filter
             }),

@@ -1367,6 +1367,19 @@ impl crate::app::state::AppState {
         self.reset_home_ref_context(false);
     }
 
+    /// Open the existing Add project modal from the sidebar header.
+    pub(crate) fn open_add_project_from_sidebar(&mut self) {
+        let start = self.home_browse_start_directory();
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
+        home.picker = None;
+        home.browse = None;
+        home.directory_filter.set_query("");
+        home.add_project = Some(AddProjectState::starting_at(&start));
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
+    }
+
     pub(crate) fn clear_home(&mut self) {
         if let Some(home) = self.home.take() {
             self.home_agent_choices = home.saved_agent_choices();

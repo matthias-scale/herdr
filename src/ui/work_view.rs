@@ -1360,6 +1360,7 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            labels: Vec::new(),
             pane_bound: false,
             messages: (0..message_count)
                 .map(|index| crate::work_index::MissiveEntry {
@@ -1759,6 +1760,7 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            labels: Vec::new(),
             pane_bound: false,
             messages: vec![crate::work_index::MissiveEntry {
                 id: "message".into(),

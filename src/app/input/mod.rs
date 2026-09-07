@@ -162,6 +162,12 @@ impl App {
             return None;
         }
         let key_event = key.as_key_event();
+        if self.state.handle_sidebar_new_thread_key(key_event) {
+            return None;
+        }
+        if self.state.handle_sidebar_search_key(key_event) {
+            return None;
+        }
         if self.state.sidebar_settled_menu_target.is_some()
             && self.handle_sidebar_settled_key(key_event)
         {
@@ -2826,6 +2832,15 @@ impl App {
                 self.toggle_missive_view();
                 return;
             }
+            let refresh = self.state.view.sidebar_footer_refresh_hit_area;
+            if mouse.column >= refresh.x
+                && mouse.column < refresh.right()
+                && mouse.row >= refresh.y
+                && mouse.row < refresh.bottom()
+            {
+                self.request_sidebar_refresh();
+                return;
+            }
 
             if let Some(copy_value) = self
                 .state
@@ -5268,6 +5283,7 @@ navigate_workspace_down = "ctrl+j"
             assignees: Vec::new(),
             last_activity_at: Some(std::time::SystemTime::UNIX_EPOCH),
             closed: false,
+            labels: Vec::new(),
             pane_bound: false,
             messages: Vec::new(),
             notes: Vec::new(),

@@ -474,6 +474,10 @@ impl App {
                 self.state.cycle_sidebar_group_mode();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::RefreshSidebar => {
+                self.request_sidebar_refresh();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::ToggleStatusDetail => {
                 self.state.status_bar_expanded = !self.state.status_bar_expanded;
                 leave_navigate_mode(&mut self.state);
@@ -1897,6 +1901,7 @@ pub(crate) enum NavigateAction {
     EnterResizeMode,
     ToggleSidebar,
     CycleSidebarGroupMode,
+    RefreshSidebar,
     ToggleStatusDetail,
     ToggleDock,
     PreviousDockTab,
@@ -2130,6 +2135,7 @@ fn non_indexed_action_for_key(
             &kb.sidebar_cycle_group_mode,
             NavigateAction::CycleSidebarGroupMode,
         ),
+        (&kb.sidebar_refresh, NavigateAction::RefreshSidebar),
         (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
@@ -2470,6 +2476,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::CycleSidebarGroupMode => {
             state.cycle_sidebar_group_mode();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::RefreshSidebar => {
+            state.request_sidebar_refresh();
             leave_navigate_mode(state);
         }
         NavigateAction::ToggleStatusDetail => {
@@ -3109,6 +3119,24 @@ mod tests {
             state.take_sidebar_group_mode_persistence_request(),
             Some(crate::app::state::SidebarGroupMode::LinearTeam)
         );
+    }
+
+    #[test]
+    fn sidebar_refresh_binding_dispatches_and_sets_the_request() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.sidebar_refresh = crate::config::ActionKeybinds::prefix("u");
+
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('u'), KeyModifiers::empty()),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::RefreshSidebar)
+        );
+        execute_navigate_action(&mut state, NavigateAction::RefreshSidebar);
+        assert!(state.sidebar_refreshing);
+        assert!(state.sidebar_refresh_requested);
     }
 
     #[test]

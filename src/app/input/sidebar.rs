@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::app::state::{AppState, ViewLayout};
@@ -22,6 +22,105 @@ pub(crate) enum SidebarWorkGroupKeyAction {
 }
 
 impl AppState {
+    pub(crate) fn open_sidebar_new_thread(&mut self) {
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_object_menu = None;
+        self.sidebar_search_active = false;
+        self.sidebar_new_thread = Some(Default::default());
+    }
+
+    pub(crate) fn sidebar_new_thread_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_new_thread_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn accept_sidebar_new_thread(&mut self, position: usize) -> bool {
+        let Some((path_index, _)) = crate::ui::sidebar_new_thread_matches(self)
+            .get(position)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(directory) = self.home_directory_options().get(path_index).cloned() else {
+            return false;
+        };
+        self.sidebar_new_thread = None;
+        self.open_home_composer_in_directory(directory, self.default_home_workspace());
+        true
+    }
+
+    pub(crate) fn handle_sidebar_new_thread_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut picker) = self.sidebar_new_thread.take() else {
+            return false;
+        };
+        let match_count = {
+            self.sidebar_new_thread = Some(picker.clone());
+            let count = crate::ui::sidebar_new_thread_matches(self).len();
+            self.sidebar_new_thread = None;
+            count
+        };
+        match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Up => picker.filter.move_selection(-1, match_count),
+            KeyCode::Down => picker.filter.move_selection(1, match_count),
+            KeyCode::Backspace => picker.filter.pop(),
+            KeyCode::Enter => {
+                let selected = picker.filter.selected;
+                self.sidebar_new_thread = Some(picker);
+                self.accept_sidebar_new_thread(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() && ('1'..='9').contains(&character) =>
+            {
+                let selected = character.to_digit(10).unwrap_or(1) as usize - 1;
+                self.sidebar_new_thread = Some(picker);
+                self.accept_sidebar_new_thread(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                picker.filter.push(character);
+            }
+            _ => {}
+        }
+        self.sidebar_new_thread = Some(picker);
+        true
+    }
+
+    pub(crate) fn handle_sidebar_search_key(&mut self, key: KeyEvent) -> bool {
+        if !self.sidebar_search_active {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => self.sidebar_search_active = false,
+            KeyCode::Backspace => {
+                let mut filter = self.sidebar_work_filter.clone();
+                filter.query.pop();
+                self.set_sidebar_work_filter(filter);
+                self.sidebar_search_active = true;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut filter = self.sidebar_work_filter.clone();
+                filter.query.clear();
+                self.set_sidebar_work_filter(filter);
+                self.sidebar_search_active = true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                let mut filter = self.sidebar_work_filter.clone();
+                filter.query.push(character);
+                self.set_sidebar_work_filter(filter);
+                self.sidebar_search_active = true;
+            }
+            _ => {}
+        }
+        true
+    }
+
     pub(crate) fn open_sidebar_object_menu(&mut self, target: String) {
         if self.dock_pending_write.is_some() {
             return;
@@ -1278,6 +1377,7 @@ mod tests {
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,
+                labels: Vec::new(),
                 pane_bound: false,
                 messages: Vec::new(),
                 notes: Vec::new(),
