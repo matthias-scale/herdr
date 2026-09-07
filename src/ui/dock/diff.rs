@@ -12,6 +12,16 @@ use crate::app::state::{AppState, DiffCacheEntry};
 const WHITESPACE_TOGGLE_WIDTH: u16 = 8;
 
 pub(crate) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
+    render_diff_with_state(app, frame, area, app.dock_scroll, app.dock_diff_focused);
+}
+
+pub(crate) fn render_diff_with_state(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    scroll: u16,
+    focused: bool,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -57,7 +67,7 @@ pub(crate) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
         } else {
             format!("+{} −{}", file.additions, file.deletions)
         };
-        let style = if index == app.dock_diff_selected && app.dock_diff_focused {
+        let style = if index == app.dock_diff_selected && focused {
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0)
@@ -106,7 +116,7 @@ pub(crate) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.overlay1),
         )));
     }
-    frame.render_widget(Paragraph::new(lines).scroll((app.dock_scroll, 0)), area);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
     frame.render_widget(
         Paragraph::new(whitespace)
             .alignment(Alignment::Right)

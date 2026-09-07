@@ -73,6 +73,7 @@ const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(500);
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
+pub(crate) const HOVER_TOOLTIP_DELAY: Duration = Duration::from_millis(400);
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -777,6 +778,7 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,
@@ -797,7 +799,9 @@ impl App {
             symphony_detail: None,
             work_view: None,
             linear_default_layout: config.linear.default_layout.into(),
-            sidebar_footer_hover: None,
+            hovered_control: None,
+            hover_started_at: None,
+            hover_tooltip_visible: false,
             usage_view: None,
             usage_snapshot: if cfg!(test) {
                 None
@@ -976,6 +980,8 @@ impl App {
                 dock_file_row_hit_areas: Vec::new(),
                 dock_files_refresh_rect: Rect::default(),
                 dock_files_sort_rect: Rect::default(),
+                editor_preview_refresh_rect: Rect::default(),
+                editor_preview_open_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
@@ -1012,7 +1018,6 @@ impl App {
             dock_open_surfaces: dock_default_surfaces.clone(),
             dock_tab_bindings: vec![None; dock_default_surfaces.len()],
             dock_active_tab_index: (!dock_default_surfaces.is_empty()).then_some(0),
-            dock_hovered_tab_index: None,
             dock_pane_tabs: std::collections::HashMap::new(),
             dock_followed_pane: None,
             dock_context_objects: Vec::new(),
@@ -1021,6 +1026,7 @@ impl App {
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_object_views: std::collections::HashMap::new(),
             dock_editor_focused: false,
             dock_diff_focused: false,
             dock_pr_focused: false,
@@ -1039,6 +1045,7 @@ impl App {
             dock_files_collapsed: std::collections::HashSet::new(),
             dock_files_sort: crate::files::FileSort::Name,
             dock_files_search_active: false,
+            dock_files_last_click: None,
             dock_agents_focused: false,
             dock_agents_selection: None,
             dock_linear_focused: false,
@@ -1050,6 +1057,7 @@ impl App {
             dock_files_cwd: None,
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
             files_icons: config.files.icons,
+            nerd_font: config.ui.nerd_font,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -1080,6 +1088,7 @@ impl App {
                 .as_deref()
                 .is_some_and(|team| !team.trim().is_empty()),
             dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_preview: None,
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
@@ -2434,6 +2443,9 @@ impl App {
         if !invalid_section("files") {
             self.state.files_icons = config.files.icons;
         }
+        if !invalid_section("ui") {
+            self.state.nerd_font = config.ui.nerd_font;
+        }
 
         if !invalid_section("usage") {
             self.state.usage_pricing = config.usage.clone();
@@ -2657,6 +2669,7 @@ impl App {
             let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
+                    self.state.clear_hovered_control();
                     let lease_key = input::InputLeaseKey::new(source_id, &key);
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
@@ -2748,6 +2761,7 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Text(text) => {
+                    self.state.clear_hovered_control();
                     self.handle_text_commit_headless(text.as_str());
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
@@ -2765,6 +2779,7 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
+                    self.state.clear_hovered_control();
                     if self.state.symphony_detail.is_some()
                         || self.state.work_view.is_some()
                         || self.try_route_paste_to_popup(&text)

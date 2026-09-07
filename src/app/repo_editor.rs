@@ -154,7 +154,15 @@ impl App {
     }
 
     pub(crate) fn open_repo_editor(&mut self) {
-        let Some(argv) = self.state.repo_editor_argv.clone() else {
+        self.open_repo_editor_target(None);
+    }
+
+    pub(crate) fn open_repo_editor_file(&mut self, path: PathBuf) {
+        self.open_repo_editor_target(Some(path));
+    }
+
+    fn open_repo_editor_target(&mut self, path: Option<PathBuf>) {
+        let Some(mut argv) = self.state.repo_editor_argv.clone() else {
             self.show_work_link_notice("no Vim-family editor found on PATH");
             return;
         };
@@ -167,7 +175,24 @@ impl App {
         };
         if let Some(sibling) = self.state.right_repo_editor_sibling(&root) {
             self.focus_pane_internal_via_api(ws_idx, sibling);
+            if let Some(path) = path.as_deref() {
+                let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                    &self.terminal_runtimes,
+                    ws_idx,
+                    sibling,
+                ) else {
+                    return;
+                };
+                let escaped = vim_fnameescape(&path.to_string_lossy());
+                runtime.send_bytes_after(
+                    Bytes::from(format!("\x1b:e {escaped}\r")),
+                    EDITOR_SEND_DELAY,
+                );
+            }
             return;
+        }
+        if let Some(path) = path.as_ref() {
+            argv.push(path.to_string_lossy().into_owned());
         }
 
         let before = self
@@ -213,6 +238,18 @@ impl App {
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         runtime.send_bytes_after(Bytes::from(bytes), EDITOR_SEND_DELAY);
     }
+}
+
+pub(crate) fn vim_fnameescape(path: &str) -> String {
+    path.chars()
+        .flat_map(|character| {
+            if matches!(character, ' ' | '\\' | '|' | '%' | '#') {
+                vec!['\\', character]
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -315,8 +352,8 @@ mod tests {
         assert_eq!(app.right_repo_editor_sibling(Path::new("/repo")), None);
     }
 
-    #[test]
-    fn opening_repo_editor_focuses_a_matching_right_sibling_without_splitting() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn opening_a_file_reuses_the_matching_editor_and_sends_the_path() {
         let mut app = App::new(
             &crate::config::Config::default(),
             true,
@@ -353,12 +390,21 @@ mod tests {
             .expect("state");
         terminal.cwd = "/repo".into();
         terminal.set_foreground_process(Some("vim".into()), true, std::time::Instant::now());
+        let (runtime, mut editor_input) =
+            crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes
+            .insert(sibling_terminal.clone(), runtime);
         app.state.workspaces[0].tabs[0].layout.focus_pane(root_pane);
         app.state.repo_editor_argv = Some(vec!["nvim".into()]);
 
-        app.open_repo_editor();
+        app.open_repo_editor_file(PathBuf::from("/repo/src/two words.rs"));
+        tokio::time::sleep(EDITOR_SEND_DELAY + std::time::Duration::from_millis(25)).await;
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(sibling));
+        assert_eq!(
+            editor_input.try_recv().expect("editor command"),
+            Bytes::from_static(b"\x1b:e /repo/src/two\\ words.rs\r")
+        );
     }
 }

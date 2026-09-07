@@ -52,6 +52,9 @@ impl App {
         }
 
         let key_event = key.as_key_event();
+        if self.state.handle_sidebar_new_menu_key(key_event) {
+            return None;
+        }
         if self.state.handle_sidebar_new_thread_key(key_event) {
             return None;
         }

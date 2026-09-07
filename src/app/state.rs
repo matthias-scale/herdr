@@ -32,6 +32,15 @@ pub(crate) struct DockEditorSession {
     pub terminal_id: crate::terminal::TerminalId,
 }
 
+/// Read-only file content shown in the main pane area by the Editor renderer.
+/// It stays attach-local and never enters the server protocol or pane runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockEditorPreview {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) content: String,
+    pub(crate) notice: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -1429,6 +1438,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
     pub(crate) search_active: bool,
+    pub(crate) new_menu: Option<SidebarNewMenuState>,
     pub(crate) new_thread: Option<SidebarNewThreadState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
@@ -1442,6 +1452,37 @@ pub(crate) struct SidebarPresentationState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarNewThreadState {
     pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SidebarNewMenuState {
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarNewMenuAction {
+    NewSpace,
+    AddProject,
+    NewThread,
+    OpenFolder,
+}
+
+impl SidebarNewMenuAction {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::NewSpace,
+        Self::AddProject,
+        Self::NewThread,
+        Self::OpenFolder,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NewSpace => "New space",
+            Self::AddProject => "Add project…",
+            Self::NewThread => "New thread",
+            Self::OpenFolder => "Open folder…",
+        }
+    }
 }
 
 /// Attach-local state for the action menu anchored to a sidebar work object.
@@ -1477,7 +1518,9 @@ pub(crate) struct DockPresentationState {
     pub(crate) open_surfaces: Vec<DockSurface>,
     pub(crate) tab_bindings: Vec<Option<DockTabBinding>>,
     pub(crate) active_tab_index: Option<usize>,
-    pub(crate) hovered_tab_index: Option<usize>,
+    pub(crate) hovered_control: Option<ControlId>,
+    pub(crate) hover_started_at: Option<Instant>,
+    pub(crate) hover_tooltip_visible: bool,
     pub(crate) pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
     pub(crate) followed_pane: Option<PaneFocusTarget>,
     pub(crate) context_objects: Vec<DockObjectRef>,
@@ -1486,7 +1529,11 @@ pub(crate) struct DockPresentationState {
     pub(crate) surface_menu: Option<DockSurfaceMenu>,
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
+    /// Rich PR/ticket view state keyed by stable object identity. This is
+    /// attach-local TUI state and never enters the session protocol.
+    pub(crate) object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) editor_focused: bool,
+    pub(crate) editor_preview: Option<DockEditorPreview>,
     pub(crate) diff_focused: bool,
     pub(crate) pr_focused: bool,
     pub(crate) pr_checkout_menu: Option<PrCheckoutChoice>,
@@ -1502,6 +1549,7 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
     pub(crate) files_sort: crate::files::FileSort,
     pub(crate) files_search_active: bool,
+    pub(crate) files_last_click: Option<(std::path::PathBuf, std::time::Instant)>,
     pub(crate) agents_focused: bool,
     pub(crate) agents_selection: Option<String>,
     pub(crate) linear_focused: bool,
@@ -1536,7 +1584,9 @@ impl Default for DockPresentationState {
             open_surfaces: Vec::new(),
             tab_bindings: Vec::new(),
             active_tab_index: None,
-            hovered_tab_index: None,
+            hovered_control: None,
+            hover_started_at: None,
+            hover_tooltip_visible: false,
             pane_tabs: std::collections::HashMap::new(),
             followed_pane: None,
             context_objects: Vec::new(),
@@ -1545,7 +1595,9 @@ impl Default for DockPresentationState {
             surface_menu: None,
             chooser_focused: false,
             scroll: 0,
+            object_views: std::collections::HashMap::new(),
             editor_focused: false,
+            editor_preview: None,
             diff_focused: false,
             pr_focused: false,
             pr_checkout_menu: None,
@@ -1561,6 +1613,7 @@ impl Default for DockPresentationState {
             files_collapsed: std::collections::HashSet::new(),
             files_sort: crate::files::FileSort::Name,
             files_search_active: false,
+            files_last_click: None,
             agents_focused: false,
             agents_selection: None,
             linear_focused: false,
@@ -1576,6 +1629,27 @@ impl Default for DockPresentationState {
             home_followed_pane: None,
             symphony: None,
         }
+    }
+}
+
+impl DockPresentationState {
+    pub(crate) fn hover_tooltip_deadline(&self) -> Option<Instant> {
+        if self.hover_tooltip_visible || self.hovered_control.is_none() {
+            return None;
+        }
+        self.hover_started_at
+            .map(|started| started + super::HOVER_TOOLTIP_DELAY)
+    }
+
+    pub(crate) fn reveal_hover_tooltip_at(&mut self, now: Instant) -> bool {
+        if self
+            .hover_tooltip_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.hover_tooltip_visible = true;
+            return true;
+        }
+        false
     }
 }
 
@@ -2102,6 +2176,8 @@ pub struct ViewState {
     pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
     pub(crate) dock_files_refresh_rect: Rect,
     pub(crate) dock_files_sort_rect: Rect,
+    pub(crate) editor_preview_refresh_rect: Rect,
+    pub(crate) editor_preview_open_rect: Rect,
     pub(crate) dock_agent_row_hit_areas: Vec<DockAgentRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
@@ -2894,9 +2970,12 @@ pub struct AppState {
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
-    /// Defaults and hover state owned by the TUI client.
+    /// Defaults owned by the TUI client.
     pub(crate) linear_default_layout: LinearViewLayout,
-    pub(crate) sidebar_footer_hover: Option<SidebarFooterItem>,
+    /// Hover state is presentation-only and never enters the session protocol.
+    pub(crate) hovered_control: Option<ControlId>,
+    pub(crate) hover_started_at: Option<Instant>,
+    pub(crate) hover_tooltip_visible: bool,
     /// Client-local historical usage view and its scan result.
     pub(crate) usage_view: Option<UsageViewState>,
     /// Cached local usage loaded before the first background rescan.
@@ -3039,6 +3118,8 @@ pub struct AppState {
     pub(crate) sidebar_filter_menu_selected: usize,
     /// Typed input goes to the persisted sidebar row query while this is set.
     pub(crate) sidebar_search_active: bool,
+    /// Downward creation menu anchored to the sidebar header.
+    pub(crate) sidebar_new_menu: Option<SidebarNewMenuState>,
     /// Downward recent-project picker. Project paths are derived at render time.
     pub(crate) sidebar_new_thread: Option<SidebarNewThreadState>,
     /// Server-owned request and busy state for the sidebar refresh operation.
@@ -3132,8 +3213,6 @@ pub struct AppState {
     /// several PR, Linear, or Missive tabs at once.
     pub(crate) dock_tab_bindings: Vec<Option<DockTabBinding>>,
     pub(crate) dock_active_tab_index: Option<usize>,
-    /// Tab under the client pointer, used only to expose an object's full title.
-    pub(crate) dock_hovered_tab_index: Option<usize>,
     /// Per-pane tab memory and context suppression. This is swapped per client
     /// and never enters server or protocol state.
     pub(crate) dock_pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
@@ -3147,11 +3226,14 @@ pub struct AppState {
     /// Keyboard focus sits on the chooser card grid. TUI presentation state.
     pub(crate) dock_chooser_focused: bool,
     pub dock_scroll: u16,
+    /// Rich PR/ticket view state for dock hosts. The indexed object remains a
+    /// shared runtime fact; tab, picker, and scroll are client presentation.
+    pub(crate) dock_object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) dock_editor_focused: bool,
     /// Diff interaction state is attach-local TUI state. The whitespace choice
     /// survives surface switches for the lifetime of the client session.
     pub(crate) dock_diff_focused: bool,
-    /// Compact PR surface interaction state. TUI presentation state: the
+    /// Dock-hosted PR interaction state. TUI presentation state: the
     /// pull request itself is a shared work-index fact, the open menu and the
     /// staged confirmation are not.
     pub(crate) dock_pr_focused: bool,
@@ -3174,6 +3256,7 @@ pub struct AppState {
     pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
     pub(crate) dock_files_sort: crate::files::FileSort,
     pub(crate) dock_files_search_active: bool,
+    pub(crate) dock_files_last_click: Option<(std::path::PathBuf, std::time::Instant)>,
     /// Selection and keyboard ownership for the focus-following Agents tree.
     /// Both fields are attach-local TUI presentation state.
     pub(crate) dock_agents_focused: bool,
@@ -3190,6 +3273,7 @@ pub struct AppState {
     pub(crate) dock_files_roots_by_cwd:
         std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
     pub(crate) files_icons: crate::config::FilesIconConfig,
+    pub(crate) nerd_font: bool,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
@@ -3250,6 +3334,7 @@ pub struct AppState {
     pub(crate) commit_stage_all: bool,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
+    pub(crate) dock_editor_preview: Option<DockEditorPreview>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     pub(crate) dock_editor_requested_paths: std::collections::HashMap<PaneId, std::path::PathBuf>,
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
@@ -3533,7 +3618,9 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_sort: crate::ui::work_list_detail::TicketSort,
     pub(crate) open_only: bool,
     pub(crate) ticket_open_only: bool,
-    pub(crate) detail_tab: PrDetailTab,
+    /// The full-screen host uses the same per-object presentation state as the
+    /// dock host. Keys preserve tabs and scroll while list selection changes.
+    pub(crate) object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) pr_action_menu: Option<PrActionMenuState>,
     pub(crate) reviewer_picker: Option<ReviewerPickerState>,
@@ -3578,6 +3665,62 @@ pub(crate) enum SidebarFooterItem {
     Linear,
     Missive,
     Refresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlId {
+    SidebarNewThread,
+    SidebarNewMenu,
+    SidebarMore,
+    SidebarFooter(SidebarFooterItem),
+    DockTab(usize),
+    DockClose,
+    DockAdd,
+    TopBarScrollLeft,
+    TopBarScrollRight,
+    TopBarNewTab,
+    TopBarRepoEditor,
+    TopBarAddAction,
+    TopBarUserAction(usize),
+    TopBarGitMenu,
+    TopBarPaneBelow,
+    TopBarPaneRight,
+}
+
+impl AppState {
+    pub(crate) fn set_hovered_control_at(&mut self, control: Option<ControlId>, now: Instant) {
+        if self.hovered_control == control {
+            return;
+        }
+        self.hovered_control = control;
+        self.hover_started_at = control.map(|_| now);
+        self.hover_tooltip_visible = false;
+    }
+
+    pub(crate) fn clear_hovered_control(&mut self) {
+        self.hovered_control = None;
+        self.hover_started_at = None;
+        self.hover_tooltip_visible = false;
+    }
+
+    pub(crate) fn hover_tooltip_deadline(&self) -> Option<Instant> {
+        if self.hover_tooltip_visible || self.hovered_control.is_none() {
+            return None;
+        }
+        self.hover_started_at
+            .map(|started| started + super::HOVER_TOOLTIP_DELAY)
+    }
+
+    pub(crate) fn reveal_hover_tooltip_at(&mut self, now: Instant) -> bool {
+        if self
+            .hover_tooltip_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.hover_tooltip_visible = true;
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3669,19 +3812,47 @@ impl TicketTransitionChoice {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PrDetailTab {
     #[default]
-    Summary,
+    Overview,
+    Files,
+    Diff,
+    Checks,
     Timeline,
-    Code,
 }
 
 impl PrDetailTab {
-    pub(crate) fn next(self) -> Self {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Files,
+        Self::Diff,
+        Self::Checks,
+        Self::Timeline,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Summary => Self::Timeline,
-            Self::Timeline => Self::Code,
-            Self::Code => Self::Summary,
+            Self::Overview => "Overview",
+            Self::Files => "Files",
+            Self::Diff => "Diff",
+            Self::Checks => "Checks",
+            Self::Timeline => "Timeline",
         }
     }
+
+    pub(crate) fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// Host-independent state for a rich work-object detail. Both the full work
+/// view and the dock store this exact type and call the same renderer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ObjectViewState {
+    pub(crate) tab: PrDetailTab,
+    pub(crate) scroll: u16,
+    /// Selected row while the narrow-width sub-tab picker is open.
+    pub(crate) tab_picker: Option<usize>,
+    pub(crate) reviewer_picker: Option<ReviewerPickerState>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3784,7 +3955,7 @@ impl WorkViewState {
             ticket_sort: crate::ui::work_list_detail::TicketSort::Updated,
             open_only: true,
             ticket_open_only: false,
-            detail_tab: PrDetailTab::Summary,
+            object_views: std::collections::HashMap::new(),
             checkout_menu: None,
             pr_action_menu: None,
             reviewer_picker: None,
@@ -3804,6 +3975,14 @@ impl WorkViewState {
             board_detail_open: false,
             board_last_click: None,
         }
+    }
+
+    pub(crate) fn object_view(&self, key: &WorkItemKey) -> ObjectViewState {
+        self.object_views.get(key).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn object_view_mut(&mut self, key: WorkItemKey) -> &mut ObjectViewState {
+        self.object_views.entry(key).or_default()
     }
 }
 
@@ -4059,6 +4238,7 @@ impl AppState {
             &mut other.filter_menu_selected,
         );
         std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
+        std::mem::swap(&mut self.sidebar_new_menu, &mut other.new_menu);
         std::mem::swap(&mut self.sidebar_new_thread, &mut other.new_thread);
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
@@ -4359,7 +4539,7 @@ impl AppState {
             self.dock_active_tab_index = restored.active_index;
             self.dock_context_objects = restored.context_objects;
             self.dock_suppressed_context = restored.suppressed_context;
-            self.dock_hovered_tab_index = None;
+            self.clear_hovered_control();
             self.dock_followed_pane = target;
             self.dock_tab = self
                 .dock_active_tab_index
@@ -4371,7 +4551,7 @@ impl AppState {
             return;
         }
         self.align_dock_tab_bindings();
-        self.dock_hovered_tab_index = None;
+        self.clear_hovered_control();
         let active = self.active_dock_tab_index().and_then(|index| {
             self.dock_open_surfaces.get(index).copied().map(|surface| {
                 (
@@ -4434,7 +4614,7 @@ impl AppState {
         }
     }
 
-    /// Keep the dock on the compact companion for a sidebar or full-screen
+    /// Keep the dock on the object companion for a sidebar or full-screen
     /// work view. A later explicit surface pick remains visible until another
     /// view change calls this function.
     pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
@@ -4478,7 +4658,7 @@ impl AppState {
         }
         self.dock_open_surfaces.remove(index);
         self.dock_tab_bindings.remove(index);
-        self.dock_hovered_tab_index = None;
+        self.clear_hovered_control();
         if !was_active {
             return;
         }
@@ -4523,9 +4703,11 @@ impl AppState {
         std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
         std::mem::swap(&mut self.dock_tab_bindings, &mut other.tab_bindings);
         std::mem::swap(&mut self.dock_active_tab_index, &mut other.active_tab_index);
+        std::mem::swap(&mut self.hovered_control, &mut other.hovered_control);
+        std::mem::swap(&mut self.hover_started_at, &mut other.hover_started_at);
         std::mem::swap(
-            &mut self.dock_hovered_tab_index,
-            &mut other.hovered_tab_index,
+            &mut self.hover_tooltip_visible,
+            &mut other.hover_tooltip_visible,
         );
         std::mem::swap(&mut self.dock_pane_tabs, &mut other.pane_tabs);
         std::mem::swap(&mut self.dock_followed_pane, &mut other.followed_pane);
@@ -4538,7 +4720,9 @@ impl AppState {
         std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
+        std::mem::swap(&mut self.dock_object_views, &mut other.object_views);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
+        std::mem::swap(&mut self.dock_editor_preview, &mut other.editor_preview);
         std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
         std::mem::swap(&mut self.dock_pr_focused, &mut other.pr_focused);
         std::mem::swap(&mut self.dock_pr_checkout_menu, &mut other.pr_checkout_menu);
@@ -4560,6 +4744,7 @@ impl AppState {
             &mut self.dock_files_search_active,
             &mut other.files_search_active,
         );
+        std::mem::swap(&mut self.dock_files_last_click, &mut other.files_last_click);
         std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
         std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
         std::mem::swap(&mut self.dock_linear_focused, &mut other.linear_focused);
@@ -4931,7 +5116,9 @@ impl AppState {
             dock_symphony: None,
             work_view: None,
             linear_default_layout: LinearViewLayout::List,
-            sidebar_footer_hover: None,
+            hovered_control: None,
+            hover_started_at: None,
+            hover_tooltip_visible: false,
             usage_view: None,
             usage_snapshot: None,
             usage_pricing: crate::config::UsageConfig::default(),
@@ -5023,6 +5210,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,
@@ -5112,6 +5300,8 @@ impl AppState {
                 dock_file_row_hit_areas: Vec::new(),
                 dock_files_refresh_rect: Rect::default(),
                 dock_files_sort_rect: Rect::default(),
+                editor_preview_refresh_rect: Rect::default(),
+                editor_preview_open_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
@@ -5151,7 +5341,6 @@ impl AppState {
             dock_open_surfaces: Vec::new(),
             dock_tab_bindings: Vec::new(),
             dock_active_tab_index: None,
-            dock_hovered_tab_index: None,
             dock_pane_tabs: std::collections::HashMap::new(),
             dock_followed_pane: None,
             dock_context_objects: Vec::new(),
@@ -5160,6 +5349,7 @@ impl AppState {
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_object_views: std::collections::HashMap::new(),
             dock_editor_focused: false,
             dock_diff_focused: false,
             dock_pr_focused: false,
@@ -5178,6 +5368,7 @@ impl AppState {
             dock_files_collapsed: std::collections::HashSet::new(),
             dock_files_sort: crate::files::FileSort::Name,
             dock_files_search_active: false,
+            dock_files_last_click: None,
             dock_agents_focused: false,
             dock_agents_selection: None,
             dock_linear_focused: false,
@@ -5188,7 +5379,8 @@ impl AppState {
             dock_files_root: None,
             dock_files_cwd: None,
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
-            files_icons: crate::config::FilesIconConfig::Badges,
+            files_icons: crate::config::FilesIconConfig::Nerd,
+            nerd_font: true,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -5214,6 +5406,7 @@ impl AppState {
             commit_stage_all: false,
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_preview: None,
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
@@ -5736,12 +5929,15 @@ mod tests {
     fn sidebar_refresh_request_remains_server_owned_during_presentation_swaps() {
         let mut app = AppState::test_new();
         let mut presentation = SidebarPresentationState::default();
+        app.sidebar_new_menu = Some(SidebarNewMenuState { selected: 2 });
 
         assert!(app.request_sidebar_refresh());
         app.swap_sidebar_presentation(&mut presentation);
 
         assert!(app.sidebar_refresh_requested);
         assert!(app.sidebar_refreshing);
+        assert_eq!(app.sidebar_new_menu, None);
+        assert_eq!(presentation.new_menu.map(|menu| menu.selected), Some(2));
     }
 
     #[test]
@@ -6173,11 +6369,16 @@ mod tests {
     }
 
     #[test]
-    fn dock_file_sort_and_search_are_swapped_with_client_presentation() {
+    fn dock_file_state_and_preview_are_swapped_with_client_presentation() {
         let mut state = AppState::test_new();
         let mut client = DockPresentationState {
             files_sort: crate::files::FileSort::GitStatus,
             files_search_active: true,
+            editor_preview: Some(DockEditorPreview {
+                path: "/repo/src/lib.rs".into(),
+                content: "fn lib() {}".into(),
+                notice: None,
+            }),
             ..DockPresentationState::default()
         };
 
@@ -6185,8 +6386,16 @@ mod tests {
 
         assert_eq!(state.dock_files_sort, crate::files::FileSort::GitStatus);
         assert!(state.dock_files_search_active);
+        assert_eq!(
+            state
+                .dock_editor_preview
+                .as_ref()
+                .map(|preview| preview.path.as_path()),
+            Some(std::path::Path::new("/repo/src/lib.rs"))
+        );
         assert_eq!(client.files_sort, crate::files::FileSort::Name);
         assert!(!client.files_search_active);
+        assert!(client.editor_preview.is_none());
     }
 
     #[test]
@@ -6435,5 +6644,48 @@ mod tests {
 
         assert!(crate::ui::text::display_width(&state.dock_tab_label(0)) <= 12);
         assert_eq!(state.dock_tab_title(0), "提交 attachment review");
+    }
+
+    #[test]
+    fn rich_object_tab_and_scroll_persist_per_object_and_per_client() {
+        let pr = WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(206),
+            pr_url: Some("https://github.com/owner/repo/pull/206".into()),
+            ticket_id: None,
+        };
+        let ticket = WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some("SCA-3165".into()),
+        };
+        let mut state = AppState::test_new();
+        state.dock_object_views.insert(
+            pr.clone(),
+            ObjectViewState {
+                tab: PrDetailTab::Files,
+                scroll: 11,
+                tab_picker: None,
+                reviewer_picker: None,
+            },
+        );
+        state.dock_object_views.insert(
+            ticket.clone(),
+            ObjectViewState {
+                scroll: 7,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(state.dock_object_views[&pr].tab, PrDetailTab::Files);
+        assert_eq!(state.dock_object_views[&pr].scroll, 11);
+        assert_eq!(state.dock_object_views[&ticket].scroll, 7);
+
+        let mut client = DockPresentationState::default();
+        state.swap_dock_presentation(&mut client);
+        assert!(state.dock_object_views.is_empty());
+        assert_eq!(client.object_views[&pr].tab, PrDetailTab::Files);
+        assert_eq!(client.object_views[&ticket].scroll, 7);
     }
 }

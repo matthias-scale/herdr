@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -41,7 +41,8 @@ fn focused_agent_pane(
 }
 
 fn focused_editor_terminal_id(app: &AppState) -> Option<TerminalId> {
-    if app.mode != Mode::Terminal
+    if app.dock_editor_preview.is_some()
+        || app.mode != Mode::Terminal
         || !app.dock_editor_focused
         || app.dock_collapsed
         || app.dock_tab != Some(DockSurface::Editor)
@@ -65,6 +66,10 @@ pub(super) fn render_editor_body(
 ) {
     let area = app.view.dock_body_rect;
     if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if app.dock_editor_preview.is_some() {
+        render_editor_preview(app, frame, area);
         return;
     }
 
@@ -91,6 +96,203 @@ pub(super) fn render_editor_body(
         area,
         app.mode == Mode::Terminal && app.dock_editor_focused,
     );
+}
+
+pub(crate) fn preview_action_hit_areas(app: &AppState, area: Rect) -> (Rect, Rect) {
+    if app.dock_editor_preview.is_none() || area.width == 0 || area.height == 0 {
+        return (Rect::default(), Rect::default());
+    }
+    let open_width = crate::ui::text::display_width_u16(" Open in nvim ").min(area.width);
+    let open = Rect::new(
+        area.right().saturating_sub(open_width),
+        area.y,
+        open_width,
+        1,
+    );
+    let refresh = if area.width >= open_width.saturating_add(3) {
+        Rect::new(open.x.saturating_sub(3), area.y, 3, 1)
+    } else {
+        Rect::default()
+    };
+    (refresh, open)
+}
+
+pub(crate) fn render_editor_preview(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(preview) = app.dock_editor_preview.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.palette.panel_bg)),
+        area,
+    );
+    let (refresh, open) = preview_action_hit_areas(app, area);
+    let actions_width = refresh.width.saturating_add(open.width);
+    let path_area = Rect::new(area.x, area.y, area.width.saturating_sub(actions_width), 1);
+    let path = crate::ui::text::middle_elide(
+        &preview.path.to_string_lossy(),
+        usize::from(path_area.width.saturating_sub(1)),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ", Style::default().bg(app.palette.surface0)),
+            Span::styled(
+                path,
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface0)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .style(Style::default().bg(app.palette.surface0)),
+        path_area,
+    );
+    if refresh.width > 0 {
+        frame.render_widget(
+            Paragraph::new(" ⟳ ").style(
+                Style::default()
+                    .fg(app.palette.accent)
+                    .bg(app.palette.surface0),
+            ),
+            refresh,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(" Open in nvim ").style(
+            Style::default()
+                .fg(app.palette.accent)
+                .bg(app.palette.surface0)
+                .add_modifier(Modifier::BOLD),
+        ),
+        open,
+    );
+    if area.height <= 1 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("─".repeat(usize::from(area.width)))
+            .style(Style::default().fg(app.palette.surface_dim)),
+        Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+    let mut code_y = area.y.saturating_add(2);
+    if let Some(notice) = preview.notice.as_deref() {
+        if code_y < area.bottom() {
+            frame.render_widget(
+                Paragraph::new(format!(" {notice}"))
+                    .style(Style::default().fg(app.palette.peach))
+                    .wrap(Wrap { trim: false }),
+                Rect::new(area.x, code_y, area.width, 1),
+            );
+            code_y = code_y.saturating_add(1);
+        }
+    }
+    if code_y >= area.bottom() {
+        return;
+    }
+    let lines = preview.content.lines().collect::<Vec<_>>();
+    let line_count = lines.len().max(1);
+    let gutter_width = line_count.to_string().len();
+    for (index, source) in lines
+        .iter()
+        .take(usize::from(area.bottom().saturating_sub(code_y)))
+        .enumerate()
+    {
+        let mut spans = vec![
+            Span::styled(
+                format!(" {:>gutter_width$} ", index + 1),
+                Style::default().fg(app.palette.overlay0),
+            ),
+            Span::styled("│ ", Style::default().fg(app.palette.surface1)),
+        ];
+        spans.extend(highlight_line(source, &preview.path, app));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(area.x, code_y + index as u16, area.width, 1),
+        );
+    }
+}
+
+fn highlight_line(source: &str, path: &std::path::Path, app: &AppState) -> Vec<Span<'static>> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let trimmed = source.trim_start();
+    if (matches!(extension.as_str(), "rs" | "ts" | "tsx" | "js" | "jsx")
+        && trimmed.starts_with("//"))
+        || (matches!(extension.as_str(), "py" | "toml" | "yaml" | "yml")
+            && trimmed.starts_with('#'))
+    {
+        return vec![Span::styled(
+            source.to_string(),
+            Style::default()
+                .fg(app.palette.overlay0)
+                .add_modifier(Modifier::ITALIC),
+        )];
+    }
+    if matches!(extension.as_str(), "md" | "markdown") && trimmed.starts_with('#') {
+        return vec![Span::styled(
+            source.to_string(),
+            Style::default()
+                .fg(app.palette.mauve)
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+
+    let keywords = [
+        "as", "async", "await", "break", "const", "def", "else", "enum", "false", "fn", "for",
+        "from", "if", "impl", "import", "in", "let", "loop", "match", "mod", "mut", "null", "pub",
+        "return", "self", "struct", "true", "type", "use", "where", "while",
+    ];
+    let mut spans = Vec::new();
+    let mut token = String::new();
+    let flush = |spans: &mut Vec<Span<'static>>, token: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        let style = if keywords.contains(&token.as_str()) {
+            Style::default().fg(app.palette.mauve)
+        } else if token.chars().all(|character| character.is_ascii_digit()) {
+            Style::default().fg(app.palette.peach)
+        } else {
+            Style::default().fg(app.palette.text)
+        };
+        spans.push(Span::styled(std::mem::take(token), style));
+    };
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character.is_alphanumeric() || character == '_' {
+            token.push(character);
+            continue;
+        }
+        flush(&mut spans, &mut token);
+        if matches!(character, '"' | '\'') {
+            let quote = character;
+            let mut string = String::from(character);
+            let mut escaped = false;
+            for next in chars.by_ref() {
+                string.push(next);
+                if next == quote && !escaped {
+                    break;
+                }
+                escaped = next == '\\' && !escaped;
+                if next != '\\' {
+                    escaped = false;
+                }
+            }
+            spans.push(Span::styled(string, Style::default().fg(app.palette.green)));
+        } else {
+            spans.push(Span::styled(
+                character.to_string(),
+                Style::default().fg(app.palette.text),
+            ));
+        }
+    }
+    flush(&mut spans, &mut token);
+    spans
 }
 
 fn render_editor_message(app: &AppState, frame: &mut Frame, area: Rect, message: &str) {
@@ -141,7 +343,10 @@ impl App {
 
     pub(crate) fn ensure_dock_editor(&mut self) {
         self.reap_orphaned_dock_editors();
-        if self.state.dock_collapsed || self.state.dock_tab != Some(DockSurface::Editor) {
+        if self.state.dock_editor_preview.is_some()
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(DockSurface::Editor)
+        {
             return;
         }
         let Some((agent_pane_id, cwd)) = focused_agent_pane(&self.state, &self.terminal_runtimes)
@@ -230,7 +435,10 @@ impl App {
     }
 
     pub(crate) fn resize_dock_editor(&self) {
-        if self.state.dock_collapsed || self.state.dock_tab != Some(DockSurface::Editor) {
+        if self.state.dock_editor_preview.is_some()
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(DockSurface::Editor)
+        {
             return;
         }
         let Some(terminal_id) = editor_terminal_id_for_focused_agent(&self.state) else {
@@ -351,7 +559,71 @@ pub(crate) fn parse_editor_command(command: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::state::DockEditorSession, detect::Agent};
+    use crate::{
+        app::state::{DockEditorPreview, DockEditorSession},
+        detect::Agent,
+    };
+
+    #[test]
+    fn preview_renderer_has_actions_line_numbers_and_syntax_colour_without_a_pty() {
+        let mut app = AppState::test_new();
+        app.dock_editor_preview = Some(DockEditorPreview {
+            path: PathBuf::from("/repo/src/lib.rs"),
+            content: "pub fn answer() -> u32 { 42 }\n// done\n".to_string(),
+            notice: None,
+        });
+        let area = Rect::new(0, 0, 50, 8);
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| render_editor_preview(&app, frame, area))
+            .expect("render preview");
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Open in nvim"), "{text}");
+        assert!(text.contains(" 1 │ pub fn answer"), "{text}");
+        let pub_col = text
+            .lines()
+            .nth(2)
+            .and_then(|line| line.find("pub"))
+            .expect("pub token") as u16;
+        assert_eq!(buffer[(pub_col, 2)].fg, app.palette.mauve);
+        let (refresh, open) = preview_action_hit_areas(&app, area);
+        assert_eq!(refresh.y, area.y);
+        assert_eq!(open.right(), area.right());
+    }
+
+    #[test]
+    fn preview_mode_never_starts_a_dock_editor_runtime() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(DockSurface::Editor);
+        app.state.dock_editor_preview = Some(DockEditorPreview {
+            path: PathBuf::from("/repo/src/lib.rs"),
+            content: "fn main() {}".to_string(),
+            notice: None,
+        });
+
+        app.ensure_dock_editor();
+
+        assert!(app.state.dock_editor_sessions.is_empty());
+        assert_eq!(app.terminal_runtimes.len(), 0);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn closing_the_agent_shuts_down_the_editor_it_was_keyed_to() {

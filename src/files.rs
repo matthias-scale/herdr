@@ -9,6 +9,7 @@ pub(crate) enum FileStatus {
     Modified,
     Added,
     Untracked,
+    Deleted,
 }
 
 impl FileStatus {
@@ -17,6 +18,7 @@ impl FileStatus {
             Self::Modified => 'M',
             Self::Added => 'A',
             Self::Untracked => '?',
+            Self::Deleted => 'D',
         }
     }
 }
@@ -51,6 +53,7 @@ impl FileSort {
 pub(crate) struct FileRecord {
     pub(crate) path: PathBuf,
     pub(crate) status: Option<FileStatus>,
+    pub(crate) kind: FileTreeRowKind,
 }
 
 /// Where a listing came from. Outside a git repository `git ls-files` has
@@ -81,10 +84,11 @@ pub(crate) const DIRECTORY_WALK_DEADLINE: Duration = Duration::from_secs(5);
 /// enough to spend the whole deadline on.
 const IGNORED_DIRECTORIES: [&str; 3] = [".git", "target", "node_modules"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FileTreeRowKind {
     Directory,
     File,
+    Symlink,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,7 +102,7 @@ pub(crate) struct FileTreeRow {
 #[derive(Default)]
 struct DirectoryNode {
     directories: BTreeMap<String, DirectoryNode>,
-    files: BTreeMap<String, Option<FileStatus>>,
+    files: BTreeMap<String, (Option<FileStatus>, FileTreeRowKind)>,
 }
 
 impl FileTreeSnapshot {
@@ -122,7 +126,7 @@ impl FileTreeSnapshot {
             if matched_files.is_some_and(|matches| !matches.contains(&file.path)) {
                 continue;
             }
-            insert_file(&mut root, &file.path, file.status);
+            insert_file(&mut root, &file.path, file.status, file.kind);
         }
 
         let mut rows = Vec::new();
@@ -139,13 +143,18 @@ impl FileTreeSnapshot {
     }
 }
 
-fn insert_file(root: &mut DirectoryNode, path: &Path, status: Option<FileStatus>) {
+fn insert_file(
+    root: &mut DirectoryNode,
+    path: &Path,
+    status: Option<FileStatus>,
+    kind: FileTreeRowKind,
+) {
     let mut components = path.components().peekable();
     let mut directory = root;
     while let Some(component) = components.next() {
         let name = component.as_os_str().to_string_lossy().into_owned();
         if components.peek().is_none() {
-            directory.files.insert(name, status);
+            directory.files.insert(name, (status, kind));
         } else {
             directory = directory.directories.entry(name).or_default();
         }
@@ -182,18 +191,20 @@ fn append_rows(
         }
     }
     let mut files = node.files.iter().collect::<Vec<_>>();
-    files.sort_by(|(left_name, left_status), (right_name, right_status)| {
-        file_sort_key(left_name, **left_status, sort).cmp(&file_sort_key(
-            right_name,
-            **right_status,
-            sort,
-        ))
-    });
-    for (name, status) in files {
+    files.sort_by(
+        |(left_name, (left_status, _)), (right_name, (right_status, _))| {
+            file_sort_key(left_name, *left_status, sort).cmp(&file_sort_key(
+                right_name,
+                *right_status,
+                sort,
+            ))
+        },
+    );
+    for (name, (status, kind)) in files {
         rows.push(FileTreeRow {
             path: parent.join(name),
             depth,
-            kind: FileTreeRowKind::File,
+            kind: *kind,
             status: *status,
         });
     }
@@ -212,7 +223,8 @@ fn file_sort_key(name: &str, status: Option<FileStatus>, sort: FileSort) -> (Str
             Some(FileStatus::Modified) => "0",
             Some(FileStatus::Added) => "1",
             Some(FileStatus::Untracked) => "2",
-            None => "3",
+            Some(FileStatus::Deleted) => "3",
+            None => "4",
         }
         .to_string(),
     };
@@ -288,6 +300,7 @@ fn build_git_file_tree(root: PathBuf, git_program: &Path) -> FileTreeSnapshot {
         .into_iter()
         .map(|path| FileRecord {
             status: statuses.get(&path).copied(),
+            kind: file_record_kind(&root, &path),
             path,
         })
         .collect();
@@ -298,6 +311,14 @@ fn build_git_file_tree(root: PathBuf, git_program: &Path) -> FileTreeSnapshot {
         source: FileTreeSource::Git,
         error: None,
     }
+}
+
+fn file_record_kind(root: &Path, path: &Path) -> FileTreeRowKind {
+    std::fs::symlink_metadata(root.join(path))
+        .ok()
+        .filter(|metadata| metadata.file_type().is_symlink())
+        .map(|_| FileTreeRowKind::Symlink)
+        .unwrap_or(FileTreeRowKind::File)
 }
 
 fn git_output(cwd: &Path, git_program: &Path, args: &[&str]) -> Option<Vec<u8>> {
@@ -348,9 +369,11 @@ fn porcelain_status(x: char, y: char) -> Option<FileStatus> {
         Some(FileStatus::Untracked)
     } else if x == 'A' || y == 'A' {
         Some(FileStatus::Added)
+    } else if x == 'D' || y == 'D' {
+        Some(FileStatus::Deleted)
     } else if [x, y]
         .into_iter()
-        .any(|status| matches!(status, 'M' | 'D' | 'R' | 'C' | 'U'))
+        .any(|status| matches!(status, 'M' | 'R' | 'C' | 'U'))
     {
         Some(FileStatus::Modified)
     } else {
@@ -372,7 +395,11 @@ fn build_directory_file_tree(root: PathBuf, deadline: Instant) -> FileTreeSnapsh
     paths.sort();
     let files = paths
         .into_iter()
-        .map(|path| FileRecord { path, status: None })
+        .map(|path| FileRecord {
+            kind: file_record_kind(&root, &path),
+            path,
+            status: None,
+        })
         .collect::<Vec<_>>();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     files.hash(&mut hasher);
@@ -594,7 +621,7 @@ mod tests {
         assert_eq!(statuses[Path::new("src/lib.rs")], FileStatus::Modified);
         assert_eq!(statuses[Path::new("src/new.rs")], FileStatus::Added);
         assert_eq!(statuses[Path::new("notes.md")], FileStatus::Untracked);
-        assert_eq!(statuses[Path::new("gone.txt")], FileStatus::Modified);
+        assert_eq!(statuses[Path::new("gone.txt")], FileStatus::Deleted);
     }
 
     #[test]
@@ -604,6 +631,7 @@ mod tests {
             files: vec![FileRecord {
                 path: PathBuf::from("src/nested/lib.rs"),
                 status: None,
+                kind: FileTreeRowKind::File,
             }],
             fingerprint: 1,
             source: FileTreeSource::Git,
@@ -634,14 +662,17 @@ mod tests {
                 FileRecord {
                     path: PathBuf::from("zeta.md"),
                     status: Some(FileStatus::Untracked),
+                    kind: FileTreeRowKind::File,
                 },
                 FileRecord {
                     path: PathBuf::from("alpha.rs"),
                     status: Some(FileStatus::Added),
+                    kind: FileTreeRowKind::File,
                 },
                 FileRecord {
                     path: PathBuf::from("beta.md"),
                     status: Some(FileStatus::Modified),
+                    kind: FileTreeRowKind::File,
                 },
             ],
             fingerprint: 1,

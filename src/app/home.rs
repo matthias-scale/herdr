@@ -307,7 +307,7 @@ pub(crate) struct AddProjectCloneRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddProjectState {
     pub(crate) tab: AddProjectTab,
-    pub(crate) browse: HomeBrowse,
+    pub(crate) browse: FolderBrowser,
     pub(crate) git_url: String,
     pub(crate) github_query: String,
     pub(crate) github_owner: String,
@@ -324,7 +324,7 @@ impl AddProjectState {
     pub(crate) fn starting_at(directory: &Path) -> Self {
         Self {
             tab: AddProjectTab::LocalFolder,
-            browse: HomeBrowse::starting_at(directory),
+            browse: FolderBrowser::starting_at(directory),
             git_url: String::new(),
             github_query: String::new(),
             github_owner: String::new(),
@@ -337,6 +337,193 @@ impl AddProjectState {
             error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderBrowserEntry {
+    pub(crate) name: String,
+    pub(crate) is_dir: bool,
+    pub(crate) branch: Option<String>,
+}
+
+/// Filesystem-backed state for the Add project folder dialog.
+///
+/// Entries are read only when navigation or filtering changes. Rendering stays
+/// pure and never touches the filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderBrowser {
+    pub(crate) directory: PathBuf,
+    pub(crate) filter: String,
+    pub(crate) entries: Vec<FolderBrowserEntry>,
+    pub(crate) selected: usize,
+    pub(crate) show_hidden: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl FolderBrowser {
+    pub(crate) fn starting_at(directory: &Path) -> Self {
+        let directory = crate::worktree::canonical_or_original(directory);
+        let mut browser = Self {
+            directory,
+            filter: String::new(),
+            entries: Vec::new(),
+            selected: 0,
+            show_hidden: false,
+            error: None,
+        };
+        browser.refresh();
+        browser
+    }
+
+    pub(crate) fn refresh(&mut self) {
+        match folder_browser_entries(&self.directory, &self.filter, self.show_hidden) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+                self.error = None;
+            }
+            Err(error) => {
+                self.entries.clear();
+                self.selected = 0;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    pub(crate) fn push_filter(&mut self, character: char) {
+        self.filter.push(character);
+        self.selected = 0;
+        self.refresh();
+    }
+
+    pub(crate) fn backspace(&mut self) {
+        if self.filter.pop().is_some() {
+            self.selected = 0;
+            self.refresh();
+        } else {
+            self.go_up();
+        }
+    }
+
+    pub(crate) fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.selected = 0;
+        self.refresh();
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        if self.entries.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        self.selected = if delta.is_negative() {
+            self.selected.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            self.selected.saturating_add(delta as usize)
+        }
+        .min(self.entries.len() - 1);
+    }
+
+    pub(crate) fn open_selected(&mut self) {
+        self.open_entry(self.selected);
+    }
+
+    pub(crate) fn open_entry(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        if !entry.is_dir {
+            return;
+        }
+        self.directory.push(&entry.name);
+        self.filter.clear();
+        self.selected = 0;
+        self.refresh();
+    }
+
+    pub(crate) fn jump_to(&mut self, directory: PathBuf) {
+        if directory.is_dir() {
+            self.directory = directory;
+            self.filter.clear();
+            self.selected = 0;
+            self.refresh();
+        }
+    }
+
+    pub(crate) fn go_up(&mut self) {
+        let Some(parent) = self.directory.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        self.jump_to(parent);
+    }
+
+    pub(crate) fn path(&self) -> PathBuf {
+        self.directory.clone()
+    }
+}
+
+fn folder_browser_entries(
+    directory: &Path,
+    filter: &str,
+    show_hidden: bool,
+) -> Result<Vec<FolderBrowserEntry>, String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("Cannot read {}: {error}", directory.display()))?;
+    let filter = filter.to_ascii_lowercase();
+    let mut rows = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if (!show_hidden && name.starts_with('.'))
+                || (!filter.is_empty() && !name.to_ascii_lowercase().contains(&filter))
+            {
+                return None;
+            }
+            let is_dir = entry.file_type().ok()?.is_dir();
+            let branch = is_dir.then(|| git_head_label(&entry.path())).flatten();
+            Some(FolderBrowserEntry {
+                name,
+                is_dir,
+                branch,
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    rows.truncate(BROWSE_MAX_CHILDREN);
+    Ok(rows)
+}
+
+fn git_head_label(directory: &Path) -> Option<String> {
+    let dot_git = directory.join(".git");
+    let head = if dot_git.is_dir() {
+        dot_git.join("HEAD")
+    } else {
+        let git_file = std::fs::read_to_string(&dot_git).ok()?;
+        let git_dir = git_file.trim().strip_prefix("gitdir: ")?;
+        let git_dir = PathBuf::from(git_dir);
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            directory.join(git_dir)
+        };
+        git_dir.join("HEAD")
+    };
+    let value = std::fs::read_to_string(head).ok()?;
+    let value = value.trim();
+    value
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_string)
+        .or_else(|| (!value.is_empty()).then(|| value.chars().take(8).collect()))
 }
 
 /// The `Browse…` path input that takes over the picker's filter line.
@@ -1375,6 +1562,19 @@ impl crate::app::state::AppState {
         home.browse = None;
         home.directory_filter.set_query("");
         home.add_project = Some(AddProjectState::starting_at(&start));
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
+    }
+
+    pub(crate) fn open_folder_from_sidebar(&mut self) {
+        let start = self.home_browse_start_directory();
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
+        home.focus = Some(HomeFocus::Directory);
+        home.picker = Some(HomePicker::Directory);
+        home.browse = Some(HomeBrowse::starting_at(&start));
+        home.directory_filter.set_query("");
+        home.add_project = None;
         self.inbox = None;
         self.home = Some(home);
         self.reset_home_ref_context(false);

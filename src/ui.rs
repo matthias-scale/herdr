@@ -45,6 +45,8 @@ mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
+mod tooltip;
+pub(crate) use tooltip::hovered_control_at;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;
@@ -102,8 +104,8 @@ pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
-    render_sidebar_group_menu, render_sidebar_new_thread, render_sidebar_object_menu,
-    render_sidebar_settled_menu,
+    render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
+    render_sidebar_object_menu, render_sidebar_settled_menu,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -117,6 +119,7 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::{render_git_menu, render_tab_action_buttons, render_tab_bar};
+use self::tooltip::render_hover_tooltip;
 use self::usage::render as render_usage;
 use self::user_actions::render_add_action_overlay;
 use self::work_link_picker::render_work_link_picker;
@@ -141,18 +144,18 @@ pub(crate) use self::{
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
         sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
-        sidebar_group_mode_anchor_rect, sidebar_header_add_project_rect,
-        sidebar_header_new_space_rect, sidebar_header_new_thread_rect,
-        sidebar_header_overflow_rect, sidebar_header_search_rect, sidebar_missive_copy_url,
-        sidebar_nested_header_at, sidebar_new_thread_layout, sidebar_new_thread_matches,
-        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
-        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
-        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
-        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
-        sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
-        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
-        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
+        sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
+        sidebar_missive_copy_url, sidebar_nested_header_at, sidebar_new_menu_layout,
+        sidebar_new_thread_layout, sidebar_new_thread_matches, sidebar_object_action_at,
+        sidebar_object_at, sidebar_object_menu_item_at, sidebar_object_menu_items,
+        sidebar_pull_request_actions, sidebar_pull_request_key, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
+        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
+        sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
+        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
@@ -672,6 +675,14 @@ fn compute_view_internal(
         } else {
             (Rect::default(), Rect::default())
         };
+    let editor_preview_area =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Editor) {
+            dock_body_rect
+        } else {
+            terminal_area
+        };
+    let (editor_preview_refresh_rect, editor_preview_open_rect) =
+        dock::editor::preview_action_hit_areas(app, editor_preview_area);
     let dock_agent_row_hit_areas =
         if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Agents) {
             dock::agents::row_hit_areas(app, dock_body_rect)
@@ -772,6 +783,8 @@ fn compute_view_internal(
         dock_file_row_hit_areas,
         dock_files_refresh_rect,
         dock_files_sort_rect,
+        editor_preview_refresh_rect,
+        editor_preview_open_rect,
         dock_agent_row_hit_areas,
         dock_body_rect,
     };
@@ -954,6 +967,8 @@ fn compute_mobile_view(
     } else {
         Vec::new()
     };
+    let (editor_preview_refresh_rect, editor_preview_open_rect) =
+        dock::editor::preview_action_hit_areas(app, terminal_area);
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
@@ -1020,6 +1035,8 @@ fn compute_mobile_view(
         dock_file_row_hit_areas: Vec::new(),
         dock_files_refresh_rect: Rect::default(),
         dock_files_sort_rect: Rect::default(),
+        editor_preview_refresh_rect,
+        editor_preview_open_rect,
         dock_agent_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
@@ -1084,7 +1101,11 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_action_buttons(app, frame);
     }
-    if let Some(detail) = app.symphony_detail.as_ref() {
+    let preview_is_in_dock =
+        !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Editor);
+    if app.dock_editor_preview.is_some() && !preview_is_in_dock {
+        dock::editor::render_editor_preview(app, frame, terminal_area);
+    } else if let Some(detail) = app.symphony_detail.as_ref() {
         render_symphony(
             &app.palette,
             &detail.snapshot,
@@ -1194,10 +1215,12 @@ fn render_with_runtime_registry_inner(
     }
     render_sidebar_group_menu(app, frame);
     render_sidebar_filter_menu(app, frame);
+    render_sidebar_new_menu(app, frame);
     render_sidebar_new_thread(app, frame);
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
+    render_hover_tooltip(app, frame);
 }
 
 fn render_navigation_chrome(
@@ -1747,7 +1770,8 @@ mod tests {
         app.dock_open_surfaces = vec![DockSurface::Missive];
         app.dock_tab = Some(DockSurface::Missive);
         app.dock_active_tab_index = Some(0);
-        app.dock_hovered_tab_index = Some(0);
+        app.hovered_control = Some(crate::app::state::ControlId::DockTab(0));
+        app.hover_tooltip_visible = true;
         app.dock_tab_bindings = vec![Some(DockTabBinding {
             object: DockObjectRef {
                 surface: DockSurface::Missive,

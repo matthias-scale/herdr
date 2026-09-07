@@ -17,10 +17,13 @@ mod direct_graphics;
 mod input;
 pub(crate) mod presentation;
 
+use std::backtrace::Backtrace;
 use std::collections::HashSet;
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::IsTerminal as _;
 use std::io::{self, BufRead, Write as _};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -752,6 +755,60 @@ fn restore_terminal_state(
     restore_result.and(postlude_result)
 }
 
+fn write_client_failure_report(
+    log_path: &Path,
+    panic_info: &str,
+    backtrace: &str,
+) -> io::Result<()> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    writeln!(
+        log,
+        "client failure\npanic: {panic_info}\nbacktrace:\n{backtrace}"
+    )?;
+    log.flush()
+}
+
+fn report_client_failure(
+    log_path: &Path,
+    panic_info: &str,
+    backtrace: &str,
+    stderr: &mut impl io::Write,
+) {
+    match write_client_failure_report(log_path, panic_info, backtrace) {
+        Ok(()) => {
+            let _ = writeln!(
+                stderr,
+                "herdr: client failure details written to {}",
+                log_path.display()
+            );
+        }
+        Err(err) => {
+            let _ = writeln!(
+                stderr,
+                "herdr: client failure; could not write details to {}: {err}",
+                log_path.display()
+            );
+        }
+    }
+}
+
+fn handle_client_failure(
+    log_path: &Path,
+    panic_info: &str,
+    backtrace: &str,
+    restore_terminal: impl FnOnce(),
+    stderr: &mut impl io::Write,
+) {
+    restore_terminal();
+    report_client_failure(log_path, panic_info, backtrace, stderr);
+}
+
 #[cfg(not(windows))]
 fn push_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(
@@ -1435,20 +1492,31 @@ fn run_client_with_mode(
         err
     })?;
 
-    // Install a panic hook to restore the terminal on panic (same as monolithic).
+    // Install a panic hook that restores the terminal and leaves a durable
+    // report. Stderr stays to one line so a broken terminal remains readable.
     let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
     let panic_resets_host_color_scheme_reports = terminal_guard.reset_host_color_scheme_reports;
     #[cfg(windows)]
     let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
-    let original_hook = std::panic::take_hook();
+    let client_failure_log_path = crate::session::data_dir().join("herdr-client.log");
+    let _ = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = restore_terminal_state(
-            panic_resets_modify_other_keys,
-            panic_resets_host_color_scheme_reports,
-            #[cfg(windows)]
-            panic_restore_windows_input_mode,
+        let panic_info = info.to_string();
+        let backtrace = Backtrace::force_capture().to_string();
+        handle_client_failure(
+            &client_failure_log_path,
+            &panic_info,
+            &backtrace,
+            || {
+                let _ = restore_terminal_state(
+                    panic_resets_modify_other_keys,
+                    panic_resets_host_color_scheme_reports,
+                    #[cfg(windows)]
+                    panic_restore_windows_input_mode,
+                );
+            },
+            &mut io::stderr(),
         );
-        original_hook(info);
     }));
 
     // Create the tokio runtime.
@@ -2881,6 +2949,35 @@ mod tests {
     /// its own module and lets a test elsewhere move `XDG_CONFIG_HOME` mid-test.
     fn env_lock() -> &'static Mutex<()> {
         crate::config::test_config_env_lock()
+    }
+
+    #[test]
+    fn client_failure_hook_restores_terminal_and_writes_durable_report() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-client-failure-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let log_path = root.join("herdr-client.log");
+        let mut stderr = Vec::new();
+        let terminal_restored = std::cell::Cell::new(false);
+
+        handle_client_failure(
+            &log_path,
+            "render failed at src/ui.rs:42",
+            "frame 0: herdr::ui::render",
+            || terminal_restored.set(true),
+            &mut stderr,
+        );
+
+        assert!(terminal_restored.get());
+        let log = std::fs::read_to_string(&log_path).expect("client failure log");
+        assert!(log.contains("panic: render failed at src/ui.rs:42"));
+        assert!(log.contains("backtrace:\nframe 0: herdr::ui::render"));
+        let stderr = String::from_utf8(stderr).expect("utf-8 stderr pointer");
+        assert_eq!(stderr.lines().count(), 1);
+        assert!(stderr.contains(log_path.to_string_lossy().as_ref()));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -22,7 +22,79 @@ pub(crate) enum SidebarWorkGroupKeyAction {
 }
 
 impl AppState {
+    pub(crate) fn open_sidebar_new_menu(&mut self) {
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_object_menu = None;
+        self.sidebar_search_active = false;
+        self.sidebar_new_thread = None;
+        self.sidebar_new_menu = Some(Default::default());
+    }
+
+    pub(crate) fn sidebar_new_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_new_menu_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn dispatch_sidebar_new_menu_action(
+        &mut self,
+        action: crate::app::state::SidebarNewMenuAction,
+    ) {
+        self.sidebar_new_menu = None;
+        match action {
+            crate::app::state::SidebarNewMenuAction::NewSpace => {
+                self.request_new_workspace = true;
+            }
+            crate::app::state::SidebarNewMenuAction::AddProject => {
+                self.open_add_project_from_sidebar();
+            }
+            crate::app::state::SidebarNewMenuAction::NewThread => {
+                self.open_sidebar_new_thread();
+            }
+            crate::app::state::SidebarNewMenuAction::OpenFolder => {
+                self.open_folder_from_sidebar();
+            }
+        }
+    }
+
+    pub(crate) fn select_sidebar_new_menu_item(&mut self, index: usize) -> bool {
+        let Some(action) = crate::app::state::SidebarNewMenuAction::ALL
+            .get(index)
+            .copied()
+        else {
+            return false;
+        };
+        self.dispatch_sidebar_new_menu_action(action);
+        true
+    }
+
+    pub(crate) fn handle_sidebar_new_menu_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut menu) = self.sidebar_new_menu.take() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Up => {
+                menu.selected = menu.selected.saturating_sub(1);
+                self.sidebar_new_menu = Some(menu);
+            }
+            KeyCode::Down => {
+                menu.selected = menu
+                    .selected
+                    .saturating_add(1)
+                    .min(crate::app::state::SidebarNewMenuAction::ALL.len() - 1);
+                self.sidebar_new_menu = Some(menu);
+            }
+            KeyCode::Enter => {
+                self.select_sidebar_new_menu_item(menu.selected);
+            }
+            _ => self.sidebar_new_menu = Some(menu),
+        }
+        true
+    }
+
     pub(crate) fn open_sidebar_new_thread(&mut self) {
+        self.sidebar_new_menu = None;
         self.sidebar_group_menu_open = false;
         self.sidebar_filter_menu_open = false;
         self.sidebar_object_menu = None;
@@ -513,10 +585,6 @@ impl AppState {
         }
         let y = ws_area.y + ws_area.height;
         Rect::new(ws_area.x, y, ws_area.width, 0)
-    }
-
-    pub(crate) fn sidebar_new_button_rect(&self) -> Rect {
-        crate::ui::sidebar_header_new_space_rect(self.view.sidebar_rect)
     }
 
     pub(crate) fn global_launcher_rect(&self) -> Rect {

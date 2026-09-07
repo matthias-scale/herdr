@@ -920,6 +920,13 @@ impl HeadlessServer {
                 .fold(next_deadline, |deadline, pending| {
                     Some(deadline.map_or(pending, |current| current.min(pending)))
                 });
+            let next_deadline = self
+                .clients
+                .values()
+                .filter_map(|client| client.dock_presentation.hover_tooltip_deadline())
+                .fold(next_deadline, |deadline, hover| {
+                    Some(deadline.map_or(hover, |current| current.min(hover)))
+                });
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
@@ -3286,8 +3293,24 @@ impl HeadlessServer {
             &events,
             self.app.state.redraw_on_focus_gained,
         );
+        let hover_motion_changes = source_is_full_app
+            && events.iter().any(|event| match event {
+                crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column,
+                    row,
+                    ..
+                }) => {
+                    self.clients
+                        .get(&client_id)
+                        .is_some_and(|client| client.dock_presentation.hovered_control.is_some())
+                        || crate::ui::hovered_control_at(&self.app.state, *column, *row).is_some()
+                }
+                _ => false,
+            });
         let render_neutral_mouse_motion =
-            events_are_render_neutral_mouse_motion(&events, self.app.state.mode);
+            events_are_render_neutral_mouse_motion(&events, self.app.state.mode)
+                && !hover_motion_changes;
         if let Some(client) = self.clients.get_mut(&client_id) {
             if host_surface_redraw {
                 client.request_repaint();
@@ -5355,6 +5378,12 @@ impl HeadlessServer {
             self.app.agent_activity_refresh_deadline = None;
             false
         };
+        for client in self.clients.values_mut() {
+            if client.dock_presentation.reveal_hover_tooltip_at(now) {
+                client.request_repaint();
+                changed = true;
+            }
+        }
         changed |= self.app.handle_loop_receipt_fallback(now);
         if self.app.status_metrics_visible {
             changed |= self.app.schedule_status_metrics(now);
@@ -7272,7 +7301,9 @@ esac
                 open_surfaces: vec![crate::app::DockSurface::Editor],
                 tab_bindings: vec![None],
                 active_tab_index: Some(0),
-                hovered_tab_index: None,
+                hovered_control: None,
+                hover_started_at: None,
+                hover_tooltip_visible: false,
                 pane_tabs: std::collections::HashMap::new(),
                 followed_pane: None,
                 context_objects: Vec::new(),
@@ -7281,7 +7312,9 @@ esac
                 surface_menu: None,
                 chooser_focused: false,
                 scroll: 0,
+                object_views: std::collections::HashMap::new(),
                 editor_focused,
+                editor_preview: None,
                 diff_focused: false,
                 pr_focused: false,
                 pr_checkout_menu: None,
@@ -7297,6 +7330,7 @@ esac
                 files_collapsed: std::collections::HashSet::new(),
                 files_sort: crate::files::FileSort::Name,
                 files_search_active: false,
+                files_last_click: None,
                 agents_focused: false,
                 agents_selection: None,
                 linear_focused: false,

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -250,30 +250,35 @@ fn render_row(app: &AppState, frame: &mut Frame, area: Rect, row: &FileTreeRow) 
         Style::default().fg(app.palette.text)
     };
     let indent = "  ".repeat(row.depth);
-    let (marker, name) = match row.kind {
-        FileTreeRowKind::Directory => {
-            let marker = if app.dock_files_filter.is_empty()
-                && app.dock_files_collapsed.contains(&row.path)
-            {
-                "▸ "
-            } else {
-                "▾ "
-            };
-            (marker.to_string(), file_name(&row.path))
-        }
-        FileTreeRowKind::File => (
-            format!("{} ", badge(&row.path, app.files_icons)),
-            file_name(&row.path),
-        ),
+    let collapsed = row.kind == FileTreeRowKind::Directory
+        && app.dock_files_filter.is_empty()
+        && app.dock_files_collapsed.contains(&row.path);
+    let disclosure = match row.kind {
+        FileTreeRowKind::Directory if collapsed => "▸ ",
+        FileTreeRowKind::Directory => "▾ ",
+        FileTreeRowKind::File | FileTreeRowKind::Symlink => "  ",
     };
+    let kind = file_icon_kind(&row.path, row.kind);
+    let nerd = app.nerd_font && app.files_icons == crate::config::FilesIconConfig::Nerd;
+    let icon = file_icon(kind, nerd, !collapsed);
+    let name = file_name(&row.path);
     let gutter = row.status.map(|status| status.gutter()).unwrap_or(' ');
     let reserved = 2usize;
     let available = usize::from(area.width).saturating_sub(reserved);
-    let prefix = format!(" {indent}{marker}");
-    let name_width = available.saturating_sub(prefix.chars().count());
-    let name = truncate(&name, name_width);
-    let mut spans = vec![Span::styled(format!("{prefix}{name}"), style)];
-    let used = spans[0].content.chars().count();
+    let prefix = format!(" {indent}{disclosure}");
+    let fixed_width = crate::ui::text::display_width(&prefix)
+        .saturating_add(crate::ui::text::display_width(icon))
+        .saturating_add(1);
+    let name = crate::ui::text::truncate_end(&name, available.saturating_sub(fixed_width));
+    let mut spans = vec![
+        Span::styled(prefix, style),
+        Span::styled(icon, style.fg(file_icon_color(kind, app))),
+        Span::styled(format!(" {name}"), style),
+    ];
+    let used = spans
+        .iter()
+        .map(|span| crate::ui::text::display_width(span.content.as_ref()))
+        .sum::<usize>();
     spans.push(Span::raw(" ".repeat(available.saturating_sub(used))));
     spans.push(Span::styled(
         gutter.to_string(),
@@ -281,6 +286,7 @@ fn render_row(app: &AppState, frame: &mut Frame, area: Rect, row: &FileTreeRow) 
             'A' => app.palette.green,
             '?' => app.palette.yellow,
             'M' => app.palette.peach,
+            'D' => app.palette.red,
             _ => app.palette.overlay0,
         }),
     ));
@@ -294,35 +300,97 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-fn truncate(value: &str, width: usize) -> String {
-    value.chars().take(width).collect()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileIconKind {
+    Directory,
+    Symlink,
+    Rust,
+    Toml,
+    Markdown,
+    Json,
+    TypeScript,
+    Python,
+    Lock,
+    Dotfile,
+    File,
 }
 
-pub(crate) fn badge(path: &Path, icons: crate::config::FilesIconConfig) -> &'static str {
+pub(crate) fn file_icon_kind(path: &Path, row_kind: FileTreeRowKind) -> FileIconKind {
+    if row_kind == FileTreeRowKind::Directory {
+        return FileIconKind::Directory;
+    }
+    if row_kind == FileTreeRowKind::Symlink {
+        return FileIconKind::Symlink;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if name.eq_ignore_ascii_case("Cargo.lock") {
+        return FileIconKind::Lock;
+    }
+    if name.starts_with('.') {
+        return FileIconKind::Dotfile;
+    }
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if icons == crate::config::FilesIconConfig::Nerd {
-        return match extension.as_str() {
-            "rs" => "",
-            "md" => "󰍔",
-            "json" | "toml" | "yaml" | "yml" => "",
-            "sh" => "",
-            "ts" | "tsx" => "",
-            "py" => "",
-            _ => "󰈔",
+    match extension.as_str() {
+        "rs" => FileIconKind::Rust,
+        "toml" => FileIconKind::Toml,
+        "md" | "markdown" => FileIconKind::Markdown,
+        "json" | "yaml" | "yml" => FileIconKind::Json,
+        "ts" | "tsx" => FileIconKind::TypeScript,
+        "py" => FileIconKind::Python,
+        _ => FileIconKind::File,
+    }
+}
+
+pub(crate) fn file_icon(kind: FileIconKind, nerd: bool, expanded: bool) -> &'static str {
+    if nerd {
+        return match kind {
+            FileIconKind::Directory if expanded => "",
+            FileIconKind::Directory => "",
+            FileIconKind::Symlink => "",
+            FileIconKind::Rust => "",
+            FileIconKind::Toml => "",
+            FileIconKind::Markdown => "󰍔",
+            FileIconKind::Json => "",
+            FileIconKind::TypeScript => "",
+            FileIconKind::Python => "",
+            FileIconKind::Lock => "󰌾",
+            FileIconKind::Dotfile => "󰘓",
+            FileIconKind::File => "󰈔",
         };
     }
-    match extension.as_str() {
-        "rs" => "rs",
-        "md" => "md",
-        "json" | "toml" | "yaml" | "yml" => "{}",
-        "sh" => "sh",
-        "ts" | "tsx" => "ts",
-        "py" => "py",
-        _ => "··",
+    match kind {
+        FileIconKind::Directory => "d ",
+        FileIconKind::Symlink => "->",
+        FileIconKind::Rust => "rs",
+        FileIconKind::Toml => "tm",
+        FileIconKind::Markdown => "md",
+        FileIconKind::Json => "{}",
+        FileIconKind::TypeScript => "ts",
+        FileIconKind::Python => "py",
+        FileIconKind::Lock => "lk",
+        FileIconKind::Dotfile => ". ",
+        FileIconKind::File => "--",
+    }
+}
+
+fn file_icon_color(kind: FileIconKind, app: &AppState) -> Color {
+    match kind {
+        FileIconKind::Directory | FileIconKind::TypeScript => app.palette.blue,
+        FileIconKind::Symlink => app.palette.teal,
+        FileIconKind::Rust => app.palette.peach,
+        FileIconKind::Toml => app.palette.red,
+        FileIconKind::Markdown => app.palette.mauve,
+        FileIconKind::Json | FileIconKind::Python => app.palette.yellow,
+        FileIconKind::Lock => app.palette.green,
+        FileIconKind::Dotfile => app.palette.overlay1,
+        FileIconKind::File => app.palette.text,
     }
 }
 
@@ -331,35 +399,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn badges_are_portable_until_nerd_icons_are_opted_in() {
-        assert_eq!(
-            badge(
-                Path::new("src/lib.rs"),
-                crate::config::FilesIconConfig::Badges
+    fn icon_mapping_covers_names_extensions_directories_and_symlinks() {
+        let cases = [
+            (
+                "src",
+                FileTreeRowKind::Directory,
+                FileIconKind::Directory,
+                "d ",
             ),
-            "rs"
-        );
-        assert_eq!(
-            badge(
-                Path::new("Cargo.toml"),
-                crate::config::FilesIconConfig::Badges
+            (
+                "link",
+                FileTreeRowKind::Symlink,
+                FileIconKind::Symlink,
+                "->",
             ),
-            "{}"
-        );
-        assert_eq!(
-            badge(
-                Path::new("image.bin"),
-                crate::config::FilesIconConfig::Badges
+            ("lib.rs", FileTreeRowKind::File, FileIconKind::Rust, "rs"),
+            (
+                "Cargo.toml",
+                FileTreeRowKind::File,
+                FileIconKind::Toml,
+                "tm",
             ),
-            "··"
-        );
-        assert_ne!(
-            badge(
-                Path::new("src/lib.rs"),
-                crate::config::FilesIconConfig::Nerd
+            (
+                "README.md",
+                FileTreeRowKind::File,
+                FileIconKind::Markdown,
+                "md",
             ),
-            "rs"
-        );
+            ("data.json", FileTreeRowKind::File, FileIconKind::Json, "{}"),
+            (
+                "app.ts",
+                FileTreeRowKind::File,
+                FileIconKind::TypeScript,
+                "ts",
+            ),
+            ("tool.py", FileTreeRowKind::File, FileIconKind::Python, "py"),
+            (
+                "Cargo.lock",
+                FileTreeRowKind::File,
+                FileIconKind::Lock,
+                "lk",
+            ),
+            (
+                ".gitignore",
+                FileTreeRowKind::File,
+                FileIconKind::Dotfile,
+                ". ",
+            ),
+        ];
+        for (path, row_kind, icon_kind, ascii) in cases {
+            assert_eq!(
+                file_icon_kind(Path::new(path), row_kind),
+                icon_kind,
+                "{path}"
+            );
+            assert_eq!(file_icon(icon_kind, false, false), ascii, "{path}");
+            assert_ne!(file_icon(icon_kind, true, false), ascii, "{path}");
+        }
     }
 
     fn app_with(snapshot: FileTreeSnapshot) -> AppState {
@@ -377,6 +473,7 @@ mod tests {
             files: vec![crate::files::FileRecord {
                 path: PathBuf::from("notes.md"),
                 status: None,
+                kind: FileTreeRowKind::File,
             }],
             fingerprint: 1,
             source: FileTreeSource::Directory,
@@ -467,10 +564,12 @@ mod tests {
                     crate::files::FileRecord {
                         path: PathBuf::from("src/ui/sidebar.rs"),
                         status: None,
+                        kind: FileTreeRowKind::File,
                     },
                     crate::files::FileRecord {
                         path: PathBuf::from("docs/readme.md"),
                         status: None,
+                        kind: FileTreeRowKind::File,
                     },
                 ],
                 fingerprint: 1,
