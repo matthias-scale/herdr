@@ -1444,6 +1444,10 @@ pub(crate) struct DockPresentationState {
     /// this attach-local lets an explicit selection survive while pane focus
     /// remains unchanged.
     pub(crate) home_followed_pane: Option<PaneFocusTarget>,
+    /// Which Symphony job this client's dock surface follows. Attach-local like
+    /// every other surface selection: two clients read the same snapshot but
+    /// each picks its own job.
+    pub(crate) symphony: Option<SymphonyDockSelection>,
 }
 
 impl Default for DockPresentationState {
@@ -1494,6 +1498,7 @@ impl Default for DockPresentationState {
             home_detail_tab: DockHomeDetailTab::Overview,
             home_focused: false,
             home_followed_pane: None,
+            symphony: None,
         }
     }
 }
@@ -4529,6 +4534,7 @@ impl AppState {
             &mut other.ticket_comment_draft,
         );
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
+        std::mem::swap(&mut self.dock_symphony, &mut other.symphony);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
             &mut other.home_ticket_selection,
@@ -6036,6 +6042,29 @@ mod tests {
         assert!(state.dock_files_search_active);
         assert_eq!(client.files_sort, crate::files::FileSort::Name);
         assert!(!client.files_search_active);
+    }
+
+    #[test]
+    fn dock_symphony_selection_is_swapped_with_client_presentation() {
+        let mut state = AppState::test_new();
+        let selection = SymphonyDockSelection {
+            workflow_id: "symphony-MAT-138".to_string(),
+            run_id: "019a".to_string(),
+        };
+        let mut client = DockPresentationState {
+            symphony: Some(selection.clone()),
+            ..DockPresentationState::default()
+        };
+
+        state.swap_dock_presentation(&mut client);
+        assert_eq!(state.dock_symphony, Some(selection.clone()));
+        assert_eq!(client.symphony, None);
+
+        // Detaching hands the selection back to the client, so another client
+        // attached to the same state never sees this one's job.
+        state.swap_dock_presentation(&mut client);
+        assert_eq!(state.dock_symphony, None);
+        assert_eq!(client.symphony, Some(selection));
     }
 
     fn app_with_object_and_bare_panes() -> (AppState, PaneId, PaneId) {
