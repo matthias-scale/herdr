@@ -18,6 +18,7 @@ mod home;
 pub(crate) mod linear;
 pub(crate) mod missive;
 pub(crate) mod pr;
+pub(crate) mod symphony;
 
 pub(crate) use chooser::{
     card_hit_areas_for_count as chooser_card_hit_areas_for_count,
@@ -187,6 +188,9 @@ pub(super) fn render_dock(
         Some(DockSurface::Linear) => linear::render_linear(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Missive) => missive::render_missive(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Agents) => agents::render_agents(app, frame, app.view.dock_body_rect),
+        Some(DockSurface::Symphony) => {
+            symphony::render_symphony(app, frame, app.view.dock_body_rect)
+        }
         Some(DockSurface::Shortcuts) => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)
         }

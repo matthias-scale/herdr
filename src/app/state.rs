@@ -1444,6 +1444,10 @@ pub(crate) struct DockPresentationState {
     /// this attach-local lets an explicit selection survive while pane focus
     /// remains unchanged.
     pub(crate) home_followed_pane: Option<PaneFocusTarget>,
+    /// Which Symphony job this client's dock surface follows. Attach-local like
+    /// every other surface selection: two clients read the same snapshot but
+    /// each picks its own job.
+    pub(crate) symphony: Option<SymphonyDockSelection>,
 }
 
 impl Default for DockPresentationState {
@@ -1494,6 +1498,7 @@ impl Default for DockPresentationState {
             home_detail_tab: DockHomeDetailTab::Overview,
             home_focused: false,
             home_followed_pane: None,
+            symphony: None,
         }
     }
 }
@@ -1663,6 +1668,7 @@ pub enum DockSurface {
     Shortcuts,
     Context,
     Scratchpad,
+    Symphony,
 }
 
 /// Stable identity of one work object shown by a compact dock tab.
@@ -1697,7 +1703,7 @@ pub(crate) struct PaneDockTabs {
 
 impl DockSurface {
     /// Every surface the chooser can open, in menu order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
@@ -1710,6 +1716,7 @@ impl DockSurface {
         Self::Shortcuts,
         Self::Context,
         Self::Scratchpad,
+        Self::Symphony,
     ];
 
     /// The card grid of the empty dock, each with its single-key shortcut.
@@ -1742,6 +1749,7 @@ impl DockSurface {
             Self::Linear => "linear",
             Self::Missive => "missive",
             Self::Agents => "agents",
+            Self::Symphony => "flow",
         }
     }
 
@@ -1760,6 +1768,7 @@ impl DockSurface {
             Self::Linear => "Linear",
             Self::Missive => "Missive",
             Self::Agents => "Agents",
+            Self::Symphony => "Symphony",
         }
     }
 
@@ -1792,6 +1801,7 @@ impl DockSurface {
             Self::Shortcuts => 'K',
             Self::Context => 'X',
             Self::Scratchpad => 'N',
+            Self::Symphony => 'Y',
         }
     }
 
@@ -1814,6 +1824,15 @@ impl DockSurface {
         matches!(self, Self::Terminal | Self::Files)
             .then(|| format!("{}: coming in a later slice", self.title()))
     }
+}
+
+/// The Symphony job the dock surface is showing. Identity only: phase, wait and
+/// age are read back out of the live snapshot every frame, so an open panel
+/// tracks the workflow rather than a copy of it that goes stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SymphonyDockSelection {
+    pub(crate) workflow_id: String,
+    pub(crate) run_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2843,6 +2862,9 @@ pub struct AppState {
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
+    /// Which job the dock's Symphony surface is bound to. Client presentation
+    /// state: the runtime knows nothing about which panel is open.
+    pub(crate) dock_symphony: Option<SymphonyDockSelection>,
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
@@ -3772,6 +3794,47 @@ impl AppState {
         }
     }
 
+    /// Bind the dock's Symphony surface to `workflow` and bring it up.
+    pub(crate) fn bind_symphony_dock(&mut self, workflow: &crate::symphony::Workflow) {
+        self.dock_symphony = Some(SymphonyDockSelection {
+            workflow_id: workflow.workflow_id.clone(),
+            run_id: workflow.run_id.clone(),
+        });
+        self.dock_collapsed = false;
+        self.open_dock_surface(DockSurface::Symphony);
+    }
+
+    /// Bind the Symphony surface to `workflow` on the pane that currently has
+    /// focus. Dock tabs are per pane and only move at the `compute_view()`
+    /// reconcile, so a surface opened right after a focus change would land on
+    /// the pane focus just left. Reconcile first so it opens on the new one.
+    pub(crate) fn bind_symphony_dock_to_focused_pane(
+        &mut self,
+        workflow: &crate::symphony::Workflow,
+    ) {
+        self.reconcile_dock_context_tabs();
+        self.bind_symphony_dock(workflow);
+    }
+
+    /// The workflow the dock surface is bound to, as it stands in the current
+    /// snapshot. `None` once the job closes and leaves the snapshot.
+    pub(crate) fn dock_symphony_workflow(&self) -> Option<&crate::symphony::Workflow> {
+        let selection = self.dock_symphony.as_ref()?;
+        self.symphony_snapshot.workflows.iter().find(|workflow| {
+            workflow.workflow_id == selection.workflow_id && workflow.run_id == selection.run_id
+        })
+    }
+
+    /// The dashboard URL when `(column, row)` lands on the Symphony surface's
+    /// dashboard link. Uses the same rect the surface draws, so a click can
+    /// never open a link that was not on screen.
+    pub(crate) fn dock_symphony_dashboard_click(&self, column: u16, row: u16) -> Option<String> {
+        let rect = crate::ui::dock_symphony_dashboard_link_rect(self, self.view.dock_body_rect)?;
+        (row == rect.y && column >= rect.x && column < rect.right())
+            .then(|| crate::ui::dock_symphony_dashboard_url(self))
+            .flatten()
+    }
+
     pub(crate) fn clear_symphony(&mut self) {
         self.symphony_detail = None;
     }
@@ -4483,6 +4546,7 @@ impl AppState {
             &mut other.ticket_comment_draft,
         );
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
+        std::mem::swap(&mut self.dock_symphony, &mut other.symphony);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
             &mut other.home_ticket_selection,
@@ -4815,6 +4879,7 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            dock_symphony: None,
             work_view: None,
             linear_default_layout: LinearViewLayout::List,
             sidebar_footer_hover: None,
@@ -5991,6 +6056,29 @@ mod tests {
         assert!(!client.files_search_active);
     }
 
+    #[test]
+    fn dock_symphony_selection_is_swapped_with_client_presentation() {
+        let mut state = AppState::test_new();
+        let selection = SymphonyDockSelection {
+            workflow_id: "symphony-MAT-138".to_string(),
+            run_id: "019a".to_string(),
+        };
+        let mut client = DockPresentationState {
+            symphony: Some(selection.clone()),
+            ..DockPresentationState::default()
+        };
+
+        state.swap_dock_presentation(&mut client);
+        assert_eq!(state.dock_symphony, Some(selection.clone()));
+        assert_eq!(client.symphony, None);
+
+        // Detaching hands the selection back to the client, so another client
+        // attached to the same state never sees this one's job.
+        state.swap_dock_presentation(&mut client);
+        assert_eq!(state.dock_symphony, None);
+        assert_eq!(client.symphony, Some(selection));
+    }
+
     fn app_with_object_and_bare_panes() -> (AppState, PaneId, PaneId) {
         let mut state = AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("objects");
@@ -6018,6 +6106,50 @@ mod tests {
                 ..Default::default()
             });
         (state, object_pane, bare_pane)
+    }
+
+    #[test]
+    fn symphony_dock_binds_to_the_newly_focused_pane_not_the_one_left() {
+        let (mut state, object_pane, bare_pane) = app_with_object_and_bare_panes();
+        // The object pane already has focus; `false` only says nothing moved.
+        let _ = state.focus_pane_in_workspace(0, object_pane);
+        state.reconcile_dock_context_tabs();
+        let workflow = crate::symphony::Workflow {
+            workflow_id: "symphony-MAT-138".to_string(),
+            run_id: "019a".to_string(),
+            name: "blocker dashboard".to_string(),
+            phase: "runFlowStep".to_string(),
+            wait: None,
+            started_at: None,
+            ticket: None,
+            repo: None,
+            pr: None,
+            receipts: None,
+        };
+
+        // Opening a job creates and focuses its checkout tab, then binds.
+        assert!(state.focus_pane_in_workspace(0, bare_pane));
+        state.bind_symphony_dock_to_focused_pane(&workflow);
+        state.reconcile_dock_context_tabs();
+        assert_eq!(state.dock_tab, Some(DockSurface::Symphony));
+        assert_eq!(
+            state.dock_followed_pane,
+            state.current_pane_focus_target(),
+            "the dock follows the checkout pane"
+        );
+
+        // The pane the click came from never received the surface.
+        assert!(state.focus_pane_in_workspace(0, object_pane));
+        state.reconcile_dock_context_tabs();
+        assert!(!state.dock_open_surfaces.contains(&DockSurface::Symphony));
+
+        // A plain bind after the focus change reproduces the lost surface.
+        assert!(state.focus_pane_in_workspace(0, bare_pane));
+        state.reconcile_dock_context_tabs();
+        assert!(state.focus_pane_in_workspace(0, object_pane));
+        state.bind_symphony_dock(&workflow);
+        state.reconcile_dock_context_tabs();
+        assert_ne!(state.dock_tab, Some(DockSurface::Symphony));
     }
 
     #[test]

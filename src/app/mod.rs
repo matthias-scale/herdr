@@ -759,6 +759,7 @@ impl App {
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
+            dock_symphony: None,
             symphony_detail: None,
             work_view: None,
             linear_default_layout: config.linear.default_layout.into(),

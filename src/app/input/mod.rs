@@ -3437,7 +3437,24 @@ impl App {
         else {
             return;
         };
+        self.open_symphony_workflow(&workflow);
+    }
+
+    /// Open the job at `index` in the current snapshot.
+    pub(crate) fn open_symphony_workflow_at(&mut self, index: usize) {
+        let Some(workflow) = self.state.symphony_snapshot.workflows.get(index).cloned() else {
+            return;
+        };
+        self.open_symphony_workflow(&workflow);
+    }
+
+    /// Open a job: the dock surface bound to it, and a terminal in its verified
+    /// checkout. The surface opens even when the checkout cannot be resolved --
+    /// what the job is doing is exactly what you want to read when it has
+    /// nowhere to open.
+    fn open_symphony_workflow(&mut self, workflow: &crate::symphony::Workflow) {
         let Some(repo) = workflow.repo.as_deref() else {
+            self.state.bind_symphony_dock(workflow);
             self.state.config_diagnostic =
                 Some("Symphony workflow has no repository checkout".to_string());
             return;
@@ -3473,6 +3490,7 @@ impl App {
             }
         };
         let Some(cwd) = cwd else {
+            self.state.bind_symphony_dock(workflow);
             self.state.config_diagnostic = Some(
                 verification_error
                     .unwrap_or_else(|| format!("Symphony checkout unavailable for {repo}")),
@@ -3489,10 +3507,14 @@ impl App {
                     .ticket
                     .clone()
                     .or_else(|| Some(workflow.name.clone())),
-                env: crate::symphony::launch_env(&workflow),
+                env: crate::symphony::launch_env(workflow),
                 work_context: None,
             },
         );
+        // The tab is focused now, but the dock still follows the pane the click
+        // came from until the next reconcile. Bind after catching it up, or the
+        // surface is saved under the old pane and the checkout opens without it.
+        self.state.bind_symphony_dock_to_focused_pane(workflow);
         self.state.clear_symphony();
         self.state.mode = Mode::Terminal;
     }
@@ -4099,6 +4121,16 @@ impl App {
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.state.clear_home();
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
+                    }
+                    MouseAction::OpenUrl { url } => {
+                        if let Err(error) = crate::platform::open_url(&url) {
+                            self.state.config_diagnostic =
+                                Some(format!("Could not open {url}: {error}"));
+                        }
+                    }
+                    MouseAction::OpenSymphonyWorkflow { index } => {
+                        self.state.clear_home();
+                        self.open_symphony_workflow_at(index);
                     }
                     MouseAction::FocusToastTarget => {
                         self.state.clear_home();

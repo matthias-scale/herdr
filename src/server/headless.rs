@@ -6569,6 +6569,7 @@ esac
                 home_detail_tab: crate::app::state::DockHomeDetailTab::Overview,
                 home_focused: false,
                 home_followed_pane: None,
+                symphony: None,
             };
             server.clients.insert(client_id, client);
         }
