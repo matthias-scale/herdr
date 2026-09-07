@@ -2547,14 +2547,28 @@ fn fetch_unresolved_review_thread_count(
     cache: Option<&ProviderCache>,
     bypass: bool,
 ) -> Option<usize> {
-    fetch_unresolved_review_threads(repo, number, program, deadline).map(|threads| threads.count)
+    fetch_unresolved_review_threads_with_cache(repo, number, program, deadline, cache, bypass)
+        .map(|threads| threads.count)
 }
 
+/// On-demand entry for the `Fix findings` action: no host cache, always fresh,
+/// so the prompt reflects the current thread state.
 pub(crate) fn fetch_unresolved_review_threads(
     repo: &str,
     number: u64,
     program: &Path,
     deadline: Instant,
+) -> Option<UnresolvedReviewThreads> {
+    fetch_unresolved_review_threads_with_cache(repo, number, program, deadline, None, true)
+}
+
+fn fetch_unresolved_review_threads_with_cache(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Option<UnresolvedReviewThreads> {
     let (owner, name) = repo.split_once('/')?;
     let mut command = crate::noninteractive_process::command(program);
