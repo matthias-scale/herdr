@@ -6604,7 +6604,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_age_refresh_uses_authoritative_transition_boundary() {
+    fn activity_age_refresh_is_scheduled_for_space_suffix_rows() {
         let mut app = test_app();
         let started = Instant::now();
         let workspace = Workspace::test_new("activity");
@@ -6633,9 +6633,8 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
-        // The space-first tab row shows the latest communication age for the
-        // tab; sub-minute ages render as a static `<1m`, so the next visible
-        // boundary is the first minute mark, never a per-second tick.
+        // F19-1a keeps the visible age before the optional Space suffix, so its
+        // minute boundary must keep waking the render loop.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,

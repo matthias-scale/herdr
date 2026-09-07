@@ -1287,7 +1287,9 @@ mod tests {
         crate::ui::sidebar_rows(app)
             .into_iter()
             .map(|row| match row {
-                crate::ui::SidebarRow::Workspace { ws_idx, indented } => {
+                crate::ui::SidebarRow::Workspace {
+                    ws_idx, indented, ..
+                } => {
                     format!("workspace:{ws_idx}:{indented}")
                 }
                 crate::ui::SidebarRow::Tab { entry, .. } => {

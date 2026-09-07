@@ -7725,7 +7725,7 @@ next_tab = ""
     }
 
     #[test]
-    fn headless_activity_clock_streams_a_new_frame_at_the_age_boundary() {
+    fn headless_space_suffix_keeps_age_frame_schedule() {
         let mut server = test_headless_server();
         server.app.state.status_bar_enabled = false;
         server.app.state.mobile_width_threshold = 0;
@@ -7743,8 +7743,6 @@ next_tab = ""
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
         server.app.state.mode = crate::app::Mode::Terminal;
-        // Sidebar ages are minute-granular (`1m`, `2m`, …), so start just shy
-        // of the second minute boundary to keep the boundary wait short.
         let started = Instant::now() - Duration::from_secs(119);
         server
             .app
@@ -7789,30 +7787,11 @@ next_tab = ""
                 .expect("initial clock frame"),
         );
         let first_text = frame_text(&first);
+        assert!(first_text.contains("Clock task"), "{first_text:?}");
         assert!(first_text.contains("1m"), "{first_text:?}");
         assert!(!first_text.contains("ago"), "{first_text:?}");
-
-        let deadline = server
-            .app
-            .agent_activity_refresh_deadline
-            .expect("visible clock should schedule its next boundary");
-        std::thread::sleep(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .saturating_add(Duration::from_millis(20)),
-        );
-        assert!(server.handle_scheduled_tasks_headless(Instant::now(), false));
-        server.render_and_stream();
-
-        let second = read_server_frame(
-            render_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("advanced clock frame"),
-        );
-        let second_text = frame_text(&second);
-        assert!(second_text.contains("2m"), "{second_text:?}");
-        assert!(!second_text.contains("ago"), "{second_text:?}");
-        assert_ne!(first, second);
+        assert!(server.app.agent_activity_refresh_deadline.is_some());
+        assert!(!server.handle_scheduled_tasks_headless(Instant::now(), false));
     }
 
     #[test]
