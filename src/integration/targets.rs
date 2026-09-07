@@ -8,7 +8,9 @@ use super::claude_settings::{
     install_with_title as install_claude_settings, uninstall as uninstall_claude_settings,
 };
 use super::command::hook_command;
-#[cfg(unix)]
+#[cfg(windows)]
+use super::command::powershell_encoded_hook_command;
+#[cfg(not(windows))]
 use super::command::shell_single_quote;
 use super::config_edit::{
     build_codex_config_with_hooks, build_kimi_config_with_hooks, ensure_command_hook,
@@ -1214,16 +1216,7 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
 pub(crate) fn mastracode_hook_command(hook_path: &Path, action: &str) -> String {
     #[cfg(windows)]
     {
-        use base64::Engine;
-
-        let path = hook_path.display().to_string().replace('\'', "''");
-        let script = format!("& '{path}' {action}");
-        let encoded_script = script
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(encoded_script);
-        format!("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}")
+        powershell_encoded_hook_command(hook_path, action)
     }
     #[cfg(not(windows))]
     {
@@ -1373,6 +1366,17 @@ pub(crate) fn install_antigravity_cli() -> io::Result<AntigravityCliInstallPaths
     })
 }
 
+pub(crate) fn antigravity_cli_hook_command(hook_path: &Path, action: &str) -> String {
+    #[cfg(windows)]
+    {
+        powershell_encoded_hook_command(hook_path, action)
+    }
+    #[cfg(not(windows))]
+    {
+        hook_command(hook_path, Some(action))
+    }
+}
+
 /// Builds the Herdr-owned `hooks.json` block for Antigravity CLI.
 ///
 /// Every event Herdr registers takes a flat handler list; the `matcher`/`hooks`
@@ -1382,7 +1386,7 @@ fn antigravity_cli_hook_block(hook_path: &Path) -> Value {
     for (event, action) in ANTIGRAVITY_CLI_HOOK_EVENTS {
         let handler = json!({
             "type": "command",
-            "command": hook_command(hook_path, Some(action)),
+            "command": antigravity_cli_hook_command(hook_path, action),
             "timeout": ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
         });
         block.insert(event.to_string(), json!([handler]));

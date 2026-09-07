@@ -274,7 +274,8 @@ fn worktree_command() -> Command {
             Command::new("list")
                 .about("List worktree workspaces")
                 .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH")),
+                .arg(path_option("cwd", "PATH"))
+                .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("create")
@@ -287,7 +288,8 @@ fn worktree_command() -> Command {
                 .arg(option("label", "TEXT"))
                 .args(worktree_work_context_options())
                 .arg(flag("focus"))
-                .arg(flag("no-focus")),
+                .arg(flag("no-focus"))
+                .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("open")
@@ -299,13 +301,15 @@ fn worktree_command() -> Command {
                 .arg(option("label", "TEXT"))
                 .args(worktree_work_context_options())
                 .arg(flag("focus"))
-                .arg(flag("no-focus")),
+                .arg(flag("no-focus"))
+                .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("remove")
                 .about("Remove a worktree checkout")
                 .arg(option("workspace", "ID"))
-                .arg(flag("force")),
+                .arg(flag("force"))
+                .arg(flag("trust-repository")),
         )
 }
 

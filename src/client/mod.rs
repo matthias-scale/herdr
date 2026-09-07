@@ -230,6 +230,7 @@ struct AttachEscapeState {
 #[cfg(unix)]
 enum AttachInputAction {
     Forward(Vec<u8>),
+    ForwardAfterPendingPrefix(Vec<u8>),
     Scroll {
         source: AttachScrollSource,
         direction: AttachScrollDirection,
@@ -251,6 +252,14 @@ impl AttachEscapeState {
         mouse_scroll_lines: usize,
     ) -> AttachInputAction {
         const PREFIX: u8 = 0x02; // Ctrl+B
+
+        if crate::raw_input::is_complete_text_bracketed_paste(&data) {
+            return if std::mem::take(&mut self.pending_prefix) {
+                AttachInputAction::ForwardAfterPendingPrefix(data)
+            } else {
+                AttachInputAction::Forward(data)
+            };
+        }
 
         let mut output = Vec::with_capacity(data.len());
         for byte in data {
@@ -464,11 +473,11 @@ fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
 
 /// Sets up a direct attach terminal.
 ///
-/// Direct attach forwards stdin to the attached PTY. It enables mouse capture
-/// so wheel events can drive the attached viewport or be forwarded to child
+/// Direct attach forwards stdin to the attached PTY. When configured, mouse
+/// capture lets wheel events drive the attached viewport or reach child
 /// programs that requested mouse input.
-fn setup_direct_attach_terminal() -> io::Result<TerminalGuard> {
-    setup_terminal_with_capabilities(false, true)
+fn setup_direct_attach_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
+    setup_terminal_with_capabilities(false, mouse_capture)
 }
 
 fn setup_terminal_with_capabilities(
@@ -480,12 +489,18 @@ fn setup_terminal_with_capabilities(
     let host_color_scheme_reports =
         should_enable_host_color_scheme_reports(enable_client_protocols);
 
-    if enable_client_protocols {
-        if mouse_capture {
-            set_mouse_capture(true, false)?;
+    #[cfg(windows)]
+    let windows_ssh_session = is_ssh_session();
+    #[cfg(windows)]
+    let mut windows_virtual_terminal_input =
+        if windows_vti_input_backend_enabled() && windows_ssh_session {
+            enable_windows_virtual_terminal_input()
         } else {
-            set_mouse_capture(false, false)?;
-        }
+            WindowsVirtualTerminalInputSetup::default()
+        };
+
+    if enable_client_protocols {
+        set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         if host_color_scheme_reports {
             write_host_color_scheme_report_mode(&mut io::stdout(), true)?;
@@ -495,20 +510,14 @@ fn setup_terminal_with_capabilities(
         if should_query_host_terminal_theme() {
             write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
         }
-        if mouse_capture {
-            set_mouse_capture(true, false)?;
-        } else {
-            set_mouse_capture(false, false)?;
-        }
+        set_mouse_capture(mouse_capture, false)?;
+        execute!(io::stdout(), EnableBracketedPaste)?;
     }
 
     #[cfg(windows)]
-    let windows_virtual_terminal_input =
-        if enable_client_protocols && windows_vti_input_backend_enabled() {
-            enable_windows_virtual_terminal_input()
-        } else {
-            WindowsVirtualTerminalInputSetup::default()
-        };
+    if enable_client_protocols && windows_vti_input_backend_enabled() && !windows_ssh_session {
+        windows_virtual_terminal_input = enable_windows_virtual_terminal_input();
+    }
 
     #[cfg(windows)]
     if enable_client_protocols
@@ -679,6 +688,14 @@ fn restore_windows_input_mode_value(mode: u32) {
 
 fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
     crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
+    #[cfg(windows)]
+    if is_ssh_session() && windows_vti_input_backend_enabled() {
+        return crate::terminal_modes::set_windows_ssh_mouse_reporting(
+            &mut io::stdout(),
+            enabled,
+            sgr_pixels,
+        );
+    }
     if enabled {
         execute!(io::stdout(), EnableMouseCapture)?;
         if sgr_pixels {
@@ -715,10 +732,9 @@ fn restore_terminal_state(
         io::stdout(),
         EnableLineWrap,
         DisableFocusChange,
-        DisableBracketedPaste,
-        DisableMouseCapture
+        DisableBracketedPaste
     );
-    let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
+    let _ = set_mouse_capture(false, false);
     #[cfg(windows)]
     if let Some(mode) = restore_windows_input_mode {
         restore_windows_input_mode_value(mode);
@@ -818,6 +834,10 @@ fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
 
+fn is_ssh_session() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
 /// Time to wait for the server's Welcome reply during the handshake.
 ///
 /// A local client talks to an already-connected server, so 5s is plenty. The
@@ -860,8 +880,7 @@ fn direct_graphics_profile_allowed(direct_attach: bool) -> bool {
         std::env::var_os("KITTY_WINDOW_ID").is_some(),
         direct_attach
             || is_remote_client_process()
-            || std::env::var_os("SSH_CONNECTION").is_some()
-            || std::env::var_os("SSH_TTY").is_some()
+            || is_ssh_session()
             || std::env::var_os("TMUX").is_some()
             || std::env::var_os("STY").is_some(),
         io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -1407,7 +1426,7 @@ fn run_client_with_mode(
     // so we don't leave the terminal in raw mode if the server rejects us.
     let direct_attach = attach_escape.is_some();
     let terminal_guard = if direct_attach {
-        setup_direct_attach_terminal()
+        setup_direct_attach_terminal(mouse_capture)
     } else {
         setup_terminal(mouse_capture)
     }
@@ -1676,6 +1695,13 @@ async fn run_client_loop(
                         state.mouse_scroll_lines,
                     ) {
                         AttachInputAction::Forward(data) => data,
+                        AttachInputAction::ForwardAfterPendingPrefix(data) => {
+                            let prefix = ClientMessage::Input { data: vec![0x02] };
+                            if let Err(e) = write_to_server(&mut write_stream, &prefix) {
+                                return Err(ClientError::ConnectionLost(e));
+                            }
+                            data
+                        }
                         AttachInputAction::Scroll {
                             source,
                             direction,
@@ -2035,10 +2061,14 @@ async fn run_client_loop(
                     let mouse_mode_changed = enabled != state.mouse_capture_active
                         || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
                     if mouse_mode_changed {
+                        #[cfg(windows)]
+                        if enabled && windows_vti_input_backend_enabled() && is_ssh_session() {
+                            let _ = enable_windows_virtual_terminal_input();
+                        }
                         set_mouse_capture(enabled, next_sgr_pixels)
                             .map_err(ClientError::ConnectionFailed)?;
                         #[cfg(windows)]
-                        if enabled && windows_vti_input_backend_enabled() {
+                        if enabled && windows_vti_input_backend_enabled() && !is_ssh_session() {
                             let _ = enable_windows_virtual_terminal_input();
                         }
                     }
@@ -3556,6 +3586,38 @@ mod tests {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, vec![0x02]),
             other => panic!("expected forwarded prefix, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_does_not_interpret_bracketed_paste_contents() {
+        let mut escape = AttachEscapeState::default();
+        let paste = b"\x1b[200~one\x02q\ntwo\x1b[201~".to_vec();
+
+        match escape.filter_input(paste.clone(), 24, 3) {
+            AttachInputAction::Forward(bytes) => assert_eq!(bytes, paste),
+            other => panic!("expected opaque paste, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_flushes_pending_prefix_before_bracketed_paste() {
+        let mut escape = AttachEscapeState::default();
+        let paste = b"\x1b[200~one\ntwo\x1b[201~".to_vec();
+        assert!(matches!(
+            escape.filter_input(vec![0x02], 24, 3),
+            AttachInputAction::None
+        ));
+
+        assert!(matches!(
+            escape.filter_input(paste.clone(), 24, 3),
+            AttachInputAction::ForwardAfterPendingPrefix(bytes) if bytes == paste
+        ));
+        assert!(matches!(
+            escape.filter_input(vec![b'q'], 24, 3),
+            AttachInputAction::Forward(bytes) if bytes == b"q"
+        ));
     }
 
     #[cfg(unix)]

@@ -6,7 +6,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$installerPath = (Resolve-Path -LiteralPath "$PSScriptRoot\..\website\install.ps1").Path
+$installerPath = (Resolve-Path -LiteralPath "$PSScriptRoot\..\distribution\install.ps1").Path
+$bootstrapPath = (Resolve-Path -LiteralPath "$PSScriptRoot\..\distribution\install.cmd").Path
+$bootstrapContent = Get-Content -LiteralPath $bootstrapPath -Raw
+foreach ($forbiddenCommand in @("Invoke-RestMethod", "Invoke-WebRequest", "Invoke-Expression", "iex")) {
+    if ($bootstrapContent -match "(?i)\b$forbiddenCommand\b") {
+        throw "CMD bootstrap uses forbidden PowerShell network execution: $forbiddenCommand"
+    }
+}
+if ($bootstrapContent -notmatch "(?i)\bcurl\.exe\b") {
+    throw "CMD bootstrap does not download through curl.exe"
+}
 $parseErrors = $null
 $tokens = $null
 $installerAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -16,6 +26,19 @@ $installerAst = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 if ($parseErrors.Count -ne 0) {
     throw ($parseErrors | Out-String)
+}
+$forbiddenPowerShellCommands = @(
+    $installerAst.FindAll(
+        { param($node) $node -is [System.Management.Automation.Language.CommandAst] },
+        $true
+    ) |
+        ForEach-Object { $_.GetCommandName() } |
+        Where-Object {
+            $_ -in @("Invoke-RestMethod", "Invoke-WebRequest", "Invoke-Expression", "irm", "iwr", "iex")
+        }
+)
+if ($forbiddenPowerShellCommands.Count -ne 0) {
+    throw "installer uses forbidden PowerShell network execution: $($forbiddenPowerShellCommands -join ', ')"
 }
 foreach ($functionName in @("Prepend-PathEntry", "Update-PathRegistryEntry")) {
     $definition = $installerAst.FindAll(
@@ -76,6 +99,7 @@ $herdrHome = Join-Path $root "home"
 $installDir = Join-Path $root "bin"
 New-Item -ItemType Directory -Force -Path $webRoot | Out-Null
 Copy-Item -LiteralPath $archive -Destination (Join-Path $webRoot "herdr-windows-x86_64.zip")
+Copy-Item -LiteralPath $installerPath -Destination (Join-Path $webRoot "install.ps1")
 $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
 
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
@@ -114,6 +138,7 @@ $legacyStableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
 
 $server = $null
 $oldHerdrHome = $env:HERDR_HOME
+$oldInstallerUrl = $env:HERDR_INSTALLER_URL
 $oldProcessPath = $env:Path
 try {
     $server = Start-Process python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $webRoot) -PassThru -WindowStyle Hidden
@@ -134,10 +159,15 @@ try {
     $freshStableBin = Join-Path $root "fresh-stable-bin"
     $stableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
     $env:HERDR_HOME = $freshStableHome
+    $env:HERDR_INSTALLER_URL = "http://127.0.0.1:$port/install.ps1"
     $env:Path = $oldProcessPath
-    & $installerPath `
+    & $bootstrapPath `
         -ManifestUrl $stableManifestUrl `
         -InstallDir $freshStableBin
+    if ($LASTEXITCODE -ne 0) {
+        throw "CMD bootstrap failed with exit code $LASTEXITCODE"
+    }
+    $env:HERDR_INSTALLER_URL = $oldInstallerUrl
     $freshStableRelease = Get-ChildItem -LiteralPath (Join-Path $freshStableHome "packages\standalone\releases") -Directory |
         Where-Object { $_.Name.StartsWith("0.0.1-") } |
         Select-Object -First 1
@@ -233,7 +263,7 @@ try {
     $badManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $previewManifestPath -Encoding utf8
     $downloadFailed = $false
     try {
-        & "$PSScriptRoot\..\website\install.ps1" `
+        & "$PSScriptRoot\..\distribution\install.ps1" `
             -Channel preview `
             -ManifestUrl $previewManifestUrl `
             -InstallDir $installDir `
@@ -359,7 +389,7 @@ try {
         }
     }
 
-    & "$PSScriptRoot\..\website\install.ps1" `
+    & "$PSScriptRoot\..\distribution\install.ps1" `
         -Channel preview `
         -ManifestUrl $previewManifestUrl `
         -InstallDir $installDir `
@@ -372,7 +402,7 @@ try {
     $junctionTarget = Join-Path $root "junction-target"
     Move-Item -LiteralPath $x64HostDir -Destination $junctionTarget
     New-Item -ItemType Junction -Path $x64HostDir -Target $junctionTarget | Out-Null
-    & "$PSScriptRoot\..\website\install.ps1" `
+    & "$PSScriptRoot\..\distribution\install.ps1" `
         -Channel preview `
         -ManifestUrl $previewManifestUrl `
         -InstallDir $installDir `
@@ -384,7 +414,7 @@ try {
 
     $rejected = $false
     try {
-        & "$PSScriptRoot\..\website\install.ps1" `
+        & "$PSScriptRoot\..\distribution\install.ps1" `
             -Channel preview `
             -ManifestUrl $previewManifestUrl `
             -InstallDir $installDir `
@@ -400,7 +430,7 @@ try {
     }
 
     $stableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
-    & "$PSScriptRoot\..\website\install.ps1" `
+    & "$PSScriptRoot\..\distribution\install.ps1" `
         -Channel stable `
         -ManifestUrl $stableManifestUrl `
         -InstallDir $installDir
@@ -435,7 +465,7 @@ exit /b 1
     $preserveBin = Join-Path $root "preserve-bin"
     $env:HERDR_HOME = $preserveHome
     $env:Path = "$fakeBin;$oldProcessPath"
-    & "$PSScriptRoot\..\website\install.ps1" `
+    & "$PSScriptRoot\..\distribution\install.ps1" `
         -ManifestUrl "http://127.0.0.1:$port/candidate.json" `
         -InstallDir $preserveBin `
         -ExpectedBuildId "installer-test"
@@ -446,7 +476,7 @@ exit /b 1
         throw "installer did not preserve the existing preview channel"
     }
 
-    & "$PSScriptRoot\..\website\install.ps1" `
+    & "$PSScriptRoot\..\distribution\install.ps1" `
         -Channel stable `
         -ManifestUrl $stableManifestUrl `
         -InstallDir $preserveBin
@@ -458,6 +488,7 @@ exit /b 1
     }
 } finally {
     $env:HERDR_HOME = $oldHerdrHome
+    $env:HERDR_INSTALLER_URL = $oldInstallerUrl
     $env:Path = $oldProcessPath
     if ($null -ne $server -and -not $server.HasExited) {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue

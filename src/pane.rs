@@ -87,6 +87,7 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // when the remote side lacks matching terminfo entries.
     cmd.env("TERM", PANE_TERM);
     cmd.env("COLORTERM", PANE_COLORTERM);
+    cmd.env_remove("WT_SESSION");
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -388,6 +389,15 @@ fn foreground_shell_agent_action(
     }
 
     ForegroundShellAgentAction::ObserveProbe
+}
+
+/// Drops retained OSC evidence when changing away from an identified agent.
+/// First acquisition keeps bytes that the newly identified process may have
+/// emitted before the process probe recognized it.
+fn clear_osc_evidence_for_agent_transition(terminal: &PaneTerminal, previous_agent: Option<Agent>) {
+    if previous_agent.is_some() {
+        terminal.clear_agent_osc_state();
+    }
 }
 
 fn apply_foreground_shell_agent_action(
@@ -991,9 +1001,10 @@ fn spawn_basic_detection_task(
                     if agent_changed {
                         pending_idle.clear();
                         last_screen_scan_detection_content_seq = None;
-                        // A new foreground agent must not inherit OSC
-                        // title/progress evidence from the previous process.
-                        terminal.clear_agent_osc_state();
+                        // A replacement agent must not inherit OSC evidence
+                        // from the previous process; a first acquisition keeps
+                        // the evidence its own process already emitted.
+                        clear_osc_evidence_for_agent_transition(&terminal, previous_agent);
                         if let Some(agent) = agent {
                             agent_startup_grace_until = Some(now + AGENT_STARTUP_GRACE_WINDOW);
                             state = AgentState::Unknown;
@@ -2646,9 +2657,14 @@ impl PaneRuntime {
                                 {
                                     pending_idle.clear();
                                     last_screen_scan_detection_content_seq = None;
-                                    // A new foreground agent must not inherit OSC
-                                    // title/progress evidence from the previous process.
-                                    terminal.clear_agent_osc_state();
+                                    // A replacement agent must not inherit OSC
+                                    // evidence from the previous process; a first
+                                    // acquisition keeps the evidence its own
+                                    // process already emitted.
+                                    clear_osc_evidence_for_agent_transition(
+                                        &terminal,
+                                        previous_agent,
+                                    );
                                     if let Some(agent) = agent {
                                         agent_startup_grace_until =
                                             Some(now + AGENT_STARTUP_GRACE_WINDOW);
@@ -3406,12 +3422,12 @@ impl PaneRuntime {
                 .or_else(|| crate::platform::foreground_process_group_id(pid));
             let leader_cwd = foreground_pgid.and_then(absolute_process_cwd);
 
-            if leader_cwd.as_ref() == shell_cwd.as_ref() {
-                foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()).or(leader_cwd)
-            } else {
-                leader_cwd
-                    .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
-            }
+            // The group leader's cwd is authoritative (issue #3270): a helper
+            // process that chdirs elsewhere inside the same foreground group
+            // must not override it. Scan other members only when the leader's
+            // cwd cannot be read at all.
+            leader_cwd
+                .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
         }
 
         #[cfg(not(unix))]
@@ -3750,6 +3766,16 @@ mod tests {
                 .as_deref()
                 .map(std::path::Path::as_os_str)
         );
+    }
+
+    #[test]
+    fn pane_terminal_identity_removes_outer_windows_terminal_session() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("WT_SESSION", "outer-session");
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert!(cmd.get_env("WT_SESSION").is_none());
     }
 
     #[tokio::test]
@@ -4375,6 +4401,20 @@ mod tests {
             foreground_shell_agent_action(Some(Agent::Claude), None, false, false),
             ForegroundShellAgentAction::ObserveProbe
         );
+    }
+
+    #[tokio::test]
+    async fn first_agent_acquisition_keeps_osc_evidence_replacement_clears_it() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes(b"\x1b]2;startup title\x1b\\\x1b]9;4;1;\x1b\\");
+
+        clear_osc_evidence_for_agent_transition(&runtime.terminal, None);
+        assert_eq!(runtime.agent_osc_title(), "startup title");
+        assert_eq!(runtime.agent_osc_progress(), "4;1;");
+
+        clear_osc_evidence_for_agent_transition(&runtime.terminal, Some(Agent::Claude));
+        assert_eq!(runtime.agent_osc_title(), "");
+        assert_eq!(runtime.agent_osc_progress(), "");
     }
 
     #[test]

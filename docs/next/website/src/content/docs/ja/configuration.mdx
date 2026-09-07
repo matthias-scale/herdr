@@ -290,6 +290,23 @@ yellow = "#f9e2af"
 
 色の値には、hex、名前付きの色、`rgb(r,g,b)`、または `reset`、`default`、`none`、`transparent` のようなリセットエイリアスが使えます。
 
+`auto_switch` が有効な場合は、ライト/ダーク別のサブテーブルを共有カスタム色の上に重ねられます:
+
+```toml
+[theme.custom]
+accent = "#89b4fa"
+
+[theme.custom.light]
+panel_bg = "#eff1f5"
+text = "#4c4f69"
+
+[theme.custom.dark]
+panel_bg = "#1e1e2e"
+text = "#cdd6f4"
+```
+
+有効なパレットには、組み込みテーマ、`[theme.custom]`、`[theme.custom.light]` または `[theme.custom.dark]` の順で適用されます。モード別のサブテーブルを省略すると、既存の共有上書きの挙動が維持されます。
+
 ## UI とサイドバー
 
 サイドバーは Herdr のメインダッシュボードです。デスクトップでは、上から Blocked、Prio、該当する場合は Agents または Pinned、最後に Spaces の順で表示されます。Blocked は 0 件でも表示されるため、入力待ちのペインがないことを確認できます。Spaces は標準の所有関係ツリーです。リポジトリとリンクされた worktree は 1 つの Space 行を共有し、エージェントが検出されていないタブや複数ペインを持つタブも含め、各タブがその直下に 1 つのウィンドウ行として表示されます。コンパクト表示とモバイル表示でも同じ所有関係ツリーが保たれます。選択は強い背景色ではなく、前景色と太字で示されます。

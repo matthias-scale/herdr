@@ -257,6 +257,7 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
     ("kimi", include_str!("manifests/kimi.toml")),
     ("kiro", include_str!("manifests/kiro.toml")),
     ("maki", include_str!("manifests/maki.toml")),
+    ("muse", include_str!("manifests/muse.toml")),
     ("opencode", include_str!("manifests/opencode.toml")),
     ("pi", include_str!("manifests/pi.toml")),
     ("qodercli", include_str!("manifests/qodercli.toml")),
@@ -349,6 +350,49 @@ fn reload_manifests_locked() -> Vec<AgentManifestSummary> {
         Err(poisoned) => *poisoned.into_inner() = cache,
     }
     summaries
+}
+
+pub(crate) fn reload_manifests_for_agents(agents: &[Agent]) {
+    if agents.is_empty() {
+        return;
+    }
+
+    // A test sandbox holds the reload lock for the whole closure, so taking it
+    // again here would deadlock the test process. Mirror `reload_manifests`.
+    #[cfg(test)]
+    if current_thread_owns_sandbox() {
+        reload_manifests_for_agents_locked(agents);
+        return;
+    }
+
+    let _reload_guard = MANIFEST_RELOAD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    reload_manifests_for_agents_locked(agents);
+}
+
+/// Reload the named agents assuming the caller already holds the reload lock.
+fn reload_manifests_for_agents_locked(agents: &[Agent]) {
+    let lock = manifest_cache();
+    let replacements = Agent::SCREEN_MANIFEST_AGENTS
+        .into_iter()
+        .filter(|agent| agents.contains(agent))
+        .map(|agent| (agent, load_manifest_uncached(agent)))
+        .collect::<Vec<_>>();
+    let mut cache = match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    for (agent, replacement) in replacements {
+        if let Some((_, loaded)) = cache
+            .manifests
+            .iter_mut()
+            .find(|(cached_agent, _)| *cached_agent == agent)
+        {
+            *loaded = replacement;
+        }
+    }
 }
 
 fn manifest_cache() -> &'static RwLock<ManifestCache> {
@@ -1655,6 +1699,16 @@ fn line_start_offset(content: &str, lines: &[&str], index: usize) -> usize {
 /// what it says on every machine.
 #[cfg(test)]
 pub(crate) fn with_bundled_manifests<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    // Reentrancy: this fork sandboxes inside helpers such as `osc_explain`, so
+    // a test that also wraps the call in its own sandbox would nest. The
+    // reload and config-env locks are plain non-reentrant mutexes, and nesting
+    // them deadlocks the test process. A thread that already owns a sandbox is
+    // already pointed at empty config and state roots, which is exactly what
+    // the inner call wants, so reuse it instead of acquiring a second one.
+    if current_thread_owns_sandbox() {
+        return f();
+    }
+
     /// Restores the sandbox on drop so a panicking `f` cannot leave the
     /// process pointed at a deleted config root or a stale manifest cache.
     struct Sandbox {

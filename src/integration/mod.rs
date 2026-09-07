@@ -28,7 +28,7 @@ const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 8;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 8;
+const OMP_INTEGRATION_VERSION: u32 = 9;
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -240,7 +240,7 @@ const ANTIGRAVITY_CLI_HOOK_ASSET: &str =
 #[cfg(not(windows))]
 const ANTIGRAVITY_CLI_HOOK_ASSET: &str =
     include_str!("assets/antigravity_cli/herdr-agent-state.sh");
-const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 1;
+const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 3;
 /// Antigravity CLI keys `hooks.json` by hook name, so every Herdr entry lives
 /// under one Herdr-owned block that install rewrites and uninstall removes.
 const ANTIGRAVITY_CLI_HOOK_BLOCK_NAME: &str = "herdr";

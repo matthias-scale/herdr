@@ -116,14 +116,12 @@ Use `default` as the session name when you need to stop the default session expl
 
 ```bash
 herdr workspace list
-herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
-herdr workspace bind <workspace_id> <owner/repo> [--reconcile]
-herdr workspace bind <workspace_id> --clear
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
-herdr workspace close <workspace_id>
+herdr workspace close <workspace_id> [--group]
 ```
 
 Create a workspace without stealing focus:
@@ -137,21 +135,23 @@ A workspace is a top-level project or work context. Creating one also creates it
 ## Worktrees
 
 ```bash
-herdr worktree list [--workspace ID | --cwd PATH]
-herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--ticket ID]... [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]
-herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--ticket ID]... [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]
-herdr worktree remove --workspace ID [--force]
+herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]
+herdr worktree remove --workspace ID [--force] [--trust-repository]
 ```
 
 Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree create` creates a Git worktree checkout, opens it as a workspace, and groups it with the parent repo workspace. If `--branch` names an existing local branch, Herdr checks it out; otherwise it creates the branch from `--base` or `HEAD`. Without `--path`, Herdr creates the checkout under `<worktrees.directory>/<repo>/<branch-slug>`.
 
-`workspace close` closes only Herdr state. To delete the checkout, run `worktree remove`. It runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
+`workspace close` closes only Herdr state. Closing a primary workspace while linked-worktree workspaces are open requires `--group`; without it, the command leaves the group open and returns `workspace_group_close_required`. To delete the checkout, run `worktree remove`. It runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
+
+Git rejects repositories owned by another user by default. If you have independently verified the repository, pass `--trust-repository` to trust its resolved path for that command only. Herdr does not change your Git configuration.
 
 ## Tabs
 
 ```bash
 herdr tab list [--workspace <workspace_id>]
-herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
@@ -161,17 +161,6 @@ herdr tab close <tab_id>
 A tab is another terminal layout inside a workspace. Without `--workspace`, `tab create` uses the active workspace and fails if none exists. Its JSON response exposes `.result.tab.tab_id` and `.result.root_pane.pane_id`. Closing a workspace's last tab also closes the workspace, matching the TUI close-tab action. If `confirm_close` is enabled and closing the tab would also close a whole worktree group, `tab close` returns a `confirmation_required` error instead.
 
 Workspace and tab creation, and pane splitting, leave focus unchanged by default. `--focus` selects the new layout; `--no-focus` states the default explicitly. Without `--cwd`, new terminals follow the configured `terminal.new_cwd` policy, which follows the source pane or workspace by default. Each `--env KEY=VALUE` adds or replaces that variable in the new root shell.
-
-Creation commands can bind the new pane to one pull request before its shell starts. A PR binding requires one `--pr` and a `--role` of `baseline`, `repair`, `ship`, or `review`; `--active-owner` asks Herdr to make that pane the active owner. If the PR already has a live owner, Herdr keeps the existing owner and returns the new pane with `active_owner: false`, so the run remains attached as history. When the owner pane exits, surviving runs show the PR as un-owned.
-
-## Windows
-
-```bash
-herdr window next
-herdr window previous
-```
-
-A window is a tab for global navigation. These commands focus the next or previous tab across every workspace in canonical workspace/tab order, include tabs without agents, and wrap at both ends.
 
 ## Panes
 
@@ -187,12 +176,11 @@ herdr pane focus --direction left|right|up|down [--pane ID|--current]
 herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
-herdr pane work-context get <pane_id>
-herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--clear FIELD]...
-herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
+herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane
+herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
-herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
+herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
 herdr pane close <pane_id>
@@ -210,28 +198,6 @@ Right-clicking the pane frame still opens Herdr's menu. `pane split
 --right-click pane` applies the same policy to the new pane at creation.
 
 After `pane move`, use `.result.move_result.pane.pane_id` for later commands. A cross-workspace move changes the workspace-qualified pane ID; the prior value remains at `.result.move_result.previous_pane_id`. The running process keeps its launch-time `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID`; Herdr retains the old pane ID as an alias for that terminal, so pane commands using `--current` still resolve it. A live agent name follows the terminal and continues to resolve after the move.
-
-`pane work-context set` applies one atomic manual patch. Repeated `--ticket` and
-`--pr` flags replace those lists in first-seen order; omitted fields stay
-unchanged. `--clear` accepts `ticket_ids`, `pr_urls`, `branch`, `repo`, or `work_title`.
-`pane work-context get` returns the same `PaneInfo` response as `pane get`,
-including its effective `work_context` object.
-
-`workspace bind` records the repository a workspace collects work for, so the
-grouping survives new panes instead of having to be rebuilt by hand. A pane is
-placed in the bound workspace once it resolves its own repository, which comes
-either from a declaration (`pane work-context set --repo`, or a `--pr` spawn
-binding, which implies its repository) or, failing that, from the `origin`
-remote of the pane's checkout. Declarations outrank the checkout, because a
-session often runs from a shared worktree while working on another repository.
-Repositories are GitHub-only: a remote on any other host is refused rather than
-reduced to its `owner/repo` path, which would otherwise route a mirror into the
-wrong workspace.
-
-Placement never takes focus, and the pane the human is currently focused in is
-never moved; it is placed later, once focus has moved on. `--reconcile` sorts
-panes that already resolved the repository, under the same two rules. A
-repository may be bound to only one workspace.
 
 Read output:
 
@@ -287,7 +253,7 @@ herdr pane release-agent <pane_id> \
   [--seq N]
 ```
 
-`report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits. Use `herdr agent wait <target> --until stale` to wait for the server-side watchdog status; `stale` is never a valid value for `pane report-agent --state`.
+`report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
 
 `pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
 
@@ -341,46 +307,17 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 
 Agent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.
 
-`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, and `maki`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
+`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `maki`, and `muse`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
 
 A successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
 
 `agent prompt` honors live bracketed-paste mode and sends text followed by encoded Enter after a short delay, including while the agent is working. If the agent is already `blocked`, it returns `agent_blocked` without sending input. With `--wait`, an accepted prompt sent from another non-working state must produce an observed lifecycle change within five seconds or Herdr returns `agent_prompt_stalled`; a caller timeout of five seconds or less keeps the normal `timeout` error. After activity is observed, it waits for the first requested settled status. It does not track individual turns. If the agent is already working, completion of that active turn may satisfy the wait. `--until` narrows the matching states and is rejected unless `--wait` is also present. Standalone `agent wait` returns immediately when the current status matches. Both default to `idle`, `done`, or `blocked`; use `--until unknown` explicitly when needed.
 
-`idle` means ready for input after its pane has been opened in the focused Herdr UI; `done` is the same underlying idle state after unseen background work completes. Opening that agent's pane or targeting it with `pane focus` / `agent focus` marks it seen; opening another pane in the same tab or reading it through the CLI does not. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently, not that its work succeeded.
+`idle` means ready for input after its tab has been seen in the focused Herdr UI; `done` is the same underlying idle state after unseen background work completes. Focusing that tab or targeting it with `pane focus` / `agent focus` marks it seen; reading it through the CLI does not. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently, not that its work succeeded.
 
 `agent send-keys` sends logical terminal keys such as `enter`, `up`, `esc`, or `ctrl+c`. Herdr validates every key before writing any bytes. `agent read` reads the resolved terminal stream, and `agent rename` names an already detected agent.
 
 `agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
-
-## Fleet status
-
-```bash
-herdr fleet status
-herdr fleet status --hosts laptop,workbox --blocked-only
-herdr fleet status --json
-herdr fleet status --watch
-```
-
-Fleet status reads every configured host in parallel and merges pane-backed Herdr agents with windowless `~/.agents/runs/<run_id>/state.json` records. The `source` field remains `herdr` or `run_state` in JSON so consumers never confuse the evidence classes. Missing run-state files are normal. A run-state file with `schema` other than `1` produces a loud `run_state` error row.
-
-The human table sorts blocked rows first, then working or active rows. `--blocked-only` uses the blocked fact, independent of liveness. `--watch` prints JSON Lines only after the initial snapshot and emits each observed state transition once. Newly blocked events include the gate summary.
-
-Fleet status models two separate facts:
-
-| Input evidence | Liveness | Blocked |
-| --- | --- | --- |
-| Herdr `idle`, `working`, or `blocked` | live | true for `blocked` or any unanswered gate |
-| Herdr `done` | terminal for that agent only | true if an unanswered gate remains |
-| Herdr `stale` or `unknown` | unknown | true if an unanswered gate remains |
-| Run `active`, `waiting`, or `blocked` with a fresh heartbeat | live | true only for `blocked` |
-| Non-terminal run with an old or invalid heartbeat | unknown | preserves the run's blocked fact |
-| Run `done` or `failed` | terminal | false |
-| Host read failure or disappeared row | unknown | false unless retained evidence says blocked |
-
-This split prevents a quiet gate from being demoted to stale. A stale Herdr record with unanswered gates appears as `BLOCKED · UNKNOWN`. It also prevents silence from being called complete or blocked without evidence.
-
-Windowless run records may name a parent run or native agent session. Fleet status scores every known descendant when it computes `closure_liveness` and `closure_blocked`. A parent reporting `done` is terminal only for its own row; a live, unknown, or blocked child keeps the parent closure non-terminal or blocked. Relationships absent from the run-state contract cannot be inferred.
 
 Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for ordinary terminals, servers, tests, shells, or low-level terminal control. Use `pane run` when you want to submit a command with Enter.
 
@@ -517,7 +454,7 @@ herdr plugin log list [--plugin ID] [--limit N]
 Managed terminal panes:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction left|right|up|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```

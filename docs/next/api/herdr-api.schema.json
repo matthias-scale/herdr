@@ -5100,6 +5100,20 @@
           ],
           "type": "object"
         },
+        "WorkspaceCloseParams": {
+          "properties": {
+            "close_group": {
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceCreateParams": {
           "properties": {
             "cwd": {
@@ -5309,6 +5323,9 @@
                 "null"
               ]
             },
+            "trust_repository": {
+              "type": "boolean"
+            },
             "work_context": {
               "anyOf": [
                 {
@@ -5335,6 +5352,9 @@
                 "string",
                 "null"
               ]
+            },
+            "trust_repository": {
+              "type": "boolean"
             },
             "workspace_id": {
               "type": [
@@ -5375,6 +5395,9 @@
                 "null"
               ]
             },
+            "trust_repository": {
+              "type": "boolean"
+            },
             "work_context": {
               "anyOf": [
                 {
@@ -5398,6 +5421,9 @@
           "properties": {
             "force": {
               "default": false,
+              "type": "boolean"
+            },
+            "trust_repository": {
               "type": "boolean"
             },
             "workspace_id": {
@@ -5723,7 +5749,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+              "$ref": "#/schemas/request/$defs/WorkspaceCloseParams"
             }
           },
           "required": [

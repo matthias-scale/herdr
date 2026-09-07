@@ -86,7 +86,7 @@ pub enum Method {
     #[serde(rename = "workspace.report_metadata")]
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
-    WorkspaceClose(WorkspaceTarget),
+    WorkspaceClose(WorkspaceCloseParams),
     #[serde(rename = "loop.list")]
     LoopList(EmptyParams),
     #[serde(rename = "loop.run_history")]
