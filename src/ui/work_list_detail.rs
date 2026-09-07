@@ -295,7 +295,16 @@ impl PrItem<'_> {
         let auto_enabled = self
             .cached_detail
             .is_some_and(|detail| detail.auto_merge_enabled);
-        let fix_reason = (!checkout_available).then_some("Check out the PR first");
+        let fix_reason = if !checkout_available {
+            Some("Check out the PR first")
+        } else if self
+            .cached_detail
+            .is_some_and(|detail| detail.unresolved_review_threads == Some(0))
+        {
+            Some("No unresolved review threads")
+        } else {
+            None
+        };
         let mut actions = vec![
             PrAction {
                 kind: PrActionKind::CheckOut,
@@ -1502,10 +1511,7 @@ mod tests {
             .find(|action| action.kind == PrActionKind::FixFindings)
             .expect("fix findings action");
 
-        assert_eq!(
-            fix_findings.disabled_reason,
-            Some("Check out the PR first")
-        );
+        assert_eq!(fix_findings.disabled_reason, Some("Check out the PR first"));
         assert!(!fix_findings.enabled());
     }
 
