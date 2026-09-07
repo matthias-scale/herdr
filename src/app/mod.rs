@@ -6593,7 +6593,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_age_refresh_is_not_scheduled_for_space_suffix_rows() {
+    fn activity_age_refresh_is_scheduled_for_space_suffix_rows() {
         let mut app = test_app();
         let started = Instant::now();
         let workspace = Workspace::test_new("activity");
@@ -6622,8 +6622,8 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
-        // F19 replaces the visible age with the Space suffix, so the hidden
-        // clock must not keep waking the render loop.
+        // F19-1a keeps the visible age before the optional Space suffix, so its
+        // minute boundary must keep waking the render loop.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,
@@ -6634,9 +6634,12 @@ mod tests {
         );
         app.sync_agent_activity_refresh_deadline(observed);
 
-        assert_eq!(app.agent_activity_refresh_deadline, None);
+        assert_eq!(
+            app.agent_activity_refresh_deadline,
+            Some(started + Duration::from_secs(60))
+        );
         assert!(!app.take_due_agent_activity_refresh(observed));
-        assert!(!app.take_due_agent_activity_refresh(started + Duration::from_secs(60)));
+        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(60)));
         assert!(app.agent_activity_refresh_deadline.is_none());
     }
 
