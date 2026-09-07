@@ -5341,7 +5341,7 @@ esac
         assert!(snapshot.items.is_empty());
         assert_eq!(
             snapshot.unavailable_reason(WorkIndexSource::Github),
-            Some("observation timed out")
+            Some("list observation timed out")
         );
     }
 
