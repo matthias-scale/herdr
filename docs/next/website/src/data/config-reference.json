@@ -1539,6 +1539,17 @@
       "title": "Source control",
       "keys": [
         {
+          "key": "source_control.merge_method",
+          "type": "enum",
+          "default": "\"merge\"",
+          "description": "Merge strategy used by the primary pull request action and auto-merge.",
+          "values": [
+            "merge",
+            "squash",
+            "rebase"
+          ]
+        },
+        {
           "key": "source_control.commit_message_model",
           "type": "string",
           "default": "\"\"",
@@ -1555,18 +1566,6 @@
           "type": "string",
           "default": "\"issue/\"",
           "description": "Prefix for branch names Herdr derives from a ticket."
-        }
-      ]
-    },
-    {
-      "id": "land",
-      "title": "Pull request landing",
-      "keys": [
-        {
-          "key": "land.approval_label",
-          "type": "string",
-          "default": "\"approved\"",
-          "description": "Exact pull request label accepted as an approval signal for the Land action."
         }
       ]
     },

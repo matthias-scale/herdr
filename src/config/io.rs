@@ -15,7 +15,6 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "experimental",
     "files",
     "keys",
-    "land",
     "missive",
     "onboarding",
     "panel",
@@ -368,14 +367,6 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.remote = section,
-    );
-    load_live_section(
-        table,
-        "land",
-        "land config",
-        &mut diagnostics,
-        &mut invalid_sections,
-        |section| config.land = section,
     );
     load_live_section(
         table,

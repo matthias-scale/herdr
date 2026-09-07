@@ -20,6 +20,7 @@
   "isDraft": false,
   "mergeable": "UNKNOWN",
   "mergeStateStatus": "UNKNOWN",
+  "autoMergeRequest": null,
   "statusCheckRollup": [
     {
       "__typename": "CheckRun",

@@ -858,7 +858,6 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
             state.sort,
             state.open_only,
             observed_at,
-            &app.land_approval_label,
             Some((&app.sidebar_work_filter, &app.work_index_session)),
         )
     });
@@ -1192,41 +1191,57 @@ fn render_pr_detail(
 ) {
     let palette = &app.palette;
     let detail = item.detail();
-    let land_enabled = item.actions().iter().any(|action| {
-        action.kind == crate::ui::work_list_detail::WorkActionKind::Land && action.enabled
+    let checkout_available = detail.open_url.is_some()
+        && item
+            .cached_detail
+            .and_then(|detail| detail.head_ref_name.as_ref())
+            .is_some();
+    let actions = item.action_table(app.pr_merge_method, checkout_available);
+    let merge = actions.iter().find(|action| {
+        matches!(
+            action.placement,
+            crate::ui::work_list_detail::PrActionPlacement::Header
+        ) && matches!(
+            action.kind,
+            crate::ui::work_list_detail::PrActionKind::Merge(_)
+        )
     });
-    let land_status = item.land_status();
-    let awaiting_approval =
-        land_status == crate::ui::work_list_detail::PrLandStatus::AwaitingApproval;
-    let (land_label, land_style) = match (land_enabled, &land_status) {
-        (true, crate::ui::work_list_detail::PrLandStatus::Enabled(_)) => (
-            "[Land]",
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        (false, crate::ui::work_list_detail::PrLandStatus::AwaitingApproval) => (
-            "[Land]",
-            Style::default()
-                .fg(palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        ),
-        _ => (
-            "[Land disabled]",
-            Style::default()
-                .fg(palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        ),
+    let merge_style = if merge.is_some_and(|action| action.enabled()) {
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::DIM)
     };
+    let checkout = actions.iter().find(|action| {
+        action.kind == crate::ui::work_list_detail::PrActionKind::CheckOut
+            && matches!(
+                action.placement,
+                crate::ui::work_list_detail::PrActionPlacement::Header
+            )
+    });
     let mut lines = vec![
         Line::from(vec![
             ratatui::text::Span::styled(
-                format!(" {}     [Check out ▾] ", detail.heading),
+                format!(
+                    " {}     [{}] ",
+                    detail.heading,
+                    checkout.map_or("Check out ▾", |action| action.label.as_str())
+                ),
                 Style::default()
                     .fg(palette.text)
                     .add_modifier(Modifier::BOLD),
             ),
-            ratatui::text::Span::styled(land_label, land_style),
+            ratatui::text::Span::styled(
+                format!(
+                    "[{}]",
+                    merge.map_or("Merge", |action| action.label.as_str())
+                ),
+                merge_style,
+            ),
+            ratatui::text::Span::styled(" [⋯]", Style::default().fg(palette.accent)),
         ]),
         Line::styled(
             format!(" {}", detail.title),
@@ -1247,11 +1262,11 @@ fn render_pr_detail(
             Style::default().fg(palette.accent),
         ),
     ];
-    if awaiting_approval {
+    if let Some(reason) = merge.and_then(|action| action.disabled_reason) {
         lines.insert(
             1,
             Line::styled(
-                " awaiting approval",
+                format!(" {reason}"),
                 Style::default()
                     .fg(palette.overlay0)
                     .add_modifier(Modifier::DIM),
@@ -1341,17 +1356,6 @@ fn render_pr_detail(
         }
         PrDetailTab::Code => crate::ui::dock::diff::render_diff(app, frame, area),
     }
-    if let Some(confirm) = state.pending_land.as_ref() {
-        lines.push(Line::styled(
-            format!(
-                " Confirm Land {}#{} via {} at {}? [y/N]",
-                confirm.repo, confirm.number, confirm.approval_signal, confirm.head_sha
-            ),
-            Style::default()
-                .fg(palette.yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
     if state.detail_tab != PrDetailTab::Code {
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -1386,7 +1390,20 @@ fn render_pr_detail(
                 Rect::new(area.x, area.y, area.width, 1),
             );
         }
+    } else if let Some(menu) = state.pr_action_menu {
+        let anchor = pr_action_menu_anchor(area);
+        if !crate::ui::pr_actions::render(app, frame, frame.area(), anchor, &actions, menu) {
+            frame.render_widget(
+                Paragraph::new("action menu needs space below")
+                    .style(Style::default().fg(palette.red)),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+        }
     }
+}
+
+fn pr_action_menu_anchor(area: Rect) -> Rect {
+    Rect::new(area.right().saturating_sub(3), area.y, 3.min(area.width), 1)
 }
 
 fn checkout_menu_layout(
@@ -1540,7 +1557,7 @@ fn render_placeholder(
 fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
     let base = match state.projection {
         WorkProjection::PullRequests => {
-            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   c checkout   l Land   x fix"
+            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   c checkout   l merge   m actions"
         }
         WorkProjection::Tickets
             if state.ticket_layout == crate::app::state::LinearViewLayout::Board
@@ -1917,7 +1934,7 @@ mod tests {
     }
 
     #[test]
-    fn land_row_and_confirmation_name_the_approval_state() {
+    fn pr_header_uses_merge_and_shared_overflow_actions() {
         let item = pr("owner/repo", 42, &[]);
         let key = crate::app::state::WorkItemKey {
             repo: item.repo.clone(),
@@ -1932,24 +1949,41 @@ mod tests {
             state: "SUCCESS".into(),
         }];
         detail.merge_state_status = Some("CLEAN".into());
+        detail.mergeable = Some("MERGEABLE".into());
         detail.head_sha = Some("abc123".into());
         let mut app = AppState::test_new();
         app.work_item_detail_cache.insert(key, detail);
         app.work_view = Some(WorkViewState::new(true, Some(snapshot(vec![item]))));
 
-        let awaiting = rendered_app_text_at(&app, 120, 24);
-        assert!(awaiting.contains("[Land]"));
-        assert!(awaiting.contains("awaiting approval"));
+        let rendered = rendered_app_text_at(&app, 120, 24);
+        assert!(rendered.contains("[Check out ▾] [Merge] [⋯]"), "{rendered}");
 
-        app.work_view.as_mut().expect("work view").pending_land =
-            Some(crate::app::state::PrLandConfirmation {
-                repo: "owner/repo".into(),
-                number: 42,
-                head_sha: "abc123".into(),
-                approval_signal: "approved review".into(),
-            });
-        let confirmation = rendered_app_text_at(&app, 120, 24);
-        assert!(confirmation.contains("via approved review at abc123"));
+        app.work_view.as_mut().expect("work view").pr_action_menu = Some(Default::default());
+        let menu = rendered_app_text_at(&app, 120, 40);
+        assert!(menu.contains("Ask a question"), "{menu}");
+        assert!(menu.contains("Close pull request"), "{menu}");
+    }
+
+    #[test]
+    fn full_pr_action_menu_opens_downward_from_the_header() {
+        let summary = pr("owner/repo", 42, &[]);
+        let detail = crate::work_index::WorkItemDetail::empty();
+        let actions = crate::ui::work_list_detail::PrItem {
+            summary: &summary,
+            cached_detail: Some(&detail),
+            observed_at: SystemTime::UNIX_EPOCH,
+        }
+        .action_table(crate::config::MergeMethodConfig::Merge, true);
+        let area = Rect::new(30, 12, 60, 20);
+        let anchor = pr_action_menu_anchor(area);
+        let layout = crate::ui::pr_actions::layout(
+            Rect::new(0, 0, 120, 40),
+            anchor,
+            &actions,
+            Default::default(),
+        )
+        .expect("menu fits below the full-view header");
+        assert_eq!(layout.rect.y, anchor.bottom());
     }
 
     #[test]

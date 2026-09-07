@@ -132,10 +132,10 @@ impl AppState {
         self.dock_pr_focused = surface == DockSurface::Pr;
         self.dock_linear_focused = surface == DockSurface::Linear;
         self.dock_pr_checkout_menu = None;
-        self.dock_pr_pending_land = None;
         self.dock_ticket_start_menu = None;
         self.dock_ticket_action_menu = None;
         self.dock_ticket_comment_draft = None;
+        self.dock_pr_action_menu = None;
         if self.dock_agents_focused {
             self.reconcile_dock_agents_selection();
         }
