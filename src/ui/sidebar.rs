@@ -335,6 +335,41 @@ fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
     candidate.unwrap_or(DEFAULT_THREAD_TITLE)
 }
 
+fn title_without_object_identifier(title: &str) -> Option<&str> {
+    let (identifier, title) = title.split_once(" · ")?;
+    let github_identifier = identifier
+        .strip_prefix('#')
+        .is_some_and(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()));
+    let linear_identifier = identifier.split_once('-').is_some_and(|(team, number)| {
+        !team.is_empty()
+            && team.chars().all(|c| c.is_ascii_alphabetic())
+            && !number.is_empty()
+            && number.chars().all(|c| c.is_ascii_digit())
+    });
+    (github_identifier || linear_identifier).then_some(title)
+}
+
+fn compact_row_title_for_width<'a>(
+    title: &'a str,
+    provider: &str,
+    width: usize,
+    requested_prefix: usize,
+) -> &'a str {
+    if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+        return title;
+    }
+    let Some(title_only) = title_without_object_identifier(title) else {
+        return title;
+    };
+    let widths = compact_row_widths(title, provider, width, requested_prefix);
+    let fixed_width = requested_prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    if display_width(title) <= width.saturating_sub(fixed_width) {
+        title
+    } else {
+        title_only
+    }
+}
+
 fn compact_title_candidate(title: Option<&str>) -> Option<&str> {
     let title = title?.trim();
     if title.is_empty()
@@ -360,7 +395,12 @@ fn compact_row_layout(
 ) -> TabRowLayout {
     let (age, activity_instant) = compact_age(entry, now);
     let provider = compact_provider(entry);
-    let title = compact_row_title(entry, tab);
+    let title = compact_row_title_for_width(
+        compact_row_title(entry, tab),
+        &provider,
+        width,
+        prefix_width,
+    );
     let widths = compact_row_widths(title, &provider, width, prefix_width);
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     TabRowLayout {
@@ -538,14 +578,33 @@ pub(super) fn render_compact_agent_row(
     tab: bool,
     bg: Option<Color>,
 ) {
+    render_compact_agent_row_with_prefix(app, frame, entry, rect, depth, tab, bg, None);
+}
+
+fn render_compact_agent_row_with_prefix(
+    app: &AppState,
+    frame: &mut Frame,
+    entry: &AgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+    tab: bool,
+    bg: Option<Color>,
+    prefix_override: Option<usize>,
+) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
     let p = &app.palette;
-    let requested_prefix_width = usize::from(depth) * 3 + 1;
+    let requested_prefix_width = prefix_override.unwrap_or_else(|| usize::from(depth) * 3 + 1);
     let provider = compact_provider(entry);
-    let widths = compact_row_widths(
+    let row_title = compact_row_title_for_width(
         compact_row_title(entry, tab),
+        &provider,
+        usize::from(rect.width),
+        requested_prefix_width,
+    );
+    let widths = compact_row_widths(
+        row_title,
         &provider,
         usize::from(rect.width),
         requested_prefix_width,
@@ -5141,8 +5200,12 @@ fn render_workspace_list(
     for header in compute_sidebar_nested_header_areas(app, sidebar_area) {
         render_nested_header(app, frame, &header);
     }
-    for card in compute_tab_card_areas(app, sidebar_area) {
-        render_tab_card(app, frame, &card);
+    let tab_cards = compute_tab_card_areas(app, sidebar_area);
+    let narrow_prefix = tab_cards
+        .first()
+        .and_then(|card| narrow_view_tab_prefix(app, usize::from(card.rect.width)));
+    for card in tab_cards {
+        render_tab_card(app, frame, &card, narrow_prefix);
     }
     for card in agent_cards {
         let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
@@ -5151,7 +5214,7 @@ fn render_workspace_list(
         }) else {
             continue;
         };
-        render_agent_card(app, frame, entry, card.rect, depth);
+        render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
@@ -5170,7 +5233,48 @@ fn render_workspace_list(
     }
 }
 
-fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::TabCardArea) {
+fn narrow_view_tab_prefix(app: &AppState, width: usize) -> Option<usize> {
+    if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+        return None;
+    }
+    let rows = sidebar_rows(app);
+    narrow_view_tab_prefix_from_rows(&rows, width)
+}
+
+fn narrow_view_tab_prefix_from_rows(rows: &[SidebarRow], width: usize) -> Option<usize> {
+    let prefixes = rows
+        .iter()
+        .filter_map(|row| match row {
+            SidebarRow::Tab { entry, depth } => Some((entry, depth, true)),
+            SidebarRow::Agent { entry, depth } => Some((entry, depth, false)),
+            _ => None,
+        })
+        .map(|(entry, depth, tab)| {
+            let requested_prefix = usize::from(*depth) * 3 + 1;
+            let provider = compact_provider(entry);
+            let title = compact_row_title_for_width(
+                compact_row_title(entry, tab),
+                &provider,
+                width,
+                requested_prefix,
+            );
+            let prefix = compact_row_widths(title, &provider, width, requested_prefix).prefix;
+            (prefix, requested_prefix)
+        })
+        .collect::<Vec<_>>();
+    prefixes
+        .iter()
+        .any(|(prefix, requested)| prefix < requested)
+        .then(|| prefixes.iter().map(|(prefix, _)| *prefix).min())
+        .flatten()
+}
+
+fn render_tab_card(
+    app: &AppState,
+    frame: &mut Frame,
+    card: &crate::app::state::TabCardArea,
+    narrow_prefix: Option<usize>,
+) {
     let entry = sidebar_rows(app).into_iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
             if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
@@ -5180,7 +5284,16 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         _ => None,
     });
     let Some((entry, depth)) = entry else { return };
-    render_compact_agent_row(app, frame, &entry, card.rect, depth, true, None);
+    render_compact_agent_row_with_prefix(
+        app,
+        frame,
+        &entry,
+        card.rect,
+        depth,
+        true,
+        None,
+        narrow_prefix,
+    );
     if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
         dim_settled_row(frame, card.rect, app.palette.overlay0);
         let target = crate::app::state::PaneFocusTarget {
@@ -5201,8 +5314,18 @@ fn render_agent_card(
     detail: &AgentPanelEntry,
     rect: Rect,
     depth: u16,
+    narrow_prefix: Option<usize>,
 ) {
-    render_compact_agent_row(app, frame, detail, rect, depth, false, None);
+    render_compact_agent_row_with_prefix(
+        app,
+        frame,
+        detail,
+        rect,
+        depth,
+        false,
+        None,
+        narrow_prefix,
+    );
     if app.pane_is_settled(detail.ws_idx, detail.pane_id) {
         dim_settled_row(frame, rect, app.palette.overlay0);
     }
@@ -5224,6 +5347,9 @@ pub(crate) fn visible_tab_activity_instants_from(
     cards: &[crate::app::state::TabCardArea],
 ) -> Vec<std::time::Instant> {
     let rows = sidebar_rows_from(app, terminal_runtimes);
+    let narrow_prefix = cards
+        .first()
+        .and_then(|card| narrow_view_tab_prefix(app, usize::from(card.rect.width)));
     cards
         .iter()
         .filter_map(|card| {
@@ -5239,7 +5365,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 entry,
                 app.view_observed_at,
                 usize::from(card.rect.width),
-                usize::from(depth) * 3 + 1,
+                narrow_prefix.unwrap_or_else(|| usize::from(depth) * 3 + 1),
                 &app.palette,
                 app.status_indicators,
             );
@@ -9688,10 +9814,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert!(
-            nested_ticket.starts_with(" ●  SCA-3165"),
-            "{nested_ticket:?}"
-        );
+        assert_eq!(nested_ticket, "  ●  sample-linear pi  2m");
 
         let area = Rect::new(0, 0, 80, 12);
         let cards = compute_tab_card_areas(&app, area);
@@ -9721,6 +9844,139 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
         assert!(wide.contains("2m · t3-sample"), "{wide:?}");
+    }
+
+    #[test]
+    fn f19_8_narrow_rows_drop_identifiers_and_share_one_marker_column() {
+        let app = AppState::test_new();
+        let mut rows = Vec::new();
+        for (title, depth, recently_done) in [
+            ("SCA-3165 · sample-linear", 2, false),
+            ("#159 · sample-pr", 1, false),
+            ("sample-missive", 1, false),
+            ("sample-settled", 0, true),
+        ] {
+            let mut entry = compact_test_entry(title, Some(Agent::Claude));
+            entry.state = AgentState::Working;
+            rows.push(if recently_done {
+                SidebarRow::Agent {
+                    entry: Box::new(entry),
+                    depth,
+                }
+            } else {
+                SidebarRow::Tab {
+                    entry: Box::new(entry),
+                    depth,
+                }
+            });
+        }
+
+        let prefix = narrow_view_tab_prefix_from_rows(&rows, 25);
+        assert_eq!(prefix, Some(1));
+        let mut marker_columns = Vec::new();
+        for (row, expected_title) in rows.iter().zip([
+            "sample-linear",
+            "sample-pr",
+            "sample-missive",
+            "sample-settled",
+        ]) {
+            let (entry, depth, tab) = match row {
+                SidebarRow::Tab { entry, depth } => (entry, depth, true),
+                SidebarRow::Agent { entry, depth } => (entry, depth, false),
+                _ => unreachable!("fixture contains only compact rows"),
+            };
+            let mut terminal =
+                Terminal::new(TestBackend::new(25, 1)).expect("test terminal should initialize");
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row_with_prefix(
+                        &app,
+                        frame,
+                        entry,
+                        Rect::new(0, 0, 25, 1),
+                        *depth,
+                        tab,
+                        None,
+                        prefix,
+                    )
+                })
+                .expect("narrow compact row should render");
+            let rendered = row_text(terminal.backend().buffer(), 0, 25);
+            assert!(!rendered.contains("SCA-3165 ·"), "{rendered:?}");
+            assert!(!rendered.contains("#159 ·"), "{rendered:?}");
+            assert!(rendered.contains(expected_title), "{rendered:?}");
+            marker_columns.push(rendered.find('●').expect("working marker"));
+        }
+        assert_eq!(marker_columns, vec![1, 1, 1, 1]);
+
+        let short_github = compact_row_title_for_width("#1 · fix", "cc", 24, 7);
+        assert_eq!(short_github, "fix");
+        assert_eq!(compact_row_widths(short_github, "cc", 24, 7).prefix, 7);
+
+        assert_eq!(
+            narrow_view_tab_prefix_from_rows(&rows, 43),
+            None,
+            "nested rows keep their extra level when every title fits"
+        );
+
+        let mut rendered_app = app_with_agents(&["linear", "pr", "missive", "settled"]);
+        for (workspace, title) in rendered_app.workspaces.iter_mut().zip([
+            "sample-linear",
+            "sample-pr",
+            "sample-missive",
+            "sample-settled",
+        ]) {
+            workspace.tabs[0].custom_name = Some(title.into());
+        }
+        replace_tab_context(
+            &mut rendered_app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-3165".into()],
+                work_title: Some("sample-linear".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut rendered_app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
+                work_title: Some("sample-pr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        rendered_app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+        rendered_app.reconcile_sidebar_presentation();
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_sidebar(&rendered_app, &TerminalRuntimeRegistry::new(), frame, area)
+            })
+            .expect("narrow grouped view should render");
+        let rendered_rows = (0..area.height)
+            .map(|y| row_text(terminal.backend().buffer(), y, area.width - 1))
+            .filter(|row| row.contains("sample-"))
+            .collect::<Vec<_>>();
+        assert_eq!(rendered_rows.len(), 4, "{rendered_rows:#?}");
+        for expected_title in [
+            "sample-linear",
+            "sample-pr",
+            "sample-missive",
+            "sample-settled",
+        ] {
+            let row = rendered_rows
+                .iter()
+                .find(|row| row.contains(expected_title))
+                .expect("full seeded title");
+            assert_eq!(row.find('●'), Some(1), "{row:?}");
+        }
     }
 
     #[test]
