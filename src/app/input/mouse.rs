@@ -40,6 +40,9 @@ pub(super) enum MouseAction {
     SettledMenu {
         index: usize,
     },
+    SidebarNewMenu {
+        action: crate::app::state::SidebarNewMenuAction,
+    },
     NewWorkspace,
     DispatchSidebarWork(Box<crate::app::home::HomeDispatchPlan>),
     Settings(SettingsAction),
@@ -319,12 +322,12 @@ impl AppState {
             && !self.sidebar_collapsed
             && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
         let new_thread_anchor = crate::ui::sidebar_header_new_thread_rect(self.view.sidebar_rect);
-        let add_project_anchor = crate::ui::sidebar_header_add_project_rect(self.view.sidebar_rect);
+        let new_menu_anchor = crate::ui::sidebar_header_new_menu_rect(self.view.sidebar_rect);
         let search_anchor = crate::ui::sidebar_header_search_rect(self.view.sidebar_rect);
         let new_thread_hit =
             group_menu_enabled && self.point_in_rect(new_thread_anchor, mouse.column, mouse.row);
-        let add_project_hit =
-            group_menu_enabled && self.point_in_rect(add_project_anchor, mouse.column, mouse.row);
+        let new_menu_hit =
+            group_menu_enabled && self.point_in_rect(new_menu_anchor, mouse.column, mouse.row);
         let search_hit =
             group_menu_enabled && self.point_in_rect(search_anchor, mouse.column, mouse.row);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
@@ -336,6 +339,30 @@ impl AppState {
         let group_anchor_hit = group_menu_enabled
             && !filter_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_menu.is_some() {
+            if let Some(index) = self.sidebar_new_menu_item_at(mouse.column, mouse.row) {
+                if let Some(menu) = self.sidebar_new_menu.as_mut() {
+                    menu.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_new_menu.is_some()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            if new_menu_hit {
+                self.sidebar_new_menu = None;
+            } else if let Some(index) = self.sidebar_new_menu_item_at(mouse.column, mouse.row) {
+                let action = crate::app::state::SidebarNewMenuAction::ALL
+                    .get(index)
+                    .copied();
+                self.sidebar_new_menu = None;
+                return action.map(|action| MouseAction::SidebarNewMenu { action });
+            } else {
+                self.sidebar_new_menu = None;
+            }
+            return None;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_thread.is_some() {
             if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
                 if let Some(picker) = self.sidebar_new_thread.as_mut() {
@@ -360,8 +387,8 @@ impl AppState {
             self.open_sidebar_new_thread();
             return None;
         }
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && add_project_hit {
-            self.open_add_project_from_sidebar();
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && new_menu_hit {
+            self.open_sidebar_new_menu();
             return None;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && search_hit {
@@ -1180,15 +1207,6 @@ impl AppState {
                             return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
                         }
                         return None;
-                    }
-
-                    let new_button = self.sidebar_new_button_rect();
-                    let on_new_button = mouse.row >= new_button.y
-                        && mouse.row < new_button.y + new_button.height
-                        && mouse.column >= new_button.x
-                        && mouse.column < new_button.x + new_button.width;
-                    if on_new_button {
-                        return Some(MouseAction::NewWorkspace);
                     }
 
                     if let Some(target) =
@@ -5425,11 +5443,18 @@ mod tests {
         app.state.prompt_new_workspace_name = true;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let new_workspace = app.state.sidebar_new_button_rect();
+        let new_workspace = crate::ui::sidebar_header_new_menu_rect(app.state.view.sidebar_rect);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             new_workspace.x + 1,
             new_workspace.y,
+        ));
+        let menu = crate::ui::sidebar_new_menu_layout(&app.state, Rect::new(0, 0, 120, 40))
+            .expect("new menu");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            menu.list_rect.y,
         ));
 
         assert_eq!(app.state.mode, Mode::RenameWorkspace);
@@ -5595,16 +5620,23 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_header_add_project_click_opens_existing_modal_directly() {
+    fn sidebar_header_plus_menu_dispatches_add_project() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let hit = crate::ui::sidebar_header_add_project_rect(app.state.view.sidebar_rect);
+        let hit = crate::ui::sidebar_header_new_menu_rect(app.state.view.sidebar_rect);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), hit.x, hit.y));
+        let menu = crate::ui::sidebar_new_menu_layout(&app.state, Rect::new(0, 0, 120, 40))
+            .expect("new menu");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            menu.list_rect.y + 1,
+        ));
 
         assert!(app.state.add_project_active());
     }
@@ -5768,11 +5800,18 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let new_workspace = app.state.sidebar_new_button_rect();
+        let new_workspace = crate::ui::sidebar_header_new_menu_rect(app.state.view.sidebar_rect);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             new_workspace.x + 1,
             new_workspace.y,
+        ));
+        let menu = crate::ui::sidebar_new_menu_layout(&app.state, Rect::new(0, 0, 120, 40))
+            .expect("new menu");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            menu.list_rect.y,
         ));
 
         assert_eq!(app.state.workspaces.len(), 2);

@@ -1353,6 +1353,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
     pub(crate) search_active: bool,
+    pub(crate) new_menu: Option<SidebarNewMenuState>,
     pub(crate) new_thread: Option<SidebarNewThreadState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
@@ -1366,6 +1367,37 @@ pub(crate) struct SidebarPresentationState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarNewThreadState {
     pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SidebarNewMenuState {
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarNewMenuAction {
+    NewSpace,
+    AddProject,
+    NewThread,
+    OpenFolder,
+}
+
+impl SidebarNewMenuAction {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::NewSpace,
+        Self::AddProject,
+        Self::NewThread,
+        Self::OpenFolder,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NewSpace => "New space",
+            Self::AddProject => "Add project…",
+            Self::NewThread => "New thread",
+            Self::OpenFolder => "Open folder…",
+        }
+    }
 }
 
 /// Attach-local state for the action menu anchored to a sidebar work object.
@@ -3017,6 +3049,8 @@ pub struct AppState {
     pub(crate) sidebar_filter_menu_selected: usize,
     /// Typed input goes to the persisted sidebar row query while this is set.
     pub(crate) sidebar_search_active: bool,
+    /// Downward creation menu anchored to the sidebar header.
+    pub(crate) sidebar_new_menu: Option<SidebarNewMenuState>,
     /// Downward recent-project picker. Project paths are derived at render time.
     pub(crate) sidebar_new_thread: Option<SidebarNewThreadState>,
     /// Server-owned request and busy state for the sidebar refresh operation.
@@ -3557,8 +3591,7 @@ pub(crate) enum SidebarFooterItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlId {
     SidebarNewThread,
-    SidebarAddProject,
-    SidebarNewSpace,
+    SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
     DockTab(usize),
@@ -4049,6 +4082,7 @@ impl AppState {
             &mut other.filter_menu_selected,
         );
         std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
+        std::mem::swap(&mut self.sidebar_new_menu, &mut other.new_menu);
         std::mem::swap(&mut self.sidebar_new_thread, &mut other.new_thread);
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
@@ -4995,6 +5029,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,
@@ -5696,12 +5731,15 @@ mod tests {
     fn sidebar_refresh_request_remains_server_owned_during_presentation_swaps() {
         let mut app = AppState::test_new();
         let mut presentation = SidebarPresentationState::default();
+        app.sidebar_new_menu = Some(SidebarNewMenuState { selected: 2 });
 
         assert!(app.request_sidebar_refresh());
         app.swap_sidebar_presentation(&mut presentation);
 
         assert!(app.sidebar_refresh_requested);
         assert!(app.sidebar_refreshing);
+        assert_eq!(app.sidebar_new_menu, None);
+        assert_eq!(presentation.new_menu.map(|menu| menu.selected), Some(2));
     }
 
     #[test]

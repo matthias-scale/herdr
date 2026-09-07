@@ -1567,6 +1567,19 @@ impl crate::app::state::AppState {
         self.reset_home_ref_context(false);
     }
 
+    pub(crate) fn open_folder_from_sidebar(&mut self) {
+        let start = self.home_browse_start_directory();
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
+        home.focus = Some(HomeFocus::Directory);
+        home.picker = Some(HomePicker::Directory);
+        home.browse = Some(HomeBrowse::starting_at(&start));
+        home.directory_filter.set_query("");
+        home.add_project = None;
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
+    }
+
     pub(crate) fn clear_home(&mut self) {
         if let Some(home) = self.home.take() {
             self.home_agent_choices = home.saved_agent_choices();
