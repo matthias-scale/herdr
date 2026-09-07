@@ -744,6 +744,7 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,

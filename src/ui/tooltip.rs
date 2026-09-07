@@ -74,12 +74,8 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
         ),
         (
-            ControlId::SidebarAddProject,
-            super::sidebar_header_add_project_rect(view.sidebar_rect),
-        ),
-        (
-            ControlId::SidebarNewSpace,
-            super::sidebar_header_new_space_rect(view.sidebar_rect),
+            ControlId::SidebarNewMenu,
+            super::sidebar_header_new_menu_rect(view.sidebar_rect),
         ),
         (
             ControlId::SidebarMore,
@@ -135,13 +131,9 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
             "New thread".into(),
         ),
-        ControlId::SidebarAddProject => (
-            super::sidebar_header_add_project_rect(view.sidebar_rect),
-            "Add project".into(),
-        ),
-        ControlId::SidebarNewSpace => (
-            super::sidebar_header_new_space_rect(view.sidebar_rect),
-            "New space".into(),
+        ControlId::SidebarNewMenu => (
+            super::sidebar_header_new_menu_rect(view.sidebar_rect),
+            "New…".into(),
         ),
         ControlId::SidebarMore => (
             super::sidebar_header_overflow_rect(view.sidebar_rect),
@@ -297,6 +289,10 @@ mod tests {
         assert_eq!(
             hovered_control_at(&app, header.x, header.y),
             Some(ControlId::SidebarNewThread)
+        );
+        assert_eq!(
+            tooltip_target(&app, ControlId::SidebarNewMenu).map(|(_, label)| label),
+            Some("New…".to_string())
         );
     }
 }

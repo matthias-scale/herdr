@@ -158,6 +158,9 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        if self.state.handle_sidebar_new_menu_key(key_event) {
+            return None;
+        }
         if self.handle_pr_action_confirmation_key(key_event) {
             return None;
         }
@@ -4044,6 +4047,13 @@ impl App {
                     }
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
+                    }
+                    MouseAction::SidebarNewMenu { action } => {
+                        if action == crate::app::state::SidebarNewMenuAction::NewSpace {
+                            self.begin_tui_workspace_create("tui.mouse.workspace.create");
+                        } else {
+                            self.state.dispatch_sidebar_new_menu_action(action);
+                        }
                     }
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")

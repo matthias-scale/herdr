@@ -4574,8 +4574,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     let toggle = expanded_sidebar_toggle_rect(area);
     let search = sidebar_header_search_rect(area);
     let new_thread = sidebar_header_new_thread_rect(area);
-    let add_project = sidebar_header_add_project_rect(area);
-    let new_space = sidebar_header_new_space_rect(area);
+    let new_menu = sidebar_header_new_menu_rect(area);
     let overflow = sidebar_header_overflow_rect(area);
     frame.render_widget(
         Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
@@ -4611,7 +4610,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     );
     frame.render_widget(
         Paragraph::new(Span::styled("+", Style::default().fg(p.accent))),
-        add_project,
+        new_menu,
     );
     let mode_anchor = sidebar_group_mode_anchor_rect(area);
     if mode_anchor.width > 0 {
@@ -4626,10 +4625,6 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
             mode_anchor,
         );
     }
-    frame.render_widget(
-        Paragraph::new(Span::styled("＋", Style::default().fg(p.accent))),
-        new_space,
-    );
     let overflow_style = if app.global_menu_attention_badge_visible() {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
@@ -5389,7 +5384,7 @@ pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
     Rect::new(area.x, area.y, 1, 1)
 }
 
-pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
+pub(crate) fn sidebar_header_new_menu_rect(area: Rect) -> Rect {
     if area.width < 6 || area.height == 0 {
         return Rect::default();
     }
@@ -5402,16 +5397,8 @@ pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
     )
 }
 
-pub(crate) fn sidebar_header_add_project_rect(area: Rect) -> Rect {
-    let next = sidebar_header_new_space_rect(area);
-    if next.width == 0 || next.x < area.x.saturating_add(3) {
-        return Rect::default();
-    }
-    Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
-}
-
 pub(crate) fn sidebar_header_new_thread_rect(area: Rect) -> Rect {
-    let next = sidebar_header_add_project_rect(area);
+    let next = sidebar_header_new_menu_rect(area);
     if next.width == 0 || next.x < area.x.saturating_add(3) {
         return Rect::default();
     }
@@ -5485,6 +5472,46 @@ pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
 
 fn sidebar_new_thread_paths(app: &AppState) -> Vec<std::path::PathBuf> {
     app.home_directory_options()
+}
+
+pub(crate) fn sidebar_new_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let menu = app.sidebar_new_menu?;
+    let width = crate::app::state::SidebarNewMenuAction::ALL
+        .iter()
+        .map(|action| display_width(action.label()).saturating_add(2))
+        .max()
+        .unwrap_or(1);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor: sidebar_header_new_menu_rect(app.view.sidebar_rect),
+            item_count: crate::app::state::SidebarNewMenuAction::ALL.len(),
+            selected: menu.selected,
+            has_filter: false,
+            max_rows: crate::app::state::SidebarNewMenuAction::ALL.len(),
+            min_width: u16::try_from(width).unwrap_or(u16::MAX),
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_new_menu(app: &AppState, frame: &mut Frame) {
+    let Some(menu) = app.sidebar_new_menu else {
+        return;
+    };
+    let Some(layout) = sidebar_new_menu_layout(app, frame.area()) else {
+        return;
+    };
+    let rows = crate::app::state::SidebarNewMenuAction::ALL
+        .iter()
+        .map(|action| super::dropdown::DropdownMenuRow::Item {
+            label: action.label().to_string(),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    super::dropdown::render_menu(&app.palette, frame, &layout, &rows, menu.selected);
 }
 
 fn sidebar_new_thread_labels(app: &AppState) -> Vec<String> {
@@ -10024,8 +10051,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let view = row_text(terminal.backend().buffer(), 1, width - 1);
             assert!(controls.starts_with('«'));
             assert!(controls.contains('✎'));
-            assert!(controls.contains('+'));
-            assert!(controls.contains('＋'));
+            assert_eq!(controls.matches('+').count(), 1, "{controls:?}");
+            assert!(!controls.contains('＋'));
             assert!(controls.contains('…'));
             assert!(view.contains("Repo"));
             assert!(view.contains('▾'));
@@ -14430,7 +14457,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sidebar_header_controls_keep_hit_areas_and_recent_picker_opens_downward() {
+    fn sidebar_header_controls_keep_hit_areas_and_menus_open_downward() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = AppState::test_new();
@@ -14443,11 +14470,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         crate::ui::compute_view(&mut app, area);
 
         let edit = sidebar_header_new_thread_rect(app.view.sidebar_rect);
-        let add = sidebar_header_add_project_rect(app.view.sidebar_rect);
-        let existing_add = sidebar_header_new_space_rect(app.view.sidebar_rect);
-        assert_eq!((edit.width, add.width, existing_add.width), (2, 2, 2));
+        let add = sidebar_header_new_menu_rect(app.view.sidebar_rect);
+        assert_eq!((edit.width, add.width), (2, 2));
         assert_eq!(edit.right().saturating_add(1), add.x);
-        assert_eq!(add.right().saturating_add(1), existing_add.x);
+
+        app.open_sidebar_new_menu();
+        let new_layout = sidebar_new_menu_layout(&app, area).expect("new dropdown");
+        assert_eq!(new_layout.rect.y, add.bottom());
+        assert_eq!(
+            crate::app::state::SidebarNewMenuAction::ALL
+                .iter()
+                .map(|action| action.label())
+                .collect::<Vec<_>>(),
+            vec!["New space", "Add project…", "New thread", "Open folder…"]
+        );
 
         app.open_sidebar_new_thread();
         let layout = sidebar_new_thread_layout(&app, area).expect("recent-project dropdown");
@@ -14479,6 +14515,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_new_thread_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
         );
         assert!(app.sidebar_new_thread.is_none());
+    }
+
+    #[test]
+    fn sidebar_new_menu_dispatches_all_four_actions() {
+        use crate::app::home::HomePicker;
+        use crate::app::state::SidebarNewMenuAction;
+
+        let mut app = AppState::test_new();
+        app.dispatch_sidebar_new_menu_action(SidebarNewMenuAction::NewSpace);
+        assert!(app.request_new_workspace);
+
+        app.request_new_workspace = false;
+        app.dispatch_sidebar_new_menu_action(SidebarNewMenuAction::AddProject);
+        assert!(app.add_project_active());
+
+        app.clear_home();
+        app.dispatch_sidebar_new_menu_action(SidebarNewMenuAction::NewThread);
+        assert!(app.sidebar_new_thread.is_some());
+
+        app.sidebar_new_thread = None;
+        app.dispatch_sidebar_new_menu_action(SidebarNewMenuAction::OpenFolder);
+        let home = app.home.as_ref().expect("folder browser home");
+        assert_eq!(home.picker, Some(HomePicker::Directory));
+        assert!(home.browse.is_some());
     }
 
     #[test]
