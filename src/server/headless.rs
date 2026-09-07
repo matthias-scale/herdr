@@ -7541,6 +7541,13 @@ next_tab = ""
             direct_attach_requested: false,
             writer,
         }));
+        let presentation = &mut server
+            .clients
+            .get_mut(&7)
+            .expect("connected clock client")
+            .sidebar_presentation;
+        presentation.group_mode = crate::app::state::SidebarGroupMode::Repo;
+        presentation.work_filter.query.clear();
         server.render_and_stream();
         let first = read_server_frame(
             render_rx
