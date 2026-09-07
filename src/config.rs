@@ -22,7 +22,8 @@ pub use self::{
     model::{
         validated_sidebar_bounds, ActionConfig, AgentPanelSortConfig, Config, ConfigReloadReport,
         ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
-        MissiveConfig, NewTerminalCwdConfig, NewThreadWorkspaceConfig, ShellModeConfig,
+        LinearLayoutConfig, MergeMethodConfig, MissiveConfig, NewTerminalCwdConfig,
+        NewThreadWorkspaceConfig, PanelConfig, PanelSurfaceConfig, ShellModeConfig,
         SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
         ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
         UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
@@ -37,7 +38,7 @@ pub use self::{
 };
 
 #[cfg(test)]
-pub(crate) use self::model::{DEFAULT_BRANCH_PREFIX, DEFAULT_LAND_APPROVAL_LABEL};
+pub(crate) use self::model::DEFAULT_BRANCH_PREFIX;
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;

@@ -1938,6 +1938,7 @@ impl AppState {
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
+            self.view.repo_editor_button_hit_area = ratatui::layout::Rect::default();
             self.view.add_action_button_hit_area = ratatui::layout::Rect::default();
             self.view.user_action_hit_areas.clear();
             self.view.git_menu_button_hit_area = ratatui::layout::Rect::default();
@@ -1966,21 +1967,24 @@ impl AppState {
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
         // Mirrors `compute_view`: a hidden or too-narrow tab row hands the
         // toggles to the status row instead of dropping them.
-        let (add, actions, menu, below, right) = if layout.pane_toggle_below_hit_area.width > 0 {
-            (
-                layout.add_action_button_hit_area,
-                layout.user_action_hit_areas,
-                layout.git_menu_button_hit_area,
-                layout.pane_toggle_below_hit_area,
-                layout.pane_toggle_right_hit_area,
-            )
-        } else {
-            crate::ui::tab_action_fallback_hit_areas(
-                self.view.status_bar_rect,
-                self.mouse_capture,
-                &visible_user_actions,
-            )
-        };
+        let (editor, add, actions, menu, below, right) =
+            if layout.pane_toggle_below_hit_area.width > 0 {
+                (
+                    layout.repo_editor_button_hit_area,
+                    layout.add_action_button_hit_area,
+                    layout.user_action_hit_areas,
+                    layout.git_menu_button_hit_area,
+                    layout.pane_toggle_below_hit_area,
+                    layout.pane_toggle_right_hit_area,
+                )
+            } else {
+                crate::ui::tab_action_fallback_hit_areas(
+                    self.view.status_bar_rect,
+                    self.mouse_capture,
+                    &visible_user_actions,
+                )
+            };
+        self.view.repo_editor_button_hit_area = editor;
         self.view.add_action_button_hit_area = add;
         self.view.user_action_hit_areas = actions;
         self.view.git_menu_button_hit_area = menu;
@@ -3130,6 +3134,7 @@ impl AppState {
             | AppEvent::ConnectivityProbed { .. }
             | AppEvent::HomeCatalogRefreshed { .. }
             | AppEvent::HomeRefsRefreshed { .. }
+            | AppEvent::HomeGithubReposRefreshed { .. }
             | AppEvent::ToolProbesFinished { .. }
             | AppEvent::HomeCheckoutFinished { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {

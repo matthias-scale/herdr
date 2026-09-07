@@ -8,6 +8,7 @@ use ratatui::{
 };
 use tokio::sync::Notify;
 
+pub(crate) mod add_project;
 mod dialogs;
 pub(crate) mod dock;
 #[path = "ui/dock/context.rs"]
@@ -28,6 +29,7 @@ mod mobile;
 mod navigator;
 mod onboarding;
 mod panes;
+pub(crate) mod pr_actions;
 mod release_notes;
 mod scrollbar;
 mod settings;
@@ -41,15 +43,17 @@ mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
-mod text;
+pub(crate) mod text;
+pub(crate) mod ticket_actions;
 pub(crate) mod usage;
 mod user_actions;
 mod widgets;
 mod work_link_picker;
 pub(crate) mod work_list_detail;
 mod work_status;
-mod work_view;
+pub(crate) mod work_view;
 
+use self::add_project::render_add_project_overlay;
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
@@ -85,6 +89,10 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
+#[cfg(test)]
+pub(crate) use self::sidebar::sidebar_object_menu_layout as sidebar_object_menu_layout_for_test;
+#[cfg(test)]
+pub(crate) use self::sidebar::tests::sidebar_work_item_fixture;
 pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
@@ -92,7 +100,8 @@ pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
-    render_sidebar_group_menu, render_sidebar_settled_menu,
+    render_sidebar_group_menu, render_sidebar_new_thread, render_sidebar_object_menu,
+    render_sidebar_settled_menu,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -130,19 +139,27 @@ pub(crate) use self::{
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
         sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
-        sidebar_group_mode_anchor_rect, sidebar_header_new_space_rect,
-        sidebar_header_overflow_rect, sidebar_nested_header_at, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
-        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_thread_entries, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
+        sidebar_group_mode_anchor_rect, sidebar_header_add_project_rect,
+        sidebar_header_new_space_rect, sidebar_header_new_thread_rect,
+        sidebar_header_overflow_rect, sidebar_header_search_rect, sidebar_missive_copy_url,
+        sidebar_nested_header_at, sidebar_new_thread_layout, sidebar_new_thread_matches,
+        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
+        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
+        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        sidebar_show_more_key, sidebar_thread_entries, sidebar_ticket_action_entries,
+        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
         workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarFilterOption, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
+        WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
 
+#[cfg(test)]
+pub(crate) use self::tabs::REPO_EDITOR_BUTTON_WIDTH;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -161,6 +178,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
 pub(crate) const DOCK_COLLAPSED_WIDTH: u16 = 1;
 pub(crate) const DOCK_DEFAULT_WIDTH: u16 = 32;
+const EMPTY_DOCK_PREFERRED_WIDTH: u16 = 80;
 pub(crate) const DOCK_MIN_WIDTH: u16 = 18;
 /// Generous because the dock holds an editor: the ceiling that matters is the one
 /// the layout already enforces -- the terminal keeps `DOCK_MIN_TERMINAL_WIDTH` no
@@ -287,6 +305,7 @@ fn compute_view_internal(
 ) {
     app.view_observed_at = std::time::Instant::now();
     app.reconcile_sidebar_presentation();
+    app.reconcile_dock_context_tabs();
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -314,6 +333,12 @@ fn compute_view_internal(
     };
 
     let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
+    let main_view_active = app.symphony_detail.is_some()
+        || app.loop_run_history_detail.is_some()
+        || app.usage_view.is_some()
+        || app.work_view.is_some()
+        || app.home.is_some()
+        || app.inbox.is_some();
     let dock_w = if app.dock_collapsed {
         DOCK_COLLAPSED_WIDTH
     } else if available_after_sidebar < DOCK_MIN_WIDTH + DOCK_MIN_TERMINAL_WIDTH {
@@ -324,7 +349,13 @@ fn compute_view_internal(
         // width so the session stays navigable.
         available_after_sidebar
     } else {
-        app.dock_width
+        let requested_width =
+            if app.dock_open_surfaces.is_empty() && !main_view_active && area.width > 80 {
+                app.dock_width.max(EMPTY_DOCK_PREFERRED_WIDTH)
+            } else {
+                app.dock_width
+            };
+        requested_width
             .clamp(DOCK_MIN_WIDTH, DOCK_MAX_WIDTH)
             .min(available_after_sidebar.saturating_sub(DOCK_MIN_TERMINAL_WIDTH))
     };
@@ -396,6 +427,7 @@ fn compute_view_internal(
     app.tab_scroll = tab_bar_view.scroll;
     // A hidden tab row leaves the toggles homeless; the status row takes them.
     let (
+        repo_editor_button_hit_area,
         add_action_button_hit_area,
         user_action_hit_areas,
         git_menu_button_hit_area,
@@ -403,6 +435,7 @@ fn compute_view_internal(
         pane_toggle_right_hit_area,
     ) = if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
         (
+            tab_bar_view.repo_editor_button_hit_area,
             tab_bar_view.add_action_button_hit_area,
             tab_bar_view.user_action_hit_areas.clone(),
             tab_bar_view.git_menu_button_hit_area,
@@ -417,6 +450,7 @@ fn compute_view_internal(
         )
     } else {
         (
+            Rect::default(),
             Rect::default(),
             Vec::new(),
             Rect::default(),
@@ -502,6 +536,11 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_work_hit_area(sidebar_area)
     };
+    let sidebar_footer_settings_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_settings_hit_area(sidebar_area)
+    };
     let sidebar_footer_usage_hit_area = if app.sidebar_collapsed {
         Rect::default()
     } else {
@@ -522,6 +561,11 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_missive_hit_area(sidebar_area)
     };
+    let sidebar_footer_refresh_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_refresh_hit_area(sidebar_area)
+    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let DockGeometry {
@@ -536,13 +580,19 @@ fn compute_view_internal(
     } = dock_geometry(
         dock_area,
         app.dock_collapsed,
-        &app.dock_open_surfaces,
-        app.dock_tab,
+        &(0..app.dock_open_surfaces.len())
+            .map(|index| app.dock_tab_label(index))
+            .collect::<Vec<_>>(),
+        app.active_dock_tab_index(),
     );
     let dock_surface_card_hit_areas = if app.dock_collapsed || app.dock_tab.is_some() {
         Vec::new()
     } else {
-        dock::chooser_card_hit_areas(dock_body_rect)
+        dock::chooser_card_hit_areas_for_count(
+            dock_body_rect,
+            area.width,
+            dock::chooser::entries(app, true).len(),
+        )
     };
     let (
         dock_home_section_hit_areas,
@@ -611,21 +661,39 @@ fn compute_view_internal(
         } else {
             Vec::new()
         };
+    let (dock_files_refresh_rect, dock_files_sort_rect) =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Files) {
+            dock::files::header_hit_areas(app, dock_body_rect)
+        } else {
+            (Rect::default(), Rect::default())
+        };
+    let dock_agent_row_hit_areas =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Agents) {
+            dock::agents::row_hit_areas(app, dock_body_rect)
+        } else {
+            Vec::new()
+        };
 
     let add_action_layout = if app.mode == Mode::AddAction {
         user_actions::add_action_layout(area)
     } else {
         user_actions::AddActionLayout::default()
     };
+    let add_project_layout = add_project::add_project_layout(
+        area,
+        app.home.as_ref().and_then(|home| home.add_project.as_ref()),
+    );
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
+        sidebar_footer_settings_hit_area,
         sidebar_footer_work_hit_area,
         sidebar_footer_usage_hit_area,
         usage_hit_areas,
         sidebar_footer_ticket_hit_area,
         sidebar_footer_missive_hit_area,
+        sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
         visible_agent_activity_instants,
@@ -634,12 +702,14 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        repo_editor_button_hit_area,
         add_action_button_hit_area,
         user_action_hit_areas,
         add_action_close_hit_area: add_action_layout.close,
         add_action_field_hit_areas: add_action_layout.fields,
         add_action_cancel_hit_area: add_action_layout.cancel,
         add_action_save_hit_area: add_action_layout.save,
+        add_project_layout,
         git_menu_button_hit_area,
         git_menu_popup_rect,
         git_menu_first_visible,
@@ -695,6 +765,9 @@ fn compute_view_internal(
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
         dock_file_row_hit_areas,
+        dock_files_refresh_rect,
+        dock_files_sort_rect,
+        dock_agent_row_hit_areas,
         dock_body_rect,
     };
     // The menu anchors on the `+`, so its geometry needs the strip already
@@ -740,8 +813,8 @@ impl DockGeometry {
 fn dock_geometry(
     area: Rect,
     collapsed: bool,
-    open: &[crate::app::DockSurface],
-    active: Option<crate::app::DockSurface>,
+    labels: &[String],
+    active_index: Option<usize>,
 ) -> DockGeometry {
     if area.width == 0 || area.height == 0 {
         return DockGeometry::empty(Rect::default());
@@ -760,9 +833,10 @@ fn dock_geometry(
     // Width the strip wants: every open tab, the trailing `+`, and the `⤢`
     // pinned to the right edge. The maximise glyph only claims its two columns
     // when the tabs do not need them.
-    let wanted: u16 = open
+    let wanted: u16 = labels
         .iter()
-        .map(|surface| dock::tab_width(*surface, active == Some(*surface)))
+        .enumerate()
+        .map(|(index, label)| dock::tab_width_label(label, active_index == Some(index)))
         .fold(dock::PLUS_WIDTH, u16::saturating_add);
     let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
         (
@@ -775,7 +849,8 @@ fn dock_geometry(
 
     // The hit areas come from the same layout the strip is drawn from, so the
     // `+` cell a click lands in is the cell the glyph occupies.
-    let dock::StripLayout { tabs, close, plus } = dock::strip_layout(strip, open, active);
+    let dock::StripLayout { tabs, close, plus } =
+        dock::strip_layout_labels(strip, labels, active_index);
 
     DockGeometry {
         handle,
@@ -879,11 +954,13 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
+        sidebar_footer_settings_hit_area: Rect::default(),
         sidebar_footer_work_hit_area: Rect::default(),
         sidebar_footer_usage_hit_area: Rect::default(),
         usage_hit_areas: Vec::new(),
         sidebar_footer_ticket_hit_area: Rect::default(),
         sidebar_footer_missive_hit_area: Rect::default(),
+        sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
@@ -892,12 +969,17 @@ fn compute_mobile_view(
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
+        repo_editor_button_hit_area: Rect::default(),
         add_action_button_hit_area: Rect::default(),
         user_action_hit_areas: Vec::new(),
         add_action_close_hit_area: Rect::default(),
         add_action_field_hit_areas: Vec::new(),
         add_action_cancel_hit_area: Rect::default(),
         add_action_save_hit_area: Rect::default(),
+        add_project_layout: add_project::add_project_layout(
+            area,
+            app.home.as_ref().and_then(|home| home.add_project.as_ref()),
+        ),
         git_menu_button_hit_area: Rect::default(),
         git_menu_popup_rect: Rect::default(),
         git_menu_first_visible: 0,
@@ -931,6 +1013,9 @@ fn compute_mobile_view(
         dock_home_tab_keys: Vec::new(),
         dock_home_detail_tab_hit_areas: Vec::new(),
         dock_file_row_hit_areas: Vec::new(),
+        dock_files_refresh_rect: Rect::default(),
+        dock_files_sort_rect: Rect::default(),
+        dock_agent_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {
@@ -1095,9 +1180,19 @@ fn render_with_runtime_registry_inner(
         Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
         Mode::Terminal => {}
     }
+    if app
+        .home
+        .as_ref()
+        .is_some_and(|home| home.add_project.is_some())
+    {
+        render_add_project_overlay(app, frame);
+    }
     render_sidebar_group_menu(app, frame);
     render_sidebar_filter_menu(app, frame);
+    render_sidebar_new_thread(app, frame);
     render_sidebar_settled_menu(app, frame);
+    render_sidebar_object_menu(app, frame);
+    pr_actions::render_confirmation(app, frame, frame.area());
 }
 
 fn render_navigation_chrome(
@@ -1632,6 +1727,71 @@ mod tests {
     }
 
     #[test]
+    fn f20_hovered_object_tab_renders_its_full_title_below_the_strip() {
+        use crate::app::state::{DockObjectRef, DockTabBinding, DockTabOrigin};
+        use crate::app::DockSurface;
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let key = "https://mail.missiveapp.com/#inbox/conversations/abc".to_string();
+        app.dock_open_surfaces = vec![DockSurface::Missive];
+        app.dock_tab = Some(DockSurface::Missive);
+        app.dock_active_tab_index = Some(0);
+        app.dock_hovered_tab_index = Some(0);
+        app.dock_tab_bindings = vec![Some(DockTabBinding {
+            object: DockObjectRef {
+                surface: DockSurface::Missive,
+                key: key.clone(),
+            },
+            origin: DockTabOrigin::Context,
+        })];
+        app.view.dock_tab_hit_areas = vec![Rect::new(
+            app.view.dock_tab_bar_rect.x,
+            app.view.dock_tab_bar_rect.y,
+            14,
+            1,
+        )];
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: vec![crate::work_index::MissiveConversation {
+                id: "abc".into(),
+                subject: "Full conversation subject".into(),
+                app_url: key,
+                web_url: String::new(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                labels: Vec::new(),
+                pane_bound: true,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            }],
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal.draw(|frame| render(&app, frame)).expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Full conversation subject"));
+    }
+
+    #[test]
     fn a_scrolled_strip_gives_hidden_tabs_no_hit_area() {
         use crate::app::DockSurface;
         let open = three_and_seven_tabs()[1].clone();
@@ -1660,6 +1820,8 @@ mod tests {
     fn the_dock_strip_ends_with_a_plus_and_a_maximise_glyph() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![crate::app::DockSurface::Home];
+        app.dock_tab = Some(crate::app::DockSurface::Home);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1707,8 +1869,33 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(screen.contains("Open a surface"));
-        for surface in crate::app::DockSurface::CARDS {
-            assert!(screen.contains(surface.title()), "missing {surface:?}");
+        for title in [
+            "Terminal",
+            "Files",
+            "Diff",
+            "Pull request",
+            "Linear",
+            "Missive",
+        ] {
+            assert!(screen.contains(title), "missing {title}");
+        }
+        assert!(screen.contains("Choose what to show in the right panel."));
+    }
+
+    #[test]
+    fn empty_dock_grid_is_single_column_at_80_and_two_columns_at_120() {
+        for (width, height, two_columns) in [(80, 24, false), (120, 40, true)] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.dock_collapsed = false;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.mode = Mode::Terminal;
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            let cards = &app.view.dock_surface_card_hit_areas;
+            assert!(cards.len() >= 2);
+            assert_eq!(cards[0].y == cards[1].y, two_columns, "width {width}");
+            assert_eq!(cards[0].x == cards[1].x, !two_columns, "width {width}");
         }
     }
 

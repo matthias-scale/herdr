@@ -396,10 +396,12 @@ pub struct Keybinds {
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub sidebar_cycle_group_mode: ActionKeybinds,
+    pub sidebar_refresh: ActionKeybinds,
     pub toggle_blocked_filter: ActionKeybinds,
     pub toggle_dock: ActionKeybinds,
     pub previous_dock_tab: ActionKeybinds,
     pub next_dock_tab: ActionKeybinds,
+    pub editor_open_repo: ActionKeybinds,
     pub edit_scratchpad: ActionKeybinds,
     pub show_scratchpad: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
@@ -591,10 +593,12 @@ impl Config {
             resize_mode: empty_action!(),
             toggle_sidebar: empty_action!(),
             sidebar_cycle_group_mode: empty_action!(),
+            sidebar_refresh: empty_action!(),
             toggle_blocked_filter: empty_action!(),
             toggle_dock: empty_action!(),
             previous_dock_tab: empty_action!(),
             next_dock_tab: empty_action!(),
+            editor_open_repo: empty_action!(),
             edit_scratchpad: empty_action!(),
             show_scratchpad: empty_action!(),
             toggle_info_panel: empty_action!(),
@@ -769,6 +773,7 @@ impl Config {
                 sidebar_cycle_group_mode,
                 source
             );
+            apply_action!(keybinds.sidebar_refresh, sidebar_refresh, source);
             apply_action!(
                 keybinds.toggle_blocked_filter,
                 toggle_blocked_filter,
@@ -777,6 +782,7 @@ impl Config {
             apply_action!(keybinds.toggle_dock, toggle_dock, source);
             apply_action!(keybinds.previous_dock_tab, previous_dock_tab, source);
             apply_action!(keybinds.next_dock_tab, next_dock_tab, source);
+            apply_action!(keybinds.editor_open_repo, editor_open_repo, source);
             apply_action!(keybinds.edit_scratchpad, edit_scratchpad, source);
             apply_action!(keybinds.show_scratchpad, show_scratchpad, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
@@ -1979,6 +1985,31 @@ next_tab = "prefix+n"
     fn back_and_forth_keybinds_are_unset_by_default() {
         let kb = Config::default().keybinds();
         assert!(kb.last_pane.bindings.is_empty());
+    }
+
+    #[test]
+    fn repository_editor_keybinding_is_configurable_and_unset_by_default() {
+        assert!(Config::default()
+            .keybinds()
+            .editor_open_repo
+            .bindings
+            .is_empty());
+
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+editor_open_repo = "ctrl+alt+v"
+"#,
+        )
+        .expect("repository editor keybinding config");
+
+        assert!(config
+            .keybinds()
+            .editor_open_repo
+            .matches_direct_key(&TerminalKey::new(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )));
     }
 
     #[test]

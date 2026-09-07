@@ -1,4 +1,17 @@
-use ratatui::layout::Rect;
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
+    Frame,
+};
+
+use crate::app::state::Palette;
+
+pub(crate) enum DropdownMenuRow {
+    Separator,
+    Item { label: String, enabled: bool },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DropdownSpec {
@@ -147,6 +160,59 @@ pub(crate) fn hit_test(layout: &DropdownLayout, x: u16, y: u16) -> Option<usize>
         return None;
     }
     Some(layout.first_visible + usize::from(y - list.y))
+}
+
+pub(crate) fn render_menu(
+    palette: &Palette,
+    frame: &mut Frame,
+    layout: &DropdownLayout,
+    rows: &[DropdownMenuRow],
+    selected: usize,
+) {
+    let lines = rows
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(index, row)| match row {
+            DropdownMenuRow::Separator => Line::from(Span::styled(
+                "─".repeat(usize::from(layout.list_rect.width)),
+                Style::default().fg(palette.surface0).bg(palette.panel_bg),
+            )),
+            DropdownMenuRow::Item { label, enabled } => {
+                let is_selected = index == selected;
+                let foreground = if *enabled {
+                    if is_selected {
+                        palette.text
+                    } else {
+                        palette.subtext0
+                    }
+                } else {
+                    palette.overlay0
+                };
+                let mut style = Style::default().fg(foreground).bg(if is_selected {
+                    palette.surface1
+                } else {
+                    palette.panel_bg
+                });
+                if is_selected && *enabled {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if !*enabled {
+                    style = style.add_modifier(Modifier::DIM);
+                }
+                Line::from(Span::styled(
+                    format!("{} {label}", if is_selected { "▸" } else { " " }),
+                    style,
+                ))
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, layout.rect);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(palette.panel_bg)),
+        layout.list_rect,
+    );
 }
 
 #[cfg(test)]

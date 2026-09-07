@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import os
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class Check:
     name: str
     command: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 CHECKS = (
@@ -42,7 +44,11 @@ CHECKS = (
             "never",
         ),
     ),
-    Check("windows", ("just", "windows-lint")),
+    Check(
+        "windows",
+        ("just", "windows-lint"),
+        (("LIBGHOSTTY_VT_SIMD", "false"),),
+    ),
     Check(
         "maintenance",
         (
@@ -55,6 +61,7 @@ CHECKS = (
             "scripts.test_docs_translation_parity",
             "scripts.test_hermes_integration_asset",
             "scripts.test_package_windows_conpty",
+            "scripts.test_parallel_check",
             "scripts.test_pr_gate_workflow",
             "scripts.test_preview",
             "scripts.test_qa_preview_adapter",
@@ -65,6 +72,18 @@ CHECKS = (
     ),
     Check("integrations", ("just", "integration-assets-test")),
     Check("marketplace", ("just", "plugin-marketplace-test")),
+)
+
+WINDOWS_TEST_CHECK = (
+    "cargo",
+    "check",
+    "--bin",
+    "herdr",
+    "--tests",
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "--message-format",
+    "json",
 )
 
 
@@ -107,16 +126,94 @@ def run_check(
 ) -> tuple[Check, int, float, Path]:
     log_path = log_dir / f"{check.name}.log"
     started = time.monotonic()
+    check_env = env.copy()
+    check_env.update(check.environment)
     with log_path.open("wb") as log:
         result = subprocess.run(
             check.command,
             cwd=ROOT,
             stdout=log,
             stderr=subprocess.STDOUT,
-            env=env,
+            env=check_env,
             check=False,
         )
     return check, result.returncode, time.monotonic() - started, log_path
+
+
+def compiler_error_locations_under_src(output: str) -> list[str]:
+    """Return primary source locations from Cargo compiler error records."""
+    src_root = (ROOT / "src").resolve()
+    locations: set[str] = set()
+    for line in output.splitlines():
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if record.get("reason") != "compiler-message":
+            continue
+        message = record.get("message", {})
+        if message.get("level") != "error":
+            continue
+        for span in message.get("spans", []):
+            if not span.get("is_primary"):
+                continue
+            file_name = span.get("file_name")
+            if not isinstance(file_name, str):
+                continue
+            path = Path(file_name)
+            resolved = (path if path.is_absolute() else ROOT / path).resolve()
+            if not resolved.is_relative_to(src_root):
+                continue
+            relative = resolved.relative_to(ROOT)
+            locations.add(
+                f"{relative}:{span.get('line_start', '?')}:{span.get('column_start', '?')}"
+            )
+    return sorted(locations)
+
+
+def run_windows_check(
+    check: Check, log_dir: Path, env: dict[str, str]
+) -> tuple[Check, int, float, Path]:
+    """Keep clippy strict, then ignore Unix-only integration-test errors."""
+    log_path = log_dir / f"{check.name}.log"
+    started = time.monotonic()
+    check_env = env.copy()
+    check_env.update(check.environment)
+    with log_path.open("wb") as log:
+        lint = subprocess.run(
+            check.command,
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=check_env,
+            check=False,
+        )
+        if lint.returncode:
+            return check, lint.returncode, time.monotonic() - started, log_path
+        build = subprocess.run(
+            WINDOWS_TEST_CHECK,
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=check_env,
+            check=False,
+        )
+        output = build.stdout.decode(errors="replace")
+        log.write(build.stdout)
+        locations = compiler_error_locations_under_src(output)
+        if locations:
+            log.write(b"\nWindows test build found compiler errors under src/:\n")
+            for location in locations:
+                log.write(f"{location}\n".encode())
+    return check, int(bool(locations)), time.monotonic() - started, log_path
+
+
+def run_independent_check(
+    check: Check, log_dir: Path, env: dict[str, str]
+) -> tuple[Check, int, float, Path]:
+    if check.name == "windows":
+        return run_windows_check(check, log_dir, env)
+    return run_check(check, log_dir, env)
 
 
 def platform_filter(value: str) -> str:
@@ -172,7 +269,7 @@ def main() -> int:
         ) as executor:
             results = list(
                 executor.map(
-                    lambda check: run_check(check, log_dir, env),
+                    lambda check: run_independent_check(check, log_dir, env),
                     independent_checks,
                 )
             )

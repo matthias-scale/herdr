@@ -5,6 +5,7 @@
 //! - `input.rs` — key/mouse → action translation
 
 pub(crate) mod actions;
+mod add_project;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
@@ -30,6 +31,7 @@ pub(crate) use input::SidebarWorkGroupKeyAction;
 mod pane_lifecycle;
 mod popup;
 pub(crate) mod probes;
+mod repo_editor;
 mod repo_routing;
 mod runtime;
 mod runtime_mutations;
@@ -199,6 +201,8 @@ pub struct App {
     pub(crate) last_work_index_refresh_generation: u64,
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
+    pub(crate) work_index_context_fingerprint: crate::work_index::WorkIndexContextFingerprint,
+    pub(crate) work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
     pub(crate) work_index_session: crate::work_index::WorkIndexSession,
     pub(crate) work_item_detail_refresh_in_flight:
@@ -222,6 +226,8 @@ pub struct App {
     pub(crate) git_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) work_index_gh_program_override: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    pub(crate) work_index_provider_cache_root_override: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) work_index_linearis_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
@@ -366,6 +372,30 @@ fn agent_panel_sort_from_config(
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
     }
+}
+
+fn dock_surfaces_from_config(panel: &crate::config::PanelConfig) -> Vec<state::DockSurface> {
+    let mut surfaces = Vec::new();
+    for configured in &panel.default_surfaces {
+        let surface = match configured {
+            crate::config::PanelSurfaceConfig::Home => state::DockSurface::Home,
+            crate::config::PanelSurfaceConfig::Terminal => state::DockSurface::Terminal,
+            crate::config::PanelSurfaceConfig::Files => state::DockSurface::Files,
+            crate::config::PanelSurfaceConfig::Diff => state::DockSurface::Diff,
+            crate::config::PanelSurfaceConfig::PullRequest => state::DockSurface::Pr,
+            crate::config::PanelSurfaceConfig::Linear => state::DockSurface::Linear,
+            crate::config::PanelSurfaceConfig::Missive => state::DockSurface::Missive,
+            crate::config::PanelSurfaceConfig::Agents => state::DockSurface::Agents,
+            crate::config::PanelSurfaceConfig::Editor => state::DockSurface::Editor,
+            crate::config::PanelSurfaceConfig::Shortcuts => state::DockSurface::Shortcuts,
+            crate::config::PanelSurfaceConfig::Context => state::DockSurface::Context,
+            crate::config::PanelSurfaceConfig::Scratchpad => state::DockSurface::Scratchpad,
+        };
+        if !surfaces.contains(&surface) {
+            surfaces.push(surface);
+        }
+    }
+    surfaces
 }
 
 /// Parse the configured agent name list into a deduplicated set of `Agent`
@@ -626,6 +656,8 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let dock_default_surfaces = dock_surfaces_from_config(&config.panel);
+        let dock_tab = dock_default_surfaces.first().copied();
 
         // Validate sidebar bounds before they reach any `u16::clamp(min, max)`
         // call: `clamp` panics when `min > max`. On bad config, fall back to
@@ -667,6 +699,8 @@ impl App {
             crate::work_index::load_snapshot(&crate::work_index::work_index_snapshot_path());
         #[cfg(test)]
         let work_index_snapshot: Option<crate::work_index::Snapshot> = None;
+        let work_item_detail_cache =
+            crate::work_index::WorkItemDetailCache::from_snapshot(work_index_snapshot.as_ref());
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
@@ -708,7 +742,12 @@ impl App {
             sidebar_work_filter,
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
+            sidebar_search_active: false,
+            sidebar_new_thread: None,
+            sidebar_refresh_requested: false,
+            sidebar_refreshing: false,
             sidebar_selected_work_group: None,
+            sidebar_object_menu: None,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
@@ -722,6 +761,8 @@ impl App {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            linear_default_layout: config.linear.default_layout.into(),
+            sidebar_footer_hover: None,
             usage_view: None,
             usage_snapshot: if cfg!(test) {
                 None
@@ -732,6 +773,7 @@ impl App {
             request_usage_scan: false,
             inbox: None,
             home: None,
+            home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
                 crate::app::home_catalog::HomeCatalog::fallback()
             } else {
@@ -748,6 +790,7 @@ impl App {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             git_root_for_cwd: std::collections::HashMap::new(),
+            repo_editor_argv: repo_editor::resolve_repo_editor_argv(),
             forwarded_pane_input: None,
             status_bar_enabled: config.ui.status_bar.enabled,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
@@ -783,10 +826,11 @@ impl App {
             request_new_workspace: false,
             request_new_tab: false,
             request_pane_toggle: None,
+            request_open_repo_editor: false,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
-            request_pr_land: None,
+            request_pr_command: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -841,11 +885,13 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_settings_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
+                sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -854,12 +900,14 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                repo_editor_button_hit_area: Rect::default(),
                 add_action_button_hit_area: Rect::default(),
                 user_action_hit_areas: Vec::new(),
                 add_action_close_hit_area: Rect::default(),
                 add_action_field_hit_areas: Vec::new(),
                 add_action_cancel_hit_area: Rect::default(),
                 add_action_save_hit_area: Rect::default(),
+                add_project_layout: crate::ui::add_project::AddProjectLayout::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,
@@ -891,6 +939,9 @@ impl App {
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_file_row_hit_areas: Vec::new(),
+                dock_files_refresh_rect: Rect::default(),
+                dock_files_sort_rect: Rect::default(),
+                dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -919,9 +970,17 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
+            dock_default_surfaces: dock_default_surfaces.clone(),
             dock_surface_override: false,
-            dock_tab: Some(state::DockSurface::Home),
-            dock_open_surfaces: state::DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_tab,
+            dock_open_surfaces: dock_default_surfaces.clone(),
+            dock_tab_bindings: vec![None; dock_default_surfaces.len()],
+            dock_active_tab_index: (!dock_default_surfaces.is_empty()).then_some(0),
+            dock_hovered_tab_index: None,
+            dock_pane_tabs: std::collections::HashMap::new(),
+            dock_followed_pane: None,
+            dock_context_objects: Vec::new(),
+            dock_suppressed_context: std::collections::HashSet::new(),
             dock_maximized: false,
             dock_surface_menu: None,
             dock_chooser_focused: false,
@@ -930,7 +989,7 @@ impl App {
             dock_diff_focused: false,
             dock_pr_focused: false,
             dock_pr_checkout_menu: None,
-            dock_pr_pending_land: None,
+            dock_pr_action_menu: None,
             dock_diff_ignore_whitespace: config.ui.hide_whitespace_in_diff,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
@@ -942,6 +1001,14 @@ impl App {
             dock_files_selection: None,
             dock_files_filter: String::new(),
             dock_files_collapsed: std::collections::HashSet::new(),
+            dock_files_sort: crate::files::FileSort::Name,
+            dock_files_search_active: false,
+            dock_agents_focused: false,
+            dock_agents_selection: None,
+            dock_linear_focused: false,
+            dock_ticket_start_menu: None,
+            dock_ticket_action_menu: None,
+            dock_ticket_comment_draft: None,
             dock_file_cache: std::collections::HashMap::new(),
             dock_files_root: None,
             dock_files_cwd: None,
@@ -953,19 +1020,24 @@ impl App {
             dock_home_focus_unbound: false,
             dock_comment_draft: None,
             dock_pending_write: None,
+            pr_action_confirmation: None,
             dock_write_notice: None,
             dock_home_section: state::DockHomeSection::Prs,
             dock_home_detail_tab: state::DockHomeDetailTab::Overview,
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: work_index_snapshot.clone(),
+            settings_missive_team: config.missive.team.clone(),
+            settings_missive_token_present: std::env::var_os(&config.missive.token_env)
+                .is_some_and(|value| !value.is_empty()),
             work_index_session: crate::work_index::WorkIndexSession::default(),
-            work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
+            work_item_detail_cache,
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
-            land_approval_label: config.land.approval_label.clone(),
+            pr_merge_method: config.source_control.merge_method,
             branch_prefix: config.source_control.branch_prefix.clone(),
             commit_message_model: config.source_control.commit_message_model.clone(),
+            commit_stage_all: config.source_control.commit_stage_all,
             work_index_linear_team_configured: config
                 .work_index
                 .linear_team
@@ -1177,6 +1249,8 @@ impl App {
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
+            work_index_context_fingerprint: Vec::new(),
+            work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass::default(),
             work_index_snapshot,
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_refresh_in_flight: None,
@@ -1197,6 +1271,8 @@ impl App {
             git_program_override: None,
             #[cfg(test)]
             work_index_gh_program_override: None,
+            #[cfg(test)]
+            work_index_provider_cache_root_override: None,
             #[cfg(test)]
             work_index_linearis_program_override: None,
             #[cfg(test)]
@@ -1577,7 +1653,14 @@ impl App {
                 needs_render = true;
             }
 
+            if self.apply_open_repo_editor_request() {
+                needs_render = true;
+            }
+
             if self.apply_git_action_request() {
+                needs_render = true;
+            }
+            if self.apply_add_project_clone_request() {
                 needs_render = true;
             }
             if self.apply_user_action_request() {
@@ -1586,7 +1669,7 @@ impl App {
             if self.apply_save_add_action_request() {
                 needs_render = true;
             }
-            if self.apply_pr_land_request() {
+            if self.apply_pr_command_request() {
                 needs_render = true;
             }
 
@@ -2084,6 +2167,14 @@ impl App {
             }
         }
 
+        if !invalid_section("panel") {
+            self.state.dock_default_surfaces = dock_surfaces_from_config(&config.panel);
+        }
+
+        if !invalid_section("linear") {
+            self.state.linear_default_layout = config.linear.default_layout.into();
+        }
+
         if !invalid_section("ui") {
             // Validate sidebar bounds before they reach any `u16::clamp` call.
             // On `min > max`, treat the entire `[ui]` section as invalid: keep
@@ -2261,10 +2352,11 @@ impl App {
             self.state.usage_pricing = config.usage.clone();
         }
 
-        if !invalid_section("land") {
-            self.state.land_approval_label = config.land.approval_label.clone();
+        if !invalid_section("source_control") {
+            self.state.pr_merge_method = config.source_control.merge_method;
             self.state.branch_prefix = config.source_control.branch_prefix.clone();
             self.state.commit_message_model = config.source_control.commit_message_model.clone();
+            self.state.commit_stage_all = config.source_control.commit_stage_all;
         }
 
         if !invalid_section("work_index") {
@@ -2283,6 +2375,9 @@ impl App {
 
         if !invalid_section("missive") {
             self.missive_config = config.missive.clone();
+            self.state.settings_missive_team = config.missive.team.clone();
+            self.state.settings_missive_token_present =
+                std::env::var_os(&config.missive.token_env).is_some_and(|value| !value.is_empty());
             self.next_work_index_refresh = Instant::now();
         }
 
@@ -2752,6 +2847,51 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn fresh_and_restored_clients_start_with_no_panel_tabs() {
+        let app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        assert!(app.state.dock_default_surfaces.is_empty());
+        assert!(app.state.dock_open_surfaces.is_empty());
+        assert_eq!(app.state.dock_tab, None);
+
+        let restored_attach = state::DockPresentationState::default();
+        assert!(restored_attach.open_surfaces.is_empty());
+        assert_eq!(restored_attach.tab, None);
+    }
+
+    #[test]
+    fn panel_config_restores_only_the_selected_default_tabs() {
+        let mut config = Config::default();
+        config.panel.default_surfaces = vec![
+            crate::config::PanelSurfaceConfig::Files,
+            crate::config::PanelSurfaceConfig::PullRequest,
+            crate::config::PanelSurfaceConfig::Files,
+        ];
+        let app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(
+            app.state.dock_default_surfaces,
+            vec![state::DockSurface::Files, state::DockSurface::Pr]
+        );
+        assert_eq!(
+            app.state.dock_open_surfaces,
+            app.state.dock_default_surfaces
+        );
+        assert_eq!(app.state.dock_tab, Some(state::DockSurface::Files));
+    }
 
     #[cfg(unix)]
     fn imported_editor_runtime(
@@ -4916,6 +5056,86 @@ mod tests {
     }
 
     #[test]
+    fn settings_source_control_edits_reach_live_consumers_without_restart() {
+        use crate::app::settings_general::ConfigEdit;
+
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("settings-source-control-live-reload");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[source_control]\nmerge_method = \"merge\"\n").unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        for (section, key, value) in [
+            ("source_control", "commit_message_model", "claude-opus-5"),
+            ("source_control", "branch_prefix", "live/"),
+            ("worktrees", "directory", "/tmp/herdr-live-worktrees"),
+        ] {
+            app.save_config_edit(ConfigEdit::Text {
+                section,
+                key,
+                value: value.into(),
+            });
+        }
+        app.save_config_edit(ConfigEdit::Bool {
+            section: "source_control",
+            key: "commit_stage_all",
+            value: true,
+        });
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.pr_merge_method,
+            crate::config::MergeMethodConfig::Merge
+        );
+        assert!(crate::app::git_actions::wrapped_command(
+            state::GitAction::Commit,
+            &app.state.commit_message_model,
+            app.state.commit_stage_all,
+        )
+        .contains("claude-opus-5"));
+        assert!(app.state.commit_stage_all);
+        assert_eq!(
+            crate::ui::work_list_detail::ticket_worktree_branch(
+                &app.state.branch_prefix,
+                "T3-9F",
+                "Live reload",
+            ),
+            "live/t3-9f-live-reload"
+        );
+        assert_eq!(
+            crate::worktree::default_checkout_path(
+                &app.state.worktree_directory,
+                "herdr",
+                "live/t3-9f-live-reload",
+            ),
+            std::path::PathBuf::from("/tmp/herdr-live-worktrees/herdr/live-t3-9f-live-reload")
+        );
+
+        std::fs::write(
+            &path,
+            "[source_control]\nmerge_method = \"squash\"\ncommit_message_model = 17\nbranch_prefix = \"ignored/\"\n[worktrees]\ndirectory = \"/tmp/herdr-live-worktrees\"\n",
+        )
+        .unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid source control config")));
+        assert_eq!(
+            app.state.pr_merge_method,
+            crate::config::MergeMethodConfig::Merge
+        );
+        assert_eq!(app.state.commit_message_model, "claude-opus-5");
+        assert_eq!(app.state.branch_prefix, "live/");
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn save_status_indicators_persists_then_applies_live_config() {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = temp_config_path("save-status-indicators");
@@ -6384,7 +6604,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_age_refresh_uses_authoritative_transition_boundary() {
+    fn activity_age_refresh_is_scheduled_for_space_suffix_rows() {
         let mut app = test_app();
         let started = Instant::now();
         let workspace = Workspace::test_new("activity");
@@ -6413,9 +6633,8 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
-        // The space-first tab row shows the latest communication age for the
-        // tab; sub-minute ages render as a static `<1m`, so the next visible
-        // boundary is the first minute mark, never a per-second tick.
+        // F19-1a keeps the visible age before the optional Space suffix, so its
+        // minute boundary must keep waking the render loop.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,

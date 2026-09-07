@@ -171,6 +171,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             keybind_label(&kb.sidebar_cycle_group_mode),
             "cycle sidebar grouping mode",
         ),
+        help_entry(keybind_label(&kb.sidebar_refresh), "sidebar.refresh"),
         help_entry(
             keybind_label(&kb.toggle_blocked_filter),
             "toggle blocked filter",
@@ -178,6 +179,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.toggle_dock), "toggle dock"),
         help_entry(keybind_label(&kb.previous_dock_tab), "previous dock tab"),
         help_entry(keybind_label(&kb.next_dock_tab), "next dock tab"),
+        help_entry(keybind_label(&kb.editor_open_repo), "editor.open_repo"),
         help_entry(keybind_label(&kb.edit_scratchpad), "edit scratchpad"),
         help_entry(keybind_label(&kb.show_scratchpad), "show scratchpad"),
         help_entry(keybind_label(&kb.toggle_info_panel), "toggle info panel"),
@@ -492,6 +494,22 @@ mod tests {
         assert!(entries
             .iter()
             .any(|(key, label)| { key == "prefix+ctrl+n" && label == "next tab in this Space" }));
+    }
+
+    #[test]
+    fn repository_editor_action_appears_in_help() {
+        let mut app = AppState::test_new();
+        app.keybinds.editor_open_repo = crate::config::ActionKeybinds::direct("ctrl+alt+v");
+
+        let entries = keybind_help_groups(&app)
+            .into_iter()
+            .find(|(title, _)| *title == "panes")
+            .expect("panes help group")
+            .1;
+
+        assert!(entries
+            .iter()
+            .any(|(key, label)| key == "ctrl+alt+v" && label == "editor.open_repo"));
     }
 
     #[test]

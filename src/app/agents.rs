@@ -18,6 +18,41 @@ fn valid_agent_name(name: &str) -> bool {
 }
 
 impl App {
+    pub(crate) fn collect_work_index_panes(&self) -> Vec<crate::work_index::WorkIndexPane> {
+        self.state
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, workspace)| {
+                workspace.tabs.iter().flat_map(move |tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            let pane = self.pane_info(ws_idx, pane_id)?;
+                            let name = workspace
+                                .pane_state(pane_id)
+                                .and_then(|state| {
+                                    self.state.terminals.get(&state.attached_terminal_id)
+                                })
+                                .and_then(|terminal| terminal.agent_name.clone());
+                            let projection = crate::work_index::WorkIndexPane {
+                                work_context: pane.work_context,
+                                name,
+                                agent: pane.agent,
+                                display_agent: pane.display_agent,
+                                agent_status: pane.agent_status,
+                                workspace_id: pane.workspace_id,
+                                tab_id: pane.tab_id,
+                                pane_id: pane.pane_id,
+                            };
+                            projection.has_indexable_context().then_some(projection)
+                        })
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
             .workspaces

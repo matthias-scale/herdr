@@ -67,6 +67,40 @@ impl App {
         });
     }
 
+    pub(crate) fn request_sidebar_refresh(&mut self) -> bool {
+        if self.state.sidebar_refreshing
+            || self.git_refresh_in_flight.is_some()
+            || self.git_work_context_refresh_in_flight.is_some()
+            || self.work_index_refresh_in_flight.is_some()
+        {
+            return false;
+        }
+        self.state.request_sidebar_refresh()
+    }
+
+    pub(crate) fn start_sidebar_refresh_if_requested(&mut self, now: Instant) -> bool {
+        if !std::mem::take(&mut self.state.sidebar_refresh_requested) {
+            return false;
+        }
+        self.next_work_index_refresh = now;
+        self.request_git_identity_refresh(now);
+        self.request_git_work_context_refresh(now);
+        true
+    }
+
+    pub(crate) fn finish_sidebar_refresh_if_idle(&mut self) -> bool {
+        if self.state.sidebar_refreshing
+            && !self.state.sidebar_refresh_requested
+            && self.git_refresh_in_flight.is_none()
+            && self.git_work_context_refresh_in_flight.is_none()
+            && self.work_index_refresh_in_flight.is_none()
+        {
+            self.state.sidebar_refreshing = false;
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {
         if self
             .git_refresh_in_flight
@@ -669,6 +703,25 @@ mod tests {
         app.start_git_status_refresh_if_due(now);
         assert!(app.git_refresh_in_flight.is_some());
         assert!(!app.git_identity_refresh_requested);
+    }
+
+    #[test]
+    fn sidebar_refresh_is_single_flight_and_schedules_both_sources_immediately() {
+        let mut app = test_app(&crate::config::Config::default());
+        app.state.workspaces.push(Workspace::test_new("test"));
+        let now = Instant::now();
+
+        assert!(app.request_sidebar_refresh());
+        assert!(!app.request_sidebar_refresh(), "second click is ignored");
+        assert!(app.start_sidebar_refresh_if_requested(now));
+        assert_eq!(app.next_work_index_refresh, now);
+        assert!(app.git_identity_refresh_requested);
+        assert_eq!(app.next_git_work_context_refresh, now);
+        assert!(app.state.sidebar_refreshing);
+        assert!(
+            !app.request_sidebar_refresh(),
+            "busy state remains single-flight"
+        );
     }
 
     #[test]

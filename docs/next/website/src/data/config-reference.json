@@ -674,6 +674,12 @@
           "description": "Cycle the sidebar grouping mode."
         },
         {
+          "key": "keys.sidebar_refresh",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Refresh sidebar work and Git metadata."
+        },
+        {
           "key": "keys.toggle_blocked_filter",
           "type": "keybinding",
           "default": "\"prefix+f\"",
@@ -696,6 +702,12 @@
           "type": "keybinding",
           "default": "\"prefix+shift+]\"",
           "description": "Select the next dock tab."
+        },
+        {
+          "key": "keys.editor_open_repo",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the focused repository in a right-side Vim-family editor."
         },
         {
           "key": "keys.edit_scratchpad",
@@ -1044,6 +1056,32 @@
       ]
     },
     {
+      "id": "panel",
+      "title": "Right panel",
+      "keys": [
+        {
+          "key": "panel.default_surfaces",
+          "type": "list of enums",
+          "default": "[]",
+          "description": "Surfaces opened as tabs in a fresh right panel. An empty list opens the surface chooser.",
+          "values": [
+            "home",
+            "terminal",
+            "files",
+            "diff",
+            "pull_request",
+            "linear",
+            "missive",
+            "agents",
+            "editor",
+            "shortcuts",
+            "context",
+            "scratchpad"
+          ]
+        }
+      ]
+    },
+    {
       "id": "files",
       "title": "Files",
       "keys": [
@@ -1055,6 +1093,22 @@
           "values": [
             "badges",
             "nerd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "linear",
+      "title": "Linear",
+      "keys": [
+        {
+          "key": "linear.default_layout",
+          "type": "enum",
+          "default": "\"list\"",
+          "description": "Initial layout for the full-screen Linear tickets view.",
+          "values": [
+            "list",
+            "board"
           ]
         }
       ]
@@ -1485,28 +1539,33 @@
       "title": "Source control",
       "keys": [
         {
+          "key": "source_control.merge_method",
+          "type": "enum",
+          "default": "\"merge\"",
+          "description": "Merge strategy used by the primary pull request action and auto-merge.",
+          "values": [
+            "merge",
+            "squash",
+            "rebase"
+          ]
+        },
+        {
           "key": "source_control.commit_message_model",
           "type": "string",
           "default": "\"\"",
-          "description": "Model exported to the Commit action as HERDR_COMMIT_MESSAGE_MODEL so a prepare-commit-msg hook can draft the message. Empty runs `git commit` unchanged."
+          "description": "Claude Code or Codex model used to draft a conventional commit message from the cached diff, or the unstaged diff when the cache is empty. Empty runs `git commit` unchanged."
+        },
+        {
+          "key": "source_control.commit_stage_all",
+          "type": "boolean",
+          "default": "false",
+          "description": "Stage all working-tree changes before drafting and committing. False leaves the index unchanged."
         },
         {
           "key": "source_control.branch_prefix",
           "type": "string",
           "default": "\"issue/\"",
           "description": "Prefix for branch names Herdr derives from a ticket."
-        }
-      ]
-    },
-    {
-      "id": "land",
-      "title": "Pull request landing",
-      "keys": [
-        {
-          "key": "land.approval_label",
-          "type": "string",
-          "default": "\"approved\"",
-          "description": "Exact pull request label accepted as an approval signal for the Land action."
         }
       ]
     },

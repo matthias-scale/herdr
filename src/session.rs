@@ -309,6 +309,7 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
     }
     let info = session_info(Some(name));
     let dir = data_dir_for(Some(name));
+    crate::work_index::remove_session_snapshot(name).map_err(|error| error.to_string())?;
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(info),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(info),
@@ -1073,6 +1074,32 @@ mod tests {
     #[test]
     fn delete_default_session_is_rejected() {
         assert!(delete_session(DEFAULT_SESSION_NAME).is_err());
+    }
+
+    #[test]
+    fn deleting_named_session_removes_its_work_index_snapshot() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-session-delete-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set("XDG_CONFIG_HOME", base.join("config"));
+        env.set("XDG_STATE_HOME", base.join("state"));
+        let session_name = "customer-support";
+        let session_dir = data_dir_for(Some(session_name));
+        let snapshot_path = crate::config::state_dir()
+            .join("work-index")
+            .join(format!("{session_name}.json"));
+        std::fs::create_dir_all(&session_dir).expect("session directory");
+        std::fs::create_dir_all(snapshot_path.parent().expect("snapshot parent"))
+            .expect("snapshot directory");
+        std::fs::write(&snapshot_path, b"{}").expect("session snapshot");
+
+        delete_session(session_name).expect("delete named session");
+
+        assert!(!session_dir.exists());
+        assert!(!snapshot_path.exists());
+        std::fs::remove_dir_all(base).expect("cleanup session fixture");
     }
 
     #[test]

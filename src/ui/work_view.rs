@@ -8,8 +8,7 @@ use ratatui::{
 
 use crate::{
     app::state::{
-        AppState, Palette, PrDetailTab, TicketMoreChoice, TicketTransitionChoice, WorkProjection,
-        WorkViewState,
+        AppState, Palette, PrDetailTab, TicketTransitionChoice, WorkProjection, WorkViewState,
     },
     ui::work_list_detail::{
         comment_header, section_separator, sorted_filtered_conversations, sorted_filtered_prs,
@@ -80,20 +79,28 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         format!(" 🔍 {}{cursor}  ⚲ {filter}", fit_cell(query, query_width)),
         Style::default().fg(palette.subtext0),
     )];
-    let message = if !state.enabled {
+    let blocking_message = if !state.enabled {
         Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
         Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.clone())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
         frame.render_widget(Paragraph::new(lines), left_inner);
         return;
+    }
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Missive,
+            std::time::SystemTime::now(),
+        )
+    }) {
+        lines.push(Line::styled(
+            format!("Missive: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
     let items = items.unwrap_or_default();
     let selected = state
@@ -147,6 +154,10 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
         render_missive_detail(app, state, item, detail_inner, frame);
+    } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Missive)
+    }) {
+        frame.render_widget(Paragraph::new(format!(" details\n {reason}")), detail_inner);
     }
 }
 
@@ -271,6 +282,11 @@ fn render_missive_start_menu(
 }
 
 fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    if state.ticket_layout == crate::app::state::LinearViewLayout::Board && !state.board_detail_open
+    {
+        render_ticket_board(app, state, area, frame);
+        return;
+    }
     let palette = &app.palette;
     let observed_at = state
         .snapshot
@@ -300,9 +316,13 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     } else {
         Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
     };
+    let layout_label = match state.ticket_layout {
+        crate::app::state::LinearViewLayout::List => "[List] Board",
+        crate::app::state::LinearViewLayout::Board => "List [Board]",
+    };
     let left = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Tickets{refresh} "))
+        .title(format!(" Tickets{refresh} · {layout_label} "))
         .border_style(Style::default().fg(palette.accent));
     let left_inner = left.inner(columns[0]);
     frame.render_widget(left, columns[0]);
@@ -324,20 +344,28 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         ),
         Style::default().fg(palette.subtext0),
     )];
-    let message = if !state.enabled {
+    let blocking_message = if !state.enabled {
         Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
         Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.clone())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
         frame.render_widget(Paragraph::new(lines), left_inner);
         return;
+    }
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Linear,
+            std::time::SystemTime::now(),
+        )
+    }) {
+        lines.push(Line::styled(
+            format!("Linear: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
     let items = items.unwrap_or_default();
     let selected = state
@@ -386,6 +414,338 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
         render_ticket_detail(app, state, item, detail_inner, frame);
+    } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Linear)
+    }) {
+        frame.render_widget(Paragraph::new(format!(" details\n {reason}")), detail_inner);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinearBoardColumn {
+    Triage,
+    Todo,
+    InProgress,
+    InReview,
+    Done,
+}
+
+impl LinearBoardColumn {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Triage,
+        Self::Todo,
+        Self::InProgress,
+        Self::InReview,
+        Self::Done,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Triage => "Triage",
+            Self::Todo => "Backlog / Todo",
+            Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
+            Self::Done => "Done",
+        }
+    }
+
+    pub(crate) fn for_ticket(ticket: &crate::work_index::WorkTicket) -> Self {
+        let state = ticket.state.as_deref().unwrap_or_default().to_lowercase();
+        if ticket.group == crate::work_index::TicketGroup::Triage || state.contains("triage") {
+            Self::Triage
+        } else if state.contains("done") || state.contains("complete") {
+            Self::Done
+        } else if state.contains("review") {
+            Self::InReview
+        } else if state.contains("progress") || state.contains("started") {
+            Self::InProgress
+        } else {
+            Self::Todo
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoardCardHitArea {
+    pub(crate) key: crate::app::state::WorkItemKey,
+    pub(crate) column: usize,
+    pub(crate) row: usize,
+    pub(crate) rect: Rect,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TicketBoardLayout {
+    pub(crate) list_toggle: Rect,
+    pub(crate) board_toggle: Rect,
+    pub(crate) visible_columns: std::ops::Range<usize>,
+    pub(crate) cards: Vec<BoardCardHitArea>,
+}
+
+pub(crate) fn ticket_board_page_size(width: u16) -> usize {
+    if width < 100 {
+        2
+    } else {
+        5
+    }
+}
+
+pub(crate) fn ticket_board_columns(
+    app: &AppState,
+    state: &WorkViewState,
+) -> [Vec<crate::app::state::WorkItemKey>; 5] {
+    let mut columns: [Vec<crate::app::state::WorkItemKey>; 5] = std::array::from_fn(|_| Vec::new());
+    let observed_at = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.observed_at)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let has_context_pr = super::dock::pr::focused_pr_key(app).is_some();
+    let items = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| {
+            sorted_filtered_tickets(
+                &snapshot.items,
+                &app.work_item_detail_cache,
+                &state.search,
+                state.ticket_sort,
+                state.ticket_open_only,
+                observed_at,
+                has_context_pr,
+                Some((&app.sidebar_work_filter, &app.work_index_session)),
+            )
+        })
+        .unwrap_or_default();
+    for item in items {
+        let column = LinearBoardColumn::for_ticket(item.summary) as usize;
+        columns[column].push(crate::app::state::WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some(item.summary.identifier.clone()),
+        });
+    }
+    columns
+}
+
+pub(crate) fn ticket_board_layout(
+    app: &AppState,
+    state: &WorkViewState,
+    area: Rect,
+) -> TicketBoardLayout {
+    if area.width == 0 || area.height < 2 {
+        return TicketBoardLayout::default();
+    }
+    let viewport_width = [
+        area.right(),
+        app.view.sidebar_rect.right(),
+        app.view.dock_rect.right(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(area.right());
+    let page_size = ticket_board_page_size(viewport_width.max(area.width));
+    let page_start = ((state.board_column / page_size) * page_size)
+        .min(LinearBoardColumn::ALL.len().saturating_sub(page_size));
+    let page_end = (page_start + page_size).min(LinearBoardColumn::ALL.len());
+    let body = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+    let constraints = (page_start..page_end)
+        .map(|_| Constraint::Ratio(1, page_size as u32))
+        .collect::<Vec<_>>();
+    let column_areas = Layout::horizontal(constraints).split(body);
+    let columns = ticket_board_columns(app, state);
+    let mut cards = Vec::new();
+    for (visible_index, column_index) in (page_start..page_end).enumerate() {
+        let inner = Block::default()
+            .borders(Borders::ALL)
+            .inner(column_areas[visible_index]);
+        let capacity = usize::from(inner.height) / 4;
+        let first = state.board_scroll[column_index]
+            .min(columns[column_index].len().saturating_sub(capacity.max(1)));
+        for (visible_row, row) in (first..columns[column_index].len())
+            .take(capacity)
+            .enumerate()
+        {
+            cards.push(BoardCardHitArea {
+                key: columns[column_index][row].clone(),
+                column: column_index,
+                row,
+                rect: Rect::new(inner.x, inner.y + visible_row as u16 * 4, inner.width, 4),
+            });
+        }
+    }
+    TicketBoardLayout {
+        list_toggle: Rect::new(area.x + 10.min(area.width), area.y, 6.min(area.width), 1),
+        board_toggle: Rect::new(area.x + 17.min(area.width), area.y, 7.min(area.width), 1),
+        visible_columns: page_start..page_end,
+        cards,
+    }
+}
+
+fn render_ticket_board(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {
+        " · refreshing…"
+    } else {
+        ""
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            ratatui::text::Span::styled(
+                "Tickets ",
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ratatui::text::Span::styled("List", Style::default().fg(app.palette.subtext0)),
+            ratatui::text::Span::raw(" | "),
+            ratatui::text::Span::styled(
+                "Board",
+                Style::default()
+                    .fg(app.palette.accent)
+                    .bg(app.palette.surface0)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ratatui::text::Span::styled(refresh, Style::default().fg(app.palette.subtext0)),
+        ])),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let layout = ticket_board_layout(app, state, area);
+    let columns = ticket_board_columns(app, state);
+    let body = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    let constraints = layout
+        .visible_columns
+        .clone()
+        .map(|_| Constraint::Ratio(1, layout.visible_columns.len() as u32))
+        .collect::<Vec<_>>();
+    let column_areas = Layout::horizontal(constraints).split(body);
+    for (visible_index, column_index) in layout.visible_columns.clone().enumerate() {
+        let column = LinearBoardColumn::ALL[column_index];
+        let selected_column = column_index == state.board_column;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(
+                " {} · {} ",
+                column.label(),
+                columns[column_index].len()
+            ))
+            .border_style(Style::default().fg(if selected_column {
+                app.palette.accent
+            } else {
+                app.palette.surface_dim
+            }));
+        let inner = block.inner(column_areas[visible_index]);
+        frame.render_widget(block, column_areas[visible_index]);
+        if columns[column_index].is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    " —",
+                    Style::default().fg(app.palette.overlay0),
+                )),
+                inner,
+            );
+            continue;
+        }
+        let first = state.board_scroll[column_index];
+        let capacity = usize::from(inner.height) / 4;
+        for (visible_row, key) in columns[column_index]
+            .iter()
+            .skip(first)
+            .take(capacity)
+            .enumerate()
+        {
+            let Some(ticket_id) = key.ticket_id.as_deref() else {
+                continue;
+            };
+            let Some(ticket) = state.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .items
+                    .iter()
+                    .flat_map(|item| &item.ticket_details)
+                    .find(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))
+            }) else {
+                continue;
+            };
+            let selected = selected_column && state.board_rows[column_index] == first + visible_row;
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface0)
+            } else {
+                Style::default().fg(app.palette.text)
+            };
+            let glyph = match LinearBoardColumn::for_ticket(ticket) {
+                LinearBoardColumn::Triage => "●",
+                LinearBoardColumn::Todo => "○",
+                LinearBoardColumn::InProgress | LinearBoardColumn::InReview => "◐",
+                LinearBoardColumn::Done => "✓",
+            };
+            let priority = ticket
+                .priority
+                .map_or("P—".into(), |value| format!("P{value}"));
+            let width = usize::from(inner.width.saturating_sub(2)).max(1);
+            let title = wrap_board_title(ticket.title.as_deref().unwrap_or("(untitled)"), width);
+            let initials = assignee_initials(ticket.assignee.as_deref());
+            let marker = if selected { "▸" } else { " " };
+            let lines = vec![
+                Line::styled(
+                    format!("{marker}{glyph} {} {priority}", ticket.identifier),
+                    style,
+                ),
+                Line::styled(format!(" {}", title[0]), style),
+                Line::styled(format!(" {}", title[1]), style),
+                Line::styled(
+                    format!(" {initials}"),
+                    Style::default().fg(app.palette.subtext0).bg(if selected {
+                        app.palette.surface0
+                    } else {
+                        app.palette.panel_bg
+                    }),
+                ),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines),
+                Rect::new(inner.x, inner.y + visible_row as u16 * 4, inner.width, 4),
+            );
+        }
+    }
+}
+
+fn wrap_board_title(title: &str, width: usize) -> [String; 2] {
+    let mut lines = [String::new(), String::new()];
+    let mut line = 0;
+    for word in title.split_whitespace() {
+        let needed = word.chars().count() + usize::from(!lines[line].is_empty());
+        if lines[line].chars().count() + needed > width && line == 0 {
+            line = 1;
+        }
+        if lines[line].chars().count() + needed > width {
+            break;
+        }
+        if !lines[line].is_empty() {
+            lines[line].push(' ');
+        }
+        lines[line].push_str(word);
+    }
+    lines
+}
+
+fn assignee_initials(assignee: Option<&str>) -> String {
+    let initials = assignee
+        .unwrap_or("unassigned")
+        .split(|character: char| character.is_whitespace() || character == '.' || character == '-')
+        .filter_map(|part| part.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    if initials.is_empty() {
+        "—".into()
+    } else {
+        initials
     }
 }
 
@@ -407,17 +767,14 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let message = if !state.enabled {
-        Some("work index disabled")
+    let blocking_message = if !state.enabled {
+        Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
-        Some("work index not yet collected")
+        Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.as_deref())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(palette.subtext0)),
             inner,
@@ -428,7 +785,19 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
     let Some(projection) = projection else {
         return;
     };
-    let mut lines = vec![Line::styled(
+    let mut lines = Vec::new();
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Github,
+            std::time::SystemTime::now(),
+        )
+    }) {
+        lines.push(Line::styled(
+            format!("GitHub: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    lines.push(Line::styled(
         format_review_queue_summary(
             projection.awaiting_review_count,
             projection.ticket_in_review_count,
@@ -437,7 +806,7 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
         Style::default()
             .fg(palette.subtext0)
             .add_modifier(Modifier::BOLD),
-    )];
+    ));
     if projection.rows.is_empty() {
         lines.push(Line::styled(
             "  no PRs awaiting review",
@@ -489,7 +858,6 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
             state.sort,
             state.open_only,
             observed_at,
-            &app.land_approval_label,
             Some((&app.sidebar_work_filter, &app.work_index_session)),
         )
     });
@@ -523,20 +891,28 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
         ),
         Style::default().fg(palette.subtext0),
     )];
-    let message = if !state.enabled {
+    let blocking_message = if !state.enabled {
         Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
         Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.clone())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
         frame.render_widget(Paragraph::new(lines), left_inner);
         return;
+    }
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Github,
+            std::time::SystemTime::now(),
+        )
+    }) {
+        lines.push(Line::styled(
+            format!("GitHub: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
     let items = items.unwrap_or_default();
     let selected = state
@@ -584,6 +960,10 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
         render_pr_detail(app, state, item, detail_inner, frame);
+    } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
+    }) {
+        frame.render_widget(Paragraph::new(format!(" details\n {reason}")), detail_inner);
     }
 }
 
@@ -681,27 +1061,13 @@ fn render_ticket_detail(
 ) {
     let palette = &app.palette;
     let detail = item.detail();
-    let link_enabled = item.actions().iter().any(|action| {
-        action.kind == crate::ui::work_list_detail::WorkActionKind::LinkPr && action.enabled
-    });
-    let link_style = if link_enabled {
-        Style::default().fg(palette.accent)
-    } else {
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::DIM)
-    };
     let mut lines = vec![
-        Line::from(vec![
-            ratatui::text::Span::styled(
-                format!(" {}   [Start thread ▾] [Transition ▾] ", detail.heading),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            ratatui::text::Span::styled("[Link PR] ", link_style),
-            ratatui::text::Span::styled("⋯", Style::default().fg(palette.accent)),
-        ]),
+        Line::from(vec![ratatui::text::Span::styled(
+            format!(" {}   [Start thread ▾] [⋯]", detail.heading),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::styled(
             format!(" {}", detail.title),
             Style::default()
@@ -793,9 +1159,27 @@ fn render_ticket_detail(
         render_ticket_start_menu(app, frame, area, item, choice);
     } else if let Some(choice) = state.ticket_transition_menu {
         render_ticket_transition_menu(app, frame, area, item, choice);
-    } else if let Some(choice) = state.ticket_more_menu {
-        render_ticket_more_menu(app, frame, area, choice);
+    } else if let Some(menu) = state.ticket_more_menu {
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            item.summary,
+            item.cached_detail,
+            app.work_index_session.linear.viewer.as_deref(),
+            app.work_index_session.linear_viewer_identity(),
+            item.has_context_pr,
+        );
+        crate::ui::ticket_actions::render_ticket_action_menu(
+            palette,
+            frame,
+            area,
+            ticket_action_menu_anchor(area),
+            &context,
+            menu,
+        );
     }
+}
+
+fn ticket_action_menu_anchor(area: Rect) -> Rect {
+    Rect::new(area.right().saturating_sub(3), area.y, 3.min(area.width), 1)
 }
 
 fn render_pr_detail(
@@ -807,41 +1191,57 @@ fn render_pr_detail(
 ) {
     let palette = &app.palette;
     let detail = item.detail();
-    let land_enabled = item.actions().iter().any(|action| {
-        action.kind == crate::ui::work_list_detail::WorkActionKind::Land && action.enabled
+    let checkout_available = detail.open_url.is_some()
+        && item
+            .cached_detail
+            .and_then(|detail| detail.head_ref_name.as_ref())
+            .is_some();
+    let actions = item.action_table(app.pr_merge_method, checkout_available);
+    let merge = actions.iter().find(|action| {
+        matches!(
+            action.placement,
+            crate::ui::work_list_detail::PrActionPlacement::Header
+        ) && matches!(
+            action.kind,
+            crate::ui::work_list_detail::PrActionKind::Merge(_)
+        )
     });
-    let land_status = item.land_status();
-    let awaiting_approval =
-        land_status == crate::ui::work_list_detail::PrLandStatus::AwaitingApproval;
-    let (land_label, land_style) = match (land_enabled, &land_status) {
-        (true, crate::ui::work_list_detail::PrLandStatus::Enabled(_)) => (
-            "[Land]",
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        (false, crate::ui::work_list_detail::PrLandStatus::AwaitingApproval) => (
-            "[Land]",
-            Style::default()
-                .fg(palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        ),
-        _ => (
-            "[Land disabled]",
-            Style::default()
-                .fg(palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        ),
+    let merge_style = if merge.is_some_and(|action| action.enabled()) {
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::DIM)
     };
+    let checkout = actions.iter().find(|action| {
+        action.kind == crate::ui::work_list_detail::PrActionKind::CheckOut
+            && matches!(
+                action.placement,
+                crate::ui::work_list_detail::PrActionPlacement::Header
+            )
+    });
     let mut lines = vec![
         Line::from(vec![
             ratatui::text::Span::styled(
-                format!(" {}     [Check out ▾] ", detail.heading),
+                format!(
+                    " {}     [{}] ",
+                    detail.heading,
+                    checkout.map_or("Check out ▾", |action| action.label.as_str())
+                ),
                 Style::default()
                     .fg(palette.text)
                     .add_modifier(Modifier::BOLD),
             ),
-            ratatui::text::Span::styled(land_label, land_style),
+            ratatui::text::Span::styled(
+                format!(
+                    "[{}]",
+                    merge.map_or("Merge", |action| action.label.as_str())
+                ),
+                merge_style,
+            ),
+            ratatui::text::Span::styled(" [⋯]", Style::default().fg(palette.accent)),
         ]),
         Line::styled(
             format!(" {}", detail.title),
@@ -862,21 +1262,29 @@ fn render_pr_detail(
             Style::default().fg(palette.accent),
         ),
     ];
-    if awaiting_approval {
+    if let Some(reason) = merge.and_then(|action| action.disabled_reason) {
         lines.insert(
             1,
             Line::styled(
-                " awaiting approval",
+                format!(" {reason}"),
                 Style::default()
                     .fg(palette.overlay0)
                     .add_modifier(Modifier::DIM),
             ),
         );
     }
+    let mut reviewer_anchor = None;
     match state.detail_tab {
         PrDetailTab::Summary => {
+            reviewer_anchor = Some(Rect::new(
+                area.right().saturating_sub(4),
+                area.y
+                    .saturating_add(u16::try_from(lines.len()).unwrap_or(u16::MAX)),
+                4.min(area.width),
+                1,
+            ));
             lines.push(Line::styled(
-                format!(" Reviewers  {}", detail.reviewers),
+                format!(" Reviewers  {}  ✦ +", detail.reviewers),
                 Style::default().fg(palette.text),
             ));
             lines.extend(section_separator(palette, "Description", area.width));
@@ -936,39 +1344,80 @@ fn render_pr_detail(
                 "Timeline · newest first",
                 area.width,
             ));
-            for (index, comment) in detail.comments.iter().enumerate() {
+            if let Some(message) = item
+                .cached_detail
+                .and_then(|detail| detail.timeline_unavailable.as_deref())
+            {
+                lines.push(Line::styled(
+                    format!(" {message}"),
+                    Style::default().fg(palette.red),
+                ));
+            }
+            let timeline = item
+                .cached_detail
+                .map(|detail| detail.timeline.as_slice())
+                .unwrap_or_default();
+            for (index, event) in timeline.iter().enumerate() {
                 if index > 0 {
                     lines.push(Line::default());
                 }
+                let age = event
+                    .created_at
+                    .map(|created_at| {
+                        comment_header(
+                            &crate::work_index::WorkItemComment {
+                                author: event.actor.clone(),
+                                body: String::new(),
+                                created_at: Some(created_at),
+                            },
+                            item.observed_at,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!("{} · —", event.actor.as_deref().unwrap_or("unknown"))
+                    });
                 lines.push(Line::styled(
-                    format!("  {}", comment_header(comment, item.observed_at)),
+                    format!("  {} · {}", event.kind.replace('_', " "), age),
                     Style::default()
                         .fg(palette.subtext0)
                         .add_modifier(Modifier::DIM),
                 ));
                 lines.extend(crate::ui::markdown::body_lines(
                     palette,
-                    Some(&comment.body),
+                    Some(&event.summary),
                     usize::from(area.width.saturating_sub(4)),
                     "    ",
+                ));
+            }
+            if timeline.is_empty()
+                && item
+                    .cached_detail
+                    .is_some_and(|detail| detail.timeline_unavailable.is_none())
+            {
+                lines.push(Line::styled(
+                    " no timeline events",
+                    Style::default().fg(palette.subtext0),
                 ));
             }
         }
         PrDetailTab::Code => crate::ui::dock::diff::render_diff(app, frame, area),
     }
-    if let Some(confirm) = state.pending_land.as_ref() {
-        lines.push(Line::styled(
-            format!(
-                " Confirm Land {}#{} via {} at {}? [y/N]",
-                confirm.repo, confirm.number, confirm.approval_signal, confirm.head_sha
-            ),
-            Style::default()
-                .fg(palette.yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
     if state.detail_tab != PrDetailTab::Code {
         frame.render_widget(Paragraph::new(lines), area);
+    }
+    if let (Some(picker), Some(anchor), Some(detail)) = (
+        state.reviewer_picker.as_ref(),
+        reviewer_anchor,
+        item.cached_detail,
+    ) {
+        render_reviewer_picker(
+            app,
+            frame,
+            frame.area(),
+            anchor,
+            picker,
+            &detail.collaborators,
+        );
     }
     if let Some(choice) = state.checkout_menu {
         if let Some(layout) = checkout_menu_layout(area, choice) {
@@ -1001,7 +1450,76 @@ fn render_pr_detail(
                 Rect::new(area.x, area.y, area.width, 1),
             );
         }
+    } else if let Some(menu) = state.pr_action_menu {
+        let anchor = pr_action_menu_anchor(area);
+        if !crate::ui::pr_actions::render(app, frame, frame.area(), anchor, &actions, menu) {
+            frame.render_widget(
+                Paragraph::new("action menu needs space below")
+                    .style(Style::default().fg(palette.red)),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+        }
     }
+}
+
+fn render_reviewer_picker(
+    app: &AppState,
+    frame: &mut Frame,
+    containing_area: Rect,
+    anchor: Rect,
+    picker: &crate::app::state::ReviewerPickerState,
+    collaborators: &[String],
+) {
+    let matches = picker.filter.matches(collaborators);
+    let Some(layout) = reviewer_picker_layout(
+        containing_area,
+        anchor,
+        matches.len(),
+        picker.filter.selected,
+    ) else {
+        return;
+    };
+    let rows = matches
+        .iter()
+        .map(|(_, login)| crate::ui::dropdown::DropdownMenuRow::Item {
+            label: (*login).to_string(),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    crate::ui::dropdown::render_menu(&app.palette, frame, &layout, &rows, picker.filter.selected);
+    if let Some(filter_rect) = layout.filter_rect {
+        frame.render_widget(
+            Paragraph::new(format!(" 🔍 {}▏", picker.filter.query)).style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg),
+            ),
+            filter_rect,
+        );
+    }
+}
+
+fn reviewer_picker_layout(
+    containing_area: Rect,
+    anchor: Rect,
+    item_count: usize,
+    selected: usize,
+) -> Option<crate::ui::dropdown::DropdownLayout> {
+    crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor,
+            item_count,
+            selected,
+            has_filter: true,
+            max_rows: 8,
+            min_width: 28,
+        },
+        containing_area,
+    )
+}
+
+fn pr_action_menu_anchor(area: Rect) -> Rect {
+    Rect::new(area.right().saturating_sub(3), area.y, 3.min(area.width), 1)
 }
 
 fn checkout_menu_layout(
@@ -1133,41 +1651,6 @@ fn render_ticket_transition_menu(
     );
 }
 
-fn render_ticket_more_menu(
-    app: &AppState,
-    frame: &mut Frame,
-    area: Rect,
-    choice: TicketMoreChoice,
-) {
-    let selected = TicketMoreChoice::ALL
-        .iter()
-        .position(|option| *option == choice)
-        .unwrap_or(0);
-    let Some(layout) = ticket_menu_layout(area, 54, 3, selected, 20) else {
-        return;
-    };
-    frame.render_widget(
-        Paragraph::new(
-            TicketMoreChoice::ALL
-                .into_iter()
-                .map(|option| {
-                    Line::styled(
-                        format!(
-                            "{} {}",
-                            if option == choice { "▸" } else { " " },
-                            option.label()
-                        ),
-                        Style::default()
-                            .fg(app.palette.text)
-                            .bg(app.palette.panel_bg),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ),
-        layout.rect,
-    );
-}
-
 fn render_placeholder(
     palette: &Palette,
     projection: WorkProjection,
@@ -1190,10 +1673,16 @@ fn render_placeholder(
 fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
     let base = match state.projection {
         WorkProjection::PullRequests => {
-            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   c checkout   l Land   x fix"
+            " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   + reviewer   c checkout   l merge   m actions"
+        }
+        WorkProjection::Tickets
+            if state.ticket_layout == crate::app::state::LinearViewLayout::Board
+                && !state.board_detail_open =>
+        {
+            " ←/→ columns   ↑/↓ cards   Enter detail   t transition   v list"
         }
         WorkProjection::Tickets => {
-            " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more"
+            " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more   v board"
         }
         WorkProjection::Missive => {
             let wide = " / search   ↑/↓ move   PgUp/PgDn detail   f open/all   c start thread   o Open in Missive   r refresh";
@@ -1290,6 +1779,7 @@ mod tests {
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Other,
+            cached_pr_detail: None,
             ticket_ids: tickets.iter().map(|ticket| (*ticket).to_string()).collect(),
             ticket_title: None,
             ticket_state: None,
@@ -1338,6 +1828,8 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            labels: Vec::new(),
+            pane_bound: false,
             messages: (0..message_count)
                 .map(|index| crate::work_index::MissiveEntry {
                     id: format!("message-{index}"),
@@ -1385,6 +1877,7 @@ mod tests {
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Unclassified,
+            cached_pr_detail: None,
             ticket_ids: vec![identifier.into()],
             ticket_title: Some("ticket title".into()),
             ticket_state: Some("In Progress".into()),
@@ -1397,6 +1890,7 @@ mod tests {
                 ),
                 state: Some("In Progress".into()),
                 assignee: Some("matthias".into()),
+                creator: None,
                 priority: Some(2),
                 cycle: Some("cycle 34".into()),
                 group,
@@ -1413,6 +1907,115 @@ mod tests {
             panes: Vec::new(),
             source: WorkItemSource::default(),
         }
+    }
+
+    fn board_state() -> WorkViewState {
+        let cases = [
+            ("SCA-1", "Triage", crate::work_index::TicketGroup::Triage),
+            ("SCA-2", "Todo", crate::work_index::TicketGroup::Assigned),
+            (
+                "SCA-3",
+                "In Progress",
+                crate::work_index::TicketGroup::Assigned,
+            ),
+            (
+                "SCA-4",
+                "In Review",
+                crate::work_index::TicketGroup::Assigned,
+            ),
+            (
+                "SCA-5",
+                "Done",
+                crate::work_index::TicketGroup::DoneThisCycle,
+            ),
+        ];
+        let items = cases
+            .into_iter()
+            .map(|(identifier, state, group)| {
+                let mut item = ticket(identifier, group);
+                item.ticket_state = Some(state.into());
+                item.ticket_details[0].state = Some(state.into());
+                item.ticket_details[0].title = Some(format!("{state} ticket with a wrapped title"));
+                item
+            })
+            .collect();
+        let mut state = WorkViewState::new(true, Some(snapshot(items)));
+        state.projection = WorkProjection::Tickets;
+        state.ticket_layout = crate::app::state::LinearViewLayout::Board;
+        state
+    }
+
+    #[test]
+    fn board_maps_injected_workflow_states_to_team_columns() {
+        let app = AppState::test_new();
+        let state = board_state();
+        let columns = ticket_board_columns(&app, &state);
+        let identifiers = columns.map(|column| {
+            column
+                .into_iter()
+                .filter_map(|key| key.ticket_id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            identifiers,
+            [
+                vec![String::from("SCA-1")],
+                vec![String::from("SCA-2")],
+                vec![String::from("SCA-3")],
+                vec![String::from("SCA-4")],
+                vec![String::from("SCA-5")],
+            ]
+        );
+    }
+
+    #[test]
+    fn board_pages_two_columns_at_eighty_and_renders_all_at_one_twenty() {
+        let app = AppState::test_new();
+        let mut state = board_state();
+        let narrow = ticket_board_layout(&app, &state, Rect::new(26, 2, 53, 20));
+        assert_eq!(narrow.visible_columns, 0..2);
+        state.board_column = 4;
+        let last_page = ticket_board_layout(&app, &state, Rect::new(26, 2, 53, 20));
+        assert_eq!(last_page.visible_columns, 3..5);
+        let wide = ticket_board_layout(&app, &state, Rect::new(26, 2, 93, 36));
+        assert_eq!(wide.visible_columns, 0..5);
+
+        state.board_column = 0;
+        let text = rendered_text_at(&state, 120, 40);
+        assert!(text.contains("List | Board"), "{text}");
+        assert!(text.contains("In Progress"), "{text}");
+        assert!(text.contains("SCA-5"), "{text}");
+
+        state.refreshing = true;
+        let narrow_text = rendered_text_at(&state, 80, 24);
+        assert!(
+            narrow_text.contains("Tickets List | Board"),
+            "{narrow_text}"
+        );
+    }
+
+    #[test]
+    fn successful_transition_reprojects_the_card_into_its_new_column() {
+        let app = AppState::test_new();
+        let mut state = board_state();
+        let before = ticket_board_columns(&app, &state);
+        assert!(before[2]
+            .iter()
+            .any(|key| key.ticket_id.as_deref() == Some("SCA-3")));
+        let ticket = state
+            .snapshot
+            .as_mut()
+            .and_then(|snapshot| snapshot.items.get_mut(2))
+            .and_then(|item| item.ticket_details.first_mut())
+            .expect("transitioned ticket");
+        ticket.state = Some("Done".into());
+        let after = ticket_board_columns(&app, &state);
+        assert!(!after[2]
+            .iter()
+            .any(|key| key.ticket_id.as_deref() == Some("SCA-3")));
+        assert!(after[4]
+            .iter()
+            .any(|key| key.ticket_id.as_deref() == Some("SCA-3")));
     }
 
     fn rendered_text(state: &WorkViewState) -> String {
@@ -1448,7 +2051,7 @@ mod tests {
     }
 
     #[test]
-    fn land_row_and_confirmation_name_the_approval_state() {
+    fn pr_header_uses_merge_and_shared_overflow_actions() {
         let item = pr("owner/repo", 42, &[]);
         let key = crate::app::state::WorkItemKey {
             repo: item.repo.clone(),
@@ -1463,24 +2066,108 @@ mod tests {
             state: "SUCCESS".into(),
         }];
         detail.merge_state_status = Some("CLEAN".into());
+        detail.mergeable = Some("MERGEABLE".into());
         detail.head_sha = Some("abc123".into());
         let mut app = AppState::test_new();
         app.work_item_detail_cache.insert(key, detail);
         app.work_view = Some(WorkViewState::new(true, Some(snapshot(vec![item]))));
 
-        let awaiting = rendered_app_text_at(&app, 120, 24);
-        assert!(awaiting.contains("[Land]"));
-        assert!(awaiting.contains("awaiting approval"));
+        let rendered = rendered_app_text_at(&app, 120, 24);
+        assert!(rendered.contains("[Check out ▾] [Merge] [⋯]"), "{rendered}");
 
-        app.work_view.as_mut().expect("work view").pending_land =
-            Some(crate::app::state::PrLandConfirmation {
-                repo: "owner/repo".into(),
-                number: 42,
-                head_sha: "abc123".into(),
-                approval_signal: "approved review".into(),
-            });
-        let confirmation = rendered_app_text_at(&app, 120, 24);
-        assert!(confirmation.contains("via approved review at abc123"));
+        app.work_view.as_mut().expect("work view").pr_action_menu = Some(Default::default());
+        let menu = rendered_app_text_at(&app, 120, 40);
+        assert!(menu.contains("Ask a question"), "{menu}");
+        assert!(menu.contains("Close pull request"), "{menu}");
+    }
+
+    #[test]
+    fn full_pr_action_menu_opens_downward_from_the_header() {
+        let summary = pr("owner/repo", 42, &[]);
+        let detail = crate::work_index::WorkItemDetail::empty();
+        let actions = crate::ui::work_list_detail::PrItem {
+            summary: &summary,
+            cached_detail: Some(&detail),
+            observed_at: SystemTime::UNIX_EPOCH,
+        }
+        .action_table(crate::config::MergeMethodConfig::Merge, true);
+        let area = Rect::new(30, 12, 60, 20);
+        let anchor = pr_action_menu_anchor(area);
+        let layout = crate::ui::pr_actions::layout(
+            Rect::new(0, 0, 120, 40),
+            anchor,
+            &actions,
+            Default::default(),
+        )
+        .expect("menu fits below the full-view header");
+        assert_eq!(layout.rect.y, anchor.bottom());
+    }
+
+    #[test]
+    fn timeline_tab_renders_cached_events_and_inline_failure() {
+        let item = pr("owner/repo", 42, &[]);
+        let key = crate::app::state::WorkItemKey {
+            repo: item.repo.clone(),
+            pr_number: item.pr_number,
+            pr_url: item.pr_url.clone(),
+            ticket_id: None,
+        };
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.timeline = crate::work_index::parse_github_timeline(
+            serde_json::from_str(include_str!(
+                "../../tests/fixtures/work-index/github-pr-timeline.json"
+            ))
+            .expect("timeline fixture"),
+        );
+        let mut app = AppState::test_new();
+        app.work_item_detail_cache.insert(key.clone(), detail);
+        let mut view = WorkViewState::new(true, Some(snapshot(vec![item])));
+        view.detail_tab = PrDetailTab::Timeline;
+        app.work_view = Some(view);
+
+        let rendered = rendered_app_text_at(&app, 120, 40);
+        assert!(rendered.contains("Timeline · newest first"), "{rendered}");
+        assert!(rendered.contains("First line of the comment"), "{rendered}");
+        assert!(!rendered.contains("Second line is omitted"), "{rendered}");
+
+        let mut failed = crate::work_index::WorkItemDetail::empty();
+        failed.timeline_unavailable = Some("timeline unavailable".into());
+        app.work_item_detail_cache.insert(key, failed);
+        let rendered = rendered_app_text_at(&app, 120, 40);
+        assert!(rendered.contains("timeline unavailable"), "{rendered}");
+    }
+
+    #[test]
+    fn reviewer_picker_filters_and_opens_downward() {
+        let anchor = Rect::new(80, 8, 4, 1);
+        let layout = reviewer_picker_layout(Rect::new(26, 2, 94, 38), anchor, 12, 9)
+            .expect("reviewer picker fits below row");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert!(layout.first_visible <= 9);
+        assert!(9 < layout.first_visible + layout.visible_rows);
+
+        let item = pr("owner/repo", 42, &[]);
+        let key = crate::app::state::WorkItemKey {
+            repo: item.repo.clone(),
+            pr_number: item.pr_number,
+            pr_url: item.pr_url.clone(),
+            ticket_id: None,
+        };
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.collaborators = vec!["ada".into(), "grace".into()];
+        let mut app = AppState::test_new();
+        app.work_item_detail_cache.insert(key, detail);
+        let mut view = WorkViewState::new(true, Some(snapshot(vec![item])));
+        let mut picker = crate::app::state::ReviewerPickerState::default();
+        picker.filter.set_query("ad");
+        view.reviewer_picker = Some(picker);
+        app.work_view = Some(view);
+
+        let rendered = rendered_app_text_at(&app, 120, 40);
+        assert!(rendered.contains("Reviewers  —  ✦ +"), "{rendered}");
+        assert!(rendered.contains("ad▏"), "{rendered}");
+        assert!(rendered.contains("ada"), "{rendered}");
+        assert!(!rendered.contains("grace"), "{rendered}");
     }
 
     #[test]
@@ -1495,11 +2182,14 @@ mod tests {
                 items: Vec::new(),
                 conversations: Vec::new(),
                 missive_users: Vec::new(),
-                unavailable: Some("GitHub observation failed".to_string()),
+                unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                    crate::work_index::WorkIndexSource::Github,
+                    "observation failed",
+                )),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
         ))
-        .contains("GitHub observation failed"));
+        .contains("GitHub: query failed (see log)"));
 
         let mut placeholder = WorkViewState::new(true, Some(snapshot(Vec::new())));
         placeholder.projection = WorkProjection::Tickets;
@@ -1522,12 +2212,15 @@ mod tests {
                 items: Vec::new(),
                 conversations: Vec::new(),
                 missive_users: Vec::new(),
-                unavailable: Some("unavailable".to_string()),
+                unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                    crate::work_index::WorkIndexSource::Github,
+                    "unavailable",
+                )),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
         );
         unavailable.projection = WorkProjection::ReviewQueue;
-        assert!(rendered_text(&unavailable).contains("unavailable"));
+        assert!(rendered_text(&unavailable).contains("query failed (see log)"));
     }
 
     #[test]
@@ -1642,8 +2335,113 @@ mod tests {
         assert!(text.contains("Ticket body with"), "{text}");
         assert!(text.contains("https://example.invalid"), "{text}");
         assert!(text.contains("Acceptance criteria"), "{text}");
-        assert!(text.contains("[Start thread ▾]"), "{text}");
-        assert!(text.contains("[Transition ▾]"), "{text}");
+        assert!(text.contains("[Start thread ▾] [⋯]"), "{text}");
+    }
+
+    #[test]
+    fn full_ticket_action_menu_uses_shared_rows_below_header() {
+        let mut state = WorkViewState::new(
+            true,
+            Some(snapshot(vec![ticket(
+                "SCA-3165",
+                crate::work_index::TicketGroup::Assigned,
+            )])),
+        );
+        state.projection = WorkProjection::Tickets;
+        state.ticket_more_menu = Some(Default::default());
+        let text = rendered_text_at(&state, 120, 40);
+        for label in [
+            "Refresh",
+            "Ask a question",
+            "Explain this ticket",
+            "Transition ▸",
+            "Priority ▸",
+            "Copy identifier",
+            "Cancel ticket",
+        ] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+    }
+
+    #[test]
+    fn full_ticket_action_menu_opens_downward_and_clamps() {
+        let item = ticket("SCA-3165", crate::work_index::TicketGroup::Assigned);
+        let ticket = item.ticket_details.first().expect("ticket fixture");
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            ticket, None, None, None, false,
+        );
+        let area = Rect::new(40, 3, 50, 5);
+        let anchor = ticket_action_menu_anchor(area);
+        let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
+            anchor,
+            area,
+            &context,
+            crate::ui::ticket_actions::TicketActionMenuState {
+                selected: 12,
+                ..Default::default()
+            },
+        )
+        .expect("rows below the ticket header");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert_eq!(layout.rect.bottom(), area.bottom());
+        assert!(layout.first_visible <= 12);
+        assert!(12 < layout.first_visible + layout.visible_rows);
+    }
+
+    #[test]
+    fn github_degradation_does_not_hide_linear_items() {
+        let mut degraded = snapshot(vec![ticket(
+            "SCA-3165",
+            crate::work_index::TicketGroup::Assigned,
+        )]);
+        degraded.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Github,
+            "rate limited",
+        ));
+        let mut state = WorkViewState::new(true, Some(degraded));
+        state.projection = WorkProjection::Tickets;
+
+        let text = rendered_text_at(&state, 100, 24);
+        assert!(text.contains("SCA-3165"), "{text}");
+        assert!(!text.contains("GitHub: rate limited"), "{text}");
+    }
+
+    #[test]
+    fn degraded_sources_keep_their_previous_rows_visible() {
+        let mut github_snapshot = snapshot(vec![pr("owner/repo", 77, &[])]);
+        github_snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Github,
+            "rate limited",
+        ));
+        let github = rendered_text_at(&WorkViewState::new(true, Some(github_snapshot)), 100, 24);
+        assert!(github.contains("GitHub: rate limited"), "{github}");
+        assert!(github.contains("PR 77"), "{github}");
+
+        let mut linear_snapshot = snapshot(vec![ticket(
+            "SCA-3165",
+            crate::work_index::TicketGroup::Assigned,
+        )]);
+        linear_snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Linear,
+            "rate limited",
+        ));
+        let mut linear_state = WorkViewState::new(true, Some(linear_snapshot));
+        linear_state.projection = WorkProjection::Tickets;
+        let linear = rendered_text_at(&linear_state, 100, 24);
+        assert!(linear.contains("Linear: rate limited"), "{linear}");
+        assert!(linear.contains("SCA-3165"), "{linear}");
+
+        let mut missive_snapshot = snapshot(Vec::new());
+        missive_snapshot.conversations = vec![missive_conversation(1)];
+        missive_snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Missive,
+            "rate limited",
+        ));
+        let mut missive_state = WorkViewState::new(true, Some(missive_snapshot));
+        missive_state.projection = WorkProjection::Missive;
+        let missive = rendered_text_at(&missive_state, 100, 24);
+        assert!(missive.contains("Missive: rate limited"), "{missive}");
+        assert!(missive.contains("Billing question"), "{missive}");
     }
 
     #[test]
@@ -1673,6 +2471,8 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            labels: Vec::new(),
+            pane_bound: false,
             messages: vec![crate::work_index::MissiveEntry {
                 id: "message".into(),
                 author: Some("Customer".into()),
@@ -1803,11 +2603,14 @@ mod tests {
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("Missive observation timed out".into()),
+            unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Missive,
+                "observation timed out",
+            )),
             observed_at: SystemTime::UNIX_EPOCH,
         });
         let failed = rendered_text(&state);
-        assert!(failed.contains("Missive observation timed out"), "{failed}");
+        assert!(failed.contains("Missive: timed out (30s)"), "{failed}");
 
         state.snapshot.as_mut().expect("snapshot").unavailable = None;
         let empty = rendered_text(&state);

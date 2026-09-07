@@ -361,10 +361,55 @@ pub struct Config {
     pub work_index: WorkIndexConfig,
     pub missive: MissiveConfig,
     pub usage: UsageConfig,
-    pub land: LandConfig,
     pub source_control: SourceControlConfig,
     pub files: FilesConfig,
+    pub panel: PanelConfig,
+    pub linear: LinearConfig,
     pub actions: Vec<ActionConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LinearLayoutConfig {
+    #[default]
+    List,
+    Board,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct LinearConfig {
+    /// Initial layout for the full-screen Linear view.
+    pub default_layout: LinearLayoutConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct PanelConfig {
+    /// Surfaces opened on a fresh right panel. Empty starts on the chooser.
+    pub default_surfaces: Vec<PanelSurfaceConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelSurfaceConfig {
+    Home,
+    Terminal,
+    Files,
+    Diff,
+    #[serde(alias = "pr")]
+    PullRequest,
+    Linear,
+    Missive,
+    Agents,
+    #[serde(alias = "edit")]
+    Editor,
+    #[serde(alias = "keys")]
+    Shortcuts,
+    #[serde(alias = "ctx")]
+    Context,
+    #[serde(alias = "note")]
+    Scratchpad,
 }
 
 /// Read-only Missive API settings.
@@ -495,33 +540,49 @@ pub struct FilesConfig {
     pub icons: FilesIconConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-pub struct LandConfig {
-    /// PR label accepted as an explicit landing approval signal.
-    pub approval_label: String,
+/// Prefix Herdr puts in front of a derived worktree branch name.
+pub const DEFAULT_BRANCH_PREFIX: &str = "issue/";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethodConfig {
+    #[default]
+    Merge,
+    Squash,
+    Rebase,
 }
 
-pub const DEFAULT_LAND_APPROVAL_LABEL: &str = "approved";
+impl MergeMethodConfig {
+    pub(crate) const ALL: [Self; 3] = [Self::Merge, Self::Squash, Self::Rebase];
 
-impl Default for LandConfig {
-    fn default() -> Self {
-        Self {
-            approval_label: DEFAULT_LAND_APPROVAL_LABEL.into(),
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    pub(crate) const fn flag(self) -> &'static str {
+        match self {
+            Self::Merge => "--merge",
+            Self::Squash => "--squash",
+            Self::Rebase => "--rebase",
         }
     }
 }
 
-/// Prefix Herdr puts in front of a derived worktree branch name.
-pub const DEFAULT_BRANCH_PREFIX: &str = "issue/";
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SourceControlConfig {
+    /// Merge strategy used by the primary pull-request action and auto-merge.
+    pub merge_method: MergeMethodConfig,
     /// Model name exported to the Commit action as
     /// `HERDR_COMMIT_MESSAGE_MODEL`, so a `prepare-commit-msg` hook can draft
     /// the message with it. Empty leaves `git commit` exactly as it was.
     pub commit_message_model: String,
+    /// Stage every working-tree change before generating and committing.
+    pub commit_stage_all: bool,
     /// Prefix for branch names Herdr derives from a ticket.
     pub branch_prefix: String,
 }
@@ -529,7 +590,9 @@ pub struct SourceControlConfig {
 impl Default for SourceControlConfig {
     fn default() -> Self {
         Self {
+            merge_method: MergeMethodConfig::Merge,
             commit_message_model: String::new(),
+            commit_stage_all: false,
             branch_prefix: DEFAULT_BRANCH_PREFIX.into(),
         }
     }
@@ -733,6 +796,8 @@ pub struct KeysConfig {
     pub toggle_sidebar: BindingConfig,
     /// Cycle the sidebar grouping mode. Unset by default.
     pub sidebar_cycle_group_mode: BindingConfig,
+    /// Refresh sidebar work and Git metadata. Unset by default.
+    pub sidebar_refresh: BindingConfig,
     /// Toggle the sidebar blocked filter. Default: "prefix+f".
     pub toggle_blocked_filter: BindingConfig,
     /// Toggle dock collapse. Default: ["prefix+shift+e", "ctrl+alt+d"]
@@ -741,6 +806,8 @@ pub struct KeysConfig {
     pub previous_dock_tab: BindingConfig,
     /// Select the next dock tab. Default: "prefix+shift+]"
     pub next_dock_tab: BindingConfig,
+    /// Open the focused repository in a right-side Vim-family editor. Unset by default.
+    pub editor_open_repo: BindingConfig,
     /// Open the focused repository's scratchpad in a terminal pane. Default: "ctrl+alt+e"
     pub edit_scratchpad: BindingConfig,
     /// Show the scratchpad in the dock without opening an editor. Default: "ctrl+alt+n"
@@ -912,6 +979,7 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     sidebar_cycle_group_mode: Option<BindingConfig>,
+    sidebar_refresh: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_blocked_filter: Option<BindingConfig>,
@@ -921,6 +989,8 @@ pub(crate) struct KeysConfigOverlay {
     previous_dock_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_dock_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    editor_open_repo: Option<BindingConfig>,
     edit_scratchpad: Option<BindingConfig>,
     show_scratchpad: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1028,10 +1098,12 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
         apply_field!(sidebar_cycle_group_mode);
+        apply_field!(sidebar_refresh);
         apply_field!(toggle_blocked_filter);
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
+        apply_field!(editor_open_repo);
         apply_field!(edit_scratchpad);
         apply_field!(show_scratchpad);
         apply_field!(toggle_info_panel);
@@ -1158,10 +1230,12 @@ impl KeysConfig {
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_effective_action_field!(sidebar_cycle_group_mode, keybinds.sidebar_cycle_group_mode);
+        copy_effective_action_field!(sidebar_refresh, keybinds.sidebar_refresh);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
+        copy_effective_action_field!(editor_open_repo, keybinds.editor_open_repo);
         copy_effective_action_field!(edit_scratchpad, keybinds.edit_scratchpad);
         copy_effective_action_field!(show_scratchpad, keybinds.show_scratchpad);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
@@ -1593,10 +1667,12 @@ impl Default for KeysConfig {
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             sidebar_cycle_group_mode: BindingConfig::empty(),
+            sidebar_refresh: BindingConfig::empty(),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
+            editor_open_repo: BindingConfig::empty(),
             edit_scratchpad: BindingConfig::one("ctrl+alt+e"),
             show_scratchpad: BindingConfig::one("ctrl+alt+n"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
@@ -1913,6 +1989,44 @@ agent_panel_scope = "current"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
+    fn panel_default_surfaces_parse_in_configured_order() {
+        let config: Config = toml::from_str(
+            r#"
+[panel]
+default_surfaces = ["home", "pull_request", "keys", "note"]
+"#,
+        )
+        .expect("panel config");
+
+        assert_eq!(
+            config.panel.default_surfaces,
+            vec![
+                PanelSurfaceConfig::Home,
+                PanelSurfaceConfig::PullRequest,
+                PanelSurfaceConfig::Shortcuts,
+                PanelSurfaceConfig::Scratchpad,
+            ]
+        );
+        assert!(Config::default().panel.default_surfaces.is_empty());
+    }
+
+    #[test]
+    fn linear_default_layout_defaults_to_list_and_parses_board() {
+        assert_eq!(
+            Config::default().linear.default_layout,
+            LinearLayoutConfig::List
+        );
+        let config: Config = toml::from_str(
+            r#"
+[linear]
+default_layout = "board"
+"#,
+        )
+        .expect("linear config");
+        assert_eq!(config.linear.default_layout, LinearLayoutConfig::Board);
     }
 
     #[test]
@@ -2500,22 +2614,22 @@ scrollback_lines = 12345
     #[test]
     fn source_control_keys_default_to_todays_behaviour_and_parse() {
         let defaults = Config::default().source_control;
+        assert_eq!(defaults.merge_method, MergeMethodConfig::Merge);
         assert_eq!(defaults.commit_message_model, "");
+        assert!(!defaults.commit_stage_all);
         assert_eq!(defaults.branch_prefix, "issue/");
 
         let config: Config = toml::from_str(
-            "[source_control]\ncommit_message_model = \"claude-opus-5\"\nbranch_prefix = \"feat/\"\n",
+            "[source_control]\nmerge_method = \"rebase\"\ncommit_message_model = \"claude-opus-5\"\ncommit_stage_all = true\nbranch_prefix = \"feat/\"\n",
         )
         .unwrap();
+        assert_eq!(
+            config.source_control.merge_method,
+            MergeMethodConfig::Rebase
+        );
         assert_eq!(config.source_control.commit_message_model, "claude-opus-5");
+        assert!(config.source_control.commit_stage_all);
         assert_eq!(config.source_control.branch_prefix, "feat/");
-    }
-
-    #[test]
-    fn land_approval_label_defaults_and_parses() {
-        assert_eq!(Config::default().land.approval_label, "approved");
-        let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
-        assert_eq!(config.land.approval_label, "ship-it");
     }
 
     #[test]

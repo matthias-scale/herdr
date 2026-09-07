@@ -408,14 +408,19 @@ impl App {
 
         changed |= self.refresh_pane_settlement_at(now);
 
+        changed |= self.start_sidebar_refresh_if_requested(now);
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
         self.start_usage_scan_if_requested();
         let work_view_selection = self.state.work_view.as_ref().and_then(|view| {
-            view.selected.clone().or_else(|| {
-                (view.projection == crate::app::state::WorkProjection::Tickets)
-                    .then(|| self.visible_ticket_view_keys().into_iter().next())
-                    .flatten()
+            view.selected.clone().or_else(|| match view.projection {
+                crate::app::state::WorkProjection::PullRequests => {
+                    self.visible_pr_view_keys().into_iter().next()
+                }
+                crate::app::state::WorkProjection::Tickets => {
+                    self.visible_ticket_view_keys().into_iter().next()
+                }
+                _ => None,
             })
         });
         let dock_pr_visible =
@@ -455,9 +460,11 @@ impl App {
         self.start_foreground_process_refresh_if_due(now);
         self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
+        changed |= self.finish_sidebar_refresh_if_idle();
         self.start_dock_diff_refresh_if_needed();
         self.start_dock_files_refresh_if_needed();
         self.start_home_ref_refresh_if_requested();
+        self.start_home_github_refresh_if_requested();
 
         if self
             .next_auto_update_check

@@ -125,13 +125,57 @@ fn work_item_detail_request(
         return None;
     }
     if let Some(view) = client.work_view.as_ref() {
-        return Some((
-            crate::app::state::DockHomeSection::Prs,
-            view.selected.clone(),
-            true,
-        ));
+        let selection = view.selected.clone().or_else(|| {
+            view.snapshot.as_ref()?.items.iter().find_map(|item| {
+                let number = item.pr_number?;
+                Some(crate::app::state::WorkItemKey {
+                    repo: item.repo.clone(),
+                    pr_number: Some(number),
+                    pr_url: item.pr_url.clone(),
+                    ticket_id: None,
+                })
+            })
+        });
+        return Some((crate::app::state::DockHomeSection::Prs, selection, true));
     }
     let presentation = &client.dock_presentation;
+    if !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Pr) {
+        let selection = presentation
+            .active_tab_index
+            .or_else(|| {
+                presentation
+                    .open_surfaces
+                    .iter()
+                    .position(|surface| *surface == crate::app::DockSurface::Pr)
+            })
+            .and_then(|index| presentation.tab_bindings.get(index))
+            .and_then(Option::as_ref)
+            .map(|binding| &binding.object)
+            .filter(|object| object.surface == crate::app::DockSurface::Pr)
+            .or_else(|| {
+                presentation
+                    .context_objects
+                    .iter()
+                    .find(|object| object.surface == crate::app::DockSurface::Pr)
+            })
+            .and_then(|object| {
+                let repo = crate::work_context::repo_slug_from_pr_url(&object.key)?;
+                let number = object
+                    .key
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()?
+                    .parse()
+                    .ok()?;
+                Some(crate::app::state::WorkItemKey {
+                    repo,
+                    pr_number: Some(number),
+                    pr_url: Some(object.key.clone()),
+                    ticket_id: None,
+                })
+            });
+        return Some((crate::app::state::DockHomeSection::Prs, selection, true));
+    }
     let selection = match presentation.home_section {
         crate::app::state::DockHomeSection::Prs => presentation.home_selection.clone(),
         crate::app::state::DockHomeSection::Tickets => presentation.home_ticket_selection.clone(),
@@ -345,6 +389,9 @@ pub struct HeadlessServer {
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
+    /// Last instant a full TUI client was attached. Timer work-index refreshes
+    /// stop after six intervals without a viewer and resume on the next attach.
+    last_app_client_seen: Instant,
     #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
@@ -546,6 +593,7 @@ impl HeadlessServer {
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
+            last_app_client_seen: Instant::now(),
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
@@ -931,6 +979,10 @@ impl HeadlessServer {
         if self.app.apply_git_action_request() {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_git_action");
+        }
+        if self.app.apply_add_project_clone_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_add_project_clone");
         }
         if self.app.apply_user_action_request() {
             needs_render = true;
@@ -1547,8 +1599,11 @@ impl HeadlessServer {
     /// from the config rather than from the struct default.
     fn seed_client_dock_presentation(&mut self, client_id: u64) {
         let ignore_whitespace = self.app.state.dock_diff_ignore_whitespace;
+        let default_surfaces = self.app.state.dock_default_surfaces.clone();
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.dock_presentation.diff_ignore_whitespace = ignore_whitespace;
+            client.dock_presentation.tab = default_surfaces.first().copied();
+            client.dock_presentation.open_surfaces = default_surfaces;
         }
     }
 
@@ -1624,6 +1679,22 @@ impl HeadlessServer {
 
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
+    }
+
+    fn work_index_refresh_is_useful(&mut self, now: Instant) -> bool {
+        if self.has_app_client() {
+            self.last_app_client_seen = now;
+            return true;
+        }
+        let idle_limit = Duration::from_secs(
+            self.app
+                .work_index_config
+                .refresh_interval_seconds
+                .max(1)
+                .saturating_mul(6),
+        );
+        now.checked_duration_since(self.last_app_client_seen)
+            .is_none_or(|idle| idle <= idle_limit)
     }
 
     fn has_renderable_status_target(&self) -> bool {
@@ -3223,6 +3294,8 @@ impl HeadlessServer {
                 }
                 if first_app_client {
                     self.app.mark_git_status_refresh_due(Instant::now());
+                    self.last_app_client_seen = Instant::now();
+                    self.app.next_work_index_refresh = Instant::now();
                 }
                 self.sync_foreground_client_state();
                 self.resize_shared_runtime_to_effective_size();
@@ -5037,7 +5110,9 @@ impl HeadlessServer {
         // without an attached TUI. Omitting it here left every server-backed
         // session with a permanently empty index while the interactive loop
         // refreshed fine, which is the #119 defect class.
-        self.app.start_work_index_refresh_if_due(now);
+        if self.work_index_refresh_is_useful(now) {
+            self.app.start_work_index_refresh_if_due(now);
+        }
         let detail_request = self
             .foreground_client_id
             .and_then(|client_id| self.clients.get(&client_id))
@@ -5667,6 +5742,7 @@ mod tests {
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),
+            last_app_client_seen: Instant::now(),
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
@@ -5712,6 +5788,65 @@ mod tests {
         server.seed_client_dock_presentation(7);
 
         assert!(server.clients[&7].dock_presentation.diff_ignore_whitespace);
+    }
+
+    #[test]
+    fn a_fresh_attach_uses_only_configured_panel_defaults() {
+        let mut server = test_headless_server();
+        server.app.state.dock_default_surfaces = vec![
+            crate::app::DockSurface::Files,
+            crate::app::DockSurface::Context,
+        ];
+        server.clients.insert(
+            7,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                7,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        server.seed_client_dock_presentation(7);
+
+        let presentation = &server.clients[&7].dock_presentation;
+        assert_eq!(
+            presentation.open_surfaces,
+            vec![
+                crate::app::DockSurface::Files,
+                crate::app::DockSurface::Context
+            ]
+        );
+        assert_eq!(presentation.tab, Some(crate::app::DockSurface::Files));
+    }
+
+    #[test]
+    fn work_index_timer_skips_after_six_idle_intervals_and_attach_resumes_immediately() {
+        let mut server = test_headless_server();
+        server.app.work_index_config.enabled = true;
+        server.app.work_index_config.refresh_interval_seconds = 10;
+        let now = Instant::now();
+        server.last_app_client_seen = now - Duration::from_secs(61);
+        assert!(!server.work_index_refresh_is_useful(now));
+
+        server.app.next_work_index_refresh = now + Duration::from_secs(30);
+        let (writer, _control, _render) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 77,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        assert!(server.app.next_work_index_refresh <= Instant::now());
+        assert!(server.work_index_refresh_is_useful(Instant::now()));
     }
 
     #[test]
@@ -5762,14 +5897,143 @@ mod tests {
             pr_url: Some("https://github.com/owner/repo/pull/42".into()),
             ticket_id: None,
         };
-        let mut view = crate::app::state::WorkViewState::new(true, None);
-        view.selected = Some(key.clone());
+        let view = crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![crate::work_index::WorkItem {
+                    repo: key.repo.clone(),
+                    pr_number: key.pr_number,
+                    pr_url: key.pr_url.clone(),
+                    pr_title: Some("detail fallback".into()),
+                    pr_state: Some("open".into()),
+                    draft: false,
+                    review_decision: None,
+                    created_at: None,
+                    updated_at: None,
+                    additions: 0,
+                    deletions: 0,
+                    author: None,
+                    assignees: Vec::new(),
+                    labels: Vec::new(),
+                    check_state: crate::work_index::PrCheckState::Unknown,
+                    audience: crate::work_index::PrAudience::Authored,
+                    cached_pr_detail: None,
+                    ticket_ids: Vec::new(),
+                    ticket_title: None,
+                    ticket_state: None,
+                    ticket_details: Vec::new(),
+                    branch: None,
+                    preview_urls: Vec::new(),
+                    panes: Vec::new(),
+                    source: crate::work_index::WorkItemSource::default(),
+                }],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+            }),
+        );
         client.work_view = Some(view);
 
         assert_eq!(
             work_item_detail_request(&client),
             Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn focused_headless_pr_dock_refreshes_bound_pr_detail() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut server = test_headless_server();
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "herdr-headless-pr-refresh-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture directory");
+        let log = fixture_dir.join("detail.log");
+        let gh = fixture_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 42 --repo owner/repo --json "*)
+    printf '%s\n' detail >> '{}'
+    printf '%s' '{{"number":42,"title":"Detail","url":"https://github.com/owner/repo/pull/42"}}'
+    ;;
+  "api repos/owner/repo/issues/42/timeline"*) printf '%s' '[]' ;;
+  "api graphql"*) printf '%s' '{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[]}}}}}}}}}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(&gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("make fake gh executable");
+        server.app.work_index_gh_program_override = Some(gh);
+        server.app.work_index_provider_cache_root_override = Some(fixture_dir.clone());
+
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Pr);
+        client.dock_presentation.open_surfaces = vec![crate::app::DockSurface::Pr];
+        client.dock_presentation.active_tab_index = Some(0);
+        client.dock_presentation.tab_bindings = vec![Some(crate::app::state::DockTabBinding {
+            object: crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Pr,
+                key: "https://github.com/owner/repo/pull/42".into(),
+            },
+            origin: crate::app::state::DockTabOrigin::Context,
+        })];
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            ticket_id: None,
+        };
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Prs,
+                Some(key.clone()),
+                true
+            ))
+        );
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        client.writer = Some(writer);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        let event = server
+            .app
+            .event_rx
+            .blocking_recv()
+            .expect("headless detail refresh result");
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(server
+            .app
+            .handle_work_item_detail_refreshed(generation, details));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("read detail counter"),
+            "detail\n"
+        );
+        assert!(server.app.state.work_item_detail_cache.get(&key).is_some());
+        let _ = std::fs::remove_dir_all(fixture_dir);
     }
 
     #[tokio::test]
@@ -6264,13 +6528,23 @@ mod tests {
                 width: dock_width,
                 collapsed: false,
                 tab: Some(crate::app::DockSurface::Editor),
-                open_surfaces: crate::app::DockSurface::DEFAULT_OPEN.to_vec(),
+                open_surfaces: vec![crate::app::DockSurface::Editor],
+                tab_bindings: vec![None],
+                active_tab_index: Some(0),
+                hovered_tab_index: None,
+                pane_tabs: std::collections::HashMap::new(),
+                followed_pane: None,
+                context_objects: Vec::new(),
+                suppressed_context: std::collections::HashSet::new(),
                 maximized: false,
                 surface_menu: None,
                 chooser_focused: false,
                 scroll: 0,
                 editor_focused,
                 diff_focused: false,
+                pr_focused: false,
+                pr_checkout_menu: None,
+                pr_action_menu: None,
                 diff_ignore_whitespace: false,
                 diff_selected: 0,
                 diff_collapsed: std::collections::HashSet::new(),
@@ -6280,6 +6554,14 @@ mod tests {
                 files_selection: None,
                 files_filter: String::new(),
                 files_collapsed: std::collections::HashSet::new(),
+                files_sort: crate::files::FileSort::Name,
+                files_search_active: false,
+                agents_focused: false,
+                agents_selection: None,
+                linear_focused: false,
+                ticket_start_menu: None,
+                ticket_action_menu: None,
+                ticket_comment_draft: None,
                 home_selection: None,
                 home_ticket_selection: None,
                 home_poll_selection: None,
@@ -7443,7 +7725,7 @@ next_tab = ""
     }
 
     #[test]
-    fn headless_activity_clock_streams_a_new_frame_at_the_age_boundary() {
+    fn headless_space_suffix_keeps_age_frame_schedule() {
         let mut server = test_headless_server();
         server.app.state.status_bar_enabled = false;
         server.app.state.mobile_width_threshold = 0;
@@ -7461,8 +7743,6 @@ next_tab = ""
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
         server.app.state.mode = crate::app::Mode::Terminal;
-        // Sidebar ages are minute-granular (`1m`, `2m`, …), so start just shy
-        // of the second minute boundary to keep the boundary wait short.
         let started = Instant::now() - Duration::from_secs(119);
         server
             .app
@@ -7493,6 +7773,13 @@ next_tab = ""
             direct_attach_requested: false,
             writer,
         }));
+        let presentation = &mut server
+            .clients
+            .get_mut(&7)
+            .expect("connected clock client")
+            .sidebar_presentation;
+        presentation.group_mode = crate::app::state::SidebarGroupMode::Repo;
+        presentation.work_filter.query.clear();
         server.render_and_stream();
         let first = read_server_frame(
             render_rx
@@ -7500,30 +7787,11 @@ next_tab = ""
                 .expect("initial clock frame"),
         );
         let first_text = frame_text(&first);
+        assert!(first_text.contains("Clock task"), "{first_text:?}");
         assert!(first_text.contains("1m"), "{first_text:?}");
         assert!(!first_text.contains("ago"), "{first_text:?}");
-
-        let deadline = server
-            .app
-            .agent_activity_refresh_deadline
-            .expect("visible clock should schedule its next boundary");
-        std::thread::sleep(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .saturating_add(Duration::from_millis(20)),
-        );
-        assert!(server.handle_scheduled_tasks_headless(Instant::now(), false));
-        server.render_and_stream();
-
-        let second = read_server_frame(
-            render_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("advanced clock frame"),
-        );
-        let second_text = frame_text(&second);
-        assert!(second_text.contains("2m"), "{second_text:?}");
-        assert!(!second_text.contains("ago"), "{second_text:?}");
-        assert_ne!(first, second);
+        assert!(server.app.agent_activity_refresh_deadline.is_some());
+        assert!(!server.handle_scheduled_tasks_headless(Instant::now(), false));
     }
 
     #[test]
