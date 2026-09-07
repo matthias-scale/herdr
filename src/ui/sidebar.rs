@@ -250,6 +250,61 @@ fn compact_age(
     (age, instant)
 }
 
+fn title_without_identifier<'a>(identifier: &str, title: &'a str) -> Option<&'a str> {
+    let title = title.trim();
+    let prefix = title.get(..identifier.len())?;
+    if !prefix.eq_ignore_ascii_case(identifier) {
+        return None;
+    }
+    let remainder = title.get(identifier.len()..)?;
+    if !remainder.is_empty()
+        && !remainder.chars().next().is_some_and(|character| {
+            character.is_whitespace() || matches!(character, ':' | '·' | '-')
+        })
+    {
+        return None;
+    }
+    Some(
+        remainder
+            .trim_start()
+            .strip_prefix([':', '·', '-'])
+            .unwrap_or(remainder.trim_start())
+            .trim_start(),
+    )
+}
+
+fn sidebar_tab_title(
+    projection: Option<&crate::workspace::TabDisplayProjection>,
+    fallback: Option<String>,
+) -> Option<String> {
+    let Some(crate::workspace::TabDisplayProjection::Derived {
+        agent,
+        ticket,
+        binding,
+        title,
+    }) = projection
+    else {
+        return fallback;
+    };
+    let normalized_title = match (ticket.as_deref(), title.as_deref()) {
+        (Some(identifier), Some(title)) => title_without_identifier(identifier, title)
+            .map(str::to_string)
+            .or_else(|| Some(title.to_string())),
+        (_, title) => title.map(str::to_string),
+    };
+    let label = [ticket.clone(), binding.clone(), normalized_title]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if label.is_empty() {
+        agent.clone().or(fallback)
+    } else {
+        Some(label)
+    }
+}
+
 fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
     let candidate = if tab {
         entry.primary_tab_label.as_deref()
@@ -383,7 +438,6 @@ pub(super) fn sidebar_workspace_labels(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> std::collections::HashMap<usize, (String, bool)> {
-    let entries = sidebar_thread_entries_from(app, terminal_runtimes);
     let mut labels = std::collections::HashMap::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         let members = sidebar_space_member_indices(app, ws_idx);
@@ -391,23 +445,12 @@ pub(super) fn sidebar_workspace_labels(
             .iter()
             .filter_map(|member| app.workspaces.get(*member))
             .find_map(|member| member.custom_name.clone());
-        let agent_title = members.iter().find_map(|member| {
-            entries
-                .iter()
-                .filter(|entry| entry.ws_idx == *member && entry.has_agent)
-                .find_map(|entry| {
-                    compact_title_candidate(entry.primary_tab_label.as_deref()).map(str::to_string)
-                })
+        let label = manual.map(|label| (label, false)).unwrap_or_else(|| {
+            (
+                ws.display_name_from(&app.terminals, terminal_runtimes),
+                true,
+            )
         });
-        let label = manual
-            .map(|label| (label, false))
-            .or_else(|| agent_title.map(|label| (label, true)))
-            .unwrap_or_else(|| {
-                (
-                    ws.display_name_from(&app.terminals, terminal_runtimes),
-                    true,
-                )
-            });
         labels.insert(ws_idx, label);
     }
     let mut duplicate_positions = std::collections::HashMap::<String, usize>::new();
@@ -457,10 +500,23 @@ pub(super) fn render_compact_agent_row(
     let title = pad_right(&layout.title, title_width);
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
     let provider = pad_left(&layout.provider, SIDEBAR_PROVIDER_FIELD_WIDTH);
-    let age = layout
-        .activity_age
-        .as_deref()
-        .map_or_else(String::new, |age| pad_left(age, SIDEBAR_AGE_FIELD_WIDTH));
+    let trailing_tag = tab
+        .then_some(entry.space_label.as_str())
+        .filter(|tag| !tag.is_empty());
+    let age = trailing_tag.map_or_else(
+        || {
+            layout
+                .activity_age
+                .as_deref()
+                .map_or_else(String::new, |age| pad_left(age, SIDEBAR_AGE_FIELD_WIDTH))
+        },
+        |tag| {
+            pad_left(
+                &truncate_end(tag, SIDEBAR_AGE_FIELD_WIDTH),
+                SIDEBAR_AGE_FIELD_WIDTH,
+            )
+        },
+    );
     let is_active = tab
         && app.active == Some(entry.ws_idx)
         && app
@@ -479,11 +535,19 @@ pub(super) fn render_compact_agent_row(
     let provider_style = Style::default()
         .fg(provider_color(entry, p))
         .add_modifier(Modifier::DIM);
-    let age_style = Style::default().fg(if entry.state == AgentState::Working {
-        p.blue
-    } else {
-        p.overlay0
-    });
+    let age_style = Style::default()
+        .fg(if trailing_tag.is_some() {
+            p.overlay0
+        } else if entry.state == AgentState::Working {
+            p.blue
+        } else {
+            p.overlay0
+        })
+        .add_modifier(if trailing_tag.is_some() {
+            Modifier::DIM
+        } else {
+            Modifier::empty()
+        });
     let spans = vec![
         Span::styled(prefix, compact_row_style(Style::default(), bg)),
         Span::styled(dot, compact_row_style(dot_style, bg)),
@@ -556,6 +620,9 @@ pub(crate) struct AgentPanelEntry {
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
     pub primary_label: String,
+    /// Server-owned Space label. Grouping views render this in the existing
+    /// trailing tag cell instead of deriving a label from the pane title.
+    pub space_label: String,
     pub primary_tab_label: Option<String>,
     pub tab_has_custom_name: bool,
     pub tab_label_leads_with_agent: bool,
@@ -766,6 +833,7 @@ fn collect_agent_panel_entries_with_runtimes(
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
+                    let space_label = workspace_label.clone();
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
                     let tab_has_custom_name = ws
                         .tabs
@@ -806,7 +874,8 @@ fn collect_agent_panel_entries_with_runtimes(
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
-                        primary_tab_label: thread_title,
+                        space_label: space_label.clone(),
+                        primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
@@ -1082,6 +1151,8 @@ pub(crate) enum SidebarRow {
     Workspace {
         ws_idx: usize,
         indented: bool,
+        title: String,
+        count: Option<usize>,
     },
     Tab {
         entry: Box<AgentPanelEntry>,
@@ -1123,7 +1194,6 @@ pub(crate) enum SidebarRow {
 /// are grouped above everything else rather than sorted among it. The group is
 /// omitted entirely when empty, which is the common case.
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
-pub(crate) const AGENTS_SECTION_TITLE: &str = "Agents";
 pub(crate) const RECENTLY_DONE_SECTION_TITLE: &str = "Recently done";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
 #[cfg(test)]
@@ -1279,28 +1349,50 @@ fn compact_sidebar_rows_inner(
     {
         return Vec::new();
     }
-    if !app.sidebar_shows_spaces_tree() {
-        let mut rows = Vec::with_capacity(visible_entries.len() + recently_done.len() + 2);
-        if !visible_entries.is_empty() {
-            rows.push(SidebarRow::SectionHeader {
-                title: AGENTS_SECTION_TITLE,
-                count: visible_entries.len(),
-                collapsed: section_is_collapsed(app, AGENTS_SECTION_TITLE),
-            });
-            if !section_is_collapsed(app, AGENTS_SECTION_TITLE) {
-                rows.extend(visible_entries.into_iter().map(|entry| SidebarRow::Agent {
-                    entry: Box::new(entry),
-                    depth: 0,
-                }));
-            }
-        }
-        append_recently_done_rows(app, &mut rows, recently_done);
+    let mut rows = Vec::new();
+    append_recently_done_rows(app, &mut rows, recently_done);
+    if app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
+        || (app.sidebar_group_mode == SidebarGroupMode::Repo
+            && !visible_entries
+                .iter()
+                .any(|entry| entry_repo_label(app, entry).is_some())
+            && !visible_entries.iter().any(|entry| {
+                entry_work_context(app, entry).is_some_and(pane_context_has_sidebar_metadata)
+            }))
+    {
+        append_legacy_space_rows(app, &mut rows, visible_entries, expand_worktrees);
         append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
+    match app.sidebar_group_mode {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
+            append_repo_group_rows(app, &mut rows, &visible_entries, false);
+            append_unassigned_rows(app, &mut rows, &visible_entries);
+        }
+        SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
+            append_object_group_rows(app, &mut rows, &visible_entries, false);
+        }
+    }
+    append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
+    rows
+}
 
-    let mut rows = Vec::new();
-    append_recently_done_rows(app, &mut rows, recently_done);
+fn pane_context_has_sidebar_metadata(context: &crate::work_context::PaneWorkContext) -> bool {
+    !context.ticket_ids.is_empty()
+        || !context.pr_urls.is_empty()
+        || !context.missive_urls.is_empty()
+        || context.branch.is_some()
+        || context.repo.is_some()
+        || context.work_title.is_some()
+        || context.session_name.is_some()
+}
+
+fn append_legacy_space_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: Vec<AgentPanelEntry>,
+    expand_worktrees: bool,
+) {
     let workspaces = workspace_list_entries_for_mode(app, expand_worktrees, app.sidebar_group_mode);
     rows.push(SidebarRow::SectionHeader {
         title: SPACES_SECTION_TITLE,
@@ -1319,70 +1411,10 @@ fn compact_sidebar_rows_inner(
         collapsed: section_is_collapsed(app, SPACES_SECTION_TITLE),
     });
     if section_is_collapsed(app, SPACES_SECTION_TITLE) {
-        append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
-        return rows;
+        return;
     }
-    if matches!(
-        app.sidebar_group_mode,
-        SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
-    ) {
-        let groups = sidebar_work_groups(app, &visible_entries, app.sidebar_group_mode);
-        for group in groups.into_iter().filter(|group| {
-            !group.entries.is_empty()
-                && (app.sidebar_group_mode == SidebarGroupMode::LinearTeam || !group.unlinked)
-        }) {
-            let collapsed = section_is_collapsed(app, &group.key);
-            let action_key = (!group.unlinked).then(|| group.key.clone());
-            rows.push(SidebarRow::NestedHeader {
-                key: group.key,
-                action_key,
-                title: group.title,
-                count: group.entries.len(),
-                collapsed,
-                dim: false,
-                status: group.status,
-                spawn: false,
-            });
-            if !collapsed {
-                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
-                    entry: Box::new(entry),
-                    depth: 1,
-                }));
-            }
-        }
-        if app.sidebar_group_mode == SidebarGroupMode::LinearTeam {
-            append_unassigned_rows(app, &mut rows, &visible_entries);
-        } else {
-            append_missive_no_pane_rows(app, &mut rows, &visible_entries);
-            for group in sidebar_work_groups(app, &visible_entries, app.sidebar_group_mode)
-                .into_iter()
-                .filter(|group| group.unlinked)
-            {
-                let collapsed = section_is_collapsed(app, &group.key);
-                rows.push(SidebarRow::NestedHeader {
-                    key: group.key,
-                    action_key: None,
-                    title: group.title,
-                    count: group.entries.len(),
-                    collapsed,
-                    dim: false,
-                    status: group.status,
-                    spawn: false,
-                });
-                if !collapsed {
-                    rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
-                        entry: Box::new(entry),
-                        depth: 1,
-                    }));
-                }
-            }
-        }
-        append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
-        return rows;
-    }
-    let unassigned_entries = visible_entries.clone();
     let mut entries_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
-    for entry in visible_entries {
+    for entry in entries {
         entries_by_workspace
             .entry(entry.ws_idx)
             .or_default()
@@ -1397,64 +1429,244 @@ fn compact_sidebar_rows_inner(
         }
         let mut member_entries = Vec::new();
         for member_idx in sidebar_space_member_indices(app, ws_idx) {
-            let Some(workspace_entries) = entries_by_workspace.remove(&member_idx) else {
-                continue;
-            };
-            member_entries.extend(workspace_entries);
+            if let Some(entries) = entries_by_workspace.remove(&member_idx) {
+                member_entries.extend(entries);
+            }
         }
         if !app.sidebar_work_filter.query.is_empty() && member_entries.is_empty() {
             continue;
         }
-        rows.push(SidebarRow::Workspace { ws_idx, indented });
+        rows.push(SidebarRow::Workspace {
+            ws_idx,
+            indented: false,
+            title: String::new(),
+            count: None,
+        });
         if !app.workspace_agents_expanded(ws_idx) {
             continue;
         }
-        if matches!(
-            app.sidebar_group_mode,
-            SidebarGroupMode::Repo | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
-        ) {
-            for entry in ordered_tab_entries(&member_entries) {
-                rows.push(SidebarRow::Tab {
-                    entry: Box::new(entry),
-                    depth: 1,
+        if app.sidebar_group_mode == SidebarGroupMode::RepoWorktree {
+            for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
+                let key = format!("{ws_idx}:{}", group.key);
+                let collapsed = section_is_collapsed(app, &key);
+                rows.push(SidebarRow::NestedHeader {
+                    key,
+                    action_key: None,
+                    title: group.title,
+                    count: group.entries.len(),
+                    collapsed,
+                    dim: false,
+                    status: None,
+                    spawn: false,
                 });
+                if !collapsed {
+                    append_tab_rows(rows, group.entries, 2);
+                }
             }
-            continue;
+        } else {
+            append_tab_rows(rows, ordered_tab_entries(&member_entries), 1);
         }
-        for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
-            let action_key = (app.sidebar_group_mode == SidebarGroupMode::RepoPr
-                && !group.unlinked)
-                .then(|| format!("github:{}", group.key));
-            let collapse_key = format!("{}:{}", ws_idx, group.key);
-            let collapsed = section_is_collapsed(app, &collapse_key);
+    }
+}
+
+fn entry_repo_group(app: &AppState, entry: &AgentPanelEntry) -> Option<(String, String)> {
+    if let Some(repo) = entry_work_context(app, entry)
+        .and_then(|context| context.repo.as_deref())
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        let title = repo
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|title| !title.is_empty())?
+            .to_string();
+        return Some((format!("repo:{repo}"), title));
+    }
+    if let Some(root) = entry_terminal(app, entry)
+        .and_then(|terminal| app.git_root_for_cwd.get(&terminal.cwd))
+        .and_then(Option::as_ref)
+    {
+        let title = root.file_name()?.to_string_lossy().into_owned();
+        return Some((format!("repo-path:{}", root.display()), title));
+    }
+    None
+}
+
+fn entry_repo_label(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
+    entry_repo_group(app, entry).map(|(_, title)| title)
+}
+
+fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<SidebarWorkGroup> {
+    let mut groups = Vec::new();
+    for entry in ordered_tab_entries(entries) {
+        let Some((key, title)) = entry_repo_group(app, &entry) else {
+            push_unlinked_entry(&mut groups, entry);
+            continue;
+        };
+        match work_group_index(&groups, &key) {
+            Some(index) => groups[index].entries.push(entry),
+            None => groups.push(SidebarWorkGroup {
+                key,
+                title,
+                entries: vec![entry],
+                unlinked: false,
+                status: None,
+                created_at: None,
+                activation: None,
+            }),
+        }
+    }
+    groups.sort_by_key(|group| group.unlinked);
+    groups
+}
+
+fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, depth: u16) {
+    rows.extend(entries.into_iter().map(|entry| SidebarRow::Tab {
+        entry: Box::new(entry),
+        depth,
+    }));
+}
+
+fn append_repo_group_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: &[AgentPanelEntry],
+    settled: bool,
+) {
+    for group in sidebar_repo_groups(app, entries) {
+        if !group.unlinked {
+            let Some(ws_idx) = group.entries.first().map(|entry| entry.ws_idx) else {
+                continue;
+            };
+            rows.push(SidebarRow::Workspace {
+                ws_idx,
+                indented: false,
+                title: group.title.clone(),
+                count: Some(group.entries.len()),
+            });
+            if !app.workspace_agents_expanded(ws_idx) {
+                continue;
+            }
+        }
+        let collapse_key = if settled {
+            format!("settled:{}", group.key)
+        } else {
+            group.key.clone()
+        };
+        let collapsed = section_is_collapsed(app, &collapse_key);
+        if group.unlinked {
             rows.push(SidebarRow::NestedHeader {
                 key: collapse_key,
-                action_key,
+                action_key: None,
                 title: group.title,
                 count: group.entries.len(),
                 collapsed,
                 dim: false,
-                status: group.status,
+                status: None,
+                spawn: false,
+            });
+            if collapsed {
+                continue;
+            }
+        }
+        if group.unlinked {
+            append_tab_rows(rows, group.entries, 1);
+            continue;
+        }
+        let mut branches = Vec::<(Option<String>, Vec<AgentPanelEntry>)>::new();
+        for entry in group.entries {
+            let branch = entry_work_context(app, &entry).and_then(|context| context.branch.clone());
+            match branches
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == branch)
+            {
+                Some((_, entries)) => entries.push(entry),
+                None => branches.push((branch, vec![entry])),
+            }
+        }
+        if branches.len() <= 1 {
+            let entries = branches
+                .pop()
+                .map(|(_, entries)| entries)
+                .unwrap_or_default();
+            append_tab_rows(rows, entries, 1);
+            continue;
+        }
+        for (branch, entries) in branches {
+            let branch_name = branch.as_deref().unwrap_or("unlinked");
+            let key = format!("{}:branch:{branch_name}", group.key);
+            let collapse_key = if settled {
+                format!("settled:{key}")
+            } else {
+                key
+            };
+            let collapsed = section_is_collapsed(app, &collapse_key);
+            rows.push(SidebarRow::NestedHeader {
+                key: collapse_key,
+                action_key: None,
+                title: branch.map_or_else(|| "unlinked".into(), |branch| format!("⎇ {branch}")),
+                count: entries.len(),
+                collapsed,
+                dim: false,
+                status: None,
                 spawn: false,
             });
             if !collapsed {
-                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
-                    entry: Box::new(entry),
-                    depth: 2,
-                }));
+                append_tab_rows(rows, entries, 2);
             }
         }
     }
-    append_unassigned_rows(app, &mut rows, &unassigned_entries);
-    append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
-    rows
+}
+
+fn append_object_group_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: &[AgentPanelEntry],
+    settled: bool,
+) {
+    for group in sidebar_work_groups(app, entries, app.sidebar_group_mode)
+        .into_iter()
+        .filter(|group| !group.entries.is_empty())
+    {
+        let collapse_key = if settled {
+            format!("settled:{}", group.key)
+        } else {
+            group.key.clone()
+        };
+        let collapsed = section_is_collapsed(app, &collapse_key);
+        let action_key = (!group.unlinked).then(|| group.key.clone());
+        rows.push(SidebarRow::NestedHeader {
+            key: collapse_key,
+            action_key,
+            title: group.title,
+            count: group.entries.len(),
+            collapsed,
+            dim: false,
+            status: group.status,
+            spawn: false,
+        });
+        if !collapsed {
+            append_tab_rows(rows, group.entries, 1);
+        }
+    }
+    if settled {
+        return;
+    }
+    match app.sidebar_group_mode {
+        SidebarGroupMode::Missive => append_missive_no_pane_rows(app, rows, entries),
+        SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam => {
+            append_unassigned_rows(app, rows, entries);
+        }
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {}
+    }
 }
 
 fn append_settled_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     entries: Vec<AgentPanelEntry>,
-    expand_worktrees: bool,
+    _expand_worktrees: bool,
 ) {
     if entries.is_empty() {
         return;
@@ -1468,88 +1680,12 @@ fn append_settled_rows(
         return;
     }
 
-    if matches!(
-        app.sidebar_group_mode,
-        SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
-    ) {
-        for group in sidebar_work_groups(app, &entries, app.sidebar_group_mode) {
-            let collapsed = section_is_collapsed(app, &group.key);
-            let action_key = (!group.unlinked).then(|| group.key.clone());
-            rows.push(SidebarRow::NestedHeader {
-                key: group.key,
-                action_key,
-                title: group.title,
-                count: group.entries.len(),
-                collapsed,
-                dim: false,
-                status: group.status,
-                spawn: false,
-            });
-            if !collapsed {
-                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
-                    entry: Box::new(entry),
-                    depth: 1,
-                }));
-            }
+    match app.sidebar_group_mode {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
+            append_repo_group_rows(app, rows, &entries, true);
         }
-        return;
-    }
-
-    let mut by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
-    for entry in entries {
-        by_workspace.entry(entry.ws_idx).or_default().push(entry);
-    }
-    for workspace in workspace_list_entries_for_mode(app, expand_worktrees, app.sidebar_group_mode)
-    {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace else {
-            continue;
-        };
-        if indented {
-            continue;
-        }
-        let mut member_entries = Vec::new();
-        for member_idx in sidebar_space_member_indices(app, ws_idx) {
-            if let Some(workspace_entries) = by_workspace.remove(&member_idx) {
-                member_entries.extend(workspace_entries);
-            }
-        }
-        if member_entries.is_empty() {
-            continue;
-        }
-        rows.push(SidebarRow::Workspace { ws_idx, indented });
-        if app.sidebar_group_mode == SidebarGroupMode::Repo {
-            rows.extend(
-                ordered_tab_entries(&member_entries)
-                    .into_iter()
-                    .map(|entry| SidebarRow::Tab {
-                        entry: Box::new(entry),
-                        depth: 1,
-                    }),
-            );
-            continue;
-        }
-        for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
-            let action_key = (app.sidebar_group_mode == SidebarGroupMode::RepoPr
-                && !group.unlinked)
-                .then(|| format!("github:{}", group.key));
-            let collapse_key = format!("settled:{ws_idx}:{}", group.key);
-            let collapsed = section_is_collapsed(app, &collapse_key);
-            rows.push(SidebarRow::NestedHeader {
-                key: collapse_key,
-                action_key,
-                title: group.title,
-                count: group.entries.len(),
-                collapsed,
-                dim: false,
-                status: group.status,
-                spawn: false,
-            });
-            if !collapsed {
-                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
-                    entry: Box::new(entry),
-                    depth: 2,
-                }));
-            }
+        SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
+            append_object_group_rows(app, rows, &entries, true);
         }
     }
 }
@@ -1559,7 +1695,6 @@ struct SidebarTabGroup {
     title: String,
     entries: Vec<AgentPanelEntry>,
     unlinked: bool,
-    status: Option<WorkGroupStatus>,
 }
 
 fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
@@ -1580,12 +1715,63 @@ fn entry_work_context<'a>(
     app: &'a AppState,
     entry: &AgentPanelEntry,
 ) -> Option<&'a crate::work_context::PaneWorkContext> {
+    entry_terminal(app, entry).map(crate::terminal::TerminalState::effective_work_context)
+}
+
+fn entry_terminal<'a>(
+    app: &'a AppState,
+    entry: &AgentPanelEntry,
+) -> Option<&'a crate::terminal::TerminalState> {
     let workspace = app.workspaces.get(entry.ws_idx)?;
     let tab = workspace.tabs.get(entry.tab_idx)?;
     let pane = tab.panes.get(&entry.pane_id)?;
-    app.terminals
-        .get(&pane.attached_terminal_id)
-        .map(crate::terminal::TerminalState::effective_work_context)
+    app.terminals.get(&pane.attached_terminal_id)
+}
+
+fn stable_binding_values<'a>(sources: impl IntoIterator<Item = &'a [String]>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    sources
+        .into_iter()
+        .flatten()
+        .filter(|value| seen.insert((*value).clone()))
+        .cloned()
+        .collect()
+}
+
+fn preferred_pr_urls(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
+    let Some(terminal) = entry_terminal(app, entry) else {
+        return Vec::new();
+    };
+    let tiers = terminal.work_context.snapshot_tiers();
+    let declared = stable_binding_values([
+        tiers.manual.pr_urls.as_slice(),
+        tiers.hook_turn.pr_urls.as_slice(),
+    ]);
+    if !declared.is_empty() {
+        return declared;
+    }
+    if !tiers.git_observation.pr_urls.is_empty() {
+        return tiers.git_observation.pr_urls;
+    }
+    tiers.restored_fallback.pr_urls
+}
+
+fn preferred_ticket_ids(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
+    let Some(terminal) = entry_terminal(app, entry) else {
+        return Vec::new();
+    };
+    let tiers = terminal.work_context.snapshot_tiers();
+    let declared = stable_binding_values([
+        tiers.manual.ticket_ids.as_slice(),
+        tiers.hook_turn.ticket_ids.as_slice(),
+    ]);
+    if !declared.is_empty() {
+        return declared;
+    }
+    if !tiers.git_observation.ticket_ids.is_empty() {
+        return tiers.git_observation.ticket_ids;
+    }
+    tiers.restored_fallback.ticket_ids
 }
 
 fn pull_request_number(url: &str) -> Option<&str> {
@@ -1601,7 +1787,6 @@ fn push_sidebar_tab_group(
     title: String,
     entry: AgentPanelEntry,
     unlinked: bool,
-    status: Option<WorkGroupStatus>,
 ) {
     if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
         group.entries.push(entry);
@@ -1611,7 +1796,6 @@ fn push_sidebar_tab_group(
             title,
             entries: vec![entry],
             unlinked,
-            status,
         });
     }
 }
@@ -1633,7 +1817,6 @@ fn sidebar_tab_groups(
                         "unlinked".into(),
                         entry,
                         true,
-                        None,
                     );
                     continue;
                 };
@@ -1652,14 +1835,7 @@ fn sidebar_tab_groups(
                         .or(context.session_name.as_deref());
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
-                    push_sidebar_tab_group(
-                        &mut groups,
-                        url.clone(),
-                        title,
-                        entry.clone(),
-                        false,
-                        Some(pull_request_status(app, url)),
-                    );
+                    push_sidebar_tab_group(&mut groups, url.clone(), title, entry.clone(), false);
                 }
             }
             SidebarGroupMode::RepoWorktree => {
@@ -1670,7 +1846,6 @@ fn sidebar_tab_groups(
                         format!("⎇ {branch}"),
                         entry,
                         false,
-                        None,
                     );
                 } else {
                     push_sidebar_tab_group(
@@ -1679,7 +1854,6 @@ fn sidebar_tab_groups(
                         "unlinked".into(),
                         entry,
                         true,
-                        None,
                     );
                 }
             }
@@ -1743,7 +1917,11 @@ fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
 /// carries no title: a separator with nothing after it reads as missing text.
 fn work_group_header_title(id: &str, title: Option<&str>) -> String {
     match title.map(str::trim).filter(|title| !title.is_empty()) {
-        Some(title) if title != id => format!("{id} · {title}"),
+        Some(title) => match title_without_identifier(id, title) {
+            Some("") => id.to_string(),
+            Some(title) => format!("{id} · {title}"),
+            None => format!("{id} · {title}"),
+        },
         _ => id.to_string(),
     }
 }
@@ -1752,15 +1930,34 @@ fn work_group_header_title(id: &str, title: Option<&str>) -> String {
 /// A URL the index has never seen has no state to show, and
 /// `from_pull_request` reads that absence as open.
 fn pull_request_status(app: &AppState, url: &str) -> WorkGroupStatus {
-    let item = app.work_index_snapshot.as_ref().and_then(|snapshot| {
-        snapshot
-            .items
-            .iter()
-            .find(|item| item.pr_url.as_deref() == Some(url))
-    });
+    let item = indexed_pull_request(app, url);
     WorkGroupStatus::from_pull_request(
         item.and_then(|item| item.pr_state.as_deref()),
         item.is_some_and(|item| item.draft),
+    )
+}
+
+fn indexed_pull_request<'a>(
+    app: &'a AppState,
+    url: &str,
+) -> Option<&'a crate::work_index::WorkItem> {
+    app.work_index_snapshot
+        .as_ref()?
+        .items
+        .iter()
+        .find(|item| item.pr_url.as_deref() == Some(url))
+}
+
+fn github_group_title(app: &AppState, url: &str, fallback: Option<&str>) -> String {
+    let item = indexed_pull_request(app, url);
+    let number = item
+        .and_then(|item| item.pr_number)
+        .map(|number| number.to_string())
+        .or_else(|| pull_request_number(url).map(str::to_string))
+        .unwrap_or_else(|| url.to_string());
+    work_group_header_title(
+        &format!("#{number}"),
+        item.and_then(|item| item.pr_title.as_deref()).or(fallback),
     )
 }
 
@@ -2029,6 +2226,37 @@ pub(crate) fn sidebar_work_groups(
     mode: SidebarGroupMode,
 ) -> Vec<SidebarWorkGroup> {
     let mut groups: Vec<SidebarWorkGroup> = Vec::new();
+    if mode == SidebarGroupMode::RepoPr {
+        for item in app
+            .work_index_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.items.as_slice())
+            .unwrap_or_default()
+        {
+            let Some(url) = item.pr_url.as_deref() else {
+                continue;
+            };
+            if !app
+                .sidebar_work_filter
+                .matches_github(item, &app.work_index_session)
+            {
+                continue;
+            }
+            let key = format!("github:{url}");
+            if work_group_index(&groups, &key).is_some() {
+                continue;
+            }
+            groups.push(SidebarWorkGroup {
+                key,
+                title: github_group_title(app, url, None),
+                entries: Vec::new(),
+                unlinked: false,
+                status: Some(pull_request_status(app, url)),
+                created_at: item.created_at,
+                activation: github_activation(app, item, url),
+            });
+        }
+    }
     if mode == SidebarGroupMode::LinearTeam {
         for row in app.dock_home_projection().ticket_rows {
             if !labels_match_sidebar_query(&row.ticket.labels, &app.sidebar_work_filter.query) {
@@ -2110,23 +2338,87 @@ pub(crate) fn sidebar_work_groups(
     for entry in ordered_tab_entries(entries) {
         let context = entry_work_context(app, &entry);
         match mode {
+            SidebarGroupMode::RepoPr => {
+                let urls = preferred_pr_urls(app, &entry);
+                if urls.is_empty() {
+                    push_unlinked_entry(&mut groups, entry);
+                    continue;
+                }
+                for url in urls {
+                    let key = format!("github:{url}");
+                    let index = match work_group_index(&groups, &key) {
+                        Some(index) => index,
+                        None => {
+                            let item = indexed_pull_request(app, &url);
+                            groups.push(SidebarWorkGroup {
+                                key,
+                                title: github_group_title(
+                                    app,
+                                    &url,
+                                    context.and_then(|context| context.work_title.as_deref()),
+                                ),
+                                entries: Vec::new(),
+                                unlinked: false,
+                                status: Some(pull_request_status(app, &url)),
+                                created_at: item.and_then(|item| item.created_at),
+                                activation: item
+                                    .and_then(|item| github_activation(app, item, &url)),
+                            });
+                            groups.len() - 1
+                        }
+                    };
+                    if indexed_pull_request(app, &url)
+                        .and_then(|item| item.pr_title.as_deref())
+                        .is_none()
+                    {
+                        let fallback = context.and_then(|context| {
+                            context
+                                .work_title
+                                .as_deref()
+                                .or(context.session_name.as_deref())
+                        });
+                        groups[index].title = github_group_title(app, &url, fallback);
+                    }
+                    groups[index].entries.push(entry.clone());
+                }
+            }
             SidebarGroupMode::LinearTeam => {
                 // A pane on several tickets is work on each of them, so it is
                 // listed under every ticket header it belongs to.
-                let ticket_ids = context
-                    .map(|context| context.ticket_ids.as_slice())
-                    .unwrap_or_default();
+                let ticket_ids = preferred_ticket_ids(app, &entry);
                 if ticket_ids.is_empty() {
                     if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
                         push_unlinked_entry(&mut groups, entry);
                     }
                     continue;
                 }
-                for ticket_id in ticket_ids {
-                    // A ticket the filter excluded takes its panes with it.
-                    if let Some(index) = work_group_index(&groups, &format!("linear:{ticket_id}")) {
-                        groups[index].entries.push(entry.clone());
-                    }
+                for ticket_id in &ticket_ids {
+                    let key = format!("linear:{ticket_id}");
+                    let index = match work_group_index(&groups, &key) {
+                        Some(index) => index,
+                        None if !sidebar_query_has_labels(&app.sidebar_work_filter.query) => {
+                            groups.push(SidebarWorkGroup {
+                                key,
+                                title: work_group_header_title(
+                                    ticket_id,
+                                    context.and_then(|context| {
+                                        context
+                                            .work_title
+                                            .as_deref()
+                                            .or(context.session_name.as_deref())
+                                    }),
+                                ),
+                                entries: Vec::new(),
+                                unlinked: false,
+                                status: Some(WorkGroupStatus::from_ticket_state(None)),
+                                created_at: None,
+                                activation: None,
+                            });
+                            groups.len() - 1
+                        }
+                        None => continue,
+                    };
+                    groups[index].entries.push(entry.clone());
                 }
             }
             SidebarGroupMode::Missive => {
@@ -2189,7 +2481,7 @@ pub(crate) fn sidebar_work_groups(
                     groups[index].entries.push(entry.clone());
                 }
             }
-            SidebarGroupMode::Repo | SidebarGroupMode::RepoPr | SidebarGroupMode::RepoWorktree => {}
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {}
         }
     }
     groups.sort_by_key(|group| group.unlinked);
@@ -2956,7 +3248,9 @@ fn agent_entry_height_in_body_at(
 
 fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16 {
     match row {
-        SidebarRow::Workspace { ws_idx, indented } => app
+        SidebarRow::Workspace {
+            ws_idx, indented, ..
+        } => app
             .workspaces
             .get(*ws_idx)
             .map(|workspace| workspace_row_height_in_body(app, workspace, *indented, body_height))
@@ -3164,7 +3458,9 @@ pub(crate) fn compute_sidebar_row_areas(
     let entries = sidebar_rows(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
-            SidebarRow::Workspace { ws_idx, indented } => {
+            SidebarRow::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -3762,7 +4058,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             break;
         }
         match row {
-            SidebarRow::Workspace { ws_idx, indented } => {
+            SidebarRow::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -4572,11 +4870,20 @@ fn render_workspace_list(
     let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
 
     let metrics = workspace_list_scroll_metrics(app, area);
+    let row_entries = sidebar_rows_from(app, terminal_runtimes);
+    let workspace_headers = row_entries
+        .iter()
+        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+        .filter_map(|row| match row {
+            SidebarRow::Workspace { title, count, .. } => Some((title, *count)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
     let computed_cards = compute_workspace_card_areas(app, sidebar_area);
     let cards = &computed_cards;
-    for card in cards {
+    for (card_index, card) in cards.iter().enumerate() {
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
         let row_y = card.rect.y;
@@ -4600,12 +4907,19 @@ fn render_workspace_list(
             }
         }
 
-        let (display_label, is_derived) = workspace_labels.get(&i).cloned().unwrap_or_else(|| {
-            (
-                ws.display_name_from(&app.terminals, terminal_runtimes),
-                true,
-            )
-        });
+        let header = workspace_headers.get(card_index);
+        let (display_label, is_derived) =
+            header.filter(|(title, _)| !title.is_empty()).map_or_else(
+                || {
+                    workspace_labels.get(&i).cloned().unwrap_or_else(|| {
+                        (
+                            ws.display_name_from(&app.terminals, terminal_runtimes),
+                            true,
+                        )
+                    })
+                },
+                |(title, _)| ((*title).clone(), false),
+            );
         let name_style = if selected || is_active || is_dragged {
             Style::default()
                 .fg(active_sidebar_title_color(p))
@@ -4625,7 +4939,10 @@ fn render_workspace_list(
             .into_iter()
             .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
             .count();
-        let count_label = format!(" ({agent_count}/{window_count})");
+        let count_label = header.and_then(|(_, count)| *count).map_or_else(
+            || format!(" ({agent_count}/{window_count})"),
+            |count| format!(" ({count})"),
+        );
         let fixed_width = display_width(" ▾ ") + display_width(&count_label);
         let title = truncate_end(
             &display_label,
@@ -4653,7 +4970,6 @@ fn render_workspace_list(
         );
     }
 
-    let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let section_headers = compute_sidebar_section_header_areas(app, sidebar_area);
     let has_matching_rows = row_entries.iter().any(|row| {
         matches!(
@@ -4796,6 +5112,9 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
+            if !entry.space_label.is_empty() {
+                return None;
+            }
             let layout = tab_row_layout(
                 entry,
                 app.view_observed_at,
@@ -5890,7 +6209,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn space_names_use_manual_then_agent_title_then_git_label() {
+    fn space_names_use_server_label_and_never_adopt_agent_title() {
         let mut app = AppState::test_new();
         let mut agent_space = Workspace::test_new("ignored");
         agent_space.custom_name = None;
@@ -5916,7 +6235,7 @@ pub(crate) mod tests {
             .detected_agent = Some(Agent::Claude);
 
         let labels = sidebar_workspace_labels(&app, &TerminalRuntimeRegistry::new());
-        assert_eq!(labels[&0], ("agent title".into(), true));
+        assert_eq!(labels[&0], ("t3-f19".into(), true));
         assert_eq!(labels[&1], ("manual label".into(), false));
         assert_eq!(labels[&2], ("terminal space¹".into(), true));
         assert_eq!(labels[&3], ("terminal space²".into(), true));
@@ -6266,6 +6585,7 @@ pub(crate) mod tests {
             tab_idx: 0,
             pane_id: crate::layout::PaneId::alloc(),
             primary_label: "workspace".into(),
+            space_label: String::new(),
             primary_tab_label: Some("tab".into()),
             tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
@@ -8045,15 +8365,12 @@ row_gap = 1
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("●"), "{busy_text:?}");
-        assert!(busy_text.ends_with('—'), "{busy_text:?}");
-        // ac7: the working dot and its age field use activity blue.
-        for token in ["●", "—"] {
-            let token_x = find_symbol_x(busy.backend().buffer(), tab_row, 49, token);
-            assert_eq!(
-                busy.backend().buffer()[(token_x, tab_row)].style().fg,
-                Some(app.palette.blue)
-            );
-        }
+        assert!(busy_text.ends_with("one"), "{busy_text:?}");
+        let dot_x = find_symbol_x(busy.backend().buffer(), tab_row, 49, "●");
+        assert_eq!(
+            busy.backend().buffer()[(dot_x, tab_row)].style().fg,
+            Some(app.palette.blue)
+        );
 
         let finished = started + std::time::Duration::from_secs(50);
         app.terminals
@@ -8080,7 +8397,7 @@ row_gap = 1
             .unwrap();
         let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
         assert!(idle_text.contains("○"), "{idle_text:?}");
-        assert!(idle_text.ends_with("5m"), "{idle_text:?}");
+        assert!(idle_text.ends_with("one"), "{idle_text:?}");
     }
 
     #[test]
@@ -8140,7 +8457,7 @@ row_gap = 1
         let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
 
         assert!(rendered.contains("Review release"), "{rendered:?}");
-        assert!(rendered.ends_with("1m"), "{rendered:?}");
+        assert!(rendered.ends_with("one"), "{rendered:?}");
         assert!(!rendered.contains("idle"), "{rendered:?}");
         assert!(!rendered.contains("done"), "{rendered:?}");
         assert!(rendered.contains("○  Review release"), "{rendered:?}");
@@ -8193,7 +8510,7 @@ row_gap = 1
         let card = &compute_tab_card_areas(&app, area)[0];
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
 
-        assert!(rendered.ends_with("5m"), "{rendered:?}");
+        assert!(rendered.ends_with("one"), "{rendered:?}");
         assert_eq!(compute_tab_card_areas(&app, area).len(), 1);
     }
 
@@ -8319,7 +8636,7 @@ row_gap = 1
     }
 
     #[test]
-    fn reported_at_age_refresh_uses_the_reported_instant_on_desktop_and_mobile() {
+    fn reported_at_age_does_not_refresh_behind_space_suffix() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -8349,13 +8666,9 @@ row_gap = 1
         let runtimes = TerminalRuntimeRegistry::new();
         let area = Rect::new(0, 0, 80, 20);
         let cards = compute_tab_card_areas(&app, area);
-        assert_eq!(
-            visible_tab_activity_instants_from(&app, &runtimes, &cards),
-            vec![reported_at]
-        );
-        assert_eq!(
-            crate::ui::mobile::visible_tab_activity_instants_from(&app, &runtimes, area),
-            vec![reported_at]
+        assert!(visible_tab_activity_instants_from(&app, &runtimes, &cards).is_empty());
+        assert!(
+            crate::ui::mobile::visible_tab_activity_instants_from(&app, &runtimes, area).is_empty()
         );
     }
 
@@ -8386,7 +8699,7 @@ row_gap = 1
     }
 
     #[test]
-    fn review_findings_activity_deadlines_follow_visible_age_fields() {
+    fn space_suffix_suppresses_hidden_activity_age_deadlines() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -8414,7 +8727,7 @@ row_gap = 1
         let runtimes = TerminalRuntimeRegistry::new();
 
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
+        assert!(app.view.visible_agent_activity_instants.is_empty());
 
         app.sidebar_collapsed = true;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
@@ -8423,7 +8736,7 @@ row_gap = 1
         app.sidebar_collapsed = false;
         app.mobile_width_threshold = 80;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
+        assert!(app.view.visible_agent_activity_instants.is_empty());
 
         app.mobile_width_threshold = 0;
         app.sidebar_width = 12;
@@ -9151,7 +9464,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn a_blocked_worklist_row_renders_its_title_without_its_space_name() {
+    fn a_blocked_worklist_row_renders_its_title_with_its_space_suffix() {
         let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
         let blocked_pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(blocked_pane).unwrap().clone();
@@ -9172,7 +9485,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
-        assert!(!rendered.contains("ws0"), "{rendered:?}");
+        assert!(rendered.ends_with("ws0"), "{rendered:?}");
     }
 
     #[test]
@@ -11307,6 +11620,357 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app
     }
 
+    fn replace_tab_context(
+        app: &mut AppState,
+        ws_idx: usize,
+        tab_idx: usize,
+        manual: crate::work_context::PaneWorkContext,
+        inferred: crate::work_context::PaneWorkContext,
+    ) {
+        let pane_id = app.workspaces[ws_idx].tabs[tab_idx].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[tab_idx].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("fixture terminal");
+        terminal
+            .replace_git_work_context(inferred)
+            .expect("valid inferred context");
+        terminal.replace_prevalidated_manual_work_context(manual);
+    }
+
+    #[test]
+    fn f19_repo_groups_by_repo_then_branch_with_server_space_suffix() {
+        let mut first = Workspace::test_new("first");
+        first.custom_name = Some("Server Alpha".into());
+        first.test_add_tab(Some("second"));
+        first.test_add_tab(Some("loose"));
+        let mut second = Workspace::test_new("second");
+        second.custom_name = Some("Server Beta".into());
+        let mut app = AppState::test_new();
+        app.workspaces = vec![first, second];
+        app.ensure_test_terminals();
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("scalable-so/herdr".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            0,
+            1,
+            crate::work_context::PaneWorkContext {
+                repo: Some("scalable-so/herdr".into()),
+                branch: Some("feature/sidebar".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            0,
+            2,
+            crate::work_context::PaneWorkContext {
+                work_title: Some("unbound work".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("scalable-so/growth".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let rows = sidebar_rows(&app);
+        let repo_headers = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Workspace { title, count, .. } => Some((title.as_str(), *count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(repo_headers, [("herdr", Some(2)), ("growth", Some(1))]);
+        let nested = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { title, count, .. } => Some((title.as_str(), *count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nested,
+            [("⎇ main", 1), ("⎇ feature/sidebar", 1), ("unlinked", 1)]
+        );
+        let suffixes = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry.space_label.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            suffixes,
+            [
+                "Server Alpha",
+                "Server Alpha",
+                "Server Beta",
+                "Server Alpha"
+            ]
+        );
+        assert!(matches!(
+            rows.last(),
+            Some(SidebarRow::Tab { entry, .. }) if entry.ws_idx == 0 && entry.tab_idx == 2
+        ));
+    }
+
+    #[test]
+    fn f19_identifier_prefix_deduplicates_supported_separators() {
+        for title in [
+            "SCA-3165: Studio edit",
+            "sca-3165 Studio edit",
+            "SCA-3165 · Studio edit",
+            "SCA-3165- Studio edit",
+        ] {
+            assert_eq!(
+                work_group_header_title("SCA-3165", Some(title)),
+                "SCA-3165 · Studio edit"
+            );
+        }
+        assert_eq!(
+            work_group_header_title("SCA-3165", Some("Studio edit")),
+            "SCA-3165 · Studio edit"
+        );
+        assert_eq!(work_group_header_title("SCA-3165", None), "SCA-3165");
+
+        let row_title = |title: &str| {
+            sidebar_tab_title(
+                Some(&crate::workspace::TabDisplayProjection::Derived {
+                    agent: None,
+                    ticket: Some("SCA-3165".into()),
+                    binding: None,
+                    title: Some(title.into()),
+                }),
+                None,
+            )
+            .expect("derived row title")
+        };
+        assert_eq!(row_title("SCA-3165: Studio edit"), "SCA-3165 · Studio edit");
+        assert_eq!(row_title("sca-3165 Studio edit"), "SCA-3165 · Studio edit");
+        assert_eq!(row_title("Studio edit"), "SCA-3165 · Studio edit");
+    }
+
+    #[test]
+    fn f19_object_groups_are_top_level_with_one_trailing_unlinked_bucket() {
+        let mut workspace = Workspace::test_new("repo");
+        workspace.custom_name = Some("Server Space".into());
+        workspace.test_add_tab(Some("second"));
+        workspace.test_add_tab(Some("loose"));
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for (tab_idx, context) in [
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/206".into()],
+                work_title: Some("#206 feat sidebar".into()),
+                ..Default::default()
+            },
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
+                work_title: Some("pricing".into()),
+                ..Default::default()
+            },
+            crate::work_context::PaneWorkContext {
+                work_title: Some("unbound".into()),
+                ..Default::default()
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            replace_tab_context(&mut app, 0, tab_idx, context, Default::default());
+        }
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+
+        let rows = sidebar_rows(&app);
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Workspace { .. })));
+        let headers = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { title, count, .. } => Some((title.as_str(), *count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headers,
+            [
+                ("#206 · feat sidebar", 1),
+                ("#159 · pricing", 1),
+                ("unlinked", 1)
+            ]
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::NestedHeader { title, .. } if title == "unlinked"))
+                .count(),
+            1
+        );
+        for (index, row) in rows.iter().enumerate() {
+            let SidebarRow::NestedHeader { count, .. } = row else {
+                continue;
+            };
+            let rendered = rows[index + 1..]
+                .iter()
+                .take_while(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count();
+            assert_eq!(*count, rendered);
+        }
+
+        let key = "github:https://github.com/herdrdev/herdr/pull/206";
+        app.toggle_sidebar_group(key);
+        let collapsed = sidebar_rows(&app);
+        assert!(collapsed.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader {
+                key: candidate,
+                collapsed: true,
+                ..
+            } if candidate == key
+        )));
+        assert!(!collapsed.windows(2).any(|pair| matches!(
+            pair,
+            [
+                SidebarRow::NestedHeader { key: candidate, .. },
+                SidebarRow::Tab { .. }
+            ] if candidate == key
+        )));
+    }
+
+    #[test]
+    fn f19_multiple_declared_objects_render_once_under_each_object() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("declared")];
+        app.ensure_test_terminals();
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec![
+                    "https://github.com/herdrdev/herdr/pull/159".into(),
+                    "https://github.com/herdrdev/herdr/pull/160".into(),
+                ],
+                ..Default::default()
+            },
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/206".into()],
+                ..Default::default()
+            },
+        );
+        let groups = sidebar_work_groups(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::RepoPr,
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.title.as_str(), group.entries.len()))
+                .collect::<Vec<_>>(),
+            [("#159", 1), ("#160", 1)]
+        );
+    }
+
+    #[test]
+    fn f19_declared_bindings_override_seed_branch_inference() {
+        const INFERRED_PR: &str = "https://github.com/herdrdev/herdr/pull/206";
+        const DECLARED_PR: &str = "https://github.com/herdrdev/herdr/pull/159";
+        let mut workspace = Workspace::test_new("seed");
+        for index in 1..5 {
+            workspace.test_add_tab(Some(&format!("seed-{index}")));
+        }
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for tab_idx in 0..5 {
+            let manual = if tab_idx == 4 {
+                crate::work_context::PaneWorkContext {
+                    pr_urls: vec![DECLARED_PR.into()],
+                    ticket_ids: vec!["SCA-159".into()],
+                    work_title: Some("declared sample".into()),
+                    ..Default::default()
+                }
+            } else {
+                Default::default()
+            };
+            replace_tab_context(
+                &mut app,
+                0,
+                tab_idx,
+                manual,
+                crate::work_context::PaneWorkContext {
+                    pr_urls: vec![INFERRED_PR.into()],
+                    ticket_ids: vec!["SCA-206".into()],
+                    repo: Some("herdrdev/herdr".into()),
+                    branch: Some("t3/integration2".into()),
+                    work_title: Some("inferred integration".into()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+        let github = sidebar_work_groups(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::RepoPr,
+        );
+        let github_counts = github
+            .iter()
+            .map(|group| (group.key.clone(), group.entries.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            github_counts,
+            [
+                (format!("github:{INFERRED_PR}"), 4),
+                (format!("github:{DECLARED_PR}"), 1),
+            ]
+        );
+
+        app.set_sidebar_group_mode(SidebarGroupMode::LinearTeam);
+        let linear = sidebar_work_groups(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::LinearTeam,
+        );
+        let mut linear_counts = linear
+            .iter()
+            .map(|group| (group.key.as_str(), group.entries.len()))
+            .collect::<Vec<_>>();
+        linear_counts.sort_unstable();
+        assert_eq!(
+            linear_counts,
+            [("linear:SCA-159", 1), ("linear:SCA-206", 4)]
+        );
+    }
+
     fn workspace_entry_tree(entries: Vec<WorkspaceListEntry>) -> Vec<String> {
         entries
             .into_iter()
@@ -11381,7 +12045,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .collect::<Vec<_>>();
             match mode {
-                SidebarGroupMode::Repo => assert!(nested.is_empty()),
+                SidebarGroupMode::Repo => assert_eq!(nested, ["unlinked"]),
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
@@ -11866,7 +12530,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert!(!rendered.contains(">_"), "{rendered:?}");
                 assert!(!rendered.contains("ago"), "{rendered:?}");
             } else {
-                assert!(rendered.contains("1m"), "{rendered:?}");
+                assert!(rendered.ends_with("one"), "{rendered:?}");
             }
         }
     }
@@ -12794,12 +13458,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .or_else(|| row.find(title.chars().next().unwrap()))
                     .unwrap();
                 let suffix_start = row.find(suffix).expect("agent suffix");
-                let age_start = row
-                    .rfind('—')
-                    .or_else(|| row.rfind("1m"))
-                    .unwrap_or_else(|| panic!("activity age at width {width}: {row:?}"));
+                let space = if card.ws_idx == 0 { "cla…" } else { "cod…" };
+                let space_start = row
+                    .rfind(space)
+                    .unwrap_or_else(|| panic!("Space suffix at width {width}: {row:?}"));
                 assert!(
-                    title_start < suffix_start && suffix_start < age_start,
+                    title_start < suffix_start && suffix_start < space_start,
                     "{row:?}"
                 );
                 assert!(
