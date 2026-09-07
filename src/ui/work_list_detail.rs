@@ -295,10 +295,7 @@ impl PrItem<'_> {
         let auto_enabled = self
             .cached_detail
             .is_some_and(|detail| detail.auto_merge_enabled);
-        let fix_reason = self
-            .cached_detail
-            .is_none_or(|detail| detail.comments.is_empty())
-            .then_some("no actionable findings");
+        let fix_reason = (!checkout_available).then_some("Check out the PR first");
         let mut actions = vec![
             PrAction {
                 kind: PrActionKind::CheckOut,
@@ -1487,6 +1484,29 @@ mod tests {
 
         assert_eq!(ask_question.disabled_reason, Some("checkout unavailable"));
         assert!(!ask_question.enabled());
+    }
+
+    #[test]
+    fn pr_action_table_disables_fix_findings_without_pr_context() {
+        let mut summary = item(7, PrAudience::Authored, 20);
+        summary.branch = None;
+        let item = PrItem {
+            summary: &summary,
+            cached_detail: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        let fix_findings = item
+            .action_table(crate::config::MergeMethodConfig::Merge, false)
+            .into_iter()
+            .find(|action| action.kind == PrActionKind::FixFindings)
+            .expect("fix findings action");
+
+        assert_eq!(
+            fix_findings.disabled_reason,
+            Some("Check out the PR first")
+        );
+        assert!(!fix_findings.enabled());
     }
 
     #[test]
