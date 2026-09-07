@@ -2786,12 +2786,12 @@ mod tests {
         assert_eq!(app.state.view.sidebar_rect.width, 50);
         let sidebar = app.state.view.sidebar_rect;
         let search = crate::ui::sidebar_header_search_rect(sidebar);
+        let new_menu = crate::ui::sidebar_header_new_menu_rect(sidebar);
         let header_areas = [
             crate::ui::expanded_sidebar_toggle_rect(sidebar),
             search,
             crate::ui::sidebar_header_new_thread_rect(sidebar),
-            crate::ui::sidebar_header_add_project_rect(sidebar),
-            crate::ui::sidebar_header_new_space_rect(sidebar),
+            new_menu,
             crate::ui::sidebar_header_overflow_rect(sidebar),
             crate::ui::sidebar_group_mode_anchor_rect(sidebar),
         ];
@@ -2801,6 +2801,36 @@ mod tests {
         assert!(header_areas
             .iter()
             .all(|area| area.x >= sidebar.x && area.right() <= sidebar.right()));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_menu.x,
+            new_menu.y,
+        ));
+        let menu = crate::ui::sidebar_new_menu_layout(&app.state, Rect::new(0, 0, 269, 84))
+            .expect("new menu");
+        assert_eq!(
+            menu.visible_rows,
+            crate::app::state::SidebarNewMenuAction::ALL.len()
+        );
+        assert_eq!(menu.list_rect.y, new_menu.bottom());
+        for index in 0..menu.visible_rows {
+            app.handle_mouse(mouse(
+                MouseEventKind::Moved,
+                menu.list_rect.x,
+                menu.list_rect.y + u16::try_from(index).expect("menu row index"),
+            ));
+            assert_eq!(
+                app.state.sidebar_new_menu.map(|state| state.selected),
+                Some(index)
+            );
+        }
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_menu.x,
+            new_menu.y,
+        ));
+        assert!(app.state.sidebar_new_menu.is_none());
 
         for kind in [
             MouseEventKind::Moved,
@@ -2822,7 +2852,7 @@ mod tests {
 
     #[test]
     fn sidebar_linear_footer_mouse_flow_renders_seeded_wide_view() {
-        use crate::app::state::{SidebarFooterItem, WorkProjection};
+        use crate::app::state::{ControlId, SidebarFooterItem, WorkProjection};
 
         let mut app = seeded_wide_sidebar_app();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 269, 84));
@@ -2837,20 +2867,38 @@ mod tests {
         ];
         assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
         assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+        for (area, item) in areas.iter().zip([
+            SidebarFooterItem::Settings,
+            SidebarFooterItem::PullRequests,
+            SidebarFooterItem::Usage,
+            SidebarFooterItem::Linear,
+            SidebarFooterItem::Missive,
+            SidebarFooterItem::Refresh,
+        ]) {
+            app.handle_mouse(mouse(MouseEventKind::Moved, area.x, area.y));
+            assert_eq!(
+                app.state.hovered_control,
+                Some(ControlId::SidebarFooter(item))
+            );
+        }
         let linear = areas[3];
 
-        for kind in [
-            MouseEventKind::Moved,
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-        ] {
-            app.handle_mouse(mouse(kind, linear.x, linear.y));
-        }
-
+        app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
         assert_eq!(
-            app.state.sidebar_footer_hover,
-            Some(SidebarFooterItem::Linear)
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::Linear))
         );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            linear.x,
+            linear.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            linear.x,
+            linear.y,
+        ));
+        assert_eq!(app.state.hovered_control, None);
         assert!(app
             .state
             .work_view
