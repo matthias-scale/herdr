@@ -6,6 +6,13 @@ use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags
 const DISABLE_HOST_MOUSE_REPORTING_SEQUENCE: &[u8] =
     b"\x1b[?1006l\x1b[?1016l\x1b[?1015l\x1b[?1005l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
+#[cfg(any(windows, test))]
+const WINDOWS_SSH_MOUSE_REPORTING_ENABLE_SEQUENCE: &[u8] =
+    b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+#[cfg(any(windows, test))]
+const WINDOWS_SSH_MOUSE_REPORTING_DISABLE_SEQUENCE: &[u8] =
+    b"\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
 #[cfg(not(windows))]
 pub(crate) fn clear_host_mouse_reporting<W: Write>(writer: &mut W) -> io::Result<()> {
     writer.write_all(DISABLE_HOST_MOUSE_REPORTING_SEQUENCE)?;
@@ -17,6 +24,27 @@ pub(crate) fn clear_host_mouse_reporting<W: Write>(_writer: &mut W) -> io::Resul
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn set_windows_ssh_mouse_reporting<W: Write>(
+    writer: &mut W,
+    enabled: bool,
+    sgr_pixels: bool,
+) -> io::Result<()> {
+    writer.write_all(if enabled {
+        WINDOWS_SSH_MOUSE_REPORTING_ENABLE_SEQUENCE
+    } else {
+        WINDOWS_SSH_MOUSE_REPORTING_DISABLE_SEQUENCE
+    })?;
+    if enabled {
+        writer.write_all(if sgr_pixels {
+            b"\x1b[?1016h"
+        } else {
+            b"\x1b[?1016l"
+        })?;
+    }
+    writer.flush()
+}
+
 #[cfg(not(windows))]
 pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
     writer: &mut W,
@@ -25,6 +53,11 @@ pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
     let mut flags = crate::input::ime_compatible_keyboard_enhancement_flags();
     if report_all_keys {
         flags |= crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+        // Report-all turns IME commits into CSI-u key events in terminals such
+        // as Ghostty. Ask the terminal to carry the committed text with them.
+        flags = crossterm::event::KeyboardEnhancementFlags::from_bits_retain(
+            flags.bits() | 0b0001_0000,
+        );
     }
     // Older iTerm2 releases clear the keyboard stack on SET, so a later pop
     // cannot restore the host state. Replace only Herdr's top entry instead.
@@ -54,7 +87,7 @@ mod tests {
         set_host_kitty_keyboard_report_all(&mut output, true).unwrap();
         set_host_kitty_keyboard_report_all(&mut output, false).unwrap();
 
-        assert_eq!(output, b"\x1b[<1u\x1b[>15u\x1b[<1u\x1b[>7u");
+        assert_eq!(output, b"\x1b[<1u\x1b[>31u\x1b[<1u\x1b[>7u");
     }
 
     #[test]
@@ -67,5 +100,19 @@ mod tests {
                 "missing mouse mode {mode}"
             );
         }
+    }
+
+    #[test]
+    fn windows_ssh_mouse_reporting_setup_and_teardown_request_required_modes() {
+        let mut output = Vec::new();
+
+        set_windows_ssh_mouse_reporting(&mut output, true, true).unwrap();
+        set_windows_ssh_mouse_reporting(&mut output, true, false).unwrap();
+        set_windows_ssh_mouse_reporting(&mut output, false, false).unwrap();
+
+        assert_eq!(
+            output,
+            b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1016l\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+        );
     }
 }

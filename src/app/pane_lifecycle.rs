@@ -249,11 +249,13 @@ fn cleanup_reaped_worktree(
         &membership.repo_root,
         &membership.checkout_path,
         false,
+        false,
     );
     match crate::worktree::run_worktree_remove_command_with_recovery(
         &command,
         &membership.repo_root,
         &membership.checkout_path,
+        false,
         false,
     ) {
         Ok(()) => (Some(path), true, None),
@@ -492,6 +494,7 @@ mod tests {
                     &self.repo,
                     &self.checkout,
                     true,
+                    false,
                 );
                 let _ = crate::worktree::run_worktree_command(&remove);
             }

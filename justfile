@@ -3,13 +3,24 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_pr_gate_workflow scripts.test_preview scripts.test_qa_preview_adapter scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_watch_pr_checks
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_pr_gate_workflow scripts.test_preview scripts.test_qa_preview_adapter scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_watch_pr_checks
     just integration-assets-test
     just plugin-marketplace-test
+    just docs-contract-test
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
+[unix]
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+
+[script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
+[windows]
+test-one filter:
+    cargo nextest run --locked --bin herdr "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+
+# Enforce deterministic UI hot-path architecture boundaries
+ui-hot-path-architecture-test:
+    python3 -m unittest scripts.test_ui_hot_path_architecture
 
 # Run fast local lint checks
 [unix]
@@ -26,6 +37,7 @@ lint:
 [unix]
 ci filter='all()': lint
     cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
+    just ui-hot-path-architecture-test
     just integration-assets-test
     just plugin-marketplace-test
 
@@ -38,7 +50,8 @@ windows-lint:
 # Check formatting + run unit tests + Windows target lint + maintenance script tests
 [unix]
 check: ci windows-lint
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_pr_gate_workflow scripts.test_preview scripts.test_qa_preview_adapter scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_watch_pr_checks
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_pr_gate_workflow scripts.test_preview scripts.test_qa_preview_adapter scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_watch_pr_checks
+    just docs-contract-test
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Run independent final verification concurrently and print one summary.
@@ -86,15 +99,30 @@ build:
     fi
     cargo build --release --locked
 
-# Build the website and documentation
-website-build:
-    cd website && bun install --frozen-lockfile && bun run build
+[script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
+[windows]
+build:
+    cargo build --release --locked
+
+# Non-gating full-render scaling profile for background workspaces and active panes
+bench-render-scale:
+    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+
+# ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
+bench-release-smoke:
+    cargo build --release --locked
+    scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/herdr"
+
+# Test public documentation snapshot and release lifecycle tooling
+docs-contract-test:
+    bun test scripts/docs/*.test.ts
 
 # Test bundled agent integration assets
 integration-assets-test:
     python3 src/integration/assets/closing-block/test_closing_block.py
     bun test src/integration/assets/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
+    bun test src/integration/assets/opencode/herdr-tui-session.test.ts
 
 # Run plugin marketplace Worker tests
 plugin-marketplace-test:
@@ -106,10 +134,11 @@ build-libghostty-vt:
 
 # Check that release docs and changelog have been finalized from docs/next before release
 release-docs-check:
-    python3 scripts/agent_detection_manifest_check.py --require-website
+    python3 scripts/agent_detection_manifest_check.py --require-all-published
     python3 scripts/config_reference_check.py
-    node website/scripts/docs-versions.mjs check
-    node website/scripts/docs-preview.mjs check
+    node scripts/docs/versions.mjs check
+    node scripts/docs/preview.mjs check
+    just docs-contract-test
     @test -f docs/next/README.md
     @test -f docs/next/README.zh-CN.md
     @if ! diff -u CHANGELOG.md docs/next/CHANGELOG.md; then \
@@ -118,7 +147,7 @@ release-docs-check:
     fi
     @for file in CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
         if [ -e "$file" ]; then \
-            echo "error: $file was replaced by website docs; remove the root copy"; \
+            echo "error: $file was replaced by technical docs; remove the root copy"; \
             exit 1; \
         fi; \
     done
@@ -140,8 +169,6 @@ release-docs-check:
         fi; \
     done
     python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
-    just website-build
-    cd website && bun run build:draft
 
 # Prepare the release commit without tagging or pushing (usage: just release-prepare 0.1.1)
 release-prepare version:
@@ -149,8 +176,10 @@ release-prepare version:
         echo "error: version must look like 0.6.6 without a v prefix"; \
         exit 1; \
     }
-    @if [ -n "$(git status --porcelain)" ]; then \
-        echo "error: commit your changes first"; \
+    @if ! git diff --quiet -- . ':(exclude)skills/herdr/SKILL.md' || \
+        ! git diff --cached --quiet -- . ':(exclude)skills/herdr/SKILL.md' || \
+        [ -n "$(git ls-files --others --exclude-standard)" ]; then \
+        echo "error: commit all changes except skills/herdr/SKILL.md first"; \
         exit 1; \
     fi
     @git fetch origin master --tags
@@ -158,13 +187,13 @@ release-prepare version:
         echo "error: tag v{{version}} already exists"; \
         exit 1; \
     fi
-    just release-docs-check
+    just pre-release-check
     python3 scripts/changelog.py prepare --version {{version}}
     cp CHANGELOG.md docs/next/CHANGELOG.md
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline
     just check
-    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock
+    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock skills/herdr/SKILL.md
     git diff --cached --quiet || git commit -m "release: v{{version}}"
     @echo "v{{version}} release commit prepared. Review it, then run: just release-publish {{version}}"
 
@@ -208,7 +237,7 @@ release-publish version:
     fi
     git tag -a v{{version}} -m "v{{version}}"
     git push origin v{{version}}
-    @echo "v{{version}} released — GitHub Actions building binaries and updating website/latest.json"
+    @echo "v{{version}} released — GitHub Actions building binaries and updating distribution/latest.json"
 
 # Prepare, verify, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:

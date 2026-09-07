@@ -50,6 +50,18 @@ herdr server reload-config
 
 重载会在不重启窗格的情况下应用大多数 UI 设置。仅启动时生效的设置仍需重启。
 
+## 无客户端终端尺寸
+
+没有客户端连接时，服务器会使用 120×40 的虚拟终端进行布局并创建新窗格。可通过以下配置更改用于无客户端编排的回退尺寸：
+
+```toml
+[server]
+headless_cols = 160
+headless_rows = 50
+```
+
+客户端连接后，其尺寸仍决定共享运行时的大小。客户端断开后，现有窗格 PTY 会保留上次连接时的尺寸，而新的无客户端布局会使用配置的回退值。
+
 ## 终端默认值
 
 设置 Herdr 创建新交互式窗格时使用的可执行文件：
@@ -120,6 +132,30 @@ manage_ssh_config = true
 
 启用后，`herdr --remote` 会写入一份私有的临时 SSH 配置：先包含用户和系统 SSH 配置，再添加兜底的 `ServerAliveInterval` 和 `ServerAliveCountMax` 值。你自己的保活设置优先。Linux 和 macOS 客户端还会为每次远程连接使用私有的 OpenSSH control socket，以复用首次通过身份验证的连接；Windows OpenSSH 不使用此复用方式。设置 `manage_ssh_config = false` 可通过普通 `ssh` 进行远程连接，不使用 Herdr 生成的配置或 control socket。
 
+## 集群状态主机
+
+`herdr fleet status` 会并行读取本地 Herdr 套接字和远程主机。在 `[remote.fleet]` 下配置每个显示名称和 SSH 目标：
+
+```toml
+[remote.fleet]
+timeout_ms = 5000
+heartbeat_stale_ms = 1800000
+
+[[remote.fleet.hosts]]
+name = "laptop"
+local = true
+socket = "/Users/you/.config/herdr/herdr.sock"
+
+[[remote.fleet.hosts]]
+name = "workbox"
+target = "workbox"
+socket = "/home/you/.config/herdr/herdr.sock"
+```
+
+`name` 是表格标签，也是 `--hosts` 接受的值。`target` 是 OpenSSH 配置别名或 `user@host`。对应该不经 SSH 直接读取本地套接字的条目设置 `local = true`。`socket` 可选，用于覆盖该主机上常规的 Herdr 套接字路径。
+
+每台主机的超时适用于整个读取过程。无法访问或响应缓慢的主机会产生一条 `STATUS UNKNOWN` 主机行，而可访问的主机仍会正常显示。`heartbeat_stale_ms` 控制未结束的无窗口运行何时失去 live 状态；默认值为 30 分钟。
+
 ## 按键绑定
 
 有关前缀键的引导式介绍和经过验证的免前缀配置，请参阅[键盘](/docs/keyboard/)。
@@ -156,7 +192,15 @@ split_up = "prefix+shift+minus"
 next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 ```
 
-可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。
+可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。例如，可以像 tmux 一样通过一次按键调整窗格大小，而无需进入调整大小模式：
+
+```toml
+[keys]
+resize_pane_left = "ctrl+shift+alt+left"
+resize_pane_down = "ctrl+shift+alt+down"
+resize_pane_up = "ctrl+shift+alt+up"
+resize_pane_right = "ctrl+shift+alt+right"
+```
 
 按键字符串支持普通按键、`ctrl+a`、`shift+n`、`alt+1`、`cmd+k` 等修饰组合键，以及 `enter`、`tab`、`esc`、`left`、`right`、`up`、`down` 等特殊键。也支持 `minus`、`comma`、`ampersand`、`plus`、`backtick` 等命名标点。直接绑定 `n` 这样的普通可打印键并不安全，因为它会拦截输入；除非你有意设置直接绑定，否则请使用 `prefix+n`。`navigate_workspace_*` 和 `navigate_pane_*` 字段仅在导航模式中生效，可以使用 `j` 或 `k` 等普通按键；它们不得使用 `prefix+`、`esc`、`enter`、`tab`、`shift+tab`、`left`、`right`，也不得使用无修饰键的 `1` 到 `9`。左右方向键是向左和向右导航窗格的永久别名。这些导航模式快捷键独立于 `focus_pane_down = "prefix+j"` 等通用动作绑定；两者使用同一按键时，打开导航模式后，导航模式快捷键优先。Alt、Cmd/Super 以及带修饰键的标点取决于你的终端和 tmux 设置。
 
@@ -230,6 +274,22 @@ description = "apply layout"
 
 在 Windows 上，自定义命令字符串使用 `cmd.exe /d /c`，因此环境变量应采用 `%HERDR_BIN_PATH%` 语法。若要运行 PowerShell 语法，请显式调用它，例如 `powershell.exe -NoProfile -Command "..."`。
 
+## 用户自定义操作
+
+用户自定义操作显示在顶栏 `+ Action` 之后，以及按键绑定帮助的 **User actions** 下。通过顶栏弹窗或 `[[actions]]` 表添加它们：
+
+```toml
+[[actions]]
+name = "test"
+command = "just test"
+key = "ctrl-b t" # 可选；使用常规的按键绑定语法
+run_on_worktree_create = false
+open_in_bottom_pane = true
+repo = "owner/project" # 可选；省略则在所有仓库中显示该操作
+```
+
+只有当 `open_in_bottom_pane = false` 且该窗格的前台进程是 shell 时，操作才会在聚焦的终端中运行。否则 Herdr 会打开共享的底部命令窗格。worktree 创建时的操作会在新代理启动之前按顺序运行；失败的命令只留下警告，不会阻塞代理。
+
 ## 主题
 
 选择内置主题：
@@ -270,6 +330,23 @@ yellow = "#f9e2af"
 
 颜色值支持十六进制、命名颜色、`rgb(r,g,b)`，以及 `reset`、`default`、`none`、`transparent` 等重置别名。
 
+启用 `auto_switch` 后，可以通过明暗模式子表在共享自定义颜色之上应用不同的覆盖值：
+
+```toml
+[theme.custom]
+accent = "#89b4fa"
+
+[theme.custom.light]
+panel_bg = "#eff1f5"
+text = "#4c4f69"
+
+[theme.custom.dark]
+panel_bg = "#1e1e2e"
+text = "#cdd6f4"
+```
+
+有效调色板按以下顺序应用：内置主题、`[theme.custom]`，然后是 `[theme.custom.light]` 或 `[theme.custom.dark]`。省略模式子表时，会保留现有的共享覆盖行为。
+
 ## UI 与侧边栏
 
 侧边栏是 Herdr 的主仪表盘。桌面侧边栏从上到下依次为 Blocked、Prio、适用时的 Agents 或 Pinned，最后是 Spaces。Blocked 即使为 0 也会显示，便于确认没有窗格在等待输入。Spaces 是标准归属树：仓库与其关联 worktree 共用一个 Space 行；每个标签页都直接显示为一个窗口子项，包括未检测到智能体或包含多个窗格的标签页。紧凑视图和移动视图也保留同一棵归属树。选中状态通过前景色和粗体显示，不使用强背景色。
@@ -290,6 +367,97 @@ enabled = false
 ```
 
 禁用状态行也会停止后台指标采样器，因此隐藏期间不会收集任何数据。
+
+在 `[ui]` 下设置 `tab_bar_position = "bottom"`，可将桌面标签栏放到终端窗格下方。Prefix、Navigate、Copy 和 Resize 模式栏会在显示期间临时替换底部标签栏。默认值为 `"top"`。
+
+可在标签栏右侧配置一个类似 tmux 的有序状态区：
+
+```toml
+[ui]
+tab_bar_right = [
+  { type = "zoom" },
+  { type = "hostname" },
+  { type = "datetime", format = "%H:%M" },
+  { type = "text", text = "prod" },
+  { type = "command", command = "~/.config/herdr/status.sh", interval_seconds = 5, timeout_seconds = 2 },
+]
+tab_bar_right_separator = " · "
+```
+
+状态区默认为空。添加 `zoom` 后，活动标签页处于缩放状态时会显示固定的 `ZOOM` 标记；它与现有的逐标签页 `Z` 标记相互独立。`hostname`、`datetime` 和 `command` 在 Herdr 服务器上解析，因此使用 `herdr --remote` 时会显示远程机器的值。日期时间条目使用 `strftime` 格式。由于该值是服务器本地的墙上时钟时间，需要 UTC 偏移量或 Unix 时间戳的 `%z`、`%s` 等指令会被拒绝。
+
+命令条目会立即运行，之后按 `interval_seconds` 刷新，不会阻塞渲染，也不会与上一次运行重叠。间隔范围为 1–31,536,000 秒，超时范围为 1–3,600 秒。Herdr 使用成功输出的最后一行；执行失败、输出为空或超过 `timeout_seconds` 后会清除该值。命令会获得与自定义命令按键绑定相同的活动工作区、标签页、窗格、socket、二进制文件和工作目录上下文。Linux、macOS 和 Windows 均支持命令条目；Linux 和 macOS 使用 `/bin/sh -lc`，Windows 使用 `cmd.exe /d /c`。
+
+分隔符只会出现在可见条目之间。设置 `tab_bar_right_separator = ""` 可直接连接条目。标签栏较窄时，整个状态区会让位给标签页及其控件。
+
+### 外层终端窗口标题
+
+Herdr 会模拟各窗格中的终端，因此窗格内写入的 `OSC 0`/`OSC 2` 标题只会停留在 Herdr。Herdr 会向自己所运行的终端写入自己的标题，窗口管理器和终端标签栏读取的正是这个标题：
+
+```toml
+[ui]
+window_title = "{hostname}: {workspace}"
+```
+
+可用记号为 `{hostname}`、`{workspace}`、`{tab}`、`{pane}`（聚焦窗格的手动名称）和 `{terminal_title}`（聚焦窗格自身的终端标题，已去除加载动画字符）。用 `{{` 和 `}}` 表示字面花括号。没有值的记号会渲染为空。
+
+标题在 Herdr 服务器上生成，因此即使通过 `herdr --remote` 连接或经由 SSH 运行 `herdr`，`{hostname}` 仍然指向运行窗格的那台机器。设置 `window_title = ""` 可以不改动外层终端标题。
+
+`client.window_title.set` 会覆盖配置的标题，直到 `client.window_title.clear` 将其交还。
+
+智能体状态默认使用紧凑的彩色圆点。若要同时通过形状和颜色区分 blocked、working、done、idle 与 unknown 状态，请在设置中选择 **distinct symbols**，或配置：
+
+```toml
+[ui]
+status_indicators = "symbols"
+```
+
+这些符号是静态的，因此该选项不会启用旋转动画。
+
+### 用量视图
+
+侧边栏页脚的 `▥` 和 `keys.usage` 会打开本地用量仪表盘。Herdr 在后台线程中从 `~/.claude/projects/**/*.jsonl` 读取 Claude Code 历史，从 `~/.codex/sessions/**` 读取 Codex 历史。Codex 的总量使用增量的 `token_usage_record.payload.usage` 值，模型取自对应的 `turn_context.payload.model`。该视图把按文件的聚合结果保存在 `<state-dir>/usage-cache.json` 中；路径、修改时间和大小均未变化的条目会在后续扫描中被复用。
+
+费用是按 API 标价估算的，并不代表订阅账单。可以用 `[usage.pricing]` 覆盖内置的每百万 token 美元默认值：
+
+```toml
+[usage.pricing]
+claude-fable-5-1 = { input = 1.0, output = 5.0, cache_write = 1.25, cache_read = 0.10 }
+claude-opus-5 = { input = 15.0, output = 75.0, cache_write = 18.75, cache_read = 1.50 }
+claude-sonnet-5 = { input = 3.0, output = 15.0, cache_write = 3.75, cache_read = 0.30 }
+claude-haiku-4-5 = { input = 1.0, output = 5.0, cache_write = 1.25, cache_read = 0.10 }
+gpt-5.6-sol = { input = 1.25, output = 10.0, cache_write = 1.25, cache_read = 0.125 }
+gpt-5.6-luna = { input = 0.25, output = 2.0, cache_write = 0.25, cache_read = 0.025 }
+gpt-5.3-codex-spark = { input = 0.25, output = 2.0, cache_write = 0.25, cache_read = 0.025 }
+```
+
+未知的模型 id 仍会计入 token 和会话总量。在添加价格条目之前，其费用显示为 `—`。
+
+### 通用设置键
+
+**Settings → General** 中的每一行恰好写入一个键。Herdr 只重写该键，配置文件的其余部分逐字节保持不变。
+
+```toml
+[ui]
+# 即使检出根目录不同 (例如同一个仓库从两台主机挂载)，也把检出同一仓库的
+# 工作区归入一个项目标题下。默认: false，每个检出根目录一个标题。
+combine_repos_across_hosts = false
+
+# 在 diff 界面中隐藏仅空白字符的更改。默认: false。
+hide_whitespace_in_diff = false
+
+# 在 Home 编辑器中为新线程预选的工作区。
+# "current_checkout" 在选中的目录中启动；"new_worktree" 会先创建一个
+# 链接的 worktree。默认: "current_checkout"。
+new_thread_workspace = "current_checkout"
+
+# 添加项目选择器的起始目录。留空则保持上次使用的目录，这是默认值。
+add_project_start_dir = ""
+
+# 关闭工作区之前，以及从侧边栏菜单或设置归档中删除已结束的线程之前进行确认。
+# 默认: true。
+confirm_close = true
+```
 
 ### 侧边栏行布局
 
@@ -381,6 +549,56 @@ herdr pane report-metadata <pane_id> \
 元数据上报方只提供值；样式由本地侧边栏配置控制。有关限制、清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
 
 固定的 Space/窗口投影在展开桌面、折叠和移动视图中保持一致。旧版行设置只影响兼容投影。
+
+## 文件停靠栏
+
+文件停靠栏默认使用可移植的双字符徽章。如果终端字体包含 Nerd Font 字形，可以选择启用文件图标：
+
+```toml
+[files]
+icons = "nerd"
+```
+
+## 源代码管理
+
+Settings → Source control 显示以下键。它们的默认值保持 Herdr 之前的行为：
+
+```toml
+[source_control]
+# 用于从缓存的 diff (缓存为空时为未暂存的 diff) 起草 conventional commit
+# 消息的 Claude Code 或 Codex 模型。留空 (默认) 则原样运行 `git commit`。
+# 只接受纯模型名称。
+commit_message_model = ""
+
+# 在起草和提交之前暂存工作树的所有更改。默认不改动索引。
+commit_stage_all = false
+
+# Herdr 为从工单派生的分支名添加的前缀，例如 issue/sca-3165-image-edit。
+# 默认: "issue/"。
+branch_prefix = "issue/"
+```
+
+旁边显示的 worktree 根目录是 `worktrees.directory`。
+
+## Missive
+
+Missive 的读取使用公开 API，绝不会写入会话状态。`team` 和 `organization` 是 Missive 的 Settings > API > Resource IDs 页面中的资源 ID。`token_env` 指定每次请求运行时 Herdr 读取的环境变量名。不要把 token 的值写进这个文件。
+
+```toml
+[missive]
+token_env = "MISSIVE_API_TOKEN"
+team = "team-uuid"
+organization = "organization-uuid"
+```
+
+## 拉取请求落地
+
+Land 操作要求检查全部成功、合并状态干净，并且具有已批准的审查或已配置的标签之一。默认标签是 `approved`：
+
+```toml
+[land]
+approval_label = "approved"
+```
 
 ## 通知
 

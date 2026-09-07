@@ -12,10 +12,14 @@
 //! - Forwards OSC 52 clipboard writes from server to its own stdout
 //! - Displays sound/toast notifications forwarded from server
 
+#[cfg(unix)]
+mod direct_graphics;
 mod input;
 pub(crate) mod presentation;
 
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::io::IsTerminal as _;
 use std::io::{self, BufRead, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -77,6 +81,12 @@ struct ClientState {
     sound_config: crate::config::SoundConfig,
     /// Whether this client may write Kitty graphics bytes to its host terminal.
     kitty_graphics_enabled: bool,
+    /// One bounded matcher, inactive unless a direct transmission is armed.
+    #[cfg(unix)]
+    direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
+    /// One server-retired direct transfer to suppress if it was still queued.
+    #[cfg(unix)]
+    retired_direct_graphics: Option<(u64, u32)>,
     /// Direct attach prefix escape state. None for full-app clients.
     attach_escape: Option<AttachEscapeState>,
     /// Rows scrolled for one direct-attach wheel notch.
@@ -220,6 +230,7 @@ struct AttachEscapeState {
 #[cfg(unix)]
 enum AttachInputAction {
     Forward(Vec<u8>),
+    ForwardAfterPendingPrefix(Vec<u8>),
     Scroll {
         source: AttachScrollSource,
         direction: AttachScrollDirection,
@@ -241,6 +252,14 @@ impl AttachEscapeState {
         mouse_scroll_lines: usize,
     ) -> AttachInputAction {
         const PREFIX: u8 = 0x02; // Ctrl+B
+
+        if crate::raw_input::is_complete_text_bracketed_paste(&data) {
+            return if std::mem::take(&mut self.pending_prefix) {
+                AttachInputAction::ForwardAfterPendingPrefix(data)
+            } else {
+                AttachInputAction::Forward(data)
+            };
+        }
 
         let mut output = Vec::with_capacity(data.len());
         for byte in data {
@@ -454,11 +473,11 @@ fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
 
 /// Sets up a direct attach terminal.
 ///
-/// Direct attach forwards stdin to the attached PTY. It enables mouse capture
-/// so wheel events can drive the attached viewport or be forwarded to child
+/// Direct attach forwards stdin to the attached PTY. When configured, mouse
+/// capture lets wheel events drive the attached viewport or reach child
 /// programs that requested mouse input.
-fn setup_direct_attach_terminal() -> io::Result<TerminalGuard> {
-    setup_terminal_with_capabilities(false, true)
+fn setup_direct_attach_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
+    setup_terminal_with_capabilities(false, mouse_capture)
 }
 
 fn setup_terminal_with_capabilities(
@@ -470,12 +489,18 @@ fn setup_terminal_with_capabilities(
     let host_color_scheme_reports =
         should_enable_host_color_scheme_reports(enable_client_protocols);
 
-    if enable_client_protocols {
-        if mouse_capture {
-            set_mouse_capture(true)?;
+    #[cfg(windows)]
+    let windows_ssh_session = is_ssh_session();
+    #[cfg(windows)]
+    let mut windows_virtual_terminal_input =
+        if windows_vti_input_backend_enabled() && windows_ssh_session {
+            enable_windows_virtual_terminal_input()
         } else {
-            set_mouse_capture(false)?;
-        }
+            WindowsVirtualTerminalInputSetup::default()
+        };
+
+    if enable_client_protocols {
+        set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         if host_color_scheme_reports {
             write_host_color_scheme_report_mode(&mut io::stdout(), true)?;
@@ -485,20 +510,14 @@ fn setup_terminal_with_capabilities(
         if should_query_host_terminal_theme() {
             write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
         }
-        if mouse_capture {
-            set_mouse_capture(true)?;
-        } else {
-            set_mouse_capture(false)?;
-        }
+        set_mouse_capture(mouse_capture, false)?;
+        execute!(io::stdout(), EnableBracketedPaste)?;
     }
 
     #[cfg(windows)]
-    let windows_virtual_terminal_input =
-        if enable_client_protocols && windows_vti_input_backend_enabled() {
-            enable_windows_virtual_terminal_input()
-        } else {
-            WindowsVirtualTerminalInputSetup::default()
-        };
+    if enable_client_protocols && windows_vti_input_backend_enabled() && !windows_ssh_session {
+        windows_virtual_terminal_input = enable_windows_virtual_terminal_input();
+    }
 
     #[cfg(windows)]
     if enable_client_protocols
@@ -527,6 +546,7 @@ fn setup_terminal_with_capabilities(
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
         reset_host_color_scheme_reports: host_color_scheme_reports,
+        restored: false,
         #[cfg(windows)]
         restore_windows_input_mode: windows_virtual_terminal_input.restore_mode,
     })
@@ -540,6 +560,7 @@ fn should_enable_host_color_scheme_reports(enable_client_protocols: bool) -> boo
 struct TerminalGuard {
     reset_modify_other_keys: bool,
     reset_host_color_scheme_reports: bool,
+    restored: bool,
     #[cfg(windows)]
     restore_windows_input_mode: Option<u32>,
 }
@@ -665,10 +686,23 @@ fn restore_windows_input_mode_value(mode: u32) {
     }
 }
 
-fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
     crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
+    #[cfg(windows)]
+    if is_ssh_session() && windows_vti_input_backend_enabled() {
+        return crate::terminal_modes::set_windows_ssh_mouse_reporting(
+            &mut io::stdout(),
+            enabled,
+            sgr_pixels,
+        );
+    }
     if enabled {
-        execute!(io::stdout(), EnableMouseCapture)
+        execute!(io::stdout(), EnableMouseCapture)?;
+        if sgr_pixels {
+            io::stdout().write_all(b"\x1b[?1016h")?;
+            io::stdout().flush()?;
+        }
+        Ok(())
     } else {
         match execute!(io::stdout(), DisableMouseCapture) {
             Ok(()) => Ok(()),
@@ -683,7 +717,7 @@ fn restore_terminal_state(
     reset_modify_other_keys: bool,
     reset_host_color_scheme_reports: bool,
     #[cfg(windows)] restore_windows_input_mode: Option<u32>,
-) {
+) -> io::Result<()> {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
@@ -698,22 +732,24 @@ fn restore_terminal_state(
         io::stdout(),
         EnableLineWrap,
         DisableFocusChange,
-        DisableBracketedPaste,
-        DisableMouseCapture
+        DisableBracketedPaste
     );
-    let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
+    let _ = set_mouse_capture(false, false);
     #[cfg(windows)]
     if let Some(mode) = restore_windows_input_mode {
         restore_windows_input_mode_value(mode);
     }
 
-    ratatui::restore();
-    let _ = write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
+    let restore_result = ratatui::try_restore();
+    let postlude_result =
+        write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
 
     #[cfg(windows)]
     if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
         let _ = disable_windows_win32_input_mode(&mut io::stdout());
     }
+
+    restore_result.and(postlude_result)
 }
 
 #[cfg(not(windows))]
@@ -758,14 +794,28 @@ fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Res
     writer.flush()
 }
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
+impl TerminalGuard {
+    fn restore(mut self) -> io::Result<()> {
+        self.restored = true;
         restore_terminal_state(
             self.reset_modify_other_keys,
             self.reset_host_color_scheme_reports,
             #[cfg(windows)]
             self.restore_windows_input_mode,
-        );
+        )
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = restore_terminal_state(
+                self.reset_modify_other_keys,
+                self.reset_host_color_scheme_reports,
+                #[cfg(windows)]
+                self.restore_windows_input_mode,
+            );
+        }
     }
 }
 
@@ -784,6 +834,10 @@ fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
 
+fn is_ssh_session() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
 /// Time to wait for the server's Welcome reply during the handshake.
 ///
 /// A local client talks to an already-connected server, so 5s is plenty. The
@@ -799,6 +853,43 @@ fn handshake_read_timeout() -> Duration {
         return REMOTE_HANDSHAKE_READ_TIMEOUT;
     }
     LOCAL_HANDSHAKE_READ_TIMEOUT
+}
+
+#[cfg(any(unix, test))]
+fn direct_graphics_profile_values(
+    term_program: &str,
+    term: &str,
+    kitty_window: bool,
+    blocked_transport: bool,
+    terminals: bool,
+) -> bool {
+    let supported = term_program.eq_ignore_ascii_case("ghostty")
+        || term_program.eq_ignore_ascii_case("wezterm")
+        || matches!(term, "xterm-ghostty" | "xterm-kitty" | "xterm-wezterm")
+        || kitty_window;
+    supported && !blocked_transport && terminals
+}
+
+#[cfg(unix)]
+fn direct_graphics_profile_allowed(direct_attach: bool) -> bool {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let term = std::env::var("TERM").unwrap_or_default();
+    direct_graphics_profile_values(
+        &term_program,
+        &term,
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        direct_attach
+            || is_remote_client_process()
+            || is_ssh_session()
+            || std::env::var_os("TMUX").is_some()
+            || std::env::var_os("STY").is_some(),
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+    )
+}
+
+#[cfg(not(unix))]
+fn direct_graphics_profile_allowed(_direct_attach: bool) -> bool {
+    false
 }
 
 fn requested_keybindings() -> ClientKeybindings {
@@ -842,6 +933,25 @@ fn set_handshake_recv_timeout(
         .map_err(ClientError::ConnectionFailed)
 }
 
+fn client_launch_mode(
+    direct_attach_requested: bool,
+    exact_cell_size: bool,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> ClientLaunchMode {
+    if direct_attach_requested {
+        ClientLaunchMode::TerminalAttach
+    } else if exact_cell_size
+        && cell_width_px > 0
+        && cell_height_px > 0
+        && direct_graphics_profile_allowed(false)
+    {
+        ClientLaunchMode::AppDirectGraphics
+    } else {
+        ClientLaunchMode::App
+    }
+}
+
 /// Performs the client→server handshake.
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
@@ -852,6 +962,7 @@ fn do_handshake(
     rows: u16,
     cell_width_px: u32,
     cell_height_px: u32,
+    exact_cell_size: bool,
     requested_encoding: RenderEncoding,
     direct_attach_requested: bool,
     dock_width: u16,
@@ -869,11 +980,12 @@ fn do_handshake(
         cell_height_px,
         requested_encoding,
         keybindings: requested_keybindings(),
-        launch_mode: if direct_attach_requested {
-            ClientLaunchMode::TerminalAttach
-        } else {
-            ClientLaunchMode::App
-        },
+        launch_mode: client_launch_mode(
+            direct_attach_requested,
+            exact_cell_size,
+            cell_width_px,
+            cell_height_px,
+        ),
     };
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
@@ -920,6 +1032,11 @@ enum ClientLoopEvent {
     /// Raw input bytes from stdin.
     #[cfg(unix)]
     StdinInput(Vec<u8>),
+    /// One confirmed SGR pixel report with geometry captured by the reader.
+    #[cfg(unix)]
+    PixelMouse(Vec<u8>, crate::input::mouse::HostGeometry),
+    #[cfg(unix)]
+    DirectGraphicsResponse(direct_graphics::Response),
     /// Structured input events from platforms without Unix-style stdin bytes.
     #[cfg(windows)]
     StdinEvents(Vec<crate::protocol::ClientInputEvent>),
@@ -1048,6 +1165,7 @@ fn connect_terminal_session_stream(
         rows,
         0,
         0,
+        false,
         RenderEncoding::TerminalAnsi,
         true,
         crate::ui::DOCK_DEFAULT_WIDTH,
@@ -1271,7 +1389,7 @@ fn run_client_with_mode(
     };
 
     // Get the terminal geometry before handshake (before raw mode).
-    let (cols, rows, cell_width_px, cell_height_px) =
+    let (cols, rows, cell_width_px, cell_height_px, exact_cell_size) =
         initial_terminal_geometry(kitty_graphics_enabled);
 
     // Perform handshake while the stream is still in blocking mode.
@@ -1281,6 +1399,7 @@ fn run_client_with_mode(
         rows,
         cell_width_px,
         cell_height_px,
+        exact_cell_size,
         requested_encoding,
         direct_attach_requested,
         dock_width,
@@ -1307,7 +1426,7 @@ fn run_client_with_mode(
     // so we don't leave the terminal in raw mode if the server rejects us.
     let direct_attach = attach_escape.is_some();
     let terminal_guard = if direct_attach {
-        setup_direct_attach_terminal()
+        setup_direct_attach_terminal(mouse_capture)
     } else {
         setup_terminal(mouse_capture)
     }
@@ -1323,7 +1442,7 @@ fn run_client_with_mode(
     let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(
+        let _ = restore_terminal_state(
             panic_resets_modify_other_keys,
             panic_resets_host_color_scheme_reports,
             #[cfg(windows)]
@@ -1365,19 +1484,22 @@ fn run_client_with_mode(
     });
 
     // Restore the terminal before printing any final status message.
-    drop(terminal_guard);
+    let terminal_restore_failed = terminal_guard.restore().is_err();
 
     if let Err(err) = result {
-        eprintln!("herdr: {err}");
+        let _ = writeln!(io::stderr(), "herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
         crate::logging::shutdown("client");
 
-        if matches!(
-            err,
+        let detached = matches!(
+            &err,
             ClientError::ServerShutdown {
                 reason: Some(reason)
             } if reason == "detached"
-        ) {
+        );
+        let connection_lost_during_terminal_hangup =
+            terminal_restore_failed && matches!(&err, ClientError::ConnectionLost(_));
+        if detached || connection_lost_during_terminal_hangup {
             return Ok(());
         }
 
@@ -1419,6 +1541,10 @@ async fn run_client_loop(
         reported_size: (cols, rows),
         sound_config: config.sound_config,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
+        #[cfg(unix)]
+        direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
+        #[cfg(unix)]
+        retired_direct_graphics: None,
         attach_escape,
         #[cfg(unix)]
         mouse_scroll_lines: config.mouse_scroll_lines,
@@ -1430,6 +1556,7 @@ async fn run_client_loop(
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
+    let host_sgr_pixels_active = Arc::new(AtomicBool::new(false));
     // Cell size reported by the host terminal, packed as width<<32 | height.
     // Zero means the host has not reported one.
     let reported_cell_size = Arc::new(AtomicU64::new(0));
@@ -1451,6 +1578,15 @@ async fn run_client_loop(
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
+    #[cfg(unix)]
+    let stdin_sgr_pixels_active = host_sgr_pixels_active.clone();
+    #[cfg(unix)]
+    let stdin_direct_response = state.direct_graphics_response.clone();
+    #[cfg(unix)]
+    let stdin_direct_response_active = stdin_direct_response
+        .lock()
+        .map(|matcher| matcher.active_handle())
+        .unwrap_or_default();
     std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
@@ -1459,6 +1595,12 @@ async fn run_client_loop(
             stdin_host_color_query_generation,
             will_query_host_cell_size,
             stdin_mouse_capture_active,
+            #[cfg(unix)]
+            stdin_sgr_pixels_active,
+            #[cfg(unix)]
+            stdin_direct_response,
+            #[cfg(unix)]
+            stdin_direct_response_active,
         );
     });
 
@@ -1472,6 +1614,10 @@ async fn run_client_loop(
         &mut appearance_query_schedule,
         &host_color_query_generation,
     );
+
+    if will_query_host_cell_size {
+        query_host_cell_size();
+    }
 
     if will_query_host_cell_size {
         query_host_cell_size();
@@ -1549,6 +1695,13 @@ async fn run_client_loop(
                         state.mouse_scroll_lines,
                     ) {
                         AttachInputAction::Forward(data) => data,
+                        AttachInputAction::ForwardAfterPendingPrefix(data) => {
+                            let prefix = ClientMessage::Input { data: vec![0x02] };
+                            if let Err(e) = write_to_server(&mut write_stream, &prefix) {
+                                return Err(ClientError::ConnectionLost(e));
+                            }
+                            data
+                        }
                         AttachInputAction::Scroll {
                             source,
                             direction,
@@ -1607,6 +1760,9 @@ async fn run_client_loop(
                     if let Some((width_px, height_px)) = reported_cell_size_from_events(&events) {
                         store_reported_cell_size(&reported_cell_size, width_px, height_px);
                     }
+                    if let Some((width_px, height_px)) = reported_cell_size_from_events(&events) {
+                        store_reported_cell_size(&reported_cell_size, width_px, height_px);
+                    }
                     data
                 };
                 if should_bridge_clipboard_image_paste(
@@ -1629,6 +1785,30 @@ async fn run_client_loop(
                 let msg = ClientMessage::Input { data };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
+                }
+            }
+            #[cfg(unix)]
+            ClientLoopEvent::DirectGraphicsResponse(response) => {
+                let message = ClientMessage::GraphicsTransmissionResult {
+                    transfer_id: response.transfer_id,
+                    image_id: response.image_id,
+                    success: response.success,
+                };
+                if let Err(err) = write_to_server(&mut write_stream, &message) {
+                    return Err(ClientError::ConnectionLost(err));
+                }
+            }
+            #[cfg(unix)]
+            ClientLoopEvent::PixelMouse(data, geometry) => {
+                let message = ClientMessage::InputPixels {
+                    data,
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                    width_px: geometry.width_px,
+                    height_px: geometry.height_px,
+                };
+                if let Err(err) = write_to_server(&mut write_stream, &message) {
+                    return Err(ClientError::ConnectionLost(err));
                 }
             }
             #[cfg(windows)]
@@ -1743,6 +1923,105 @@ async fn run_client_loop(
                         let _ = stdout.flush();
                     }
                 }
+                ServerMessage::TerminalBell { count } => {
+                    if let Err(err) =
+                        crate::terminal_effects::write_terminal_bells(&mut io::stdout(), count)
+                    {
+                        warn!(err = %err, "failed to emit terminal bell");
+                    }
+                }
+                ServerMessage::GraphicsFile {
+                    path,
+                    expected_len,
+                    image_id,
+                    transfer_id,
+                    leading,
+                    control,
+                } => {
+                    #[cfg(unix)]
+                    {
+                        if state.retired_direct_graphics.take() == Some((transfer_id, image_id)) {
+                            continue;
+                        }
+                        let valid = state.kitty_graphics_enabled
+                            && usize::try_from(expected_len).ok().is_some_and(|len| {
+                                crate::pane_graphics_files::validate_direct_source(
+                                    std::path::Path::new(&path),
+                                    len,
+                                )
+                                .is_ok()
+                                    && direct_graphics::valid_control(&control, image_id, len)
+                            })
+                            && state
+                                .direct_graphics_response
+                                .lock()
+                                .is_ok_and(|mut matcher| matcher.arm(transfer_id, image_id));
+                        let sent = if valid {
+                            let mut command = Vec::new();
+                            crate::kitty_graphics::encode_kitty_regular_file(
+                                &mut command,
+                                &leading,
+                                &control,
+                                &path,
+                            );
+                            let mut stdout = io::stdout();
+                            let written = stdout
+                                .write_all(&command)
+                                .and_then(|()| stdout.flush())
+                                .is_ok();
+                            if written {
+                                record_received_kitty_graphics(&command);
+                            }
+                            written
+                        } else {
+                            false
+                        };
+                        if sent {
+                            if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                                matcher.start(transfer_id);
+                            }
+                            let started = ClientMessage::GraphicsTransmissionStarted {
+                                transfer_id,
+                                image_id,
+                            };
+                            if let Err(err) = write_to_server(&mut write_stream, &started) {
+                                return Err(ClientError::ConnectionLost(err));
+                            }
+                        } else {
+                            if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                                if valid {
+                                    matcher.retire(transfer_id);
+                                } else {
+                                    matcher.cancel(transfer_id);
+                                }
+                            }
+                            let result = ClientMessage::GraphicsTransmissionResult {
+                                transfer_id,
+                                image_id,
+                                success: false,
+                            };
+                            if let Err(err) = write_to_server(&mut write_stream, &result) {
+                                return Err(ClientError::ConnectionLost(err));
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = (path, expected_len, image_id, transfer_id, leading, control);
+                }
+                ServerMessage::GraphicsTransmissionRetired {
+                    transfer_id,
+                    image_id,
+                } => {
+                    #[cfg(unix)]
+                    {
+                        state.retired_direct_graphics = Some((transfer_id, image_id));
+                        if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                            matcher.retire(transfer_id);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = (transfer_id, image_id);
+                }
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
                 }
@@ -1758,8 +2037,10 @@ async fn run_client_loop(
                     let _ = io::stdout().flush();
                 }
                 ServerMessage::WindowTitle { title } => {
-                    write_window_title(title.as_deref());
-                    let _ = io::stdout().flush();
+                    let _ = crate::terminal_effects::write_window_title(
+                        &mut io::stdout(),
+                        title.as_deref(),
+                    );
                 }
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_client_config(
@@ -1772,17 +2053,28 @@ async fn run_client_loop(
                 ServerMessage::DockWidth { width } => {
                     presentation::save_dock_width(width);
                 }
-                ServerMessage::MouseCapture { enabled } => {
-                    let desired = enabled;
-                    if desired != state.mouse_capture_active {
-                        set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
+                ServerMessage::MouseCapture {
+                    enabled,
+                    sgr_pixels,
+                } => {
+                    let next_sgr_pixels = enabled && sgr_pixels;
+                    let mouse_mode_changed = enabled != state.mouse_capture_active
+                        || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
+                    if mouse_mode_changed {
                         #[cfg(windows)]
-                        if windows_vti_input_backend_enabled() {
+                        if enabled && windows_vti_input_backend_enabled() && is_ssh_session() {
                             let _ = enable_windows_virtual_terminal_input();
                         }
-                        state.mouse_capture_active = desired;
-                        host_mouse_capture_active.store(desired, Ordering::Release);
+                        set_mouse_capture(enabled, next_sgr_pixels)
+                            .map_err(ClientError::ConnectionFailed)?;
+                        #[cfg(windows)]
+                        if enabled && windows_vti_input_backend_enabled() && !is_ssh_session() {
+                            let _ = enable_windows_virtual_terminal_input();
+                        }
                     }
+                    state.mouse_capture_active = enabled;
+                    host_mouse_capture_active.store(enabled, Ordering::Release);
+                    host_sgr_pixels_active.store(next_sgr_pixels, Ordering::Release);
                 }
                 ServerMessage::KittyKeyboardReportAll { enabled } => {
                     if enabled != state.keyboard_report_all_active {
@@ -1820,7 +2112,12 @@ async fn run_client_loop(
                     "server closed connection",
                 )));
             }
-            ClientLoopEvent::Timer => {}
+            ClientLoopEvent::Timer => {
+                #[cfg(unix)]
+                if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                    matcher.expire();
+                }
+            }
         }
 
         if !appearance_query_emitted_this_iteration {
@@ -2266,19 +2563,6 @@ fn forward_clipboard(data: &str) {
     crate::selection::write_osc52_bytes(&bytes);
 }
 
-fn window_title_osc(title: Option<&str>) -> Vec<u8> {
-    let title = title.unwrap_or("herdr");
-    let safe_title = title
-        .chars()
-        .filter(|ch| !matches!(*ch, '\u{1b}' | '\u{7}' | '\u{9c}'))
-        .collect::<String>();
-    format!("\x1b]0;{safe_title}\x07").into_bytes()
-}
-
-fn write_window_title(title: Option<&str>) {
-    let _ = io::stdout().write_all(&window_title_osc(title));
-}
-
 // ---------------------------------------------------------------------------
 // Frame output
 // ---------------------------------------------------------------------------
@@ -2425,8 +2709,16 @@ fn current_terminal_geometry(
 
 /// Reads the terminal geometry before the handshake, before any host cell
 /// size report can exist.
-fn initial_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32) {
-    current_terminal_geometry(kitty_graphics_enabled, &AtomicU64::new(0))
+fn initial_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32, bool) {
+    let geometry = current_terminal_geometry(kitty_graphics_enabled, &AtomicU64::new(0));
+    let exact_cell_size = !kitty_graphics_enabled || ioctl_cell_size().is_some();
+    (
+        geometry.0,
+        geometry.1,
+        geometry.2,
+        geometry.3,
+        exact_cell_size,
+    )
 }
 
 /// Reports polled changes and terminal wake signals, including resumes.
@@ -2510,7 +2802,9 @@ fn host_terminal_queries_enabled(
 }
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-    let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+    let query = crate::terminal_theme::host_terminal_theme_query_sequence(
+        crate::platform::should_query_host_terminal_palette(),
+    );
     writer.write_all(query.as_bytes())?;
     writer.flush()
 }
@@ -2596,6 +2890,40 @@ mod tests {
         assert!(!resize_report_required(false, size, size));
         assert!(resize_report_required(false, (120, 41, 8, 16), size));
         assert!(resize_report_required(false, (120, 40, 9, 18), size));
+    }
+
+    #[test]
+    fn approximate_cell_size_never_enables_direct_graphics() {
+        assert_eq!(
+            client_launch_mode(false, false, 8, 16),
+            ClientLaunchMode::App
+        );
+        assert_eq!(
+            client_launch_mode(true, false, 8, 16),
+            ClientLaunchMode::TerminalAttach
+        );
+    }
+
+    #[test]
+    fn direct_graphics_profile_is_narrow_and_transport_safe() {
+        for (program, term, kitty, expected) in [
+            ("ghostty", "", false, true),
+            ("WezTerm", "", false, true),
+            ("", "xterm-kitty", false, true),
+            ("", "xterm-256color", true, true),
+            ("", "xterm-256color", false, false),
+        ] {
+            assert_eq!(
+                direct_graphics_profile_values(program, term, kitty, false, true),
+                expected
+            );
+        }
+        assert!(!direct_graphics_profile_values(
+            "ghostty", "", false, true, true
+        ));
+        assert!(!direct_graphics_profile_values(
+            "ghostty", "", false, false, false
+        ));
     }
 
     fn restore_env_var(key: &str, value: Option<OsString>) {
@@ -2920,7 +3248,10 @@ mod tests {
         write_host_terminal_theme_query(&mut output).unwrap();
         assert_eq!(
             output,
-            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence(
+                crate::platform::should_query_host_terminal_palette(),
+            )
+            .as_bytes()
         );
         assert!(!output
             .windows(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.len())
@@ -2974,7 +3305,10 @@ mod tests {
         }
         assert_eq!(
             output,
-            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence(
+                crate::platform::should_query_host_terminal_palette(),
+            )
+            .as_bytes()
         );
         assert_ne!(
             output,
@@ -3252,6 +3586,38 @@ mod tests {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, vec![0x02]),
             other => panic!("expected forwarded prefix, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_does_not_interpret_bracketed_paste_contents() {
+        let mut escape = AttachEscapeState::default();
+        let paste = b"\x1b[200~one\x02q\ntwo\x1b[201~".to_vec();
+
+        match escape.filter_input(paste.clone(), 24, 3) {
+            AttachInputAction::Forward(bytes) => assert_eq!(bytes, paste),
+            other => panic!("expected opaque paste, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_flushes_pending_prefix_before_bracketed_paste() {
+        let mut escape = AttachEscapeState::default();
+        let paste = b"\x1b[200~one\ntwo\x1b[201~".to_vec();
+        assert!(matches!(
+            escape.filter_input(vec![0x02], 24, 3),
+            AttachInputAction::None
+        ));
+
+        assert!(matches!(
+            escape.filter_input(paste.clone(), 24, 3),
+            AttachInputAction::ForwardAfterPendingPrefix(bytes) if bytes == paste
+        ));
+        assert!(matches!(
+            escape.filter_input(vec![b'q'], 24, 3),
+            AttachInputAction::Forward(bytes) if bytes == b"q"
+        ));
     }
 
     #[cfg(unix)]
@@ -3711,14 +4077,5 @@ mod tests {
         unsafe {
             std::env::remove_var("SSH_CONNECTION");
         }
-    }
-
-    #[test]
-    fn window_title_osc_strips_terminators_and_defaults_to_herdr() {
-        assert_eq!(
-            window_title_osc(Some("herdr\x1b api\u{7}\u{9c}")),
-            b"\x1b]0;herdr api\x07"
-        );
-        assert_eq!(window_title_osc(None), b"\x1b]0;herdr\x07");
     }
 }

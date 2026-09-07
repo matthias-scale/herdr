@@ -128,6 +128,11 @@ pub(crate) fn take_terminal_resize_signal() -> bool {
     false
 }
 
+#[cfg(not(windows))]
+pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
+    title
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardCommand {
@@ -194,6 +199,14 @@ pub(crate) struct RemoteSshConfigPaths {
 
 #[cfg(unix)]
 mod unix_common;
+#[cfg(unix)]
+pub(crate) use unix_common::{begin_cli_output, end_cli_output};
+
+#[cfg(not(unix))]
+pub(crate) fn begin_cli_output() {}
+
+#[cfg(not(unix))]
+pub(crate) fn end_cli_output() {}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -332,6 +345,7 @@ pub(crate) fn interactive_unix_shell_command(
 
 pub(crate) fn quote_powershell_arg(value: &str) -> String {
     if !value.is_empty()
+        && !value.starts_with('-')
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'+' | b'=')
