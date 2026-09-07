@@ -209,6 +209,7 @@ impl App {
                 ratio: None,
                 cwd: Some(root.to_string_lossy().into_owned()),
                 focus: true,
+                right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
             },

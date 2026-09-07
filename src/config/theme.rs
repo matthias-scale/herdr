@@ -3,6 +3,55 @@ use std::time::Duration;
 use serde::Deserialize;
 use tracing::warn;
 
+pub const THEME_NAMES: &[&str] = &[
+    "catppuccin",
+    "catppuccin-latte",
+    "terminal",
+    "tokyo-night",
+    "tokyo-night-day",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "gruvbox-light",
+    "one-dark",
+    "one-light",
+    "github-dark-high-contrast",
+    "github-light-high-contrast",
+    "solarized",
+    "solarized-light",
+    "kanagawa",
+    "kanagawa-lotus",
+    "rose-pine",
+    "rose-pine-dawn",
+    "vesper",
+];
+
+pub(crate) fn canonical_theme_name(name: &str) -> Option<&'static str> {
+    match name.to_lowercase().replace([' ', '_'], "-").as_str() {
+        "catppuccin" | "catppuccin-mocha" => Some("catppuccin"),
+        "catppuccin-latte" | "latte" | "light" => Some("catppuccin-latte"),
+        "terminal" => Some("terminal"),
+        "tokyo-night" | "tokyonight" => Some("tokyo-night"),
+        "tokyo-night-day" | "tokyo-day" | "tokyonight-day" => Some("tokyo-night-day"),
+        "dracula" => Some("dracula"),
+        "nord" => Some("nord"),
+        "gruvbox" | "gruvbox-dark" => Some("gruvbox"),
+        "gruvbox-light" => Some("gruvbox-light"),
+        "one-dark" | "onedark" => Some("one-dark"),
+        "one-light" | "onelight" => Some("one-light"),
+        "github-dark-high-contrast" | "github-dark-hc" => Some("github-dark-high-contrast"),
+        "github-light-high-contrast" | "github-light-hc" => Some("github-light-high-contrast"),
+        "solarized" | "solarized-dark" => Some("solarized"),
+        "solarized-light" => Some("solarized-light"),
+        "kanagawa" => Some("kanagawa"),
+        "kanagawa-lotus" | "lotus" => Some("kanagawa-lotus"),
+        "rose-pine" | "rosepine" => Some("rose-pine"),
+        "rose-pine-dawn" | "rosepine-dawn" | "dawn" => Some("rose-pine-dawn"),
+        "vesper" => Some("vesper"),
+        _ => None,
+    }
+}
+
 use super::{
     DEFAULT_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS, MAX_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
     MIN_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
@@ -47,6 +96,29 @@ impl ThemeConfig {
             );
         Duration::from_secs(seconds)
     }
+
+    pub(crate) fn diagnostics(&self) -> Vec<String> {
+        let valid = THEME_NAMES.join(", ");
+        [
+            ("theme.name", self.name.as_deref(), "catppuccin"),
+            ("theme.dark_name", self.dark_name.as_deref(), "catppuccin"),
+            (
+                "theme.light_name",
+                self.light_name.as_deref(),
+                "catppuccin-latte",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, value, fallback)| {
+            let value = value?;
+            canonical_theme_name(value).is_none().then(|| {
+                format!(
+                    "unknown theme name {field} = {value:?}; using {fallback:?}; valid themes: {valid}"
+                )
+            })
+        })
+        .collect()
+    }
 }
 
 /// Per-token color overrides. All fields optional — only set what you want to change.
@@ -56,6 +128,8 @@ pub struct CustomThemeColors {
     pub accent: Option<String>,
     pub panel_bg: Option<String>,
     pub sidebar_bg: Option<String>,
+    pub active_row_bg: Option<String>,
+    pub selection_bg: Option<String>,
     pub surface0: Option<String>,
     pub surface1: Option<String>,
     pub surface_dim: Option<String>,
@@ -84,6 +158,35 @@ pub struct CustomThemeColors {
     pub work_status_merged: Option<String>,
     /// Status glyph colour for an open pull request or conversation.
     pub work_status_open: Option<String>,
+    /// Overrides applied when `auto_switch` selects a light appearance.
+    pub light: Option<ModeThemeColors>,
+    /// Overrides applied when `auto_switch` selects a dark appearance.
+    pub dark: Option<ModeThemeColors>,
+}
+
+/// Per-token color overrides for one auto-switch appearance.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ModeThemeColors {
+    pub accent: Option<String>,
+    pub panel_bg: Option<String>,
+    pub sidebar_bg: Option<String>,
+    pub active_row_bg: Option<String>,
+    pub selection_bg: Option<String>,
+    pub surface0: Option<String>,
+    pub surface1: Option<String>,
+    pub surface_dim: Option<String>,
+    pub overlay0: Option<String>,
+    pub overlay1: Option<String>,
+    pub text: Option<String>,
+    pub subtext0: Option<String>,
+    pub mauve: Option<String>,
+    pub green: Option<String>,
+    pub yellow: Option<String>,
+    pub red: Option<String>,
+    pub blue: Option<String>,
+    pub teal: Option<String>,
+    pub peach: Option<String>,
 }
 
 /// Parse a color string into a ratatui Color.
@@ -170,6 +273,34 @@ name = "dracula"
     }
 
     #[test]
+    fn unknown_theme_names_are_diagnosed() {
+        let config: Config = toml::from_str(
+            r#"
+[theme]
+name = "catppucin"
+dark_name = "tokio-night"
+light_name = "lattee"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.theme.diagnostics();
+        assert_eq!(diagnostics.len(), 3);
+        assert!(diagnostics[0].contains("theme.name = \"catppucin\""));
+        assert!(diagnostics[0].contains("using \"catppuccin\""));
+        assert!(diagnostics[1].contains("theme.dark_name = \"tokio-night\""));
+        assert!(diagnostics[2].contains("theme.light_name = \"lattee\""));
+        assert!(diagnostics[2].contains("using \"catppuccin-latte\""));
+    }
+
+    #[test]
+    fn theme_name_aliases_are_valid() {
+        for name in ["catppuccin-mocha", "tokyonight", "gruvbox-dark", "dawn"] {
+            assert!(canonical_theme_name(name).is_some(), "alias: {name}");
+        }
+    }
+
+    #[test]
     fn parse_color_accepts_reset_aliases() {
         use ratatui::style::Color;
 
@@ -220,6 +351,35 @@ red = "rgb(255, 85, 85)"
         assert_eq!(custom.accent.as_deref(), Some("#ff79c6"));
         assert_eq!(custom.red.as_deref(), Some("rgb(255, 85, 85)"));
         assert!(custom.green.is_none());
+    }
+
+    #[test]
+    fn theme_custom_mode_overrides_parse() {
+        let toml = r##"
+[theme.custom]
+accent = "#010203"
+
+[theme.custom.light]
+accent = "#040506"
+text = "#070809"
+selection_bg = "#101112"
+
+[theme.custom.dark]
+panel_bg = "#0a0b0c"
+sidebar_bg = "#0d0e0f"
+active_row_bg = "#131415"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let custom = config.theme.custom.as_ref().unwrap();
+        assert_eq!(custom.accent.as_deref(), Some("#010203"));
+        let light = custom.light.as_ref().unwrap();
+        assert_eq!(light.accent.as_deref(), Some("#040506"));
+        assert_eq!(light.text.as_deref(), Some("#070809"));
+        assert_eq!(light.selection_bg.as_deref(), Some("#101112"));
+        let dark = custom.dark.as_ref().unwrap();
+        assert_eq!(dark.panel_bg.as_deref(), Some("#0a0b0c"));
+        assert_eq!(dark.sidebar_bg.as_deref(), Some("#0d0e0f"));
+        assert_eq!(dark.active_row_bg.as_deref(), Some("#131415"));
     }
 
     #[test]

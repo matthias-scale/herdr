@@ -727,7 +727,8 @@ impl AppState {
                 crate::ui::SidebarRow::Agent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
-                | crate::ui::SidebarRow::NestedHeader { .. } => None,
+                | crate::ui::SidebarRow::NestedHeader { .. }
+                | crate::ui::SidebarRow::SymphonyJob { .. } => None,
             })
     }
 
@@ -748,7 +749,8 @@ impl AppState {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
-                | crate::ui::SidebarRow::NestedHeader { .. } => None,
+                | crate::ui::SidebarRow::NestedHeader { .. }
+                | crate::ui::SidebarRow::SymphonyJob { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -764,11 +766,16 @@ impl AppState {
         }
 
         let (cards, _) = crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
-        crate::ui::workspace_drop_slots(self, &cards, area)
-            .into_iter()
-            .enumerate()
-            .min_by_key(|(slot_idx, (_, slot_row))| (row.abs_diff(*slot_row), *slot_idx))
-            .map(|(_, (target, _))| target)
+        let slots = crate::ui::workspace_drop_slots(self, &cards, area);
+        if slots.last().is_some_and(|(_, slot_row)| row <= *slot_row) {
+            slots
+                .into_iter()
+                .enumerate()
+                .min_by_key(|(slot_idx, (_, slot_row))| (row.abs_diff(*slot_row), *slot_idx))
+                .map(|(_, (target, _))| target)
+        } else {
+            None
+        }
     }
 
     pub(super) fn workspace_move_block_params(
@@ -1375,6 +1382,7 @@ mod tests {
                     format!("section:{title}")
                 }
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
+                crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
             })
             .collect()
     }
@@ -2504,12 +2512,12 @@ mod tests {
             target_row,
         ));
         assert_eq!(app.state.active, Some(0));
-        assert!(app.state.workspace_press.is_some());
+        assert_eq!(app.state.workspace_presses.len(), 1);
 
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
-        assert!(app.state.workspace_press.is_none());
+        assert!(app.state.workspace_presses.is_empty());
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.active, Some(1));
         assert_eq!(snapshot.selected, 1);
@@ -2666,7 +2674,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.active, None);
-        assert!(app.state.workspace_press.is_none());
+        assert!(app.state.workspace_presses.is_empty());
         assert!(!app.state.workspace_agents_expanded(0));
         assert!(!app.state.collapsed_space_keys.contains("repo-key"));
 
@@ -2756,6 +2764,7 @@ mod tests {
             Some(DragTarget::WorkspaceReorder {
                 source_ws_idx: 1,
                 drop_target: Some(crate::app::state::WorkspaceDropTarget::Before(0)),
+                ..
             })
         ));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
@@ -2894,6 +2903,7 @@ mod tests {
                 ws_idx: 0,
                 source_tab_idx: 0,
                 insert_idx: Some(3),
+                ..
             })
         ));
         app.handle_mouse(mouse(
@@ -3132,6 +3142,7 @@ mod tests {
             Some(DragTarget::WorkspaceReorder {
                 source_ws_idx: 0,
                 drop_target: Some(crate::app::state::WorkspaceDropTarget::End),
+                ..
             })
         ));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));

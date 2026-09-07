@@ -101,6 +101,12 @@ pub enum AppEvent {
     },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
+    /// Process detection identified an agent before its screen state was confirmed.
+    AgentProcessDetected {
+        pane_id: PaneId,
+        agent: Agent,
+        observed_at: Instant,
+    },
     /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,
@@ -183,8 +189,12 @@ pub enum AppEvent {
     /// Remote agent detection manifest update check finished.
     AgentDetectionManifestsUpdated {
         updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,
+        activated: Vec<crate::detect::Agent>,
         status: crate::detect::manifest_update::ManifestUpdateStatus,
     },
+    /// A pane child emitted one or more executable BEL characters.
+    /// The host-facing process forwards them to its outer terminal.
+    TerminalBell { pane_id: PaneId, count: u16 },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
@@ -215,6 +225,12 @@ pub enum AppEvent {
     DiffRefreshed {
         generation: u64,
         result: Box<crate::app::diff::DiffRefreshResult>,
+    },
+    /// A configured tab bar status command finished.
+    TabBarCommandFinished {
+        generation: u64,
+        segment_index: usize,
+        result: Result<Option<String>, String>,
     },
     /// Background git/gh work-context observations completed for live panes.
     GitWorkContextRefreshed {

@@ -357,6 +357,7 @@ fn card_icon(surface: DockSurface) -> &'static str {
         DockSurface::Shortcuts => "#",
         DockSurface::Context => "◎",
         DockSurface::Scratchpad => "≡",
+        DockSurface::Symphony => "♪",
     }
 }
 
@@ -382,6 +383,7 @@ fn card_description(surface: DockSurface) -> &'static str {
         DockSurface::Shortcuts => "Review keyboard shortcuts.",
         DockSurface::Context => "Inspect this pane's context.",
         DockSurface::Scratchpad => "Read notes for this workspace.",
+        DockSurface::Symphony => "Follow a Symphony job.",
     }
 }
 

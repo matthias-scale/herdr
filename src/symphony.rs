@@ -650,6 +650,51 @@ fn valid_repo_component(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+/// Base of the Symphony runner dashboard. The runner is a single host running
+/// `temporal server start-dev --ui-port 8233`, so the dashboard address is a
+/// fact of the deployment rather than something to configure per user.
+const DASHBOARD_BASE: &str = "http://localhost:8233";
+
+/// Percent-encode one path segment. Workflow and run ids come from the runtime,
+/// so a segment must never be able to escape its position in the path.
+fn encode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Deep link to this job's details in the runner dashboard. `None` when the
+/// snapshot carries no identity to link to.
+pub(crate) fn dashboard_url(workflow: &Workflow) -> Option<String> {
+    if workflow.workflow_id.is_empty() {
+        return None;
+    }
+    let namespace = std::env::var("TEMPORAL_NAMESPACE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    // Route shape verified against the runner's own UI bundle:
+    // `namespaces/[namespace]/workflows/[workflow]/[run]/history`.
+    let mut url = format!(
+        "{DASHBOARD_BASE}/namespaces/{}/workflows/{}",
+        encode_path_segment(&namespace),
+        encode_path_segment(&workflow.workflow_id)
+    );
+    if !workflow.run_id.is_empty() {
+        url.push('/');
+        url.push_str(&encode_path_segment(&workflow.run_id));
+        url.push_str("/history");
+    }
+    Some(url)
+}
+
 pub(crate) fn launch_env(workflow: &Workflow) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
@@ -929,6 +974,40 @@ mod tests {
             _ => None,
         });
         assert_eq!(drive_path, Some(PathBuf::from(r"D:\Agents\herdr")));
+    }
+
+    #[test]
+    fn dashboard_url_points_at_the_runner_ui_and_encodes_identity() {
+        std::env::set_var("TEMPORAL_NAMESPACE", "default");
+        let mut workflow = Workflow {
+            workflow_id: "symphony-MAT-138".to_string(),
+            run_id: "019a".to_string(),
+            name: "n".to_string(),
+            phase: "runFlowStep".to_string(),
+            wait: None,
+            started_at: None,
+            ticket: None,
+            repo: None,
+            pr: None,
+            receipts: None,
+        };
+        assert_eq!(
+            dashboard_url(&workflow).as_deref(),
+            Some(
+                "http://localhost:8233/namespaces/default/workflows/symphony-MAT-138/019a/history"
+            )
+        );
+
+        // A hostile id must stay inside its own path segment.
+        workflow.workflow_id = "../../admin".to_string();
+        workflow.run_id = String::new();
+        assert_eq!(
+            dashboard_url(&workflow).as_deref(),
+            Some("http://localhost:8233/namespaces/default/workflows/..%2F..%2Fadmin")
+        );
+
+        workflow.workflow_id = String::new();
+        assert_eq!(dashboard_url(&workflow), None);
     }
 
     #[test]

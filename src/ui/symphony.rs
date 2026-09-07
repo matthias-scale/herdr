@@ -113,6 +113,21 @@ pub(crate) fn render(
     frame.render_widget(table, area);
 }
 
+/// Age of a workflow as the sidebar and the window both label it, from the
+/// snapshot's `started_at`. Unparseable or missing timestamps read as an em
+/// dash, matching the window's own columns.
+pub(crate) fn age_label_since(started_at: Option<&str>, now: SystemTime) -> String {
+    let now = now
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
+    started_at
+        .and_then(parse_utc_timestamp)
+        .zip(now)
+        .map(|(started, now)| age_label(now.saturating_sub(started).max(0) as u64))
+        .unwrap_or_else(|| "\u{2014}".to_string())
+}
+
 fn age_label(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")

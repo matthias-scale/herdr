@@ -34,6 +34,8 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+pub(crate) use dock::symphony::dashboard_link_rect as dock_symphony_dashboard_link_rect;
+pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// Exposed so the inbox tests can assert the queue and the sidebar answer the
 /// blocked question identically. Both production paths use
 /// `terminal::counts_as_blocked`.
@@ -150,12 +152,13 @@ pub(crate) use self::{
         sidebar_pull_request_actions, sidebar_pull_request_key, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
         sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
-        sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
-        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
-        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem,
-        SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
+        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
+        WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -170,7 +173,10 @@ pub(crate) use self::{
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
-    tabs::{compute_tab_bar_view, tab_action_fallback_hit_areas, visible_user_actions},
+    tabs::{
+        compute_tab_bar_view, tab_action_fallback_hit_areas, tab_bar_content_area,
+        visible_user_actions,
+    },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -418,7 +424,7 @@ fn compute_view_internal(
             compute_tab_bar_view(
                 ws,
                 &app.terminals,
-                tab_bar_rect,
+                tab_bar_content_area(app, tab_bar_rect),
                 app.tab_scroll,
                 app.tab_scroll_follow_active,
                 app.mouse_capture,
