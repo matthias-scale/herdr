@@ -226,6 +226,7 @@ mod tests {
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
             primary_label: "repo".into(),
+            space_label: String::new(),
             primary_tab_label: None,
             tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
