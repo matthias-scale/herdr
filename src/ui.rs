@@ -43,6 +43,7 @@ mod symphony;
 mod tab_surface;
 mod tabs;
 mod text;
+pub(crate) mod ticket_actions;
 pub(crate) mod usage;
 mod user_actions;
 mod widgets;
@@ -142,12 +143,12 @@ pub(crate) use self::{
         sidebar_object_menu_items, sidebar_pull_request_target, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
         sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_thread_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
-        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
-        WorkspaceListEntry, SETTLED_MENU_LABELS,
+        sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
+        sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
+        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem,
+        SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
