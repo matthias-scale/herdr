@@ -492,6 +492,16 @@ pub(crate) enum TicketGroup {
     DoneThisCycle,
 }
 
+impl TicketGroup {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Assigned => "Assigned",
+            Self::Triage => "Triage",
+            Self::DoneThisCycle => "DoneThisCycle",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     pub items: Vec<WorkItem>,
@@ -1395,7 +1405,32 @@ pub(crate) fn refresh_work_index_with_missive(
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
         ) {
-            Ok(tickets) => {
+            Ok(observation) => {
+                let mut tickets = observation.tickets;
+                for failure in &observation.group_failures {
+                    for ticket in previous_tickets
+                        .iter()
+                        .filter(|ticket| ticket.group == failure.group)
+                    {
+                        if !tickets
+                            .iter()
+                            .any(|current| current.identifier == ticket.identifier)
+                        {
+                            tickets.push(ticket.clone());
+                        }
+                    }
+                }
+                if !observation.group_failures.is_empty() {
+                    degraded.record(
+                        WorkIndexSource::Linear,
+                        observation
+                            .group_failures
+                            .iter()
+                            .map(LinearGroupFailure::summary)
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    );
+                }
                 listed_ticket_ids.extend(
                     tickets
                         .iter()
@@ -2485,13 +2520,42 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> u64 {
     (era * 146_097 + day_of_era - 719_468) as u64
 }
 
+#[derive(Debug)]
+struct LinearTicketObservation {
+    tickets: Vec<LinearTicket>,
+    group_failures: Vec<LinearGroupFailure>,
+}
+
+#[derive(Debug)]
+struct LinearGroupFailure {
+    group: TicketGroup,
+    error: RefreshError,
+}
+
+impl LinearGroupFailure {
+    fn summary(&self) -> String {
+        let reason = match &self.error {
+            RefreshError::TimedOut => "observation timed out",
+            RefreshError::Failed(reason) => reason,
+        };
+        format!("{}: {reason}", self.group.label())
+    }
+}
+
+#[derive(Debug)]
+struct ActiveLinearCycle {
+    id: String,
+    name: String,
+}
+
 fn fetch_linear_tickets(
     team: &str,
     assignee: Option<&str>,
     program: &Path,
     deadline: Instant,
-) -> Result<Vec<LinearTicket>, RefreshError> {
+) -> Result<LinearTicketObservation, RefreshError> {
     let mut tickets = Vec::new();
+    let mut group_failures = Vec::new();
     let assignee_filter = assignee
         .map(|assignee| vec!["--assignee", assignee])
         .unwrap_or_default();
@@ -2502,21 +2566,43 @@ fn fetch_linear_tickets(
         TicketGroup::Assigned,
         &assignee_filter,
     )?);
-    tickets.extend(fetch_linear_ticket_group(
+    match fetch_linear_ticket_group(
         team,
         program,
         deadline,
         TicketGroup::Triage,
         &["--status", "Triage"],
-    )?);
-    if let Some(cycle) = fetch_active_linear_cycle(team, program, deadline)? {
-        tickets.extend(fetch_linear_ticket_group(
+    ) {
+        Ok(group) => tickets.extend(group),
+        Err(error) => group_failures.push(LinearGroupFailure {
+            group: TicketGroup::Triage,
+            error,
+        }),
+    }
+    match fetch_active_linear_cycle(team, program, deadline) {
+        Ok(Some(cycle)) => match fetch_linear_ticket_group(
             team,
             program,
             deadline,
             TicketGroup::DoneThisCycle,
-            &["--cycle", &cycle, "--status", "Done"],
-        )?);
+            &["--cycle", &cycle.id, "--status", "Done"],
+        ) {
+            Ok(mut group) => {
+                for ticket in &mut group {
+                    ticket.cycle.get_or_insert_with(|| cycle.name.clone());
+                }
+                tickets.extend(group);
+            }
+            Err(error) => group_failures.push(LinearGroupFailure {
+                group: TicketGroup::DoneThisCycle,
+                error,
+            }),
+        },
+        Ok(None) => {}
+        Err(error) => group_failures.push(LinearGroupFailure {
+            group: TicketGroup::DoneThisCycle,
+            error,
+        }),
     }
 
     let mut deduplicated: Vec<LinearTicket> = Vec::new();
@@ -2532,7 +2618,10 @@ fn fetch_linear_tickets(
             deduplicated.push(ticket);
         }
     }
-    Ok(deduplicated)
+    Ok(LinearTicketObservation {
+        tickets: deduplicated,
+        group_failures,
+    })
 }
 
 fn parse_linear_ticket(value: &Value, group: TicketGroup) -> Option<LinearTicket> {
@@ -2614,7 +2703,7 @@ fn fetch_active_linear_cycle(
     team: &str,
     program: &Path,
     deadline: Instant,
-) -> Result<Option<String>, RefreshError> {
+) -> Result<Option<ActiveLinearCycle>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args(["cycles", "list", "--team", team, "--active", "--compact"]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
@@ -2635,11 +2724,20 @@ fn fetch_active_linear_cycle(
     let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
         RefreshError::Failed("Linear cycle observation returned invalid JSON".into())
     })?;
-    Ok(value
+    let Some(cycle) = value
         .get("nodes")
         .and_then(Value::as_array)
         .and_then(|nodes| nodes.first())
-        .and_then(|cycle| value_text(cycle.get("name"))))
+    else {
+        return Ok(None);
+    };
+    let id = value_text(cycle.get("id")).ok_or_else(|| {
+        RefreshError::Failed("Linear cycle observation returned no cycle id".into())
+    })?;
+    let name = value_text(cycle.get("name")).ok_or_else(|| {
+        RefreshError::Failed("Linear cycle observation returned no cycle name".into())
+    })?;
+    Ok(Some(ActiveLinearCycle { id, name }))
 }
 
 fn fetch_linear_ticket_group(
@@ -4452,13 +4550,14 @@ esac
         );
         assert!(unresolved.viewer.is_none());
         assert!(unresolved_identity.is_none());
-        let tickets = fetch_linear_tickets(
+        let observation = fetch_linear_tickets(
             "SCA",
             unresolved_identity.as_deref(),
             &unresolved_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         )
         .expect("unfiltered Linear tickets");
+        let tickets = observation.tickets;
         assert_eq!(tickets.len(), 1);
         let session = WorkIndexSession::default();
         assert!(
@@ -4703,13 +4802,14 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
 "#,
         );
 
-        let tickets = fetch_linear_tickets(
+        let observation = fetch_linear_tickets(
             "SCA",
             None,
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         )
         .expect("Linear ticket fetch");
+        let tickets = observation.tickets;
 
         assert_eq!(
             tickets[0].relations,
@@ -4722,7 +4822,7 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
     }
 
     #[test]
-    fn linear_ticket_sets_use_assignee_triage_and_active_cycle_queries() {
+    fn linear_cycle_query_uses_id_and_keeps_the_cycle_name() {
         let dir = fixture_dir("linear-ticket-sets");
         let log = dir.join("argv.log");
         let (_gh, linearis) = fake_programs(
@@ -4734,8 +4834,8 @@ printf '%s\n' "$*" >> '{}'
 case "$*" in
   "issues list --team SCA --assignee linear-user-1 -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
   "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[{{"name":"cycle 34"}}]}}' ;;
-  "issues list --team SCA --cycle cycle 34 --status Done -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4,"cycle":{{"name":"cycle 34"}}}}]}}' ;;
+  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[{{"id":"cycle-id-34","name":"cycle 34"}}]}}' ;;
+  "issues list --team SCA --cycle cycle-id-34 --status Done -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4}}]}}' ;;
   *) exit 42 ;;
 esac
 "#,
@@ -4743,13 +4843,15 @@ esac
             ),
         );
 
-        let tickets = fetch_linear_tickets(
+        let observation = fetch_linear_tickets(
             "SCA",
             Some("linear-user-1"),
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         )
         .expect("Linear ticket sets");
+        assert!(observation.group_failures.is_empty());
+        let tickets = observation.tickets;
 
         assert_eq!(tickets.len(), 3);
         assert_eq!(tickets[0].group, TicketGroup::Assigned);
@@ -4761,7 +4863,134 @@ esac
         assert!(argv.contains("--assignee linear-user-1"));
         assert!(!argv.split_whitespace().any(|argument| argument == "me"));
         assert!(argv.contains("--status Triage"));
-        assert!(argv.contains("--cycle cycle 34 --status Done"));
+        assert!(argv.contains("--cycle cycle-id-34 --status Done"));
+        assert!(!argv.contains("--cycle cycle 34 --status Done"));
+    }
+
+    #[test]
+    fn triage_failure_keeps_other_groups_and_the_previous_triage_group() {
+        let dir = fixture_dir("linear-triage-degraded");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+case "$*" in
+  "issues list --team SCA -l 100 --compact") printf '%s' '{"nodes":[]}' ;;
+  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous triage","state":{"name":"Triage"}}]}' ;;
+  "cycles list --team SCA --active --compact") printf '%s' '{"nodes":[]}' ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let mut linear_only = config();
+        linear_only.repos.clear();
+        let previous = refresh_work_index(
+            &linear_only,
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+        write_executable(
+            &linearis,
+            r#"#!/bin/sh
+case "$*" in
+  "issues list --team SCA -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
+  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' 'triage unavailable' >&2; exit 42 ;;
+  "cycles list --team SCA --active --compact") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
+  "issues list --team SCA --cycle cycle-id-34 --status Done -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-3","title":"Done","state":{"name":"Done"}}]}' ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+        );
+
+        let snapshot = refresh_work_index_with_missive(
+            &linear_only,
+            &MissiveConfig::default(),
+            &[],
+            WorkIndexRefreshContext {
+                previous: Some(&previous),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        let tickets = snapshot
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .collect::<Vec<_>>();
+        assert!(tickets
+            .iter()
+            .any(|ticket| ticket.identifier == "SCA-1" && ticket.group == TicketGroup::Assigned));
+        assert!(tickets
+            .iter()
+            .any(|ticket| { ticket.identifier == "SCA-2" && ticket.group == TicketGroup::Triage }));
+        assert!(tickets.iter().any(|ticket| {
+            ticket.identifier == "SCA-3" && ticket.group == TicketGroup::DoneThisCycle
+        }));
+        let reason = snapshot
+            .unavailable_reason(WorkIndexSource::Linear)
+            .expect("Triage degradation");
+        assert!(reason.contains("Triage"), "{reason}");
+        assert!(reason.contains("triage unavailable"), "{reason}");
+    }
+
+    #[test]
+    fn done_group_failure_keeps_assigned_and_triage_groups() {
+        let dir = fixture_dir("linear-done-degraded");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+case "$*" in
+  "issues list --team SCA -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
+  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Triage","state":{"name":"Triage"}}]}' ;;
+  "cycles list --team SCA --active --compact") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
+  "issues list --team SCA --cycle cycle-id-34 --status Done -l 100 --compact") printf '%s' 'done unavailable' >&2; exit 42 ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+        );
+        let mut linear_only = config();
+        linear_only.repos.clear();
+
+        let snapshot = refresh_work_index(
+            &linear_only,
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        let tickets = snapshot
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .collect::<Vec<_>>();
+        assert!(tickets
+            .iter()
+            .any(|ticket| ticket.identifier == "SCA-1" && ticket.group == TicketGroup::Assigned));
+        assert!(tickets
+            .iter()
+            .any(|ticket| { ticket.identifier == "SCA-2" && ticket.group == TicketGroup::Triage }));
+        let reason = snapshot
+            .unavailable_reason(WorkIndexSource::Linear)
+            .expect("DoneThisCycle degradation");
+        assert!(reason.contains("DoneThisCycle"), "{reason}");
+        assert!(reason.contains("done unavailable"), "{reason}");
     }
 
     #[test]
