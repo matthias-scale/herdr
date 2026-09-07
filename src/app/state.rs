@@ -1365,6 +1365,8 @@ impl Default for MissiveSidebarFilter {
 pub(crate) enum SidebarGroupMode {
     #[default]
     Repo,
+    /// Flat list of every Space, with no repository grouping above it.
+    Spaces,
     RepoPr,
     RepoWorktree,
     LinearTeam,
@@ -1373,19 +1375,27 @@ pub(crate) enum SidebarGroupMode {
 
 impl SidebarGroupMode {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Repo,
+        Self::Spaces,
         Self::RepoPr,
         Self::RepoWorktree,
         Self::LinearTeam,
         Self::Missive,
     ];
 
-    pub(crate) const VIEWS: [Self; 4] = [Self::Repo, Self::LinearTeam, Self::RepoPr, Self::Missive];
+    pub(crate) const VIEWS: [Self; 5] = [
+        Self::Repo,
+        Self::Spaces,
+        Self::LinearTeam,
+        Self::RepoPr,
+        Self::Missive,
+    ];
 
     pub(crate) fn view_label(self) -> &'static str {
         match self {
             Self::Repo | Self::RepoWorktree => "Repo",
+            Self::Spaces => "Spaces",
             Self::LinearTeam => "Linear",
             Self::RepoPr => "GitHub",
             Self::Missive => "Missive",
@@ -1407,6 +1417,7 @@ impl SidebarGroupMode {
     pub(crate) fn collapse_namespace(self) -> &'static str {
         match self {
             Self::Repo => "repo",
+            Self::Spaces => "spaces",
             Self::RepoPr => "repo_pr",
             Self::RepoWorktree => "repo_worktree",
             Self::LinearTeam => "linear_team",
@@ -4637,7 +4648,9 @@ impl AppState {
     /// view change calls this function.
     pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
         let surface = match view {
-            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => None,
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+                None
+            }
             SidebarGroupMode::LinearTeam => Some(DockSurface::Linear),
             SidebarGroupMode::RepoPr => Some(DockSurface::Pr),
             SidebarGroupMode::Missive => Some(DockSurface::Missive),
