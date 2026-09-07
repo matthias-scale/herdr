@@ -14,7 +14,7 @@ use ratatui::{
 
 use std::path::Path;
 
-use crate::app::state::{AppState, DockSurface};
+use crate::app::state::{AppState, DockObjectRef, DockSurface};
 use crate::ui::dropdown::{layout_dropdown, DropdownLayout, DropdownSpec};
 use crate::work_context::PaneWorkContext;
 use crate::workspace::Workspace;
@@ -22,6 +22,112 @@ use crate::workspace::Workspace;
 /// Width of the `+` menu. Wide enough for the longest title plus its hint,
 /// narrow enough for the minimum dock.
 const MENU_WIDTH: u16 = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockChooserEntry {
+    pub(crate) surface: DockSurface,
+    pub(crate) object: Option<DockObjectRef>,
+}
+
+pub(crate) fn entries(app: &AppState, cards: bool) -> Vec<DockChooserEntry> {
+    let order: &[DockSurface] = if cards {
+        &DockSurface::CARDS
+    } else {
+        &DockSurface::ALL
+    };
+    let (context, _) = focused_availability(app);
+    let objects = context_objects(&context);
+    let mut entries = Vec::new();
+    for surface in order {
+        let matching = objects
+            .iter()
+            .filter(|object| object.surface == *surface)
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            entries.push(DockChooserEntry {
+                surface: *surface,
+                object: None,
+            });
+        } else {
+            entries.extend(matching.into_iter().map(|object| DockChooserEntry {
+                surface: *surface,
+                object: Some(object),
+            }));
+        }
+    }
+    entries
+}
+
+fn context_objects(context: &PaneWorkContext) -> Vec<DockObjectRef> {
+    let mut objects = Vec::new();
+    if let Some(primary) = super::pr::primary_pr_url(context) {
+        objects.push(DockObjectRef {
+            surface: DockSurface::Pr,
+            key: primary.to_string(),
+        });
+    }
+    objects.extend(
+        context
+            .pr_urls
+            .iter()
+            .filter(|url| Some(url.as_str()) != super::pr::primary_pr_url(context))
+            .cloned()
+            .map(|key| DockObjectRef {
+                surface: DockSurface::Pr,
+                key,
+            }),
+    );
+    objects.extend(context.ticket_ids.iter().cloned().map(|key| DockObjectRef {
+        surface: DockSurface::Linear,
+        key,
+    }));
+    objects.extend(
+        context
+            .missive_urls
+            .iter()
+            .cloned()
+            .map(|key| DockObjectRef {
+                surface: DockSurface::Missive,
+                key,
+            }),
+    );
+    objects
+}
+
+pub(crate) fn entry_title(app: &AppState, entry: &DockChooserEntry) -> String {
+    let base = match entry.surface {
+        DockSurface::Pr => "Pull request",
+        _ => entry.surface.title(),
+    };
+    let Some(object) = entry.object.as_ref() else {
+        return base.to_string();
+    };
+    let label = match entry.surface {
+        DockSurface::Pr => object
+            .key
+            .rsplit('/')
+            .next()
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| format!("#{number}"))
+            .unwrap_or_else(|| "PR".into()),
+        DockSurface::Linear => object.key.clone(),
+        DockSurface::Missive => app
+            .work_index_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot.conversations.iter().find(|conversation| {
+                    conversation.app_url == object.key
+                        || conversation.web_url == object.key
+                        || object.key.ends_with(&conversation.id)
+                })
+            })
+            .map(|conversation| crate::ui::text::truncate_end(&conversation.subject, 12))
+            .unwrap_or_else(|| "conversation".into()),
+        _ => return base.to_string(),
+    };
+    format!("{base} {label}")
+}
 
 /// Can this surface do anything for the focused pane right now?
 ///
@@ -89,7 +195,12 @@ fn cwd_in_git_repo(app: &AppState, workspace: &Workspace, cwd: &Path) -> bool {
 /// Rows of the card grid, top to bottom, one rect per `DockSurface::CARDS`
 /// entry. Cards that do not fit are omitted rather than clipped, so a click can
 /// never land on a card the user cannot see.
+#[cfg(test)]
 pub(crate) fn card_hit_areas(area: Rect, terminal_width: u16) -> Vec<Rect> {
+    card_hit_areas_for_count(area, terminal_width, DockSurface::CARDS.len())
+}
+
+pub(crate) fn card_hit_areas_for_count(area: Rect, terminal_width: u16, count: usize) -> Vec<Rect> {
     if area.width < 12 || area.height < HEADER_ROWS + CARD_HEIGHT {
         return Vec::new();
     }
@@ -100,7 +211,7 @@ pub(crate) fn card_hit_areas(area: Rect, terminal_width: u16) -> Vec<Rect> {
     }
 
     let mut areas = Vec::new();
-    for index in 0..DockSurface::CARDS.len() {
+    for index in 0..count {
         let index = u16::try_from(index).unwrap_or(u16::MAX);
         let row = index / columns;
         let column = index % columns;
@@ -147,16 +258,23 @@ pub(crate) fn render_chooser(app: &AppState, frame: &mut Frame, area: Rect) {
         Rect::new(area.x, area.y, area.width, area.height.min(2)),
     );
 
-    for (surface, card) in DockSurface::CARDS
+    for (entry, card) in entries(app, true)
         .into_iter()
         .zip(app.view.dock_surface_card_hit_areas.iter().copied())
     {
-        let enabled = surface_available(surface, &context, in_git_repo, has_subagents);
-        render_card(app, frame, card, surface, enabled);
+        let enabled = entry.object.is_some()
+            || surface_available(entry.surface, &context, in_git_repo, has_subagents);
+        render_card(app, frame, card, &entry, enabled);
     }
 }
 
-fn render_card(app: &AppState, frame: &mut Frame, card: Rect, surface: DockSurface, enabled: bool) {
+fn render_card(
+    app: &AppState,
+    frame: &mut Frame,
+    card: Rect,
+    entry: &DockChooserEntry,
+    enabled: bool,
+) {
     if card.width < 4 || card.height < 3 {
         return;
     }
@@ -178,9 +296,9 @@ fn render_card(app: &AppState, frame: &mut Frame, card: Rect, surface: DockSurfa
     let hint = Style::default().fg(app.palette.overlay1);
 
     let inner = usize::from(card.width.saturating_sub(2));
-    let shortcut = format!("[{}]", surface.card_shortcut());
-    let title = card_title(surface);
-    let icon = card_icon(surface);
+    let shortcut = format!("[{}]", entry.surface.card_shortcut());
+    let title = entry_title(app, entry);
+    let icon = card_icon(entry.surface);
     let heading = format!("{icon} {title}");
     let gap = inner.saturating_sub(heading.chars().count() + shortcut.chars().count());
 
@@ -195,9 +313,10 @@ fn render_card(app: &AppState, frame: &mut Frame, card: Rect, surface: DockSurfa
     ];
     if card.height >= 4 {
         let text = if enabled {
-            card_description(surface)
+            card_description(entry.surface)
         } else {
-            card_unavailable_reason(surface).unwrap_or_else(|| card_description(surface))
+            card_unavailable_reason(entry.surface)
+                .unwrap_or_else(|| card_description(entry.surface))
         };
         let padded: String = text.chars().take(inner).collect();
         lines.push(Line::from(vec![
@@ -241,6 +360,7 @@ fn card_icon(surface: DockSurface) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn card_title(surface: DockSurface) -> &'static str {
     match surface {
         DockSurface::Pr => "Pull request",
@@ -283,10 +403,10 @@ pub(crate) fn menu_layout(app: &AppState, dock: Rect) -> Option<DropdownLayout> 
     layout_dropdown(
         &DropdownSpec {
             anchor: app.view.dock_plus_rect,
-            item_count: DockSurface::ALL.len(),
+            item_count: entries(app, false).len(),
             selected: menu.selected,
             has_filter: false,
-            max_rows: DockSurface::ALL.len(),
+            max_rows: entries(app, false).len(),
             min_width: MENU_WIDTH,
         },
         dock,
@@ -316,10 +436,12 @@ pub(crate) fn render_menu(app: &AppState, frame: &mut Frame) {
 
     for row in 0..layout.visible_rows {
         let index = layout.first_visible + row;
-        let Some(surface) = DockSurface::ALL.get(index).copied() else {
+        let entries = entries(app, false);
+        let Some(entry) = entries.get(index) else {
             break;
         };
-        let enabled = surface_available(surface, &context, in_git_repo, has_subagents);
+        let enabled = entry.object.is_some()
+            || surface_available(entry.surface, &context, in_git_repo, has_subagents);
         let selected = index == menu.selected;
         let style = if !enabled {
             Style::default().fg(app.palette.overlay0)
@@ -331,8 +453,9 @@ pub(crate) fn render_menu(app: &AppState, frame: &mut Frame) {
             Style::default().fg(app.palette.text)
         };
         let width = usize::from(layout.list_rect.width);
-        let title = surface.title();
-        let shortcut = surface
+        let title = entry_title(app, entry);
+        let shortcut = entry
+            .surface
             .shortcut()
             .map(|key| key.to_string())
             .unwrap_or_default();
@@ -485,6 +608,50 @@ mod tests {
     }
 
     #[test]
+    fn f20_chooser_lists_one_card_per_bound_object() {
+        let mut app = AppState::test_new();
+        let workspace = crate::workspace::Workspace::test_new("objects");
+        let pane = workspace.focused_pane_id().expect("focused pane");
+        let terminal_id = workspace.terminal_id(pane).expect("terminal").clone();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .replace_prevalidated_manual_work_context(context(
+                &[
+                    "https://github.com/o/r/pull/159",
+                    "https://github.com/o/r/pull/206",
+                ],
+                &["SCA-3165"],
+            ));
+
+        let entries = entries(&app, true);
+        let work = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.surface,
+                    DockSurface::Pr | DockSurface::Linear | DockSurface::Missive
+                )
+            })
+            .map(|entry| entry_title(&app, entry))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            work,
+            [
+                "Pull request #159",
+                "Pull request #206",
+                "Linear SCA-3165",
+                "Missive"
+            ]
+        );
+        assert_eq!(entries.len(), DockSurface::CARDS.len() + 1);
+    }
+
+    #[test]
     fn unavailable_agents_card_names_the_missing_observation() {
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -492,7 +659,18 @@ mod tests {
         let backend = TestBackend::new(20, 4);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render_card(&app, frame, frame.area(), DockSurface::Agents, false))
+            .draw(|frame| {
+                render_card(
+                    &app,
+                    frame,
+                    frame.area(),
+                    &DockChooserEntry {
+                        surface: DockSurface::Agents,
+                        object: None,
+                    },
+                    false,
+                )
+            })
             .expect("render Agents chooser card");
         let text = terminal
             .backend()
@@ -513,7 +691,18 @@ mod tests {
         let backend = TestBackend::new(40, 4);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render_card(&app, frame, frame.area(), DockSurface::Pr, false))
+            .draw(|frame| {
+                render_card(
+                    &app,
+                    frame,
+                    frame.area(),
+                    &DockChooserEntry {
+                        surface: DockSurface::Pr,
+                        object: None,
+                    },
+                    false,
+                )
+            })
             .expect("render pull request chooser card");
         let text = terminal
             .backend()

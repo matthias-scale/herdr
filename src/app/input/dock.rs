@@ -18,7 +18,8 @@ impl App {
         }
 
         let event = key.as_key_event();
-        let count = DockSurface::ALL.len();
+        let entries = crate::ui::dock::chooser::entries(&self.state, false);
+        let count = entries.len();
         match event.code {
             KeyCode::Esc => {
                 self.state.dock_surface_menu = None;
@@ -37,9 +38,9 @@ impl App {
                 let selected = self
                     .state
                     .dock_surface_menu
-                    .and_then(|menu| DockSurface::ALL.get(menu.selected).copied());
-                if let Some(surface) = selected {
-                    self.state.activate_dock_surface(surface);
+                    .and_then(|menu| entries.get(menu.selected).cloned());
+                if let Some(entry) = selected {
+                    self.state.activate_dock_chooser_entry(entry);
                 }
             }
             KeyCode::Char(character)
@@ -64,7 +65,13 @@ impl AppState {
         !self.dock_collapsed && rect_contains(self.view.dock_divider_rect, col, row)
     }
 
+    #[cfg(test)]
     pub(crate) fn dock_tab_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        self.dock_tab_index_at(col, row)
+            .and_then(|index| self.dock_open_surfaces.get(index).copied())
+    }
+
+    pub(crate) fn dock_tab_index_at(&self, col: u16, row: u16) -> Option<usize> {
         if self.dock_collapsed {
             return None;
         }
@@ -72,7 +79,6 @@ impl AppState {
             .dock_tab_hit_areas
             .iter()
             .position(|area| rect_contains(*area, col, row))
-            .and_then(|index| self.dock_open_surfaces.get(index).copied())
     }
 
     /// The close glyph of the active tab.
@@ -91,7 +97,18 @@ impl AppState {
     /// Card of the empty-dock grid under the cursor, available or not. The
     /// caller decides what an unavailable card does, so the geometry stays a
     /// pure function of the rect.
+    #[cfg(test)]
     pub(crate) fn dock_surface_card_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        self.dock_chooser_entry_at(col, row, true)
+            .map(|entry| entry.surface)
+    }
+
+    pub(crate) fn dock_chooser_entry_at(
+        &self,
+        col: u16,
+        row: u16,
+        cards: bool,
+    ) -> Option<crate::ui::dock::chooser::DockChooserEntry> {
         if self.dock_collapsed || self.dock_tab.is_some() {
             return None;
         }
@@ -99,14 +116,43 @@ impl AppState {
             .dock_surface_card_hit_areas
             .iter()
             .position(|area| rect_contains(*area, col, row))
-            .and_then(|index| DockSurface::CARDS.get(index).copied())
+            .and_then(|index| {
+                crate::ui::dock::chooser::entries(self, cards)
+                    .get(index)
+                    .cloned()
+            })
     }
 
     /// Row of the open `+` menu under the cursor.
+    #[cfg(test)]
     pub(crate) fn dock_surface_menu_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        self.dock_surface_menu_entry_at(col, row)
+            .map(|entry| entry.surface)
+    }
+
+    pub(crate) fn dock_surface_menu_entry_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::ui::dock::chooser::DockChooserEntry> {
         let layout = self.view.dock_surface_menu_layout?;
-        crate::ui::dropdown::hit_test(&layout, col, row)
-            .and_then(|index| DockSurface::ALL.get(index).copied())
+        crate::ui::dropdown::hit_test(&layout, col, row).and_then(|index| {
+            crate::ui::dock::chooser::entries(self, false)
+                .get(index)
+                .cloned()
+        })
+    }
+
+    pub(crate) fn activate_dock_chooser_entry(
+        &mut self,
+        entry: crate::ui::dock::chooser::DockChooserEntry,
+    ) -> bool {
+        if let Some(object) = entry.object {
+            self.open_dock_object(object, crate::app::state::DockTabOrigin::User);
+            self.finish_dock_surface_activation(entry.surface);
+            return true;
+        }
+        self.activate_dock_surface(entry.surface)
     }
 
     /// Open `surface` unless the focused pane makes it useless. A disabled card
@@ -122,7 +168,27 @@ impl AppState {
         ) {
             return false;
         }
-        self.open_dock_surface(surface);
+        if matches!(
+            surface,
+            DockSurface::Pr | DockSurface::Linear | DockSurface::Missive
+        ) {
+            let Some(object) = self
+                .dock_context_objects
+                .iter()
+                .find(|object| object.surface == surface)
+                .cloned()
+            else {
+                return false;
+            };
+            self.open_dock_object(object, crate::app::state::DockTabOrigin::User);
+        } else {
+            self.open_dock_surface(surface);
+        }
+        self.finish_dock_surface_activation(surface);
+        true
+    }
+
+    fn finish_dock_surface_activation(&mut self, surface: DockSurface) {
         self.dock_scroll = 0;
         self.dock_editor_focused = surface == DockSurface::Editor;
         self.dock_home_focused = surface == DockSurface::Home;
@@ -139,7 +205,6 @@ impl AppState {
         if self.dock_agents_focused {
             self.reconcile_dock_agents_selection();
         }
-        true
     }
 
     pub(crate) fn toggle_dock_diff_whitespace(&mut self) {

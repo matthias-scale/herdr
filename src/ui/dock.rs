@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -20,7 +20,8 @@ pub(crate) mod missive;
 pub(crate) mod pr;
 
 pub(crate) use chooser::{
-    card_hit_areas as chooser_card_hit_areas, menu_layout as chooser_menu_layout,
+    card_hit_areas_for_count as chooser_card_hit_areas_for_count,
+    menu_layout as chooser_menu_layout,
 };
 pub(crate) use home::detail_tab_layouts as home_detail_tab_layouts;
 pub(crate) use home::poll_tab_layouts as home_poll_tab_layouts;
@@ -35,8 +36,8 @@ pub(crate) const PLUS_GLYPH: &str = "+";
 
 /// Columns a tab occupies: its label, a separating space, and — while it is the
 /// active tab — the close glyph with its own space.
-pub(crate) fn tab_width(surface: DockSurface, active: bool) -> u16 {
-    let label = u16::try_from(surface.label().chars().count()).unwrap_or(u16::MAX);
+pub(crate) fn tab_width_label(label: &str, active: bool) -> u16 {
+    let label = crate::ui::text::display_width_u16(label);
     label
         .saturating_add(1)
         .saturating_add(if active { 2 } else { 0 })
@@ -60,12 +61,12 @@ pub(crate) struct StripLayout {
 /// and the `+` takes the cell after the last tab that fits. Squeezing the tabs
 /// into equal shares instead would run the labels together and put the `+`
 /// somewhere the strip never draws it.
-pub(crate) fn strip_layout(
+pub(crate) fn strip_layout_labels(
     strip: Rect,
-    open: &[DockSurface],
-    active: Option<DockSurface>,
+    labels: &[String],
+    active_index: Option<usize>,
 ) -> StripLayout {
-    let mut tabs = vec![Rect::default(); open.len()];
+    let mut tabs = vec![Rect::default(); labels.len()];
     if strip.width == 0 || strip.height == 0 {
         return StripLayout {
             tabs,
@@ -74,12 +75,12 @@ pub(crate) fn strip_layout(
         };
     }
 
-    let widths: Vec<u16> = open
+    let widths: Vec<u16> = labels
         .iter()
-        .map(|surface| tab_width(*surface, active == Some(*surface)))
+        .enumerate()
+        .map(|(index, label)| tab_width_label(label, active_index == Some(index)))
         .collect();
     let available = strip.width.saturating_sub(PLUS_WIDTH);
-    let active_index = active.and_then(|surface| open.iter().position(|open| *open == surface));
     let first = first_visible_tab(&widths, available, active_index);
 
     let mut x = strip.x;
@@ -100,8 +101,8 @@ pub(crate) fn strip_layout(
 
     let close = active_index
         .and_then(|index| tabs.get(index).copied())
-        .zip(active)
-        .map(|(tab, surface)| close_rect(tab, surface))
+        .zip(active_index.and_then(|index| labels.get(index)))
+        .map(|(tab, label)| close_rect_label(tab, label))
         .unwrap_or_default();
     let plus = Rect::new(
         x.min(strip.right().saturating_sub(PLUS_WIDTH)),
@@ -134,10 +135,8 @@ fn first_visible_tab(widths: &[u16], available: u16, active: Option<usize>) -> u
 }
 
 /// Column of the close glyph inside an active tab's rect.
-pub(crate) fn close_rect(tab: Rect, surface: DockSurface) -> Rect {
-    let offset = u16::try_from(surface.label().chars().count())
-        .unwrap_or(0)
-        .saturating_add(1);
+pub(crate) fn close_rect_label(tab: Rect, label: &str) -> Rect {
+    let offset = crate::ui::text::display_width_u16(label).saturating_add(1);
     if offset.saturating_add(1) > tab.width {
         return Rect::default();
     }
@@ -200,6 +199,54 @@ pub(super) fn render_dock(
         Some(surface) => render_placeholder(app, frame, app.view.dock_body_rect, surface),
     }
     chooser::render_menu(app, frame);
+    render_tab_tooltip(app, frame);
+}
+
+/// Object labels stay compact in the strip; hovering reveals the full title in
+/// a client-only popup that opens below its tab anchor.
+fn render_tab_tooltip(app: &AppState, frame: &mut Frame) {
+    if app.dock_surface_menu.is_some() {
+        return;
+    }
+    let Some(index) = app.dock_hovered_tab_index else {
+        return;
+    };
+    let Some(binding) = app.dock_tab_bindings.get(index).and_then(Option::as_ref) else {
+        return;
+    };
+    let Some(anchor) = app.view.dock_tab_hit_areas.get(index).copied() else {
+        return;
+    };
+    if anchor.width == 0 || binding.object.key.is_empty() {
+        return;
+    }
+    let title = app.dock_tab_title(index);
+    let dock = app.view.dock_rect;
+    let width = crate::ui::text::display_width_u16(&title)
+        .saturating_add(2)
+        .min(dock.width)
+        .max(3);
+    let x = anchor.x.min(dock.right().saturating_sub(width));
+    let inner_width = width.saturating_sub(2).max(1);
+    let paragraph = Paragraph::new(title)
+        .style(
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.panel_bg),
+        )
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    let lines = u16::try_from(paragraph.line_count(inner_width))
+        .unwrap_or(u16::MAX)
+        .max(1);
+    let available_height = dock.bottom().saturating_sub(anchor.bottom());
+    let height = lines.saturating_add(2).min(available_height);
+    if height < 3 {
+        return;
+    }
+    let area = Rect::new(x, anchor.bottom(), width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
 }
 
 /// Surfaces whose body arrives in a later slice announce themselves rather than
@@ -221,16 +268,17 @@ fn render_placeholder(app: &AppState, frame: &mut Frame, area: Rect, surface: Do
 }
 
 fn render_tab_strip(app: &AppState, frame: &mut Frame) {
-    for (surface, area) in app
+    for (index, (_surface, area)) in app
         .dock_open_surfaces
         .iter()
         .copied()
         .zip(app.view.dock_tab_hit_areas.iter().copied())
+        .enumerate()
     {
         if area.width == 0 {
             continue;
         }
-        let active = app.dock_tab == Some(surface);
+        let active = app.active_dock_tab_index() == Some(index);
         let style = if active {
             Style::default()
                 .fg(app.palette.accent)
@@ -240,14 +288,14 @@ fn render_tab_strip(app: &AppState, frame: &mut Frame) {
         };
         // The last column of a tab is its separating space, so a clipped label
         // still never touches its neighbour.
-        let label: String = surface
-            .label()
+        let full_label = app.dock_tab_label(index);
+        let label: String = full_label
             .chars()
             .take(usize::from(area.width.saturating_sub(1)))
             .collect();
         frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), area);
         if active {
-            let close = close_rect(area, surface);
+            let close = close_rect_label(area, &full_label);
             if close.width > 0 {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(

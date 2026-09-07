@@ -618,6 +618,12 @@ impl AppState {
             && mouse.row >= dock.y
             && mouse.row < dock.y.saturating_add(dock.height);
 
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            self.dock_hovered_tab_index = in_dock
+                .then(|| self.dock_tab_index_at(mouse.column, mouse.row))
+                .flatten();
+        }
+
         if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar || in_dock) {
             return None;
         }
@@ -867,6 +873,8 @@ impl AppState {
                         && self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.dock_agents_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_pr_focused =
+                        !self.dock_collapsed && self.dock_tab == Some(crate::app::DockSurface::Pr);
                     self.dock_linear_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Linear);
                     self.mark_session_dirty();
@@ -876,8 +884,8 @@ impl AppState {
                 // selects, anything else dismisses it before the click can
                 // reach the strip underneath.
                 if self.dock_surface_menu.is_some() {
-                    if let Some(surface) = self.dock_surface_menu_at(mouse.column, mouse.row) {
-                        if self.activate_dock_surface(surface) {
+                    if let Some(entry) = self.dock_surface_menu_entry_at(mouse.column, mouse.row) {
+                        if self.activate_dock_chooser_entry(entry) {
                             self.dock_surface_menu = None;
                         }
                         return None;
@@ -905,6 +913,7 @@ impl AppState {
                             self.dock_tab == Some(crate::app::DockSurface::Files);
                         self.dock_agents_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Agents);
+                        self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
                         self.dock_linear_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Linear);
                     }
@@ -914,17 +923,19 @@ impl AppState {
                     self.toggle_dock_surface_menu();
                     return None;
                 }
-                if let Some(surface) = self.dock_surface_card_at(mouse.column, mouse.row) {
-                    self.activate_dock_surface(surface);
+                if let Some(entry) = self.dock_chooser_entry_at(mouse.column, mouse.row, true) {
+                    self.activate_dock_chooser_entry(entry);
                     return None;
                 }
-                if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
-                    self.open_dock_surface(tab);
+                if let Some(index) = self.dock_tab_index_at(mouse.column, mouse.row) {
+                    let tab = self.dock_open_surfaces.get(index).copied()?;
+                    self.select_dock_tab_index(index);
                     self.dock_editor_focused = tab == crate::app::DockSurface::Editor;
                     self.dock_home_focused = tab == crate::app::DockSurface::Home;
                     self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
                     self.dock_files_focused = tab == crate::app::DockSurface::Files;
                     self.dock_agents_focused = tab == crate::app::DockSurface::Agents;
+                    self.dock_pr_focused = tab == crate::app::DockSurface::Pr;
                     self.dock_linear_focused = tab == crate::app::DockSurface::Linear;
                     if self.dock_agents_focused {
                         self.reconcile_dock_agents_selection();
@@ -1023,6 +1034,7 @@ impl AppState {
                     self.dock_files_focused = self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.dock_agents_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
                     self.dock_linear_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Linear);
                     // Clicking an empty dock hands it the keyboard so the card
