@@ -324,7 +324,7 @@ impl App {
         }
         match event.code {
             KeyCode::Char(character) if Self::dock_shortcut_modifiers(event.modifiers) => {
-                match crate::app::DockSurface::from_shortcut(character) {
+                match crate::app::DockSurface::from_card_shortcut(character) {
                     Some(surface) => {
                         self.state.activate_dock_surface(surface);
                         true
@@ -3588,6 +3588,23 @@ mod tests {
         assert!(app
             .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty())));
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+
+        for (key, surface) in [
+            ('h', crate::app::DockSurface::Home),
+            ('e', crate::app::DockSurface::Editor),
+            ('k', crate::app::DockSurface::Shortcuts),
+            ('x', crate::app::DockSurface::Context),
+            ('n', crate::app::DockSurface::Scratchpad),
+        ] {
+            app.state.dock_open_surfaces.clear();
+            app.state.dock_tab = None;
+            app.state.dock_chooser_focused = true;
+            assert!(app.handle_dock_chooser_key(&TerminalKey::new(
+                KeyCode::Char(key),
+                KeyModifiers::empty(),
+            )));
+            assert_eq!(app.state.dock_tab, Some(surface), "shortcut {key}");
+        }
 
         // No pull request on the focused pane: the card is inert, and the key
         // travels on to whatever would have had it.

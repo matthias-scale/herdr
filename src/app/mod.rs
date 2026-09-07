@@ -370,6 +370,30 @@ fn agent_panel_sort_from_config(
     }
 }
 
+fn dock_surfaces_from_config(panel: &crate::config::PanelConfig) -> Vec<state::DockSurface> {
+    let mut surfaces = Vec::new();
+    for configured in &panel.default_surfaces {
+        let surface = match configured {
+            crate::config::PanelSurfaceConfig::Home => state::DockSurface::Home,
+            crate::config::PanelSurfaceConfig::Terminal => state::DockSurface::Terminal,
+            crate::config::PanelSurfaceConfig::Files => state::DockSurface::Files,
+            crate::config::PanelSurfaceConfig::Diff => state::DockSurface::Diff,
+            crate::config::PanelSurfaceConfig::PullRequest => state::DockSurface::Pr,
+            crate::config::PanelSurfaceConfig::Linear => state::DockSurface::Linear,
+            crate::config::PanelSurfaceConfig::Missive => state::DockSurface::Missive,
+            crate::config::PanelSurfaceConfig::Agents => state::DockSurface::Agents,
+            crate::config::PanelSurfaceConfig::Editor => state::DockSurface::Editor,
+            crate::config::PanelSurfaceConfig::Shortcuts => state::DockSurface::Shortcuts,
+            crate::config::PanelSurfaceConfig::Context => state::DockSurface::Context,
+            crate::config::PanelSurfaceConfig::Scratchpad => state::DockSurface::Scratchpad,
+        };
+        if !surfaces.contains(&surface) {
+            surfaces.push(surface);
+        }
+    }
+    surfaces
+}
+
 /// Parse the configured agent name list into a deduplicated set of `Agent`
 /// values. Unknown agent names are silently dropped so a typo cannot disable
 /// other valid entries.
@@ -628,6 +652,8 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let dock_default_surfaces = dock_surfaces_from_config(&config.panel);
+        let dock_tab = dock_default_surfaces.first().copied();
 
         // Validate sidebar bounds before they reach any `u16::clamp(min, max)`
         // call: `clamp` panics when `min > max`. On bad config, fall back to
@@ -932,9 +958,10 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
+            dock_default_surfaces: dock_default_surfaces.clone(),
             dock_surface_override: false,
-            dock_tab: Some(state::DockSurface::Home),
-            dock_open_surfaces: state::DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_tab,
+            dock_open_surfaces: dock_default_surfaces,
             dock_maximized: false,
             dock_surface_menu: None,
             dock_chooser_focused: false,
@@ -2112,6 +2139,10 @@ impl App {
             }
         }
 
+        if !invalid_section("panel") {
+            self.state.dock_default_surfaces = dock_surfaces_from_config(&config.panel);
+        }
+
         if !invalid_section("ui") {
             // Validate sidebar bounds before they reach any `u16::clamp` call.
             // On `min > max`, treat the entire `[ui]` section as invalid: keep
@@ -2787,6 +2818,51 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn fresh_and_restored_clients_start_with_no_panel_tabs() {
+        let app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        assert!(app.state.dock_default_surfaces.is_empty());
+        assert!(app.state.dock_open_surfaces.is_empty());
+        assert_eq!(app.state.dock_tab, None);
+
+        let restored_attach = state::DockPresentationState::default();
+        assert!(restored_attach.open_surfaces.is_empty());
+        assert_eq!(restored_attach.tab, None);
+    }
+
+    #[test]
+    fn panel_config_restores_only_the_selected_default_tabs() {
+        let mut config = Config::default();
+        config.panel.default_surfaces = vec![
+            crate::config::PanelSurfaceConfig::Files,
+            crate::config::PanelSurfaceConfig::PullRequest,
+            crate::config::PanelSurfaceConfig::Files,
+        ];
+        let app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(
+            app.state.dock_default_surfaces,
+            vec![state::DockSurface::Files, state::DockSurface::Pr]
+        );
+        assert_eq!(
+            app.state.dock_open_surfaces,
+            app.state.dock_default_surfaces
+        );
+        assert_eq!(app.state.dock_tab, Some(state::DockSurface::Files));
+    }
 
     #[cfg(unix)]
     fn imported_editor_runtime(

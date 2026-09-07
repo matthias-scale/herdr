@@ -172,6 +172,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
 pub(crate) const DOCK_COLLAPSED_WIDTH: u16 = 1;
 pub(crate) const DOCK_DEFAULT_WIDTH: u16 = 32;
+const EMPTY_DOCK_PREFERRED_WIDTH: u16 = 80;
 pub(crate) const DOCK_MIN_WIDTH: u16 = 18;
 /// Generous because the dock holds an editor: the ceiling that matters is the one
 /// the layout already enforces -- the terminal keeps `DOCK_MIN_TERMINAL_WIDTH` no
@@ -325,6 +326,12 @@ fn compute_view_internal(
     };
 
     let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
+    let main_view_active = app.symphony_detail.is_some()
+        || app.loop_run_history_detail.is_some()
+        || app.usage_view.is_some()
+        || app.work_view.is_some()
+        || app.home.is_some()
+        || app.inbox.is_some();
     let dock_w = if app.dock_collapsed {
         DOCK_COLLAPSED_WIDTH
     } else if available_after_sidebar < DOCK_MIN_WIDTH + DOCK_MIN_TERMINAL_WIDTH {
@@ -335,7 +342,13 @@ fn compute_view_internal(
         // width so the session stays navigable.
         available_after_sidebar
     } else {
-        app.dock_width
+        let requested_width =
+            if app.dock_open_surfaces.is_empty() && !main_view_active && area.width > 80 {
+                app.dock_width.max(EMPTY_DOCK_PREFERRED_WIDTH)
+            } else {
+                app.dock_width
+            };
+        requested_width
             .clamp(DOCK_MIN_WIDTH, DOCK_MAX_WIDTH)
             .min(available_after_sidebar.saturating_sub(DOCK_MIN_TERMINAL_WIDTH))
     };
@@ -556,7 +569,7 @@ fn compute_view_internal(
     let dock_surface_card_hit_areas = if app.dock_collapsed || app.dock_tab.is_some() {
         Vec::new()
     } else {
-        dock::chooser_card_hit_areas(dock_body_rect)
+        dock::chooser_card_hit_areas(dock_body_rect, area.width)
     };
     let (
         dock_home_section_hit_areas,
@@ -1711,6 +1724,8 @@ mod tests {
     fn the_dock_strip_ends_with_a_plus_and_a_maximise_glyph() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![crate::app::DockSurface::Home];
+        app.dock_tab = Some(crate::app::DockSurface::Home);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1758,8 +1773,33 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(screen.contains("Open a surface"));
-        for surface in crate::app::DockSurface::CARDS {
-            assert!(screen.contains(surface.title()), "missing {surface:?}");
+        for title in [
+            "Terminal",
+            "Files",
+            "Diff",
+            "Pull request",
+            "Linear",
+            "Missive",
+        ] {
+            assert!(screen.contains(title), "missing {title}");
+        }
+        assert!(screen.contains("Choose what to show in the right panel."));
+    }
+
+    #[test]
+    fn empty_dock_grid_is_single_column_at_80_and_two_columns_at_120() {
+        for (width, height, two_columns) in [(80, 24, false), (120, 40, true)] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.dock_collapsed = false;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.mode = Mode::Terminal;
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            let cards = &app.view.dock_surface_card_hit_areas;
+            assert!(cards.len() >= 2);
+            assert_eq!(cards[0].y == cards[1].y, two_columns, "width {width}");
+            assert_eq!(cards[0].x == cards[1].x, !two_columns, "width {width}");
         }
     }
 
