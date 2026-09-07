@@ -223,8 +223,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                let changes_view = !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
-                    || self.state.mode.mouse_motion_changes_view();
+                let previous_hover = self.state.hovered_control;
                 if self.state.popup_pane.is_some() || self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
@@ -237,7 +236,9 @@ impl App {
                         );
                     }
                 }
-                changes_view
+                !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
+                    || self.state.mode.mouse_motion_changes_view()
+                    || self.state.hovered_control != previous_hover
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
                 #[cfg(not(windows))]
@@ -404,6 +405,7 @@ impl App {
         }
 
         changed |= self.clear_due_selection_highlight(now);
+        changed |= self.state.reveal_hover_tooltip_at(now);
         changed |= self.process_git_action_panes(now);
 
         changed |= self.refresh_pane_settlement_at(now);
@@ -1010,6 +1012,9 @@ impl App {
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
             self.git_action_deadline(),
+            include_client_refresh
+                .then(|| self.state.hover_tooltip_deadline())
+                .flatten(),
             render_deadline,
         ]
         .into_iter()

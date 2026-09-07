@@ -43,6 +43,8 @@ mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
+mod tooltip;
+pub(crate) use tooltip::hovered_control_at;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;
@@ -115,6 +117,7 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::{render_git_menu, render_tab_action_buttons, render_tab_bar};
+use self::tooltip::render_hover_tooltip;
 use self::usage::render as render_usage;
 use self::user_actions::render_add_action_overlay;
 use self::work_link_picker::render_work_link_picker;
@@ -1193,6 +1196,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
+    render_hover_tooltip(app, frame);
 }
 
 fn render_navigation_chrome(
@@ -1742,7 +1746,8 @@ mod tests {
         app.dock_open_surfaces = vec![DockSurface::Missive];
         app.dock_tab = Some(DockSurface::Missive);
         app.dock_active_tab_index = Some(0);
-        app.dock_hovered_tab_index = Some(0);
+        app.hovered_control = Some(crate::app::state::ControlId::DockTab(0));
+        app.hover_tooltip_visible = true;
         app.dock_tab_bindings = vec![Some(DockTabBinding {
             object: DockObjectRef {
                 surface: DockSurface::Missive,

@@ -644,12 +644,6 @@ impl AppState {
             && mouse.row >= dock.y
             && mouse.row < dock.y.saturating_add(dock.height);
 
-        if matches!(mouse.kind, MouseEventKind::Moved) {
-            self.dock_hovered_tab_index = in_dock
-                .then(|| self.dock_tab_index_at(mouse.column, mouse.row))
-                .flatten();
-        }
-
         if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar || in_dock) {
             return None;
         }
@@ -5494,8 +5488,10 @@ mod tests {
         let linear = areas[3];
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
         assert_eq!(
-            app.state.sidebar_footer_hover,
-            Some(SidebarFooterItem::Linear)
+            app.state.hovered_control,
+            Some(crate::app::state::ControlId::SidebarFooter(
+                SidebarFooterItem::Linear
+            ))
         );
 
         let settings = areas[0];
@@ -5504,6 +5500,8 @@ mod tests {
             settings.x,
             settings.y,
         ));
+        assert_eq!(app.state.hovered_control, None);
+        assert!(!app.state.hover_tooltip_visible);
         assert_eq!(app.state.mode, Mode::Settings);
     }
 

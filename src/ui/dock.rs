@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -199,54 +199,6 @@ pub(super) fn render_dock(
         Some(surface) => render_placeholder(app, frame, app.view.dock_body_rect, surface),
     }
     chooser::render_menu(app, frame);
-    render_tab_tooltip(app, frame);
-}
-
-/// Object labels stay compact in the strip; hovering reveals the full title in
-/// a client-only popup that opens below its tab anchor.
-fn render_tab_tooltip(app: &AppState, frame: &mut Frame) {
-    if app.dock_surface_menu.is_some() {
-        return;
-    }
-    let Some(index) = app.dock_hovered_tab_index else {
-        return;
-    };
-    let Some(binding) = app.dock_tab_bindings.get(index).and_then(Option::as_ref) else {
-        return;
-    };
-    let Some(anchor) = app.view.dock_tab_hit_areas.get(index).copied() else {
-        return;
-    };
-    if anchor.width == 0 || binding.object.key.is_empty() {
-        return;
-    }
-    let title = app.dock_tab_title(index);
-    let dock = app.view.dock_rect;
-    let width = crate::ui::text::display_width_u16(&title)
-        .saturating_add(2)
-        .min(dock.width)
-        .max(3);
-    let x = anchor.x.min(dock.right().saturating_sub(width));
-    let inner_width = width.saturating_sub(2).max(1);
-    let paragraph = Paragraph::new(title)
-        .style(
-            Style::default()
-                .fg(app.palette.text)
-                .bg(app.palette.panel_bg),
-        )
-        .block(Block::default().borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-    let lines = u16::try_from(paragraph.line_count(inner_width))
-        .unwrap_or(u16::MAX)
-        .max(1);
-    let available_height = dock.bottom().saturating_sub(anchor.bottom());
-    let height = lines.saturating_add(2).min(available_height);
-    if height < 3 {
-        return;
-    }
-    let area = Rect::new(x, anchor.bottom(), width, height);
-    frame.render_widget(Clear, area);
-    frame.render_widget(paragraph, area);
 }
 
 /// Surfaces whose body arrives in a later slice announce themselves rather than
