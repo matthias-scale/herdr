@@ -3006,6 +3006,10 @@ pub struct AppState {
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Missive config facts copied into client state for the Settings view.
+    /// The token value is never retained, only whether its named variable exists.
+    pub(crate) settings_missive_team: Option<String>,
+    pub(crate) settings_missive_token_present: bool,
     /// Provider viewers and assignee directories resolved by the work-index
     /// runtime once for this app session.
     pub(crate) work_index_session: crate::work_index::WorkIndexSession,
@@ -4417,6 +4421,8 @@ impl AppState {
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: None,
+            settings_missive_team: None,
+            settings_missive_token_present: false,
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),

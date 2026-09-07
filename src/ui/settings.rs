@@ -263,20 +263,7 @@ fn render_probe_section(
 
     let mut lines = Vec::new();
     for probe in app.tool_probes_for(kind) {
-        let marker_style = match probe.outcome {
-            crate::app::probes::ToolProbeOutcome::Ready => Style::default().fg(p.green),
-            crate::app::probes::ToolProbeOutcome::NeedsAttention => Style::default().fg(p.yellow),
-            crate::app::probes::ToolProbeOutcome::Missing => Style::default().fg(p.overlay0),
-            crate::app::probes::ToolProbeOutcome::TimedOut => Style::default().fg(p.red),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", probe.outcome.marker()), marker_style),
-            Span::styled(
-                format!("{:<10}", probe.label),
-                Style::default().fg(p.subtext0),
-            ),
-            Span::styled(probe.detail.clone(), Style::default().fg(p.overlay1)),
-        ]));
+        lines.push(probe_line(probe, p));
         // Version alone does not say how Herdr starts the agent; the flag line
         // does, and it comes from the dispatch argv builder.
         if kind == crate::app::probes::ToolProbeKind::Provider {
@@ -290,6 +277,116 @@ fn render_probe_section(
         }
     }
     frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn probe_line(probe: &crate::app::probes::ToolProbe, p: &Palette) -> Line<'static> {
+    let marker_style = match probe.outcome {
+        crate::app::probes::ToolProbeOutcome::Ready => Style::default().fg(p.green),
+        crate::app::probes::ToolProbeOutcome::NeedsAttention => Style::default().fg(p.yellow),
+        crate::app::probes::ToolProbeOutcome::Missing => Style::default().fg(p.overlay0),
+        crate::app::probes::ToolProbeOutcome::TimedOut => Style::default().fg(p.red),
+    };
+    Line::from(vec![
+        Span::styled(format!(" {} ", probe.outcome.marker()), marker_style),
+        Span::styled(
+            format!("{:<10}", probe.label),
+            Style::default().fg(p.subtext0),
+        ),
+        Span::styled(probe.detail.clone(), Style::default().fg(p.overlay1)),
+    ])
+}
+
+fn render_service_auth(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [heading, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "service auth",
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "gh, linearis and missive, checked once per session",
+                Style::default().fg(p.overlay1),
+            )),
+        ]),
+        heading,
+    );
+
+    let mut lines = if app.tool_probes_pending() {
+        vec![Line::from(Span::styled(
+            " checking…",
+            Style::default().fg(p.overlay1),
+        ))]
+    } else {
+        app.tool_probes_for(crate::app::probes::ToolProbeKind::Integration)
+            .into_iter()
+            .map(|probe| probe_line(probe, p))
+            .collect()
+    };
+    lines.extend(missive_integration_lines(app));
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn missive_integration_lines(app: &AppState) -> [Line<'static>; 2] {
+    let p = &app.palette;
+    let team = app
+        .settings_missive_team
+        .as_deref()
+        .filter(|team| !team.trim().is_empty())
+        .unwrap_or("not configured");
+    let ready = app.settings_missive_token_present && team != "not configured";
+    let marker_style = if ready {
+        Style::default().fg(p.green)
+    } else {
+        Style::default().fg(p.yellow)
+    };
+    let token = if app.settings_missive_token_present {
+        "present"
+    } else {
+        "missing"
+    };
+    [
+        Line::from(vec![
+            Span::styled(format!(" {} ", if ready { "✓" } else { "!" }), marker_style),
+            Span::styled("missive   ", Style::default().fg(p.subtext0)),
+            Span::styled(
+                format!("team {team} · token {token}"),
+                Style::default().fg(p.overlay1),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("   {}", missive_observation_label(app)),
+            Style::default().fg(p.overlay0),
+        )),
+    ]
+}
+
+fn missive_observation_label(app: &AppState) -> String {
+    let observed_at = app.work_index_snapshot.as_ref().and_then(|snapshot| {
+        let unavailable = snapshot.unavailable.as_ref().and_then(|unavailable| {
+            unavailable.reason(crate::work_index::WorkIndexSource::Missive)
+        });
+        unavailable.is_none().then_some(snapshot.observed_at)
+    });
+    let Some(observed_at) = observed_at else {
+        return "no successful observation".to_string();
+    };
+    let Some(now_unix) = app.status_now_unix else {
+        return "observed".to_string();
+    };
+    let Ok(now_unix) = u64::try_from(now_unix) else {
+        return "observed unknown".to_string();
+    };
+    match (std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now_unix))
+        .duration_since(observed_at)
+    {
+        Ok(elapsed) => format!(
+            "observed {} ago",
+            crate::work_projection::compact_elapsed(elapsed)
+        ),
+        Err(_) => "observed unknown".to_string(),
+    }
 }
 
 fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -773,7 +870,7 @@ fn render_settings_integrations(app: &AppState, frame: &mut Frame, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(0),
-        Constraint::Length(5),
+        Constraint::Length(7),
         Constraint::Length(2),
     ])
     .areas::<5>(area);
@@ -828,14 +925,7 @@ fn render_settings_integrations(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(lines), rows[2]);
-    render_probe_section(
-        app,
-        frame,
-        rows[3],
-        crate::app::probes::ToolProbeKind::Integration,
-        "service auth",
-        "github and linear, checked once per session",
-    );
+    render_service_auth(app, frame, rows[3]);
     frame.render_widget(integrations_footer_paragraph(app), rows[4]);
 }
 
@@ -895,6 +985,23 @@ fn render_settings_toggle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn rendered_integrations(app: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render_settings_integrations(app, frame, frame.area()))
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn the_nav_column_and_content_column_never_overlap() {
@@ -970,5 +1077,45 @@ mod tests {
         assert_eq!(offsets.len(), GeneralRow::ALL.len());
         assert_eq!(offsets[0], (0, 2));
         assert_eq!(offsets[1], (2, 1));
+    }
+
+    #[test]
+    fn injected_work_index_snapshot_renders_missive_integration_without_a_pty() {
+        let mut app = AppState::test_new();
+        app.tool_probes = crate::app::probes::ToolProbeState::Ready(vec![
+            crate::app::probes::ToolProbe {
+                label: "gh",
+                kind: crate::app::probes::ToolProbeKind::Integration,
+                outcome: crate::app::probes::ToolProbeOutcome::Ready,
+                detail: "authenticated".into(),
+            },
+            crate::app::probes::ToolProbe {
+                label: "linearis",
+                kind: crate::app::probes::ToolProbeKind::Integration,
+                outcome: crate::app::probes::ToolProbeOutcome::Ready,
+                detail: "authenticated".into(),
+            },
+        ]);
+        app.settings_missive_team = Some("support".into());
+        app.settings_missive_token_present = true;
+        app.status_now_unix = Some(180);
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60),
+        });
+
+        let text = rendered_integrations(&app, 76, 14);
+        for expected in [
+            "gh",
+            "linearis",
+            "missive",
+            "team support · token present",
+            "observed 2m ago",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}\n{text}");
+        }
     }
 }
