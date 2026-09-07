@@ -364,7 +364,37 @@ pub struct Config {
     pub land: LandConfig,
     pub source_control: SourceControlConfig,
     pub files: FilesConfig,
+    pub panel: PanelConfig,
     pub actions: Vec<ActionConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct PanelConfig {
+    /// Surfaces opened on a fresh right panel. Empty starts on the chooser.
+    pub default_surfaces: Vec<PanelSurfaceConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelSurfaceConfig {
+    Home,
+    Terminal,
+    Files,
+    Diff,
+    #[serde(alias = "pr")]
+    PullRequest,
+    Linear,
+    Missive,
+    Agents,
+    #[serde(alias = "edit")]
+    Editor,
+    #[serde(alias = "keys")]
+    Shortcuts,
+    #[serde(alias = "ctx")]
+    Context,
+    #[serde(alias = "note")]
+    Scratchpad,
 }
 
 /// Read-only Missive API settings.
@@ -1920,6 +1950,28 @@ agent_panel_scope = "current"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
+    fn panel_default_surfaces_parse_in_configured_order() {
+        let config: Config = toml::from_str(
+            r#"
+[panel]
+default_surfaces = ["home", "pull_request", "keys", "note"]
+"#,
+        )
+        .expect("panel config");
+
+        assert_eq!(
+            config.panel.default_surfaces,
+            vec![
+                PanelSurfaceConfig::Home,
+                PanelSurfaceConfig::PullRequest,
+                PanelSurfaceConfig::Shortcuts,
+                PanelSurfaceConfig::Scratchpad,
+            ]
+        );
+        assert!(Config::default().panel.default_surfaces.is_empty());
     }
 
     #[test]

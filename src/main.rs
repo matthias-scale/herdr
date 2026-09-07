@@ -185,6 +185,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # GitHub repositories to include, for example ["owner/repo"].
 # repos = []
 
+[panel]
+# Surfaces opened when a new right panel is expanded. Empty shows the chooser.
+# Values: terminal, files, diff, pull_request, linear, missive, agents, home,
+# editor, shortcuts, context, scratchpad.
+# default_surfaces = []
+
 [land]
 # PRs can land after an approved review or this exact label.
 # approval_label = "approved"

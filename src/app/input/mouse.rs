@@ -2793,6 +2793,12 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+            crate::app::DockSurface::Shortcuts,
+        ];
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.view.dock_rect = Rect::new(80, 0, 20, 20);
         app.state.view.dock_handle_rect = Rect::new(99, 0, 1, 20);
         app.state.view.dock_tab_hit_areas = vec![
@@ -2810,6 +2816,31 @@ mod tests {
 
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn clicking_an_empty_panel_card_opens_it_as_the_first_tab() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let home_index = crate::app::DockSurface::CARDS
+            .iter()
+            .position(|surface| *surface == crate::app::DockSurface::Home)
+            .expect("Home card");
+        let card = app.state.view.dock_surface_card_hit_areas[home_index];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.x + 1,
+            card.y + 1,
+        ));
+
+        assert_eq!(
+            app.state.dock_open_surfaces,
+            vec![crate::app::DockSurface::Home]
+        );
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
     }
 
     #[test]
@@ -2865,6 +2896,12 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+            crate::app::DockSurface::Shortcuts,
+        ];
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let shortcuts_index = app
             .state
