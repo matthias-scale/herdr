@@ -227,6 +227,8 @@ pub struct App {
     #[cfg(test)]
     pub(crate) work_index_gh_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
+    pub(crate) work_index_provider_cache_root_override: Option<std::path::PathBuf>,
+    #[cfg(test)]
     pub(crate) work_index_linearis_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) work_index_curl_program_override: Option<std::path::PathBuf>,
@@ -1269,6 +1271,8 @@ impl App {
             git_program_override: None,
             #[cfg(test)]
             work_index_gh_program_override: None,
+            #[cfg(test)]
+            work_index_provider_cache_root_override: None,
             #[cfg(test)]
             work_index_linearis_program_override: None,
             #[cfg(test)]
