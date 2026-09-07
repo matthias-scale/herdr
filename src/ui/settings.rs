@@ -987,11 +987,11 @@ mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
 
-    fn rendered_integrations(app: &AppState, width: u16, height: u16) -> String {
+    fn rendered_integrations_overlay(app: &AppState, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| render_settings_integrations(app, frame, frame.area()))
+            .draw(|frame| render_settings_overlay(app, frame, frame.area()))
             .expect("draw");
         terminal
             .backend()
@@ -1082,6 +1082,7 @@ mod tests {
     #[test]
     fn injected_work_index_snapshot_renders_missive_integration_without_a_pty() {
         let mut app = AppState::test_new();
+        app.settings.section = SettingsSection::Integrations;
         app.tool_probes = crate::app::probes::ToolProbeState::Ready(vec![
             crate::app::probes::ToolProbe {
                 label: "gh",
@@ -1107,15 +1108,20 @@ mod tests {
             observed_at: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60),
         });
 
-        let text = rendered_integrations(&app, 76, 14);
-        for expected in [
-            "gh",
-            "linearis",
-            "missive",
-            "team support · token present",
-            "observed 2m ago",
-        ] {
-            assert!(text.contains(expected), "missing {expected:?}\n{text}");
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = rendered_integrations_overlay(&app, width, height);
+            for expected in [
+                "gh",
+                "linearis",
+                "missive",
+                "team support · token present",
+                "observed 2m ago",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "missing {expected:?} at {width}x{height}\n{text}"
+                );
+            }
         }
     }
 }
