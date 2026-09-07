@@ -222,9 +222,6 @@ pub(crate) fn visible_tab_activity_instants_from(
             let SidebarRow::Tab { entry, depth } = row else {
                 return None;
             };
-            if !entry.space_label.is_empty() {
-                return None;
-            }
             let indent = " ".repeat(2 + usize::from(*depth) * 3);
             let layout = mobile_tab_row_layout(
                 entry,
@@ -2220,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_space_suffix_suppresses_hidden_age_deadlines() {
+    fn mobile_space_suffix_preserves_visible_age_deadlines() {
         let started = std::time::Instant::now() - std::time::Duration::from_secs(65);
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
@@ -2250,7 +2247,7 @@ mod tests {
         let runtimes = TerminalRuntimeRegistry::new();
 
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
-        assert!(app.view.visible_agent_activity_instants.is_empty());
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
 
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 18, 20));
         assert!(app.view.visible_agent_activity_instants.is_empty());
