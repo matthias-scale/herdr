@@ -1551,8 +1551,11 @@ impl HeadlessServer {
     /// from the config rather than from the struct default.
     fn seed_client_dock_presentation(&mut self, client_id: u64) {
         let ignore_whitespace = self.app.state.dock_diff_ignore_whitespace;
+        let default_surfaces = self.app.state.dock_default_surfaces.clone();
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.dock_presentation.diff_ignore_whitespace = ignore_whitespace;
+            client.dock_presentation.tab = default_surfaces.first().copied();
+            client.dock_presentation.open_surfaces = default_surfaces;
         }
     }
 
@@ -5719,6 +5722,39 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_attach_uses_only_configured_panel_defaults() {
+        let mut server = test_headless_server();
+        server.app.state.dock_default_surfaces = vec![
+            crate::app::DockSurface::Files,
+            crate::app::DockSurface::Context,
+        ];
+        server.clients.insert(
+            7,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                7,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+
+        server.seed_client_dock_presentation(7);
+
+        let presentation = &server.clients[&7].dock_presentation;
+        assert_eq!(
+            presentation.open_surfaces,
+            vec![
+                crate::app::DockSurface::Files,
+                crate::app::DockSurface::Context
+            ]
+        );
+        assert_eq!(presentation.tab, Some(crate::app::DockSurface::Files));
+    }
+
+    #[test]
     fn a_reloaded_diff_whitespace_choice_reaches_every_attach_and_drops_its_diff() {
         let mut server = test_headless_server();
         for client_id in [1, 2] {
@@ -6268,7 +6304,7 @@ mod tests {
                 width: dock_width,
                 collapsed: false,
                 tab: Some(crate::app::DockSurface::Editor),
-                open_surfaces: crate::app::DockSurface::DEFAULT_OPEN.to_vec(),
+                open_surfaces: vec![crate::app::DockSurface::Editor],
                 maximized: false,
                 surface_menu: None,
                 chooser_focused: false,

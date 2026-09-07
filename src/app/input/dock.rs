@@ -307,9 +307,9 @@ mod tests {
 
         // Reopening an already-open surface must not move it in the strip.
         let before = app.dock_open_surfaces.clone();
-        app.open_dock_surface(DockSurface::Home);
+        app.open_dock_surface(DockSurface::Files);
         assert_eq!(app.dock_open_surfaces, before);
-        assert_eq!(app.dock_tab, Some(DockSurface::Home));
+        assert_eq!(app.dock_tab, Some(DockSurface::Files));
     }
 
     #[test]
@@ -339,7 +339,9 @@ mod tests {
     fn closing_every_surface_leaves_the_chooser() {
         let mut app = AppState::test_new();
         app.dock_collapsed = false;
-        for surface in DockSurface::DEFAULT_OPEN {
+        app.dock_open_surfaces = vec![DockSurface::Home, DockSurface::Editor];
+        app.dock_tab = Some(DockSurface::Home);
+        for surface in [DockSurface::Home, DockSurface::Editor] {
             app.close_dock_surface(surface);
         }
 

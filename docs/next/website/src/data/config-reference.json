@@ -1056,6 +1056,32 @@
       ]
     },
     {
+      "id": "panel",
+      "title": "Right panel",
+      "keys": [
+        {
+          "key": "panel.default_surfaces",
+          "type": "list of enums",
+          "default": "[]",
+          "description": "Surfaces opened as tabs in a fresh right panel. An empty list opens the surface chooser.",
+          "values": [
+            "home",
+            "terminal",
+            "files",
+            "diff",
+            "pull_request",
+            "linear",
+            "missive",
+            "agents",
+            "editor",
+            "shortcuts",
+            "context",
+            "scratchpad"
+          ]
+        }
+      ]
+    },
+    {
       "id": "files",
       "title": "Files",
       "keys": [

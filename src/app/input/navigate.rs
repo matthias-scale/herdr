@@ -3449,6 +3449,11 @@ mod tests {
         state
             .dock_editor_errors
             .insert(agent_pane_id, "editor exited".to_string());
+        state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+        ];
+        state.dock_tab = Some(crate::app::DockSurface::Home);
 
         for _ in 0..8 {
             if state.dock_tab == Some(crate::app::DockSurface::Editor) {
@@ -3472,6 +3477,11 @@ mod tests {
         let mut state = app_with_test_workspaces(&["one"]).state;
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         state.mode = Mode::Prefix;
+        state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+        ];
+        state.dock_tab = Some(crate::app::DockSurface::Home);
 
         execute_navigate_action_in_context(
             &mut state,
