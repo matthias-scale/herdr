@@ -158,9 +158,12 @@ impl ProviderCache {
         let lock = if policy.bypass {
             None
         } else {
-            Some(acquire_lock(&lock_path, deadline, || {
-                self.fresh_output(&path, policy.ttl).is_some()
-            })?)
+            Some(acquire_lock(
+                &lock_path,
+                deadline,
+                crate::work_index::WORK_INDEX_BATCH_TIMEOUT,
+                || self.fresh_output(&path, policy.ttl).is_some(),
+            )?)
         };
         if !policy.bypass {
             if let Some(output) = self.fresh_output(&path, policy.ttl) {
@@ -372,6 +375,7 @@ impl Drop for CacheLock {
 fn acquire_lock(
     path: &Path,
     deadline: Instant,
+    stale_after: Duration,
     cache_filled: impl Fn() -> bool,
 ) -> io::Result<CacheLock> {
     if let Some(parent) = path.parent() {
@@ -393,6 +397,19 @@ fn acquire_lock(
                     return Ok(CacheLock {
                         path: PathBuf::new(),
                     });
+                }
+                let stale = std::fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                    .is_some_and(|age| age > stale_after);
+                if stale {
+                    // Another waiter may remove the same abandoned lock first.
+                    match std::fs::remove_file(path) {
+                        Ok(()) => continue,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(_) => {}
+                    }
                 }
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
@@ -667,6 +684,114 @@ mod tests {
         }
         let calls = std::fs::read_to_string(calls).expect("read calls");
         assert_eq!(calls.lines().count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stale_lock_does_not_block_provider_invocation() {
+        let dir = temp_dir("stale-lock");
+        let calls = dir.join("calls");
+        let program = fixture_program(&dir);
+        let cache = ProviderCache::new(&dir);
+        let argv = vec![calls.display().to_string()];
+        let lock_path = cache
+            .cache_path(Provider::Github, &argv)
+            .with_extension("lock");
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent"))
+            .expect("create lock parent");
+        let lock = std::fs::File::create(&lock_path).expect("create stale lock");
+        lock.set_modified(
+            SystemTime::now()
+                - crate::work_index::WORK_INDEX_BATCH_TIMEOUT
+                - Duration::from_secs(1),
+        )
+        .expect("age stale lock");
+
+        cache
+            .run(
+                Provider::Github,
+                &program,
+                &argv,
+                CachePolicy {
+                    ttl: Duration::from_secs(60),
+                    bypass: false,
+                },
+                Instant::now() + Duration::from_millis(100),
+            )
+            .expect("recover stale lock");
+
+        assert_eq!(cache.counts().github, 1);
+        assert_eq!(
+            std::fs::read_to_string(&calls)
+                .expect("read calls")
+                .lines()
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fresh_lock_waits_for_other_writer_to_fill_cache() {
+        let dir = temp_dir("fresh-lock");
+        let calls = dir.join("calls");
+        let program = fixture_program(&dir);
+        let cache = ProviderCache::new(&dir);
+        let argv = vec![calls.display().to_string()];
+        let cache_path = cache.cache_path(Provider::Github, &argv);
+        let lock_path = cache_path.with_extension("lock");
+        std::fs::create_dir_all(lock_path.parent().expect("lock parent"))
+            .expect("create lock parent");
+        std::fs::File::create(&lock_path).expect("create live lock");
+        let writer_lock_path = lock_path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            write_cache_entry(&cache_path, SystemTime::now(), b"writer output")
+                .expect("fill cache");
+            std::fs::remove_file(writer_lock_path).expect("release live lock");
+        });
+
+        let output = cache
+            .run(
+                Provider::Github,
+                &program,
+                &argv,
+                CachePolicy {
+                    ttl: Duration::from_secs(60),
+                    bypass: false,
+                },
+                Instant::now() + Duration::from_secs(2),
+            )
+            .expect("read cache filled by writer");
+        writer.join().expect("writer thread");
+
+        assert_eq!(output.stdout, b"writer output");
+        assert_eq!(cache.counts().github, 0);
+        assert!(!calls.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn abandoned_lock_recovers_after_age_threshold() {
+        let dir = temp_dir("abandoned-lock");
+        let lock_path = dir.join("provider.lock");
+        std::fs::File::create(&lock_path).expect("create abandoned lock");
+        let stale_after = Duration::from_millis(30);
+        let started = Instant::now();
+
+        let lock = acquire_lock(
+            &lock_path,
+            Instant::now() + Duration::from_secs(2),
+            stale_after,
+            || false,
+        )
+        .expect("recover abandoned lock");
+
+        assert!(started.elapsed() >= stale_after);
+        drop(lock);
+        assert!(!lock_path.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
