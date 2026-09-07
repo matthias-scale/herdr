@@ -5770,8 +5770,17 @@ mod tests {
         app.state.selected = 0;
         app.state.add_project_start_dir = root.display().to_string();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let add = crate::ui::sidebar_header_add_project_rect(app.state.view.sidebar_rect);
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), add.x, add.y));
+        // F25 folded the header `Add project` button into the `+` menu (second entry).
+        let hit = crate::ui::sidebar_header_new_menu_rect(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), hit.x, hit.y));
+        let menu = crate::ui::sidebar_new_menu_layout(&app.state, Rect::new(0, 0, 120, 40))
+            .expect("new menu");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            menu.list_rect.y + 1,
+        ));
+        assert!(app.state.add_project_active());
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
 
         let layout = app.state.view.add_project_layout.clone();
