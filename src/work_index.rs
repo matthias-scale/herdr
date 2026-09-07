@@ -3970,6 +3970,16 @@ impl crate::app::App {
         resolve_program("gh")
     }
 
+    /// Provider cache rooted at the state dir. Tests point it at a fixture
+    /// directory so cached fixture output never leaks between tests.
+    fn work_index_provider_cache(&self) -> ProviderCache {
+        #[cfg(test)]
+        if let Some(root) = self.work_index_provider_cache_root_override.as_ref() {
+            return ProviderCache::new(root);
+        }
+        ProviderCache::new(&crate::config::state_dir())
+    }
+
     pub(crate) fn work_index_linearis_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_linearis_program_override.as_ref() {
@@ -4057,7 +4067,7 @@ impl crate::app::App {
                     .and_then(|key| key.ticket_id)
             });
         let cache_bypass = std::mem::take(&mut self.work_index_cache_bypass);
-        let provider_cache = ProviderCache::new(&crate::config::state_dir());
+        let provider_cache = self.work_index_provider_cache();
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
@@ -4233,7 +4243,11 @@ impl crate::app::App {
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
-        let provider_cache = ProviderCache::new(&crate::config::state_dir());
+        let provider_cache = self.work_index_provider_cache();
+        // The selected PR is an explicit surface refresh (F18-2): its focus
+        // fetch, already debounced to PR_DETAIL_FOCUS_REFRESH_INTERVAL,
+        // bypasses the provider cache so CI and review state stay live.
+        let bypass_key = selection.filter(|key| key.pr_number.is_some());
         let _ = std::thread::Builder::new()
             .name("herdr-work-item-details".into())
             .spawn(move || {
@@ -4247,6 +4261,7 @@ impl crate::app::App {
                                 let gh_program = gh_program.clone();
                                 let linearis_program = linearis_program.clone();
                                 let provider_cache = provider_cache.clone();
+                                let bypass = bypass_key.as_ref() == Some(&key);
                                 scope.spawn(move || {
                                     let target =
                                         target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT);
@@ -4258,7 +4273,7 @@ impl crate::app::App {
                                                 &gh_program,
                                                 target,
                                                 Some(&provider_cache),
-                                                false,
+                                                bypass,
                                             ),
                                             "GitHub PR detail",
                                         ),
@@ -6351,6 +6366,7 @@ esac
         );
         let mut app = test_app_with_work_index();
         app.work_index_gh_program_override = Some(gh);
+        app.work_index_provider_cache_root_override = Some(dir.clone());
         let key = work_item_key(7);
         let now = Instant::now();
 
