@@ -2996,6 +2996,8 @@ impl App {
                         self.state.clear_home();
                         self.focus_toast_target_via_api()
                     }
+                    MouseAction::RefreshDockFiles => self.force_dock_files_refresh(),
+                    MouseAction::SortDockFiles => self.state.cycle_dock_files_sort(),
                     MouseAction::MoveWorkspace {
                         source_ws_idx,
                         insert_idx,

@@ -59,7 +59,19 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if usize::from(content_width) < minimum_required_status_width(app) {
         return;
     }
-    let segments = fitted_segments(status_segments(app, metrics, p), content_width as usize);
+    let title_segment_budget = focused_pane_title_parts(app).and_then(|(repo, _)| {
+        let start = focused_pane_title_start(app, area);
+        let budget = area
+            .x
+            .saturating_add(content_width)
+            .saturating_sub(start)
+            .saturating_sub(display_width_u16(&repo));
+        (usize::from(budget) >= minimum_title_companion_width()).then_some(usize::from(budget))
+    });
+    let segments = match title_segment_budget {
+        Some(budget) => fitted_segments_beside_title(status_segments(app, metrics, p), budget),
+        None => fitted_segments(status_segments(app, metrics, p), usize::from(content_width)),
+    };
 
     let used = segment_width(&segments);
     let pad = (content_width as usize).saturating_sub(used);
@@ -97,43 +109,26 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// The focused pane's terminal title, rendered in the status row's otherwise
+/// The focused repository and thread, rendered in the status row's otherwise
 /// empty middle. It starts at the sidebar's right edge so the title lines up
 /// with the column the pane itself occupies below, and it yields to both the
 /// left-hand buttons and the right-aligned segments rather than overlapping.
 fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segments_used: usize) {
-    const MIN_TITLE_WIDTH: u16 = 8;
-
-    let Some(title) = focused_pane_title(app) else {
+    let Some((repo, thread)) = focused_pane_title_parts(app) else {
         return;
     };
-    let sidebar = app.view.sidebar_rect;
-    let buttons_end = app
-        .view
-        .status_buttons
-        .iter()
-        .map(|button| button.rect.x.saturating_add(button.rect.width))
-        .max()
-        .unwrap_or(area.x);
-    let start = sidebar
-        .x
-        .saturating_add(sidebar.width)
-        .max(area.x)
-        .max(buttons_end);
+    let start = focused_pane_title_start(app, area);
     let segments_start = area
         .x
         .saturating_add(area.width)
         .saturating_sub(u16::try_from(segments_used).unwrap_or(u16::MAX));
-    // One blank column before the segments keeps the title from reading as part
-    // of the quota block.
-    let Some(width) = segments_start.saturating_sub(1).checked_sub(start) else {
+    let raw_width = segments_start.saturating_sub(start);
+    // Keep a separator when space permits, but at 80 columns the repository is
+    // more useful than a blank cell.
+    let width = raw_width.saturating_sub(u16::from(usize::from(raw_width) > display_width(&repo)));
+    let Some(text) = fit_focused_pane_title(&repo, &thread, usize::from(width)) else {
         return;
     };
-    if width < MIN_TITLE_WIDTH {
-        return;
-    }
-
-    let text = truncate_end(&title, usize::from(width));
     let style = Style::default()
         .fg(app.palette.subtext0)
         .bg(app.palette.panel_bg);
@@ -143,17 +138,68 @@ fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segm
     );
 }
 
-fn focused_pane_title(app: &AppState) -> Option<String> {
+fn focused_pane_title_start(app: &AppState, area: Rect) -> u16 {
+    let sidebar = app.view.sidebar_rect;
+    let buttons_end = app
+        .view
+        .status_buttons
+        .iter()
+        .map(|button| button.rect.x.saturating_add(button.rect.width))
+        .max()
+        .unwrap_or(area.x);
+    sidebar
+        .x
+        .saturating_add(sidebar.width)
+        .max(area.x)
+        .max(buttons_end)
+}
+
+fn focused_pane_title_parts(app: &AppState) -> Option<(String, String)> {
     let workspace = app.active.and_then(|ws_idx| app.workspaces.get(ws_idx))?;
-    // Same source as the window label: a plain shell focused next to a
-    // running agent must not replace the agent's subject with its own title.
-    let pane_id = workspace.title_source_pane_id(&app.terminals)?;
+    let pane_id = workspace.focused_pane_id()?;
     let terminal = app.terminals.get(workspace.terminal_id(pane_id)?)?;
+    let context = terminal.effective_work_context();
+    let repo = context
+        .repo
+        .as_deref()
+        .and_then(|repo| repo.rsplit('/').find(|part| !part.trim().is_empty()))
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            terminal
+                .cwd
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::trim)
+                .filter(|repo| !repo.is_empty())
+                .map(str::to_string)
+        })?;
     let title = terminal
-        .terminal_title_stripped()
+        .manual_label
+        .clone()
+        .or_else(|| context.session_name.clone())
+        .or_else(|| context.work_title.clone())
+        .or_else(|| terminal.terminal_title_stripped())
         .or_else(|| terminal.terminal_title.clone())?;
     let title = subject_of(title.trim());
-    (!title.is_empty()).then(|| title.to_string())
+    (!title.is_empty()).then(|| (repo, title.to_string()))
+}
+
+fn fit_focused_pane_title(repo: &str, thread: &str, width: usize) -> Option<String> {
+    let repo_width = display_width(repo);
+    if repo_width == 0 || repo_width > width {
+        return None;
+    }
+    let full = format!("{repo} / {thread}");
+    if display_width(&full) <= width {
+        return Some(full);
+    }
+    let minimum_truncated = format!("{repo} / …");
+    if display_width(&minimum_truncated) > width {
+        return Some(repo.to_string());
+    }
+    Some(truncate_end(&full, width))
 }
 
 /// Agents prefix their title with identity -- `cc · herdr · rename the pane`.
@@ -221,10 +267,13 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
 
     // The right-aligned segments are load-bearing; buttons yield to them rather
     // than overlapping, and drop whole rather than truncating to an unreadable stub.
+    let title_reserve = focused_pane_title_parts(app)
+        .map(|(repo, _)| display_width(&repo))
+        .unwrap_or(0);
     let reserved = segment_width(&fitted_segments(
         status_segments(app, metrics_or_unavailable(app), &app.palette),
         area.width as usize,
-    ));
+    )) + title_reserve;
     let budget = (area.width as usize).saturating_sub(reserved);
 
     let mut buttons = Vec::new();
@@ -297,8 +346,33 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
     segments
 }
 
-pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
+fn fitted_segments_beside_title(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
+    if width < minimum_required_status_width_for_segments() {
+        // At 80 columns the repository identity wins the last few cells. CPU
+        // and memory remain; the connectivity dot returns at wider sizes.
+        segments.retain(|segment| segment.text.trim() != DOT.to_string());
+        if width == minimum_title_companion_width() {
+            if let Some(cpu) = segments
+                .iter_mut()
+                .find(|segment| segment.text.starts_with(" CPU "))
+            {
+                cpu.text.remove(0);
+            }
+        }
+    }
+    fitted_segments(segments, width)
+}
+
+fn minimum_required_status_width_for_segments() -> usize {
     1 + display_width(" CPU \u{2588} 100 ") + display_width(" MEM \u{2588} 100 ")
+}
+
+fn minimum_title_companion_width() -> usize {
+    display_width("CPU \u{2588} ") + display_width(" MEM \u{2588} ")
+}
+
+pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
+    minimum_required_status_width_for_segments()
 }
 
 /// The eight fill levels of a column glyph, from shortest to full.
@@ -1780,10 +1854,10 @@ mod tests {
     }
 
     #[test]
-    fn focused_pane_title_starts_where_the_sidebar_ends() {
+    fn focused_pane_title_starts_at_sidebar_and_keeps_repo_at_eighty_columns() {
         use ratatui::{backend::TestBackend, Terminal};
 
-        const WIDTH: u16 = 200;
+        const WIDTH: u16 = 80;
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.ensure_test_terminals();
@@ -1801,6 +1875,14 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("focused terminal")
             .set_terminal_title(Some("Fix billing".into()));
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("herdrdev/herdr".into()),
+                ..Default::default()
+            })
+            .expect("repo context");
 
         crate::ui::compute_view_with_runtime_registry(
             &mut app,
@@ -1831,7 +1913,7 @@ mod tests {
         let columns = rendered.chars().collect::<Vec<_>>();
         let at_sidebar_edge = columns[sidebar_end..].iter().collect::<String>();
         assert!(
-            at_sidebar_edge.starts_with("Fix billing"),
+            at_sidebar_edge.starts_with("herdr"),
             "title must start at the sidebar's right edge: {rendered:?}"
         );
         assert_eq!(
@@ -1853,5 +1935,39 @@ mod tests {
         // A bare separator is not the agent prefix shape and must survive.
         assert_eq!(subject_of("a·b"), "a·b");
         assert_eq!(subject_of("修复 · 标题"), "标题");
+    }
+
+    #[test]
+    fn focused_pane_title_preserves_the_repo_then_truncates_the_thread() {
+        assert_eq!(
+            fit_focused_pane_title("herdr", "fix a long thread name", 16).as_deref(),
+            Some("herdr / fix a l…")
+        );
+        assert_eq!(
+            fit_focused_pane_title("herdr", "fix", 5).as_deref(),
+            Some("herdr")
+        );
+        assert_eq!(fit_focused_pane_title("herdr", "fix", 4), None);
+    }
+
+    #[test]
+    fn focused_pane_title_uses_focused_context_and_cwd_fallback() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+        terminal.cwd = PathBuf::from("/tmp/local-repo");
+        terminal.set_manual_label("manual thread".into());
+
+        assert_eq!(
+            focused_pane_title_parts(&app),
+            Some(("local-repo".into(), "manual thread".into()))
+        );
     }
 }

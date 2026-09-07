@@ -1362,6 +1362,8 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_selection: Option<std::path::PathBuf>,
     pub(crate) files_filter: String,
     pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) files_sort: crate::files::FileSort,
+    pub(crate) files_search_active: bool,
     pub(crate) agents_focused: bool,
     pub(crate) agents_selection: Option<String>,
     /// Selection inside the home tab. Stored as a work-item key, never an
@@ -1401,6 +1403,8 @@ impl Default for DockPresentationState {
             files_selection: None,
             files_filter: String::new(),
             files_collapsed: std::collections::HashSet::new(),
+            files_sort: crate::files::FileSort::Name,
+            files_search_active: false,
             agents_focused: false,
             agents_selection: None,
             home_selection: None,
@@ -1884,6 +1888,8 @@ pub struct ViewState {
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_home_detail_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
+    pub(crate) dock_files_refresh_rect: Rect,
+    pub(crate) dock_files_sort_rect: Rect,
     pub(crate) dock_agent_row_hit_areas: Vec<DockAgentRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
@@ -2067,6 +2073,7 @@ impl GitAction {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn argv(self) -> &'static [&'static str] {
         match self {
             Self::Pull => &["git", "pull", "--rebase"],
@@ -2968,6 +2975,8 @@ pub struct AppState {
     pub(crate) dock_files_selection: Option<std::path::PathBuf>,
     pub(crate) dock_files_filter: String,
     pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) dock_files_sort: crate::files::FileSort,
+    pub(crate) dock_files_search_active: bool,
     /// Selection and keyboard ownership for the focus-following Agents tree.
     /// Both fields are attach-local TUI presentation state.
     pub(crate) dock_agents_focused: bool,
@@ -3029,9 +3038,12 @@ pub struct AppState {
     /// `source_control.branch_prefix`: the prefix Herdr puts in front of a
     /// branch name derived from a ticket.
     pub(crate) branch_prefix: String,
-    /// `source_control.commit_message_model`: exported to the Commit action so
-    /// a hook can draft the message. Empty leaves `git commit` unchanged.
+    /// `source_control.commit_message_model`: passed to the non-interactive
+    /// commit-message generator. Empty leaves `git commit` on its editor path.
     pub(crate) commit_message_model: String,
+    /// `source_control.commit_stage_all`: opt-in staging before commit-message
+    /// generation. False preserves the caller's staged set exactly.
+    pub(crate) commit_stage_all: bool,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
@@ -3843,6 +3855,11 @@ impl AppState {
         std::mem::swap(&mut self.dock_files_selection, &mut other.files_selection);
         std::mem::swap(&mut self.dock_files_filter, &mut other.files_filter);
         std::mem::swap(&mut self.dock_files_collapsed, &mut other.files_collapsed);
+        std::mem::swap(&mut self.dock_files_sort, &mut other.files_sort);
+        std::mem::swap(
+            &mut self.dock_files_search_active,
+            &mut other.files_search_active,
+        );
         std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
         std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
@@ -4350,6 +4367,8 @@ impl AppState {
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_file_row_hit_areas: Vec::new(),
+                dock_files_refresh_rect: Rect::default(),
+                dock_files_sort_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
@@ -4402,6 +4421,8 @@ impl AppState {
             dock_files_selection: None,
             dock_files_filter: String::new(),
             dock_files_collapsed: std::collections::HashSet::new(),
+            dock_files_sort: crate::files::FileSort::Name,
+            dock_files_search_active: false,
             dock_agents_focused: false,
             dock_agents_selection: None,
             dock_file_cache: std::collections::HashMap::new(),
@@ -4430,6 +4451,7 @@ impl AppState {
             land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
             branch_prefix: crate::config::DEFAULT_BRANCH_PREFIX.into(),
             commit_message_model: String::new(),
+            commit_stage_all: false,
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
@@ -5239,5 +5261,22 @@ mod tests {
                 "Collapse"
             ]
         );
+    }
+
+    #[test]
+    fn dock_file_sort_and_search_are_swapped_with_client_presentation() {
+        let mut state = AppState::test_new();
+        let mut client = DockPresentationState {
+            files_sort: crate::files::FileSort::GitStatus,
+            files_search_active: true,
+            ..DockPresentationState::default()
+        };
+
+        state.swap_dock_presentation(&mut client);
+
+        assert_eq!(state.dock_files_sort, crate::files::FileSort::GitStatus);
+        assert!(state.dock_files_search_active);
+        assert_eq!(client.files_sort, crate::files::FileSort::Name);
+        assert!(!client.files_search_active);
     }
 }

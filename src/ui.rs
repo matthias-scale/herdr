@@ -625,6 +625,12 @@ fn compute_view_internal(
         } else {
             Vec::new()
         };
+    let (dock_files_refresh_rect, dock_files_sort_rect) =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Files) {
+            dock::files::header_hit_areas(app, dock_body_rect)
+        } else {
+            (Rect::default(), Rect::default())
+        };
     let dock_agent_row_hit_areas =
         if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Agents) {
             dock::agents::row_hit_areas(app, dock_body_rect)
@@ -721,6 +727,8 @@ fn compute_view_internal(
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
         dock_file_row_hit_areas,
+        dock_files_refresh_rect,
+        dock_files_sort_rect,
         dock_agent_row_hit_areas,
         dock_body_rect,
     };
@@ -963,6 +971,8 @@ fn compute_mobile_view(
         dock_home_tab_keys: Vec::new(),
         dock_home_detail_tab_hit_areas: Vec::new(),
         dock_file_row_hit_areas: Vec::new(),
+        dock_files_refresh_rect: Rect::default(),
+        dock_files_sort_rect: Rect::default(),
         dock_agent_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };

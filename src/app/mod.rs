@@ -901,6 +901,8 @@ impl App {
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_file_row_hit_areas: Vec::new(),
+                dock_files_refresh_rect: Rect::default(),
+                dock_files_sort_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
@@ -953,6 +955,8 @@ impl App {
             dock_files_selection: None,
             dock_files_filter: String::new(),
             dock_files_collapsed: std::collections::HashSet::new(),
+            dock_files_sort: crate::files::FileSort::Name,
+            dock_files_search_active: false,
             dock_agents_focused: false,
             dock_agents_selection: None,
             dock_file_cache: std::collections::HashMap::new(),
@@ -982,6 +986,7 @@ impl App {
             land_approval_label: config.land.approval_label.clone(),
             branch_prefix: config.source_control.branch_prefix.clone(),
             commit_message_model: config.source_control.commit_message_model.clone(),
+            commit_stage_all: config.source_control.commit_stage_all,
             work_index_linear_team_configured: config
                 .work_index
                 .linear_team
@@ -2291,6 +2296,7 @@ impl App {
         if !invalid_section("source_control") {
             self.state.branch_prefix = config.source_control.branch_prefix.clone();
             self.state.commit_message_model = config.source_control.commit_message_model.clone();
+            self.state.commit_stage_all = config.source_control.commit_stage_all;
         }
 
         if !invalid_section("work_index") {
@@ -4966,6 +4972,11 @@ mod tests {
                 value: value.into(),
             });
         }
+        app.save_config_edit(ConfigEdit::Bool {
+            section: "source_control",
+            key: "commit_stage_all",
+            value: true,
+        });
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
@@ -4977,8 +4988,10 @@ mod tests {
         assert!(crate::app::git_actions::wrapped_command(
             state::GitAction::Commit,
             &app.state.commit_message_model,
+            app.state.commit_stage_all,
         )
-        .contains("HERDR_COMMIT_MESSAGE_MODEL=claude-opus-5"));
+        .contains("claude-opus-5"));
+        assert!(app.state.commit_stage_all);
         assert_eq!(
             crate::ui::work_list_detail::ticket_worktree_branch(
                 &app.state.branch_prefix,

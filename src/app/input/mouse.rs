@@ -58,6 +58,8 @@ pub(super) enum MouseAction {
         pane_id: crate::layout::PaneId,
     },
     FocusToastTarget,
+    RefreshDockFiles,
+    SortDockFiles,
     MoveWorkspace {
         source_ws_idx: usize,
         insert_idx: usize,
@@ -884,6 +886,14 @@ impl AppState {
                     self.toggle_dock_diff_whitespace();
                     self.dock_diff_focused = true;
                     return None;
+                }
+                if rect_contains(self.view.dock_files_refresh_rect, mouse.column, mouse.row) {
+                    self.dock_files_focused = true;
+                    return Some(MouseAction::RefreshDockFiles);
+                }
+                if rect_contains(self.view.dock_files_sort_rect, mouse.column, mouse.row) {
+                    self.dock_files_focused = true;
+                    return Some(MouseAction::SortDockFiles);
                 }
                 if let Some(index) = self.dock_diff_file_at(mouse.column, mouse.row) {
                     self.dock_diff_selected = index;
@@ -2810,6 +2820,42 @@ mod tests {
 
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn files_header_clicks_route_sort_and_refresh_actions() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        app.state.view.dock_rect = Rect::new(80, 0, 20, 20);
+        app.state.view.dock_files_refresh_rect = Rect::new(81, 3, 3, 1);
+        app.state.view.dock_files_sort_rect = Rect::new(90, 3, 9, 1);
+        let mut workspace = Workspace::test_new("files-header");
+        workspace.identity_cwd = std::env::current_dir().expect("current directory");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let cached_root = std::path::PathBuf::from("/cached-tree");
+        app.state.dock_files_root = Some(cached_root.clone());
+        app.state.dock_file_cache.insert(
+            cached_root.clone(),
+            crate::files::FileTreeSnapshot {
+                root: cached_root.clone(),
+                files: Vec::new(),
+                fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
+            },
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 92, 3));
+        assert_eq!(app.state.dock_files_sort, crate::files::FileSort::Type);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 82, 3));
+        assert!(app.files_refresh_in_flight.is_some());
+        assert!(!app.state.dock_file_cache.contains_key(&cached_root));
+        assert!(app.state.dock_files_root.is_none());
     }
 
     #[test]
