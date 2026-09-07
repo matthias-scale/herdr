@@ -46,6 +46,30 @@ const USAGE_CACHE_VERSION: u32 = 1;
 pub(crate) enum UsageProvider {
     ClaudeCode,
     Codex,
+    /// Proves that consumers handle a newly collected provider without adding
+    /// a provider that production does not collect yet.
+    #[cfg(test)]
+    TestCollected,
+}
+
+impl UsageProvider {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            #[cfg(test)]
+            Self::TestCollected => "Test Collected",
+        }
+    }
+
+    pub(crate) fn series_index(self) -> usize {
+        match self {
+            Self::ClaudeCode => 0,
+            Self::Codex => 1,
+            #[cfg(test)]
+            Self::TestCollected => 2,
+        }
+    }
 }
 
 /// One billable response or turn, normalised across local provider logs.
@@ -356,6 +380,8 @@ fn parse_usage_file(provider: UsageProvider, path: &Path) -> Vec<UsageSample> {
     match provider {
         UsageProvider::ClaudeCode => parse_claude_usage_samples(&contents, &session_id),
         UsageProvider::Codex => parse_codex_usage_samples(&contents, &session_id),
+        #[cfg(test)]
+        UsageProvider::TestCollected => Vec::new(),
     }
 }
 

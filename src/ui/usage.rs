@@ -816,24 +816,17 @@ fn toggle_style(active: bool, palette: &Palette) -> Style {
 }
 
 fn provider_label(provider: UsageProvider) -> &'static str {
-    match provider {
-        UsageProvider::ClaudeCode => "Claude Code",
-        UsageProvider::Codex => "Codex",
-    }
+    provider.label()
 }
 
 fn provider_color(provider: UsageProvider, palette: &Palette) -> ratatui::style::Color {
-    match provider {
-        UsageProvider::ClaudeCode => palette.peach,
-        UsageProvider::Codex => palette.blue,
-    }
+    let colors = [palette.peach, palette.blue, palette.green, palette.mauve];
+    colors[provider.series_index() % colors.len()]
 }
 
 fn provider_series_marker(provider: UsageProvider) -> char {
-    match provider {
-        UsageProvider::ClaudeCode => '◆',
-        UsageProvider::Codex => '●',
-    }
+    const MARKERS: [char; 4] = ['◆', '●', '▲', '■'];
+    MARKERS[provider.series_index() % MARKERS.len()]
 }
 
 fn format_cost(value: Option<f64>) -> String {
@@ -1015,6 +1008,31 @@ mod tests {
                 "missing Codex series at {width}x{height}\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn newly_collected_provider_record_gets_its_own_chart_series_without_a_pty() {
+        let mut snapshot = fixture();
+        snapshot.samples.push(UsageSample {
+            provider: UsageProvider::TestCollected,
+            session_id: "test-collected-session".into(),
+            timestamp: 1_787_820_000,
+            model: "test-collected-model".into(),
+            input_tokens: 250_000,
+            output_tokens: 25_000,
+            cache_write_tokens: 0,
+            cache_read_tokens: 500_000,
+        });
+
+        let text = render_snapshot_at(120, 40, snapshot);
+        assert!(
+            text.contains("◆ Claude Code  ● Codex  ▲ Test Collected"),
+            "missing dynamic provider legend\n{text}"
+        );
+        assert!(
+            text.lines().any(|line| line.contains("▲ ▁")),
+            "missing new provider series\n{text}"
+        );
     }
 
     #[test]
