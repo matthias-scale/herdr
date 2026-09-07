@@ -1671,6 +1671,15 @@ impl AppState {
             {
                 if self.dock_tab == Some(crate::app::DockSurface::Agents) {
                     self.scroll_dock_agents(-3);
+                } else if let Some(key) = match self.dock_tab {
+                    Some(crate::app::DockSurface::Pr) => crate::ui::dock::pr::focused_pr_key(self),
+                    Some(crate::app::DockSurface::Linear) => {
+                        crate::ui::dock::linear::focused_ticket_key(self)
+                    }
+                    _ => None,
+                } {
+                    let view = self.dock_object_views.entry(key).or_default();
+                    view.scroll = view.scroll.saturating_sub(3);
                 } else {
                     self.dock_scroll = self.dock_scroll.saturating_sub(3);
                 }
@@ -1680,6 +1689,15 @@ impl AppState {
             {
                 if self.dock_tab == Some(crate::app::DockSurface::Agents) {
                     self.scroll_dock_agents(3);
+                } else if let Some(key) = match self.dock_tab {
+                    Some(crate::app::DockSurface::Pr) => crate::ui::dock::pr::focused_pr_key(self),
+                    Some(crate::app::DockSurface::Linear) => {
+                        crate::ui::dock::linear::focused_ticket_key(self)
+                    }
+                    _ => None,
+                } {
+                    let view = self.dock_object_views.entry(key).or_default();
+                    view.scroll = view.scroll.saturating_add(3);
                 } else {
                     self.dock_scroll = self.dock_scroll.saturating_add(3);
                 }

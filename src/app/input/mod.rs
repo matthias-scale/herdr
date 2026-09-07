@@ -1305,6 +1305,56 @@ impl App {
             }
             return true;
         }
+        let selected_object_key = state.selected.clone().or_else(|| match state.projection {
+            crate::app::state::WorkProjection::PullRequests => {
+                self.visible_pr_view_keys().first().cloned()
+            }
+            crate::app::state::WorkProjection::Tickets => {
+                self.visible_ticket_view_keys().first().cloned()
+            }
+            _ => None,
+        });
+        let selected_pr_key = (state.projection == crate::app::state::WorkProjection::PullRequests)
+            .then(|| selected_object_key.clone())
+            .flatten();
+        if let Some((object_key, selected)) = selected_pr_key.as_ref().and_then(|object_key| {
+            state
+                .object_views
+                .get(object_key)
+                .and_then(|view| view.tab_picker)
+                .map(|selected| (object_key.clone(), selected))
+        }) {
+            let count = crate::app::state::PrDetailTab::ALL.len();
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                    if let Some(view) = self.state.work_view.as_mut() {
+                        view.object_view_mut(object_key).tab_picker =
+                            Some(selected.saturating_sub(1));
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                    if let Some(view) = self.state.work_view.as_mut() {
+                        view.object_view_mut(object_key).tab_picker =
+                            Some((selected + 1).min(count.saturating_sub(1)));
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(view) = self.state.work_view.as_mut() {
+                        let object = view.object_view_mut(object_key);
+                        object.tab = crate::app::state::PrDetailTab::ALL[selected];
+                        object.scroll = 0;
+                        object.tab_picker = None;
+                    }
+                }
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(view) = self.state.work_view.as_mut() {
+                        view.object_view_mut(object_key).tab_picker = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         if state.reviewer_picker.is_some() {
             let collaborators = self
                 .selected_pr_detail()
@@ -1678,6 +1728,9 @@ impl App {
                 if let Some(state) = self.state.work_view.as_mut() {
                     if state.projection == crate::app::state::WorkProjection::Missive {
                         state.missive_detail_scroll = state.missive_detail_scroll.saturating_sub(5);
+                    } else if let Some(object_key) = selected_object_key.clone() {
+                        let view = state.object_view_mut(object_key);
+                        view.scroll = view.scroll.saturating_sub(5);
                     }
                 }
             }
@@ -1685,6 +1738,9 @@ impl App {
                 if let Some(state) = self.state.work_view.as_mut() {
                     if state.projection == crate::app::state::WorkProjection::Missive {
                         state.missive_detail_scroll = state.missive_detail_scroll.saturating_add(5);
+                    } else if let Some(object_key) = selected_object_key.clone() {
+                        let view = state.object_view_mut(object_key);
+                        view.scroll = view.scroll.saturating_add(5);
                     }
                 }
             }
@@ -1733,8 +1789,24 @@ impl App {
                 }
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                if let Some(state) = self.state.work_view.as_mut() {
-                    state.detail_tab = state.detail_tab.next();
+                let detail_width = if self.state.view.terminal_area.width >= 72 {
+                    self.state.view.terminal_area.width.saturating_mul(62) / 100
+                } else {
+                    self.state.view.terminal_area.width
+                };
+                if let (Some(object_key), Some(state)) =
+                    (selected_pr_key.clone(), self.state.work_view.as_mut())
+                {
+                    let view = state.object_view_mut(object_key);
+                    if detail_width < 60 {
+                        view.scroll = 0;
+                        view.tab_picker = crate::app::state::PrDetailTab::ALL
+                            .iter()
+                            .position(|tab| *tab == view.tab);
+                    } else {
+                        view.tab = view.tab.next();
+                        view.scroll = 0;
+                    }
                 }
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => {
@@ -1783,7 +1855,9 @@ impl App {
             {
                 if self.state.work_view.as_ref().is_some_and(|state| {
                     state.projection == crate::app::state::WorkProjection::PullRequests
-                        && state.detail_tab == crate::app::state::PrDetailTab::Summary
+                        && selected_pr_key.as_ref().is_some_and(|key| {
+                            state.object_view(key).tab == crate::app::state::PrDetailTab::Overview
+                        })
                 }) {
                     self.open_selected_pr_reviewer_picker();
                 }
@@ -1913,6 +1987,72 @@ impl App {
             });
         }
         self.run_pending_work_view_write();
+    }
+
+    fn open_dock_pr_reviewer_picker(&mut self, key: crate::app::state::WorkItemKey) {
+        let needs_fetch = self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .is_none_or(|detail| {
+                detail.collaborators.is_empty() && detail.collaborators_unavailable.is_none()
+            });
+        if needs_fetch {
+            let result = crate::work_index::fetch_github_collaborators(
+                &key.repo,
+                &self.work_index_gh_program(),
+                std::time::Instant::now() + crate::work_index::WORK_INDEX_TARGET_TIMEOUT,
+            );
+            let mut detail = self
+                .state
+                .work_item_detail_cache
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(crate::work_index::WorkItemDetail::empty);
+            match result {
+                Ok(collaborators) => {
+                    detail.collaborators = collaborators;
+                    detail.collaborators_unavailable = None;
+                }
+                Err(message) => {
+                    detail.collaborators_unavailable = Some(message.clone());
+                    self.state.dock_write_notice = Some(message);
+                }
+            }
+            self.state
+                .work_item_detail_cache
+                .insert(key.clone(), detail);
+        }
+        if self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .is_some_and(|detail| detail.collaborators_unavailable.is_none())
+        {
+            self.state
+                .dock_object_views
+                .entry(key)
+                .or_default()
+                .reviewer_picker = Some(Default::default());
+        }
+    }
+
+    fn add_dock_pr_reviewer(&mut self, key: crate::app::state::WorkItemKey, login: String) {
+        let Some(number) = key.pr_number else {
+            return;
+        };
+        self.state
+            .dock_object_views
+            .entry(key.clone())
+            .or_default()
+            .reviewer_picker = None;
+        self.state.dock_pending_write =
+            Some(crate::work_index::WorkItemWrite::AddPullRequestReviewer {
+                repo: key.repo,
+                number,
+                login,
+            });
+        self.run_pending_dock_write();
     }
 
     fn move_ticket_board_column(&mut self, delta: i64) {
@@ -3039,8 +3179,7 @@ impl App {
             })
     }
 
-    /// Keys of the compact PR surface, backed by the shared PR action table.
-    /// the full-screen view, over the focused pane's primary pull request.
+    /// Keys of the dock-hosted PR view, backed by the shared action table.
     fn handle_dock_pr_key(&mut self, key: &TerminalKey) -> bool {
         if self.state.mode != Mode::Terminal
             || self.state.dock_collapsed
@@ -3050,10 +3189,119 @@ impl App {
             return false;
         }
         let event = key.as_key_event();
-        if !event.modifiers.is_empty() {
+        if !(event.modifiers.is_empty()
+            || event.code == KeyCode::Char('+')
+                && event.modifiers == crossterm::event::KeyModifiers::SHIFT)
+        {
             return false;
         }
         if self.handle_pending_dock_write_key(event) {
+            return true;
+        }
+        let focused_key = crate::ui::dock::pr::focused_pr_key(&self.state);
+        if let Some((object_key, picker)) = focused_key.as_ref().and_then(|object_key| {
+            self.state
+                .dock_object_views
+                .get(object_key)
+                .and_then(|view| view.reviewer_picker.clone())
+                .map(|picker| (object_key.clone(), picker))
+        }) {
+            let collaborators = self
+                .state
+                .work_item_detail_cache
+                .get(&object_key)
+                .map(|detail| detail.collaborators.clone())
+                .unwrap_or_default();
+            let matches = picker.filter.matches(&collaborators);
+            match event.code {
+                KeyCode::Esc => {
+                    self.state
+                        .dock_object_views
+                        .entry(object_key)
+                        .or_default()
+                        .reviewer_picker = None;
+                }
+                KeyCode::Backspace => {
+                    if let Some(picker) = self
+                        .state
+                        .dock_object_views
+                        .entry(object_key)
+                        .or_default()
+                        .reviewer_picker
+                        .as_mut()
+                    {
+                        picker.filter.pop();
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(picker) = self
+                        .state
+                        .dock_object_views
+                        .entry(object_key)
+                        .or_default()
+                        .reviewer_picker
+                        .as_mut()
+                    {
+                        picker.filter.move_selection(-1, matches.len());
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(picker) = self
+                        .state
+                        .dock_object_views
+                        .entry(object_key)
+                        .or_default()
+                        .reviewer_picker
+                        .as_mut()
+                    {
+                        picker.filter.move_selection(1, matches.len());
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some((_, login)) = matches.get(picker.filter.selected) {
+                        self.add_dock_pr_reviewer(object_key, (*login).to_string());
+                    }
+                }
+                KeyCode::Char(character) => {
+                    if let Some(picker) = self
+                        .state
+                        .dock_object_views
+                        .entry(object_key)
+                        .or_default()
+                        .reviewer_picker
+                        .as_mut()
+                    {
+                        picker.filter.push(character);
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if let Some((object_key, selected)) = focused_key.as_ref().and_then(|object_key| {
+            self.state
+                .dock_object_views
+                .get(object_key)
+                .and_then(|view| view.tab_picker)
+                .map(|selected| (object_key.clone(), selected))
+        }) {
+            let count = crate::app::state::PrDetailTab::ALL.len();
+            let view = self.state.dock_object_views.entry(object_key).or_default();
+            match event.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    view.tab_picker = Some(selected.saturating_sub(1));
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    view.tab_picker = Some((selected + 1).min(count.saturating_sub(1)));
+                }
+                KeyCode::Enter => {
+                    view.tab = crate::app::state::PrDetailTab::ALL[selected];
+                    view.scroll = 0;
+                    view.tab_picker = None;
+                }
+                KeyCode::Esc => view.tab_picker = None,
+                _ => {}
+            }
             return true;
         }
         if let Some(menu) = self.state.dock_pr_action_menu {
@@ -3107,6 +3355,33 @@ impl App {
             return true;
         }
         match event.code {
+            KeyCode::Tab => {
+                if let Some(object_key) = focused_key {
+                    let narrow = self.state.view.dock_body_rect.width < 60;
+                    let view = self.state.dock_object_views.entry(object_key).or_default();
+                    if narrow {
+                        view.scroll = 0;
+                        view.tab_picker = crate::app::state::PrDetailTab::ALL
+                            .iter()
+                            .position(|tab| *tab == view.tab);
+                    } else {
+                        view.tab = view.tab.next();
+                        view.scroll = 0;
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(object_key) = focused_key {
+                    let view = self.state.dock_object_views.entry(object_key).or_default();
+                    view.scroll = view.scroll.saturating_sub(5);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(object_key) = focused_key {
+                    let view = self.state.dock_object_views.entry(object_key).or_default();
+                    view.scroll = view.scroll.saturating_add(5);
+                }
+            }
             KeyCode::Char('c') => {
                 self.state.dock_pr_checkout_menu = Some(Default::default());
             }
@@ -3114,6 +3389,18 @@ impl App {
                 crate::ui::work_list_detail::PrActionKind::Merge(self.state.pr_merge_method),
             ),
             KeyCode::Char('m') => self.state.dock_pr_action_menu = Some(Default::default()),
+            KeyCode::Char('+') => {
+                if let Some(object_key) = focused_key {
+                    let overview = self
+                        .state
+                        .dock_object_views
+                        .get(&object_key)
+                        .is_none_or(|view| view.tab == crate::app::state::PrDetailTab::Overview);
+                    if overview {
+                        self.open_dock_pr_reviewer_picker(object_key);
+                    }
+                }
+            }
             KeyCode::Esc => self.state.dock_pr_focused = false,
             _ => return false,
         }
@@ -3230,6 +3517,18 @@ impl App {
             return true;
         }
         match event.code {
+            KeyCode::PageUp => {
+                if let Some(object_key) = crate::ui::dock::linear::focused_ticket_key(&self.state) {
+                    let view = self.state.dock_object_views.entry(object_key).or_default();
+                    view.scroll = view.scroll.saturating_sub(5);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(object_key) = crate::ui::dock::linear::focused_ticket_key(&self.state) {
+                    let view = self.state.dock_object_views.entry(object_key).or_default();
+                    view.scroll = view.scroll.saturating_add(5);
+                }
+            }
             KeyCode::Char('c') => self.state.dock_ticket_start_menu = Some(Default::default()),
             KeyCode::Char('m') => self.state.dock_ticket_action_menu = Some(Default::default()),
             KeyCode::Esc => self.state.dock_linear_focused = false,
@@ -4780,6 +5079,38 @@ mod tests {
     }
 
     #[test]
+    fn switching_pr_tabs_uses_cached_object_without_scheduling_refetch() {
+        let (mut app, key) = pr_action_test_app();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.next_work_index_refresh = later;
+        let cached_comments = app
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .map(|detail| detail.comments.clone());
+
+        assert!(app.handle_work_view_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty(),)));
+
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| view.object_view(&key).tab),
+            Some(crate::app::state::PrDetailTab::Files)
+        );
+        assert_eq!(app.next_work_index_refresh, later);
+        assert_eq!(app.work_index_cache_bypass, Default::default());
+        assert_eq!(
+            app.state
+                .work_item_detail_cache
+                .get(&key)
+                .map(|detail| detail.comments.clone()),
+            cached_comments
+        );
+    }
+
+    #[test]
     fn chooser_shortcuts_open_available_surfaces_and_ignore_the_rest() {
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
@@ -4911,7 +5242,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_pr_surface_keys_open_checkout_and_shared_action_menus() {
+    fn dock_hosted_pr_keys_open_checkout_and_shared_action_menus() {
         let mut app = test_app();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
@@ -4966,7 +5297,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_linear_menu_stages_viewer_and_priority_writes() {
+    fn dock_hosted_linear_menu_stages_viewer_and_priority_writes() {
         let mut app = dock_linear_test_app();
         app.work_index_linearis_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
         let key = |code| TerminalKey::new(code, KeyModifiers::empty());
@@ -5007,7 +5338,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_linear_question_opens_ticket_home_with_fixed_prefix() {
+    fn dock_hosted_linear_question_opens_ticket_home_with_fixed_prefix() {
         let mut app = dock_linear_test_app();
         let key = |code| TerminalKey::new(code, KeyModifiers::empty());
 

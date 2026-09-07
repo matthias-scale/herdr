@@ -1444,6 +1444,9 @@ pub(crate) struct DockPresentationState {
     pub(crate) surface_menu: Option<DockSurfaceMenu>,
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
+    /// Rich PR/ticket view state keyed by stable object identity. This is
+    /// attach-local TUI state and never enters the session protocol.
+    pub(crate) object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) editor_focused: bool,
     pub(crate) diff_focused: bool,
     pub(crate) pr_focused: bool,
@@ -1501,6 +1504,7 @@ impl Default for DockPresentationState {
             surface_menu: None,
             chooser_focused: false,
             scroll: 0,
+            object_views: std::collections::HashMap::new(),
             editor_focused: false,
             diff_focused: false,
             pr_focused: false,
@@ -3154,11 +3158,14 @@ pub struct AppState {
     /// Keyboard focus sits on the chooser card grid. TUI presentation state.
     pub(crate) dock_chooser_focused: bool,
     pub dock_scroll: u16,
+    /// Rich PR/ticket view state for dock hosts. The indexed object remains a
+    /// shared runtime fact; tab, picker, and scroll are client presentation.
+    pub(crate) dock_object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) dock_editor_focused: bool,
     /// Diff interaction state is attach-local TUI state. The whitespace choice
     /// survives surface switches for the lifetime of the client session.
     pub(crate) dock_diff_focused: bool,
-    /// Compact PR surface interaction state. TUI presentation state: the
+    /// Dock-hosted PR interaction state. TUI presentation state: the
     /// pull request itself is a shared work-index fact, the open menu and the
     /// staged confirmation are not.
     pub(crate) dock_pr_focused: bool,
@@ -3541,7 +3548,9 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_sort: crate::ui::work_list_detail::TicketSort,
     pub(crate) open_only: bool,
     pub(crate) ticket_open_only: bool,
-    pub(crate) detail_tab: PrDetailTab,
+    /// The full-screen host uses the same per-object presentation state as the
+    /// dock host. Keys preserve tabs and scroll while list selection changes.
+    pub(crate) object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) pr_action_menu: Option<PrActionMenuState>,
     pub(crate) reviewer_picker: Option<ReviewerPickerState>,
@@ -3733,19 +3742,47 @@ impl TicketTransitionChoice {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PrDetailTab {
     #[default]
-    Summary,
+    Overview,
+    Files,
+    Diff,
+    Checks,
     Timeline,
-    Code,
 }
 
 impl PrDetailTab {
-    pub(crate) fn next(self) -> Self {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Files,
+        Self::Diff,
+        Self::Checks,
+        Self::Timeline,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Summary => Self::Timeline,
-            Self::Timeline => Self::Code,
-            Self::Code => Self::Summary,
+            Self::Overview => "Overview",
+            Self::Files => "Files",
+            Self::Diff => "Diff",
+            Self::Checks => "Checks",
+            Self::Timeline => "Timeline",
         }
     }
+
+    pub(crate) fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// Host-independent state for a rich work-object detail. Both the full work
+/// view and the dock store this exact type and call the same renderer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ObjectViewState {
+    pub(crate) tab: PrDetailTab,
+    pub(crate) scroll: u16,
+    /// Selected row while the narrow-width sub-tab picker is open.
+    pub(crate) tab_picker: Option<usize>,
+    pub(crate) reviewer_picker: Option<ReviewerPickerState>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3848,7 +3885,7 @@ impl WorkViewState {
             ticket_sort: crate::ui::work_list_detail::TicketSort::Updated,
             open_only: true,
             ticket_open_only: false,
-            detail_tab: PrDetailTab::Summary,
+            object_views: std::collections::HashMap::new(),
             checkout_menu: None,
             pr_action_menu: None,
             reviewer_picker: None,
@@ -3868,6 +3905,14 @@ impl WorkViewState {
             board_detail_open: false,
             board_last_click: None,
         }
+    }
+
+    pub(crate) fn object_view(&self, key: &WorkItemKey) -> ObjectViewState {
+        self.object_views.get(key).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn object_view_mut(&mut self, key: WorkItemKey) -> &mut ObjectViewState {
+        self.object_views.entry(key).or_default()
     }
 }
 
@@ -4458,7 +4503,7 @@ impl AppState {
         }
     }
 
-    /// Keep the dock on the compact companion for a sidebar or full-screen
+    /// Keep the dock on the object companion for a sidebar or full-screen
     /// work view. A later explicit surface pick remains visible until another
     /// view change calls this function.
     pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
@@ -4564,6 +4609,7 @@ impl AppState {
         std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
+        std::mem::swap(&mut self.dock_object_views, &mut other.object_views);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
         std::mem::swap(&mut self.dock_pr_focused, &mut other.pr_focused);
@@ -5162,6 +5208,7 @@ impl AppState {
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_object_views: std::collections::HashMap::new(),
             dock_editor_focused: false,
             dock_diff_focused: false,
             dock_pr_focused: false,
@@ -6294,5 +6341,48 @@ mod tests {
 
         assert!(crate::ui::text::display_width(&state.dock_tab_label(0)) <= 12);
         assert_eq!(state.dock_tab_title(0), "提交 attachment review");
+    }
+
+    #[test]
+    fn rich_object_tab_and_scroll_persist_per_object_and_per_client() {
+        let pr = WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(206),
+            pr_url: Some("https://github.com/owner/repo/pull/206".into()),
+            ticket_id: None,
+        };
+        let ticket = WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some("SCA-3165".into()),
+        };
+        let mut state = AppState::test_new();
+        state.dock_object_views.insert(
+            pr.clone(),
+            ObjectViewState {
+                tab: PrDetailTab::Files,
+                scroll: 11,
+                tab_picker: None,
+                reviewer_picker: None,
+            },
+        );
+        state.dock_object_views.insert(
+            ticket.clone(),
+            ObjectViewState {
+                scroll: 7,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(state.dock_object_views[&pr].tab, PrDetailTab::Files);
+        assert_eq!(state.dock_object_views[&pr].scroll, 11);
+        assert_eq!(state.dock_object_views[&ticket].scroll, 7);
+
+        let mut client = DockPresentationState::default();
+        state.swap_dock_presentation(&mut client);
+        assert!(state.dock_object_views.is_empty());
+        assert_eq!(client.object_views[&pr].tab, PrDetailTab::Files);
+        assert_eq!(client.object_views[&ticket].scroll, 7);
     }
 }

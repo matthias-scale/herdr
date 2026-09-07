@@ -988,6 +988,7 @@ impl App {
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_object_views: std::collections::HashMap::new(),
             dock_editor_focused: false,
             dock_diff_focused: false,
             dock_pr_focused: false,

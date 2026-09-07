@@ -57,21 +57,23 @@ pub(crate) fn resolve_diff_base(
 
 impl App {
     pub(crate) fn start_dock_diff_refresh_if_needed(&mut self) {
-        let work_view_code = self
-            .state
-            .work_view
-            .as_ref()
-            .is_some_and(|view| view.detail_tab == crate::app::state::PrDetailTab::Code);
-        if (!work_view_code
-            && (self.state.dock_collapsed
-                || self.state.dock_tab != Some(crate::app::DockSurface::Diff)))
+        let work_view_request = self.work_view_diff_refresh_request();
+        let standalone_diff_visible = !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Diff);
+        let dock_pr_diff_visible = !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Pr)
+            && crate::ui::dock::pr::focused_pr_key(&self.state).is_some_and(|key| {
+                self.state
+                    .dock_object_views
+                    .get(&key)
+                    .is_some_and(|view| view.tab == crate::app::state::PrDetailTab::Diff)
+            });
+        if (work_view_request.is_none() && !standalone_diff_visible && !dock_pr_diff_visible)
             || self.diff_refresh_in_flight.is_some()
         {
             return;
         }
-        let Some(request) = self
-            .work_view_diff_refresh_request()
-            .or_else(|| self.focused_diff_refresh_request())
+        let Some(request) = work_view_request.or_else(|| self.focused_diff_refresh_request())
         else {
             self.state.dock_diff_active_key = None;
             return;
@@ -131,11 +133,16 @@ impl App {
         });
     }
 
+    fn git_program_for_diff(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(program) = self.git_program_override.as_ref() {
+            return program.clone();
+        }
+        PathBuf::from("git")
+    }
+
     fn work_view_diff_refresh_request(&self) -> Option<DiffRefreshRequest> {
         let view = self.state.work_view.as_ref()?;
-        if view.detail_tab != crate::app::state::PrDetailTab::Code {
-            return None;
-        }
         let key = view.selected.clone().or_else(|| {
             view.snapshot.as_ref()?.items.iter().find_map(|item| {
                 item.pr_number.map(|number| crate::app::state::WorkItemKey {
@@ -146,6 +153,9 @@ impl App {
                 })
             })
         })?;
+        if view.object_view(&key).tab != crate::app::state::PrDetailTab::Diff {
+            return None;
+        }
         let detail = self.state.work_item_detail_cache.get(&key)?;
         let cwd = self.state.workspaces.iter().find_map(|workspace| {
             workspace
@@ -167,14 +177,6 @@ impl App {
             branch: detail.head_ref_name.clone(),
             ignore_whitespace: self.state.dock_diff_ignore_whitespace,
         })
-    }
-
-    fn git_program_for_diff(&self) -> PathBuf {
-        #[cfg(test)]
-        if let Some(program) = self.git_program_override.as_ref() {
-            return program.clone();
-        }
-        PathBuf::from("git")
     }
 
     fn focused_diff_refresh_request(&self) -> Option<DiffRefreshRequest> {
