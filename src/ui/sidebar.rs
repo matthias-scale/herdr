@@ -172,8 +172,10 @@ pub(super) struct TabRowLayout {
 }
 
 const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
-const SIDEBAR_PROVIDER_FIELD_WIDTH: usize = 8;
+const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
+const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
+const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
 
 fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
     entry.gate_count > 0 || entry.open_blockers
@@ -357,20 +359,74 @@ fn compact_row_layout(
     tab: bool,
 ) -> TabRowLayout {
     let (age, activity_instant) = compact_age(entry, now);
-    let fixed_width = prefix_width
-        + SIDEBAR_DOT_FIELD_WIDTH
-        + SIDEBAR_PROVIDER_FIELD_WIDTH
-        + SIDEBAR_AGE_FIELD_WIDTH;
-    let age_visible = width >= fixed_width;
+    let provider = compact_provider(entry);
+    let title = compact_row_title(entry, tab);
+    let widths = compact_row_widths(title, &provider, width, prefix_width);
+    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     TabRowLayout {
         dot: compact_row_dot_text(entry),
-        title: truncate_end(
-            compact_row_title(entry, tab),
-            width.saturating_sub(fixed_width),
-        ),
-        provider: compact_provider(entry),
-        activity_age: age_visible.then_some(age),
-        activity_instant: age_visible.then_some(activity_instant).flatten(),
+        title: truncate_end(title, width.saturating_sub(fixed_width)),
+        provider,
+        activity_age: (widths.age > 0).then_some(age),
+        activity_instant: (widths.age > 0).then_some(activity_instant).flatten(),
+    }
+}
+
+fn compact_provider_field_width(provider: &str) -> usize {
+    if provider.is_empty() {
+        0
+    } else {
+        display_width(provider) + SIDEBAR_PROVIDER_GAP_WIDTH
+    }
+}
+
+struct CompactRowWidths {
+    prefix: usize,
+    provider: usize,
+    age: usize,
+}
+
+fn compact_row_widths(
+    title: &str,
+    provider: &str,
+    width: usize,
+    requested_prefix: usize,
+) -> CompactRowWidths {
+    let provider = compact_provider_field_width(provider);
+    let title_width = display_width(title);
+    let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
+    let minimum_prefix_width = usize::from(requested_prefix > 0);
+    let age = if width
+        >= SIDEBAR_DOT_FIELD_WIDTH
+            + provider
+            + SIDEBAR_AGE_FIELD_WIDTH
+            + readable_title_width
+            + minimum_prefix_width
+    {
+        SIDEBAR_AGE_FIELD_WIDTH
+    } else {
+        0
+    };
+    let target_title_width = title_width.min(SIDEBAR_TITLE_TARGET_WIDTH);
+    let prefix_budget = width
+        .saturating_sub(SIDEBAR_DOT_FIELD_WIDTH + provider + age)
+        .saturating_sub(target_title_width);
+    let preserve_nested_prefix = requested_prefix > 0
+        && width
+            >= SIDEBAR_DOT_FIELD_WIDTH
+                + provider
+                + age
+                + readable_title_width
+                + minimum_prefix_width;
+    let prefix = requested_prefix.min(if preserve_nested_prefix {
+        prefix_budget.max(1)
+    } else {
+        prefix_budget
+    });
+    CompactRowWidths {
+        prefix,
+        provider,
+        age,
     }
 }
 
@@ -486,18 +542,23 @@ pub(super) fn render_compact_agent_row(
         return;
     }
     let p = &app.palette;
-    let prefix = " ".repeat(usize::from(depth) * 3 + 1);
+    let requested_prefix_width = usize::from(depth) * 3 + 1;
+    let provider = compact_provider(entry);
+    let widths = compact_row_widths(
+        compact_row_title(entry, tab),
+        &provider,
+        usize::from(rect.width),
+        requested_prefix_width,
+    );
+    let prefix = " ".repeat(widths.prefix);
     let layout = compact_row_layout(
         entry,
         app.view_observed_at,
         usize::from(rect.width),
-        display_width(&prefix),
+        widths.prefix,
         tab,
     );
-    let fixed_width = display_width(&prefix)
-        + SIDEBAR_DOT_FIELD_WIDTH
-        + SIDEBAR_PROVIDER_FIELD_WIDTH
-        + SIDEBAR_AGE_FIELD_WIDTH;
+    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let trailing_tag = tab
         .then_some(entry.space_label.as_str())
@@ -519,11 +580,11 @@ pub(super) fn render_compact_agent_row(
         displayed_title_width,
     );
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
-    let provider = pad_left(&layout.provider, SIDEBAR_PROVIDER_FIELD_WIDTH);
+    let provider = pad_left(&layout.provider, widths.provider);
     let age = layout
         .activity_age
         .as_deref()
-        .map_or_else(String::new, |age| pad_left(age, SIDEBAR_AGE_FIELD_WIDTH));
+        .map_or_else(String::new, |age| pad_left(age, widths.age));
     let is_active = tab
         && app.active == Some(entry.ws_idx)
         && app
@@ -6045,7 +6106,7 @@ pub(crate) mod tests {
 
         for (title, state, seen, agent) in [
             (
-                "working title",
+                "working title remains readable",
                 AgentState::Working,
                 true,
                 Some(Agent::Codex),
@@ -6087,7 +6148,7 @@ pub(crate) mod tests {
             vec![
                 (
                     "●".into(),
-                    "working title".into(),
+                    "working title rema…".into(),
                     "cx".into(),
                     Some("2m".into()),
                     Color::Rgb(137, 180, 250),
@@ -7103,7 +7164,7 @@ pub(crate) mod tests {
             app.status_indicators,
         );
 
-        assert_eq!(display_width(&linked_layout.title), 0);
+        assert_eq!(display_width(&linked_layout.title), 10);
         assert_eq!(
             display_width(&unlinked_layout.title),
             display_width(&linked_layout.title),
@@ -9586,7 +9647,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("thread entry");
         assert_eq!(entry.space_label, "t3-sample");
 
-        let render_at_row_width = |width| {
+        let render_at_row_width = |entry: &AgentPanelEntry, width, depth| {
             let mut terminal =
                 Terminal::new(TestBackend::new(width, 1)).expect("test terminal should initialize");
             terminal
@@ -9594,9 +9655,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     render_compact_agent_row(
                         &app,
                         frame,
-                        &entry,
+                        entry,
                         Rect::new(0, 0, width, 1),
-                        0,
+                        depth,
                         true,
                         None,
                     )
@@ -9604,12 +9665,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("compact row should render");
             row_text(terminal.backend().buffer(), 0, width)
         };
-        let below_suffix_threshold = render_at_row_width(43);
+        let below_suffix_threshold = render_at_row_width(&entry, 43, 0);
         assert!(
             !below_suffix_threshold.contains("· t3-sample"),
             "{below_suffix_threshold:?}"
         );
-        let at_suffix_threshold = render_at_row_width(44);
+        let at_suffix_threshold = render_at_row_width(&entry, 44, 0);
         assert!(
             at_suffix_threshold.contains("2m · t3-sample"),
             "{at_suffix_threshold:?}"
@@ -9620,15 +9681,31 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(default_width.contains("2m"), "{default_width:?}");
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
+        let github_depth = render_at_row_width(&entry, 25, 1);
+        assert_eq!(github_depth, "    ●  sample-pr   pi  2m");
+        let repo_branch_depth = render_at_row_width(&entry, 25, 2);
+        assert_eq!(repo_branch_depth, "      ●  sample-pr pi  2m");
+        let mut ticket_entry = entry.clone();
+        ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
+        let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
+        assert!(
+            nested_ticket.starts_with(" ●  SCA-3165"),
+            "{nested_ticket:?}"
+        );
+
         let area = Rect::new(0, 0, 80, 12);
         let cards = compute_tab_card_areas(&app, area);
         let card = cards[0].clone();
-        let prefix_width = usize::from(card.depth) * 3 + 1;
         let rect_width = usize::from(card.rect.width);
-        let fixed_width = prefix_width
-            + SIDEBAR_DOT_FIELD_WIDTH
-            + SIDEBAR_PROVIDER_FIELD_WIDTH
-            + SIDEBAR_AGE_FIELD_WIDTH;
+        let requested_prefix_width = usize::from(card.depth) * 3 + 1;
+        let provider = compact_provider(&entry);
+        let widths = compact_row_widths(
+            compact_row_title(&entry, true),
+            &provider,
+            rect_width,
+            requested_prefix_width,
+        );
+        let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
         let retained_title_width = rect_width
             .saturating_sub(fixed_width)
             .saturating_sub(display_width(" · t3-sample"));
