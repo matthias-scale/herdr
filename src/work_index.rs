@@ -139,7 +139,7 @@ pub(crate) struct WorkItemDetailCache {
 #[derive(Clone, Debug)]
 struct CachedWorkItemDetail {
     detail: WorkItemDetail,
-    refreshed_at: Instant,
+    refreshed_at: Option<Instant>,
 }
 
 impl WorkItemDetailCache {
@@ -150,7 +150,7 @@ impl WorkItemDetailCache {
             else {
                 continue;
             };
-            cache.insert(
+            cache.insert_stale(
                 crate::app::state::WorkItemKey {
                     repo: item.repo.clone(),
                     pr_number: Some(number),
@@ -178,6 +178,14 @@ impl WorkItemDetailCache {
         self.insert_at(key, detail, Instant::now());
     }
 
+    fn insert_stale(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
+        let lookup = key.clone();
+        self.insert_at(key, detail, Instant::now());
+        if let Some(cached) = self.entries.get_mut(&lookup) {
+            cached.refreshed_at = None;
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
@@ -195,7 +203,7 @@ impl WorkItemDetailCache {
             key,
             CachedWorkItemDetail {
                 detail,
-                refreshed_at,
+                refreshed_at: Some(refreshed_at),
             },
         );
         while self.entries.len() > WORK_ITEM_DETAIL_CACHE_CAPACITY {
@@ -212,8 +220,10 @@ impl WorkItemDetailCache {
         interval: Duration,
     ) -> bool {
         self.entries.get(key).is_some_and(|cached| {
-            now.checked_duration_since(cached.refreshed_at)
-                .is_some_and(|age| age < interval)
+            cached.refreshed_at.is_some_and(|refreshed_at| {
+                now.checked_duration_since(refreshed_at)
+                    .is_some_and(|age| age < interval)
+            })
         })
     }
 
@@ -4552,6 +4562,7 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Fetched on demand","author":{
             cache.get(&key).and_then(|detail| detail.body.as_deref()),
             Some("Fetched on demand")
         );
+        assert!(!cache.is_fresh(&key, Instant::now(), Duration::from_secs(300)));
         let mut refreshed_items = loaded.items.clone();
         refreshed_items[0].cached_pr_detail = None;
         carry_cached_pr_details(&mut refreshed_items, Some(&loaded));
