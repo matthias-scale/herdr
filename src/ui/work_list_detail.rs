@@ -1128,6 +1128,7 @@ mod tests {
                 "In Progress".into()
             }),
             assignee: Some("ada".into()),
+            creator: None,
             priority: Some(priority),
             cycle: Some("cycle 34".into()),
             group,

@@ -1774,6 +1774,7 @@ mod tests {
                 ),
                 state: Some("In Progress".into()),
                 assignee: Some("matthias".into()),
+                creator: None,
                 priority: Some(2),
                 cycle: Some("cycle 34".into()),
                 group,

@@ -272,6 +272,7 @@ mod tests {
             description: Some("- [x] doc exists\n- [ ] registry updated".into()),
             state: Some("In Progress".into()),
             assignee: Some("matthias".into()),
+            creator: None,
             priority: Some(2),
             cycle: Some("cycle 34".into()),
             group: TicketGroup::Assigned,
