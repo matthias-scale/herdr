@@ -1630,9 +1630,6 @@ pub(crate) fn refresh_work_index_with_missive(
         }
     }
     for identifier in directly_observed_tickets {
-        if listed_ticket_ids.contains(&identifier.to_ascii_uppercase()) {
-            continue;
-        }
         match fetch_linear_ticket(
             &identifier,
             linearis_program,
@@ -6279,6 +6276,83 @@ esac
         assert!(calls.lines().any(|call| {
             call.contains(LINEAR_ITEM_FIELDS) && call.ends_with("issues read SCA-77")
         }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn declared_ticket_already_listed_is_still_refetched() {
+        let dir = fixture_dir("declared-ticket-already-listed");
+        let log = dir.join("linear-argv.log");
+        let linearis_script = r##"#!/bin/sh
+printf '%s\n' "$*" >> "{linear_log}"
+if echo "$*" | grep -q 'issues read SCA-77'; then
+  printf '%s' '{{"identifier":"SCA-77","title":"detailed","state":{"name":"In Progress"}}}'
+elif echo "$*" | grep -q 'issues list'; then
+  printf '%s' '{{"nodes":[{"identifier":"SCA-77","title":"listed","state":{"name":"Triage"}}]}}'
+elif echo "$*" | grep -q 'cycles list'; then
+  printf '%s' '{{"nodes":[]}}'
+elif echo "$*" | grep -q 'attachments list'; then
+  printf '%s' '[]'
+else
+  exit 42
+fi
+"##
+        .replace("{linear_log}", &log.display().to_string());
+        let (gh, linearis) = fake_programs(&dir, "#!/bin/sh\nprintf '%s' '[]'\n", &linearis_script);
+        let mut config = config();
+        config.repos.clear();
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["SCA-77".into()],
+            ..Default::default()
+        });
+        let first_cache = ProviderCache::at_time(
+            &dir,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        let first = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                provider_cache: Some(&first_cache),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+        let second_cache = ProviderCache::at_time(
+            &dir,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 10 * 60 + 1),
+        );
+        let _ = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                previous: Some(&first),
+                provider_cache: Some(&second_cache),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        let calls = std::fs::read_to_string(log).expect("Linear argv");
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|call| call.contains("issues read SCA-77"))
+                .count(),
+            2
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
