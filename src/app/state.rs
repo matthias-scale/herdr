@@ -1384,8 +1384,8 @@ impl Default for DockPresentationState {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
             surface_override: false,
-            tab: Some(DockSurface::Home),
-            open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            tab: None,
+            open_surfaces: Vec::new(),
             maximized: false,
             surface_menu: None,
             chooser_focused: false,
@@ -1599,19 +1599,14 @@ impl DockSurface {
     ];
 
     /// The card grid of the empty dock, each with its single-key shortcut.
-    pub const CARDS: [Self; 6] = [
+    pub const CARDS: [Self; 12] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
         Self::Pr,
         Self::Linear,
+        Self::Missive,
         Self::Agents,
-    ];
-
-    /// Surfaces a dock opens with. Keeping the pre-chooser tab strip as the
-    /// default set makes the rename behaviour-neutral: the same five tabs are
-    /// there, in the same order, until the user closes one.
-    pub const DEFAULT_OPEN: [Self; 5] = [
         Self::Home,
         Self::Editor,
         Self::Shortcuts,
@@ -1654,23 +1649,6 @@ impl DockSurface {
         }
     }
 
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Home => "work index",
-            Self::Editor => "edit files",
-            Self::Shortcuts => "keybinds",
-            Self::Context => "pane facts",
-            Self::Scratchpad => "notes",
-            Self::Terminal => "shell here",
-            Self::Files => "browse",
-            Self::Diff => "vs base",
-            Self::Pr => "this branch",
-            Self::Linear => "ticket",
-            Self::Missive => "conversation",
-            Self::Agents => "subagents",
-        }
-    }
-
     /// Single-key shortcut of the empty-dock card grid.
     pub fn shortcut(self) -> Option<char> {
         match self {
@@ -1683,6 +1661,31 @@ impl DockSurface {
             Self::Missive => None,
             _ => None,
         }
+    }
+
+    /// Shortcut shown by and dispatched from the empty-panel card grid.
+    pub fn card_shortcut(self) -> char {
+        match self {
+            Self::Terminal => 'T',
+            Self::Files => 'F',
+            Self::Diff => 'D',
+            Self::Pr => 'P',
+            Self::Linear => 'L',
+            Self::Missive => 'M',
+            Self::Agents => 'A',
+            Self::Home => 'H',
+            Self::Editor => 'E',
+            Self::Shortcuts => 'K',
+            Self::Context => 'X',
+            Self::Scratchpad => 'N',
+        }
+    }
+
+    pub fn from_card_shortcut(key: char) -> Option<Self> {
+        let key = key.to_ascii_uppercase();
+        Self::CARDS
+            .into_iter()
+            .find(|surface| surface.card_shortcut() == key)
     }
 
     pub fn from_shortcut(key: char) -> Option<Self> {
@@ -2928,6 +2931,8 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub dock_width: u16,
     pub dock_collapsed: bool,
+    /// Configured tabs for a fresh attach. TUI-only state; never enters the API.
+    pub(crate) dock_default_surfaces: Vec<DockSurface>,
     /// Set by an explicit dock pick and cleared by `follow_view`.
     /// Attach-local TUI state; it never enters server state or the JSON API.
     pub(crate) dock_surface_override: bool,
@@ -4376,8 +4381,9 @@ impl AppState {
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
             dock_surface_override: false,
-            dock_tab: Some(DockSurface::Home),
-            dock_open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_default_surfaces: Vec::new(),
+            dock_tab: None,
+            dock_open_surfaces: Vec::new(),
             dock_maximized: false,
             dock_surface_menu: None,
             dock_chooser_focused: false,
