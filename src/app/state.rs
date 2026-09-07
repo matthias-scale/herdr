@@ -3804,6 +3804,18 @@ impl AppState {
         self.open_dock_surface(DockSurface::Symphony);
     }
 
+    /// Bind the Symphony surface to `workflow` on the pane that currently has
+    /// focus. Dock tabs are per pane and only move at the `compute_view()`
+    /// reconcile, so a surface opened right after a focus change would land on
+    /// the pane focus just left. Reconcile first so it opens on the new one.
+    pub(crate) fn bind_symphony_dock_to_focused_pane(
+        &mut self,
+        workflow: &crate::symphony::Workflow,
+    ) {
+        self.reconcile_dock_context_tabs();
+        self.bind_symphony_dock(workflow);
+    }
+
     /// The workflow the dock surface is bound to, as it stands in the current
     /// snapshot. `None` once the job closes and leaves the snapshot.
     pub(crate) fn dock_symphony_workflow(&self) -> Option<&crate::symphony::Workflow> {
@@ -6094,6 +6106,50 @@ mod tests {
                 ..Default::default()
             });
         (state, object_pane, bare_pane)
+    }
+
+    #[test]
+    fn symphony_dock_binds_to_the_newly_focused_pane_not_the_one_left() {
+        let (mut state, object_pane, bare_pane) = app_with_object_and_bare_panes();
+        // The object pane already has focus; `false` only says nothing moved.
+        let _ = state.focus_pane_in_workspace(0, object_pane);
+        state.reconcile_dock_context_tabs();
+        let workflow = crate::symphony::Workflow {
+            workflow_id: "symphony-MAT-138".to_string(),
+            run_id: "019a".to_string(),
+            name: "blocker dashboard".to_string(),
+            phase: "runFlowStep".to_string(),
+            wait: None,
+            started_at: None,
+            ticket: None,
+            repo: None,
+            pr: None,
+            receipts: None,
+        };
+
+        // Opening a job creates and focuses its checkout tab, then binds.
+        assert!(state.focus_pane_in_workspace(0, bare_pane));
+        state.bind_symphony_dock_to_focused_pane(&workflow);
+        state.reconcile_dock_context_tabs();
+        assert_eq!(state.dock_tab, Some(DockSurface::Symphony));
+        assert_eq!(
+            state.dock_followed_pane,
+            state.current_pane_focus_target(),
+            "the dock follows the checkout pane"
+        );
+
+        // The pane the click came from never received the surface.
+        assert!(state.focus_pane_in_workspace(0, object_pane));
+        state.reconcile_dock_context_tabs();
+        assert!(!state.dock_open_surfaces.contains(&DockSurface::Symphony));
+
+        // A plain bind after the focus change reproduces the lost surface.
+        assert!(state.focus_pane_in_workspace(0, bare_pane));
+        state.reconcile_dock_context_tabs();
+        assert!(state.focus_pane_in_workspace(0, object_pane));
+        state.bind_symphony_dock(&workflow);
+        state.reconcile_dock_context_tabs();
+        assert_ne!(state.dock_tab, Some(DockSurface::Symphony));
     }
 
     #[test]

@@ -3453,8 +3453,8 @@ impl App {
     /// what the job is doing is exactly what you want to read when it has
     /// nowhere to open.
     fn open_symphony_workflow(&mut self, workflow: &crate::symphony::Workflow) {
-        self.state.bind_symphony_dock(workflow);
         let Some(repo) = workflow.repo.as_deref() else {
+            self.state.bind_symphony_dock(workflow);
             self.state.config_diagnostic =
                 Some("Symphony workflow has no repository checkout".to_string());
             return;
@@ -3490,6 +3490,7 @@ impl App {
             }
         };
         let Some(cwd) = cwd else {
+            self.state.bind_symphony_dock(workflow);
             self.state.config_diagnostic = Some(
                 verification_error
                     .unwrap_or_else(|| format!("Symphony checkout unavailable for {repo}")),
@@ -3510,6 +3511,10 @@ impl App {
                 work_context: None,
             },
         );
+        // The tab is focused now, but the dock still follows the pane the click
+        // came from until the next reconcile. Bind after catching it up, or the
+        // surface is saved under the old pane and the checkout opens without it.
+        self.state.bind_symphony_dock_to_focused_pane(workflow);
         self.state.clear_symphony();
         self.state.mode = Mode::Terminal;
     }
