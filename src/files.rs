@@ -21,6 +21,32 @@ impl FileStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FileSort {
+    #[default]
+    Name,
+    Type,
+    GitStatus,
+}
+
+impl FileSort {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Type,
+            Self::Type => Self::GitStatus,
+            Self::GitStatus => Self::Name,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Type => "type",
+            Self::GitStatus => "status",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FileRecord {
     pub(crate) path: PathBuf,
@@ -76,10 +102,20 @@ struct DirectoryNode {
 }
 
 impl FileTreeSnapshot {
+    #[cfg(test)]
     pub(crate) fn rows(
         &self,
         collapsed: &std::collections::HashSet<PathBuf>,
         matched_files: Option<&std::collections::HashSet<PathBuf>>,
+    ) -> Vec<FileTreeRow> {
+        self.rows_sorted(collapsed, matched_files, FileSort::Name)
+    }
+
+    pub(crate) fn rows_sorted(
+        &self,
+        collapsed: &std::collections::HashSet<PathBuf>,
+        matched_files: Option<&std::collections::HashSet<PathBuf>>,
+        sort: FileSort,
     ) -> Vec<FileTreeRow> {
         let mut root = DirectoryNode::default();
         for file in &self.files {
@@ -96,6 +132,7 @@ impl FileTreeSnapshot {
             0,
             collapsed,
             matched_files.is_some(),
+            sort,
             &mut rows,
         );
         rows
@@ -121,6 +158,7 @@ fn append_rows(
     depth: usize,
     collapsed: &std::collections::HashSet<PathBuf>,
     force_expanded: bool,
+    sort: FileSort,
     rows: &mut Vec<FileTreeRow>,
 ) {
     for (name, child) in &node.directories {
@@ -132,10 +170,26 @@ fn append_rows(
             status: None,
         });
         if force_expanded || !collapsed.contains(&path) {
-            append_rows(child, &path, depth + 1, collapsed, force_expanded, rows);
+            append_rows(
+                child,
+                &path,
+                depth + 1,
+                collapsed,
+                force_expanded,
+                sort,
+                rows,
+            );
         }
     }
-    for (name, status) in &node.files {
+    let mut files = node.files.iter().collect::<Vec<_>>();
+    files.sort_by(|(left_name, left_status), (right_name, right_status)| {
+        file_sort_key(left_name, **left_status, sort).cmp(&file_sort_key(
+            right_name,
+            **right_status,
+            sort,
+        ))
+    });
+    for (name, status) in files {
         rows.push(FileTreeRow {
             path: parent.join(name),
             depth,
@@ -143,6 +197,26 @@ fn append_rows(
             status: *status,
         });
     }
+}
+
+fn file_sort_key(name: &str, status: Option<FileStatus>, sort: FileSort) -> (String, String) {
+    let normalized = name.to_ascii_lowercase();
+    let primary = match sort {
+        FileSort::Name => normalized.clone(),
+        FileSort::Type => Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        FileSort::GitStatus => match status {
+            Some(FileStatus::Modified) => "0",
+            Some(FileStatus::Added) => "1",
+            Some(FileStatus::Untracked) => "2",
+            None => "3",
+        }
+        .to_string(),
+    };
+    (primary, normalized)
 }
 
 pub(crate) fn build_file_tree(cwd: &Path, git_program: &Path) -> FileTreeSnapshot {
@@ -549,6 +623,51 @@ mod tests {
                 Path::new("src/nested"),
                 Path::new("src/nested/lib.rs")
             ]
+        );
+    }
+
+    #[test]
+    fn file_rows_sort_by_name_type_and_git_status() {
+        let snapshot = FileTreeSnapshot {
+            root: PathBuf::from("/repo"),
+            files: vec![
+                FileRecord {
+                    path: PathBuf::from("zeta.md"),
+                    status: Some(FileStatus::Untracked),
+                },
+                FileRecord {
+                    path: PathBuf::from("alpha.rs"),
+                    status: Some(FileStatus::Added),
+                },
+                FileRecord {
+                    path: PathBuf::from("beta.md"),
+                    status: Some(FileStatus::Modified),
+                },
+            ],
+            fingerprint: 1,
+            source: FileTreeSource::Git,
+            error: None,
+        };
+        let collapsed = std::collections::HashSet::new();
+        let names = |sort| {
+            snapshot
+                .rows_sorted(&collapsed, None, sort)
+                .into_iter()
+                .map(|row| row.path)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(FileSort::Name),
+            ["alpha.rs", "beta.md", "zeta.md"].map(PathBuf::from)
+        );
+        assert_eq!(
+            names(FileSort::Type),
+            ["beta.md", "zeta.md", "alpha.rs"].map(PathBuf::from)
+        );
+        assert_eq!(
+            names(FileSort::GitStatus),
+            ["beta.md", "alpha.rs", "zeta.md"].map(PathBuf::from)
         );
     }
 }

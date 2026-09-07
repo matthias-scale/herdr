@@ -1494,7 +1494,13 @@
           "key": "source_control.commit_message_model",
           "type": "string",
           "default": "\"\"",
-          "description": "Model exported to the Commit action as HERDR_COMMIT_MESSAGE_MODEL so a prepare-commit-msg hook can draft the message. Empty runs `git commit` unchanged."
+          "description": "Claude Code or Codex model used to draft a conventional commit message from the cached diff, or the unstaged diff when the cache is empty. Empty runs `git commit` unchanged."
+        },
+        {
+          "key": "source_control.commit_stage_all",
+          "type": "boolean",
+          "default": "false",
+          "description": "Stage all working-tree changes before drafting and committing. False leaves the index unchanged."
         },
         {
           "key": "source_control.branch_prefix",

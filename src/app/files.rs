@@ -141,6 +141,12 @@ impl AppState {
         }
         true
     }
+
+    pub(crate) fn cycle_dock_files_sort(&mut self) {
+        self.dock_files_sort = self.dock_files_sort.next();
+        self.dock_scroll = 0;
+        self.reconcile_dock_files_selection();
+    }
 }
 
 impl App {
@@ -181,6 +187,22 @@ impl App {
             return;
         }
 
+        self.spawn_dock_files_refresh(cwd);
+    }
+
+    pub(crate) fn force_dock_files_refresh(&mut self) {
+        let Some(cwd) = self.focused_files_cwd() else {
+            return;
+        };
+        if let Some(root) = self.state.dock_files_root.take() {
+            self.state.dock_file_cache.remove(&root);
+        }
+        self.state.dock_files_cwd = None;
+        self.state.dock_files_roots_by_cwd.remove(&cwd);
+        self.spawn_dock_files_refresh(cwd);
+    }
+
+    fn spawn_dock_files_refresh(&mut self, cwd: PathBuf) {
         self.last_files_refresh_generation = self.last_files_refresh_generation.wrapping_add(1);
         let generation = self.last_files_refresh_generation;
         self.files_refresh_in_flight = Some(FilesRefreshInFlight {
@@ -256,6 +278,9 @@ impl App {
                 self.state.dock_scroll = 0;
                 self.state.reconcile_dock_files_selection();
             }
+            KeyCode::Esc if self.state.dock_files_search_active => {
+                self.state.dock_files_search_active = false;
+            }
             KeyCode::Esc => self.state.dock_files_focused = false,
             KeyCode::Up => self.state.move_dock_files_selection(-1),
             KeyCode::Down => self.state.move_dock_files_selection(1),
@@ -279,12 +304,24 @@ impl App {
                 self.state.dock_scroll = 0;
                 self.state.reconcile_dock_files_selection();
             }
+            KeyCode::Char('/') if event.modifiers.is_empty() => {
+                self.state.dock_files_search_active = true;
+            }
+            KeyCode::Char('r')
+                if event.modifiers.is_empty() && !self.state.dock_files_search_active =>
+            {
+                self.force_dock_files_refresh();
+            }
+            KeyCode::Char('s')
+                if event.modifiers.is_empty() && !self.state.dock_files_search_active =>
+            {
+                self.state.cycle_dock_files_sort();
+            }
             KeyCode::Char(character)
                 if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT =>
             {
-                if character != '/' || !self.state.dock_files_filter.is_empty() {
-                    self.state.dock_files_filter.push(character);
-                }
+                self.state.dock_files_search_active = true;
+                self.state.dock_files_filter.push(character);
                 self.state.dock_scroll = 0;
                 self.state.reconcile_dock_files_selection();
             }
@@ -472,6 +509,45 @@ mod tests {
             app.handle_dock_files_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),))
         );
         assert!(app.state.dock_files_collapsed.contains(Path::new("src")));
+    }
+
+    #[test]
+    fn files_keys_cycle_sort_and_keep_search_input_unambiguous() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(DockSurface::Files);
+        app.state.dock_files_focused = true;
+        let mut workspace = crate::workspace::Workspace::test_new("files-keys");
+        workspace.identity_cwd = std::env::current_dir().expect("current directory");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+
+        assert!(app
+            .handle_dock_files_key(&TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty(),)));
+        assert_eq!(app.state.dock_files_sort, crate::files::FileSort::Type);
+        assert!(app
+            .handle_dock_files_key(&TerminalKey::new(KeyCode::Char('/'), KeyModifiers::empty(),)));
+        assert!(app
+            .handle_dock_files_key(&TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty(),)));
+        assert_eq!(app.state.dock_files_filter, "s");
+        assert_eq!(app.state.dock_files_sort, crate::files::FileSort::Type);
+        for _ in 0..2 {
+            assert!(
+                app.handle_dock_files_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),))
+            );
+        }
+        app.state.dock_files_focused = true;
+        assert!(app
+            .handle_dock_files_key(&TerminalKey::new(KeyCode::Char('r'), KeyModifiers::empty(),)));
+        assert!(app.files_refresh_in_flight.is_some());
     }
 
     #[test]
