@@ -90,14 +90,14 @@ const PROBE_SPECS: &[ProbeSpec] = &[
         non_zero_needs_attention: false,
     },
     ProbeSpec {
-        label: "github",
+        label: "gh",
         kind: ToolProbeKind::Integration,
         program: "gh",
         args: &["auth", "status"],
         non_zero_needs_attention: true,
     },
     ProbeSpec {
-        label: "linear",
+        label: "linearis",
         kind: ToolProbeKind::Integration,
         program: "linearis",
         args: &["auth", "status"],
@@ -308,7 +308,7 @@ mod tests {
                 detail: "2.1.4".into(),
             },
             ToolProbe {
-                label: "github",
+                label: "gh",
                 kind: ToolProbeKind::Integration,
                 outcome: ToolProbeOutcome::NeedsAttention,
                 detail: "not authenticated".into(),
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(state.tool_probes_for(ToolProbeKind::Provider).len(), 1);
         assert_eq!(
             state.tool_probes_for(ToolProbeKind::Integration)[0].label,
-            "github"
+            "gh"
         );
     }
 }

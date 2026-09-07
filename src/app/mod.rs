@@ -972,6 +972,9 @@ impl App {
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: work_index_snapshot.clone(),
+            settings_missive_team: config.missive.team.clone(),
+            settings_missive_token_present: std::env::var_os(&config.missive.token_env)
+                .is_some_and(|value| !value.is_empty()),
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache,
             work_item_detail_loading: std::collections::HashSet::new(),
@@ -2306,6 +2309,9 @@ impl App {
 
         if !invalid_section("missive") {
             self.missive_config = config.missive.clone();
+            self.state.settings_missive_team = config.missive.team.clone();
+            self.state.settings_missive_token_present =
+                std::env::var_os(&config.missive.token_env).is_some_and(|value| !value.is_empty());
             self.next_work_index_refresh = Instant::now();
         }
 
