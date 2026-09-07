@@ -99,7 +99,10 @@ pub(crate) fn render_pr(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(item) = focused_pr_item(app) else {
         let message = match app.work_index_snapshot.as_ref() {
             Some(snapshot) => snapshot
-                .unavailable_reason(crate::work_index::WorkIndexSource::Github)
+                .short_unavailable_reason(
+                    crate::work_index::WorkIndexSource::Github,
+                    std::time::SystemTime::now(),
+                )
                 .map(|reason| format!(" GitHub: {reason}"))
                 .unwrap_or_else(|| " pull request absent from latest index".into()),
             None => " pull request not indexed yet".into(),

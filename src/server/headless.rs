@@ -345,6 +345,9 @@ pub struct HeadlessServer {
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
+    /// Last instant a full TUI client was attached. Timer work-index refreshes
+    /// stop after six intervals without a viewer and resume on the next attach.
+    last_app_client_seen: Instant,
     #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
@@ -546,6 +549,7 @@ impl HeadlessServer {
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
+            last_app_client_seen: Instant::now(),
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
@@ -1631,6 +1635,22 @@ impl HeadlessServer {
 
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
+    }
+
+    fn work_index_refresh_is_useful(&mut self, now: Instant) -> bool {
+        if self.has_app_client() {
+            self.last_app_client_seen = now;
+            return true;
+        }
+        let idle_limit = Duration::from_secs(
+            self.app
+                .work_index_config
+                .refresh_interval_seconds
+                .max(1)
+                .saturating_mul(6),
+        );
+        now.checked_duration_since(self.last_app_client_seen)
+            .is_none_or(|idle| idle <= idle_limit)
     }
 
     fn has_renderable_status_target(&self) -> bool {
@@ -3230,6 +3250,8 @@ impl HeadlessServer {
                 }
                 if first_app_client {
                     self.app.mark_git_status_refresh_due(Instant::now());
+                    self.last_app_client_seen = Instant::now();
+                    self.app.next_work_index_refresh = Instant::now();
                 }
                 self.sync_foreground_client_state();
                 self.resize_shared_runtime_to_effective_size();
@@ -5044,7 +5066,9 @@ impl HeadlessServer {
         // without an attached TUI. Omitting it here left every server-backed
         // session with a permanently empty index while the interactive loop
         // refreshed fine, which is the #119 defect class.
-        self.app.start_work_index_refresh_if_due(now);
+        if self.work_index_refresh_is_useful(now) {
+            self.app.start_work_index_refresh_if_due(now);
+        }
         let detail_request = self
             .foreground_client_id
             .and_then(|client_id| self.clients.get(&client_id))
@@ -5674,6 +5698,7 @@ mod tests {
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),
+            last_app_client_seen: Instant::now(),
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
@@ -5752,6 +5777,32 @@ mod tests {
             ]
         );
         assert_eq!(presentation.tab, Some(crate::app::DockSurface::Files));
+    }
+
+    #[test]
+    fn work_index_timer_skips_after_six_idle_intervals_and_attach_resumes_immediately() {
+        let mut server = test_headless_server();
+        server.app.work_index_config.enabled = true;
+        server.app.work_index_config.refresh_interval_seconds = 10;
+        let now = Instant::now();
+        server.last_app_client_seen = now - Duration::from_secs(61);
+        assert!(!server.work_index_refresh_is_useful(now));
+
+        server.app.next_work_index_refresh = now + Duration::from_secs(30);
+        let (writer, _control, _render) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 77,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        assert!(server.app.next_work_index_refresh <= Instant::now());
+        assert!(server.work_index_refresh_is_useful(Instant::now()));
     }
 
     #[test]

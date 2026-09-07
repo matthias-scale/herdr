@@ -56,7 +56,10 @@ pub(crate) fn render_linear(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(item) = focused_ticket_item(app) else {
         let message = match app.work_index_snapshot.as_ref() {
             Some(snapshot) => snapshot
-                .unavailable_reason(crate::work_index::WorkIndexSource::Linear)
+                .short_unavailable_reason(
+                    crate::work_index::WorkIndexSource::Linear,
+                    std::time::SystemTime::now(),
+                )
                 .map(|reason| format!(" Linear: {reason}"))
                 .unwrap_or_else(|| " ticket absent from latest index".into()),
             None => " ticket not indexed yet".into(),
