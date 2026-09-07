@@ -3312,11 +3312,16 @@ mod tests {
         execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
         assert_eq!(
             state.sidebar_group_mode,
-            crate::app::state::SidebarGroupMode::LinearTeam
+            crate::app::state::SidebarGroupMode::Spaces
         );
         assert_eq!(
             state.take_sidebar_group_mode_persistence_request(),
-            Some(crate::app::state::SidebarGroupMode::LinearTeam)
+            Some(crate::app::state::SidebarGroupMode::Spaces)
+        );
+        execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
+        assert_eq!(
+            state.sidebar_group_mode,
+            crate::app::state::SidebarGroupMode::LinearTeam
         );
     }
 
