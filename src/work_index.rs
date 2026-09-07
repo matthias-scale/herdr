@@ -13,9 +13,28 @@ use crate::work_context::{
     repo_slugs_match, PaneWorkContext, PaneWorkRole,
 };
 
+mod cache;
+
+use cache::{CachePolicy, Provider, ProviderCache, ProviderOutput};
+
 pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const WORK_ITEM_DETAIL_CACHE_CAPACITY: usize = 16;
+const LINEAR_LIST_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const LINEAR_FULL_LIST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const LINEAR_CYCLE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const VIEWER_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const GITHUB_LIST_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const GITHUB_PR_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const MISSIVE_LIST_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkIndexCacheBypass {
+    pub(crate) github: bool,
+    pub(crate) linear: bool,
+    pub(crate) missive: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkIndexPane {
@@ -28,6 +47,8 @@ pub(crate) struct WorkIndexPane {
     pub(crate) tab_id: String,
     pub(crate) pane_id: String,
 }
+
+pub(crate) type WorkIndexContextFingerprint = Vec<(String, String, String, PaneWorkContext)>;
 
 impl WorkIndexPane {
     pub(crate) fn has_indexable_context(&self) -> bool {
@@ -409,6 +430,14 @@ impl WorkIndexSource {
             Self::Missive => "Missive",
         }
     }
+
+    const fn provider(self) -> Provider {
+        match self {
+            Self::Github => Provider::Github,
+            Self::Linear => Provider::Linear,
+            Self::Missive => Provider::Missive,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +448,12 @@ pub(crate) struct WorkIndexUnavailable {
     linear: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     missive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_rate_limited_until: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linear_rate_limited_until: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    missive_rate_limited_until: Option<SystemTime>,
 }
 
 impl WorkIndexUnavailable {
@@ -448,6 +483,14 @@ impl WorkIndexUnavailable {
         }
     }
 
+    fn replace_reason(&mut self, source: WorkIndexSource, reason: String) {
+        match source {
+            WorkIndexSource::Github => self.github = Some(reason),
+            WorkIndexSource::Linear => self.linear = Some(reason),
+            WorkIndexSource::Missive => self.missive = Some(reason),
+        }
+    }
+
     fn normalized_reason(source: WorkIndexSource, reason: String) -> String {
         reason
             .strip_prefix(source.label())
@@ -461,6 +504,54 @@ impl WorkIndexUnavailable {
             WorkIndexSource::Linear => self.linear.as_deref(),
             WorkIndexSource::Missive => self.missive.as_deref(),
         }
+    }
+
+    fn record_rate_limit_until(&mut self, source: WorkIndexSource, until: SystemTime) {
+        match source {
+            WorkIndexSource::Github => self.github_rate_limited_until = Some(until),
+            WorkIndexSource::Linear => self.linear_rate_limited_until = Some(until),
+            WorkIndexSource::Missive => self.missive_rate_limited_until = Some(until),
+        }
+    }
+
+    fn rate_limited_until(&self, source: WorkIndexSource) -> Option<SystemTime> {
+        match source {
+            WorkIndexSource::Github => self.github_rate_limited_until,
+            WorkIndexSource::Linear => self.linear_rate_limited_until,
+            WorkIndexSource::Missive => self.missive_rate_limited_until,
+        }
+    }
+
+    pub(crate) fn short_reason(&self, source: WorkIndexSource, now: SystemTime) -> Option<String> {
+        let reason = self.reason(source)?;
+        let lower = reason.to_ascii_lowercase();
+        if lower.contains("rate limit") || lower.contains("http 429") {
+            let retry = self.rate_limited_until(source).and_then(|until| {
+                until.duration_since(now).ok().map(|duration| {
+                    let minutes = duration.as_secs().saturating_add(59) / 60;
+                    format!(" · retry in {}m", minutes.max(1))
+                })
+            });
+            return Some(format!("rate limited{}", retry.unwrap_or_default()));
+        }
+        if lower.contains("timed out") {
+            return Some(format!(
+                "timed out ({}s)",
+                WORK_INDEX_TARGET_TIMEOUT.as_secs()
+            ));
+        }
+        if source == WorkIndexSource::Missive
+            && (lower.contains("team not configured") || lower.contains("team is not configured"))
+        {
+            return Some("team not configured".to_string());
+        }
+        if let Some(group) = ["Triage", "Assigned", "DoneThisCycle"]
+            .into_iter()
+            .find(|group| reason.starts_with(group))
+        {
+            return Some(format!("{group} query failed (see log)"));
+        }
+        Some("query failed (see log)".to_string())
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -548,6 +639,16 @@ impl Snapshot {
             .map(WorkIndexUnavailable::summary)
             .filter(|summary| !summary.is_empty())
     }
+
+    pub(crate) fn short_unavailable_reason(
+        &self,
+        source: WorkIndexSource,
+        now: SystemTime,
+    ) -> Option<String> {
+        self.unavailable
+            .as_ref()
+            .and_then(|unavailable| unavailable.short_reason(source, now))
+    }
 }
 
 /// Provider identities and assignable users observed by the work-index job.
@@ -609,6 +710,37 @@ struct Attachment {
 enum RefreshError {
     TimedOut,
     Failed(String),
+}
+
+fn run_provider_command(
+    cache: Option<&ProviderCache>,
+    source: WorkIndexSource,
+    command: std::process::Command,
+    ttl: Duration,
+    bypass: bool,
+    deadline: Instant,
+) -> io::Result<ProviderOutput> {
+    if let Some(cache) = cache {
+        let program = Path::new(command.get_program()).to_path_buf();
+        let argv = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        return cache.run(
+            source.provider(),
+            &program,
+            &argv,
+            CachePolicy { ttl, bypass },
+            deadline,
+        );
+    }
+    crate::noninteractive_process::output_with_deadline(command, deadline).map(|output| {
+        ProviderOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    })
 }
 
 const MISSIVE_API_BASE: &str = "https://public.missiveapp.com/v1";
@@ -704,6 +836,8 @@ fn run_missive_get(
     config: &MissiveConfig,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Value, RefreshError> {
     let token = std::env::var(&config.token_env).map_err(|_| {
         RefreshError::Failed(format!(
@@ -728,15 +862,21 @@ fn run_missive_get(
         &format!("Authorization: Bearer {token}"),
         &request.url(),
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Missive {} GET could not run", request.label()))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Missive,
+        command,
+        MISSIVE_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Missive {} GET could not run", request.label()))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(format!(
             "Missive {} GET failed with status {}",
@@ -925,6 +1065,8 @@ fn fetch_missive_conversation_detail(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<MissiveConversation, RefreshError> {
     let get = |request| {
         run_missive_get(
@@ -932,6 +1074,8 @@ fn fetch_missive_conversation_detail(
             config,
             program,
             target_deadline(batch_deadline, target_timeout),
+            cache,
+            bypass,
         )
     };
     let value = get(MissiveRequest::Conversation { id: id.into() })?;
@@ -975,6 +1119,8 @@ fn fetch_missive_snapshot(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<(Vec<MissiveConversation>, Vec<MissiveUser>), RefreshError> {
     let pane_ids = panes
         .iter()
@@ -1012,6 +1158,8 @@ fn fetch_missive_snapshot(
                 config,
                 program,
                 target_deadline(batch_deadline, target_timeout),
+                cache,
+                bypass,
             )?;
             value_array(&users_value, "users")
                 .iter()
@@ -1028,6 +1176,8 @@ fn fetch_missive_snapshot(
         config,
         program,
         target_deadline(batch_deadline, target_timeout),
+        cache,
+        bypass,
     )?;
     let mut conversations =
         parse_missive_conversations_for_user(&conversations_value, current_user_id);
@@ -1048,6 +1198,8 @@ fn fetch_missive_snapshot(
             program,
             batch_deadline,
             target_timeout,
+            cache,
+            bypass,
         );
         let mut detail = match detail {
             Ok(detail) => detail,
@@ -1252,6 +1404,9 @@ pub(crate) struct WorkIndexRefreshContext<'a> {
     pub(crate) session_missive_users: Option<&'a [MissiveUser]>,
     pub(crate) previous: Option<&'a Snapshot>,
     pub(crate) linear_assignee: Option<&'a str>,
+    pub(crate) selected_ticket: Option<&'a str>,
+    provider_cache: Option<&'a ProviderCache>,
+    pub(crate) cache_bypass: WorkIndexCacheBypass,
 }
 
 pub(crate) fn refresh_work_index_with_missive(
@@ -1271,6 +1426,9 @@ pub(crate) fn refresh_work_index_with_missive(
         session_missive_users,
         previous,
         linear_assignee,
+        selected_ticket,
+        provider_cache,
+        cache_bypass,
     } = context;
     if !config.enabled {
         return Snapshot {
@@ -1296,6 +1454,8 @@ pub(crate) fn refresh_work_index_with_missive(
             number,
             gh_program,
             target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.github,
         ) {
             Ok(pull_request) => upsert_github(&mut github, pull_request),
             Err(RefreshError::TimedOut) => {
@@ -1326,6 +1486,8 @@ pub(crate) fn refresh_work_index_with_missive(
             repo,
             gh_program,
             target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.github,
         ) {
             Ok(mut values) => {
                 let authored = match fetch_github_pr_numbers(
@@ -1333,6 +1495,8 @@ pub(crate) fn refresh_work_index_with_missive(
                     gh_program,
                     &["--author", "@me"],
                     target_deadline(batch_deadline, target_timeout),
+                    provider_cache,
+                    cache_bypass.github,
                 ) {
                     Ok(numbers) => numbers,
                     Err(RefreshError::TimedOut) => {
@@ -1349,6 +1513,8 @@ pub(crate) fn refresh_work_index_with_missive(
                     gh_program,
                     &["--search", "review-requested:@me OR mentions:@me"],
                     target_deadline(batch_deadline, target_timeout),
+                    provider_cache,
+                    cache_bypass.github,
                 ) {
                     Ok(numbers) => numbers,
                     Err(RefreshError::TimedOut) => {
@@ -1404,6 +1570,8 @@ pub(crate) fn refresh_work_index_with_missive(
             linear_assignee,
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.linear,
         ) {
             Ok(observation) => {
                 let mut tickets = observation.tickets;
@@ -1452,7 +1620,16 @@ pub(crate) fn refresh_work_index_with_missive(
         },
         _ => Vec::new(),
     };
-    for identifier in pane_ticket_ids(panes) {
+    let mut directly_observed_tickets = pane_ticket_ids(panes);
+    if let Some(selected) = selected_ticket.and_then(|ticket| normalize_ticket_id(ticket).ok()) {
+        if !directly_observed_tickets
+            .iter()
+            .any(|ticket| ticket.eq_ignore_ascii_case(&selected))
+        {
+            directly_observed_tickets.push(selected);
+        }
+    }
+    for identifier in directly_observed_tickets {
         if listed_ticket_ids.contains(&identifier.to_ascii_uppercase()) {
             continue;
         }
@@ -1460,6 +1637,8 @@ pub(crate) fn refresh_work_index_with_missive(
             &identifier,
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.linear,
         ) {
             Ok(ticket) => {
                 if let Some(index) = tickets.iter().position(|existing| {
@@ -1500,7 +1679,14 @@ pub(crate) fn refresh_work_index_with_missive(
             }
         }
     }
-    let attachments = fetch_attachments(&tickets, linearis_program, batch_deadline, target_timeout);
+    let attachments = fetch_attachments(
+        &tickets,
+        linearis_program,
+        batch_deadline,
+        target_timeout,
+        provider_cache,
+        cache_bypass.linear,
+    );
     let (conversations, missive_users) = match fetch_missive_snapshot(
         missive,
         panes,
@@ -1509,6 +1695,8 @@ pub(crate) fn refresh_work_index_with_missive(
         curl_program,
         batch_deadline,
         target_timeout,
+        provider_cache,
+        cache_bypass.missive,
     ) {
         Ok(snapshot) => snapshot,
         Err(RefreshError::TimedOut) => {
@@ -1682,6 +1870,12 @@ pub(crate) fn refresh_work_index_with_missive(
             .then_with(|| left.ticket_ids.cmp(&right.ticket_ids))
     });
     let _ = now;
+    preserve_previous_rate_limit_reasons(&mut degraded, previous);
+    if let Some(cache) = provider_cache {
+        cache.finish_refresh();
+        record_provider_backoff(&mut degraded, cache);
+    }
+
     Snapshot {
         items,
         conversations,
@@ -1691,7 +1885,59 @@ pub(crate) fn refresh_work_index_with_missive(
     }
 }
 
-fn exit_detail(label: &str, output: &std::process::Output) -> String {
+fn preserve_previous_rate_limit_reasons(
+    unavailable: &mut WorkIndexUnavailable,
+    previous: Option<&Snapshot>,
+) {
+    let Some(previous) = previous.and_then(|snapshot| snapshot.unavailable.as_ref()) else {
+        return;
+    };
+    for source in [
+        WorkIndexSource::Github,
+        WorkIndexSource::Linear,
+        WorkIndexSource::Missive,
+    ] {
+        let Some(current) = unavailable.reason(source) else {
+            continue;
+        };
+        let Some(prior) = previous.reason(source) else {
+            continue;
+        };
+        if is_rate_limit_reason(current) && is_rate_limit_reason(prior) {
+            unavailable.replace_reason(source, prior.to_string());
+        }
+    }
+}
+
+fn is_rate_limit_reason(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("rate limit") || reason.contains("http 429")
+}
+
+fn record_provider_backoff(unavailable: &mut WorkIndexUnavailable, cache: &ProviderCache) {
+    for source in [
+        WorkIndexSource::Github,
+        WorkIndexSource::Linear,
+        WorkIndexSource::Missive,
+    ] {
+        if let Some(rate_limit) = cache.rate_limit(source.provider()) {
+            if rate_limit.until > SystemTime::now() {
+                unavailable.record(source, rate_limit.reason);
+                unavailable.record_rate_limit_until(source, rate_limit.until);
+            }
+        }
+    }
+}
+
+fn finalize_provider_refresh(snapshot: &mut Snapshot, cache: &ProviderCache) {
+    cache.finish_refresh();
+    let mut unavailable = snapshot.unavailable.take().unwrap_or_default();
+    record_provider_backoff(&mut unavailable, cache);
+    snapshot.unavailable = (!unavailable.is_empty()).then_some(unavailable);
+    cache.log_summary();
+}
+
+fn exit_detail(label: &str, output: &ProviderOutput) -> String {
     // Keep the child's own words: a bare "exited unsuccessfully" is
     // undiagnosable in the field, which is exactly where these tools fail.
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1718,7 +1964,7 @@ fn target_deadline(batch_deadline: Instant, target_timeout: Duration) -> Instant
 
 /// Resolve provider-local "me" identities and assignee directories once per
 /// app session. Callers retain the returned value across index refreshes.
-pub(crate) fn resolve_work_index_session(
+fn resolve_work_index_session(
     config: &WorkIndexConfig,
     mut session: WorkIndexSession,
     missive_users: &[MissiveUser],
@@ -1726,17 +1972,27 @@ pub(crate) fn resolve_work_index_session(
     target_timeout: Duration,
     gh_program: &Path,
     linearis_program: &Path,
+    cache: Option<&ProviderCache>,
+    bypass: WorkIndexCacheBypass,
 ) -> WorkIndexSession {
     if !session.linear.resolved {
         (session.linear, session.linear_query_identity) = fetch_linear_directory(
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
+            cache,
+            bypass.linear,
         );
         session.linear.resolved = true;
     }
     if !session.github.resolved {
-        session.github =
-            fetch_github_directory(&config.repos, gh_program, batch_deadline, target_timeout);
+        session.github = fetch_github_directory(
+            &config.repos,
+            gh_program,
+            batch_deadline,
+            target_timeout,
+            cache,
+            bypass.github,
+        );
         session.github.resolved = true;
     }
     if !session.missive.resolved && !missive_users.is_empty() {
@@ -1749,34 +2005,50 @@ pub(crate) fn resolve_work_index_session(
 fn fetch_linear_directory(
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> (ProviderDirectory, Option<String>) {
     let (viewer, query_identity) = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["auth", "status", "--compact"]);
-        crate::noninteractive_process::output_with_deadline(command, deadline)
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-            .and_then(|value| {
-                let user = value.get("user")?;
-                let name = nested_text(Some(user), "name");
-                let identity = nested_text(Some(user), "id").or_else(|| name.clone());
-                Some((name, identity))
-            })
-            .unwrap_or_default()
+        run_provider_command(
+            cache,
+            WorkIndexSource::Linear,
+            command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
+            deadline,
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|value| {
+            let user = value.get("user")?;
+            let name = nested_text(Some(user), "name");
+            let identity = nested_text(Some(user), "id").or_else(|| name.clone());
+            Some((name, identity))
+        })
+        .unwrap_or_default()
     };
     let mut assignees = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["users", "list", "--active", "-l", "250", "--compact"]);
-        crate::noninteractive_process::output_with_deadline(command, deadline)
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-            .and_then(|value| value.get("nodes").and_then(Value::as_array).cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|user| nested_text(Some(&user), "name"))
-            .collect::<Vec<_>>()
+        run_provider_command(
+            cache,
+            WorkIndexSource::Linear,
+            command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
+            deadline,
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|value| value.get("nodes").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|user| nested_text(Some(&user), "name"))
+        .collect::<Vec<_>>()
     };
     include_viewer(&mut assignees, viewer.as_deref());
     (
@@ -1794,12 +2066,18 @@ fn fetch_github_directory(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> ProviderDirectory {
     let viewer = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["api", "user"]);
-        crate::noninteractive_process::output_with_deadline(
+        run_provider_command(
+            cache,
+            WorkIndexSource::Github,
             command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
             target_deadline(batch_deadline, target_timeout),
         )
         .ok()
@@ -1819,8 +2097,12 @@ fn fetch_github_directory(
             "--paginate",
             "--slurp",
         ]);
-        let Some(value) = crate::noninteractive_process::output_with_deadline(
+        let Some(value) = run_provider_command(
+            cache,
+            WorkIndexSource::Github,
             command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
             target_deadline(batch_deadline, target_timeout),
         )
         .ok()
@@ -1939,6 +2221,8 @@ fn fetch_github_pull_requests(
     repo: &str,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<GithubPullRequest>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args([
@@ -1953,15 +2237,21 @@ fn fetch_github_pull_requests(
         "--json",
         GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        GITHUB_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub observation",
@@ -1981,6 +2271,8 @@ fn fetch_github_pull_request(
     number: u64,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<GithubPullRequest, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     let number_arg = number.to_string();
@@ -1993,15 +2285,21 @@ fn fetch_github_pull_request(
         "--json",
         GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub pull request observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        GITHUB_PR_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub pull request observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub pull request observation",
@@ -2021,20 +2319,28 @@ fn fetch_github_pr_numbers(
     program: &Path,
     filter: &[&str],
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<HashSet<u64>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args(["pr", "list", "--repo", repo, "--state", "open"]);
     command.args(filter);
     command.args(["--limit", "200", "--json", "number"]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub PR audience observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        GITHUB_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub PR audience observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub PR audience observation",
@@ -2085,6 +2391,8 @@ fn fetch_github_pull_request_detail(
     number: u64,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<WorkItemDetail, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     let number_arg = number.to_string();
@@ -2097,15 +2405,21 @@ fn fetch_github_pull_request_detail(
         "--json",
         GITHUB_PULL_REQUEST_DETAIL_FIELDS,
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub PR detail observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub PR detail observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub PR detail observation",
@@ -2171,7 +2485,7 @@ fn fetch_github_pull_request_detail(
         files: github_files(value.get("files")),
         commits: github_commits(value.get("commits")),
         unresolved_review_threads: fetch_unresolved_review_thread_count(
-            repo, number, program, deadline,
+            repo, number, program, deadline, cache, bypass,
         ),
         unavailable: None,
         observed_at: SystemTime::now(),
@@ -2192,6 +2506,8 @@ fn fetch_unresolved_review_thread_count(
     number: u64,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Option<usize> {
     let (owner, name) = repo.split_once('/')?;
     let mut command = crate::noninteractive_process::command(program);
@@ -2207,7 +2523,15 @@ fn fetch_unresolved_review_thread_count(
         "-F",
         &format!("number={number}"),
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2242,11 +2566,21 @@ fn fetch_linear_ticket_detail(
     identifier: &str,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<WorkItemDetail, RefreshError> {
     let run = |args: &[&str]| {
         let mut command = crate::noninteractive_process::command(program);
         command.args(args);
-        crate::noninteractive_process::output_with_deadline(command, deadline).map_err(|error| {
+        run_provider_command(
+            cache,
+            WorkIndexSource::Linear,
+            command,
+            WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+            bypass,
+            deadline,
+        )
+        .map_err(|error| {
             if error.kind() == std::io::ErrorKind::TimedOut {
                 RefreshError::TimedOut
             } else {
@@ -2548,11 +2882,17 @@ struct ActiveLinearCycle {
     name: String,
 }
 
+const LINEAR_LIST_FIELDS: &str = "nodes.identifier,nodes.title,nodes.state.name,nodes.priority,nodes.assignee.name,nodes.labels.nodes.name,nodes.cycle.name,nodes.updatedAt,nodes.url";
+const LINEAR_ITEM_FIELDS: &str =
+    "identifier,title,description,state.name,priority,assignee.name,labels.nodes.name,cycle.name,updatedAt,url";
+
 fn fetch_linear_tickets(
     team: &str,
     assignee: Option<&str>,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<LinearTicketObservation, RefreshError> {
     let mut tickets = Vec::new();
     let mut group_failures = Vec::new();
@@ -2565,6 +2905,9 @@ fn fetch_linear_tickets(
         deadline,
         TicketGroup::Assigned,
         &assignee_filter,
+        true,
+        cache,
+        bypass,
     )?);
     match fetch_linear_ticket_group(
         team,
@@ -2572,6 +2915,9 @@ fn fetch_linear_tickets(
         deadline,
         TicketGroup::Triage,
         &["--status", "Triage"],
+        true,
+        cache,
+        bypass,
     ) {
         Ok(group) => tickets.extend(group),
         Err(error) => group_failures.push(LinearGroupFailure {
@@ -2579,13 +2925,16 @@ fn fetch_linear_tickets(
             error,
         }),
     }
-    match fetch_active_linear_cycle(team, program, deadline) {
+    match fetch_active_linear_cycle(team, program, deadline, cache, bypass) {
         Ok(Some(cycle)) => match fetch_linear_ticket_group(
             team,
             program,
             deadline,
             TicketGroup::DoneThisCycle,
             &["--cycle", &cycle.id, "--status", "Done"],
+            false,
+            cache,
+            bypass,
         ) {
             Ok(mut group) => {
                 for ticket in &mut group {
@@ -2665,18 +3014,33 @@ fn fetch_linear_ticket(
     identifier: &str,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<LinearTicket, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
-    command.args(["issues", "read", identifier]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Linear ticket observation failed: {error}"))
-            }
-        },
-    )?;
+    command.args([
+        "--compact",
+        "--fields",
+        LINEAR_ITEM_FIELDS,
+        "issues",
+        "read",
+        identifier,
+    ]);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Linear ticket observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "Linear ticket observation",
@@ -2703,18 +3067,35 @@ fn fetch_active_linear_cycle(
     team: &str,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Option<ActiveLinearCycle>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
-    command.args(["cycles", "list", "--team", team, "--active", "--compact"]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Linear cycle observation failed: {error}"))
-            }
-        },
-    )?;
+    command.args([
+        "--compact",
+        "--fields",
+        "nodes.id,nodes.name",
+        "cycles",
+        "list",
+        "--team",
+        team,
+        "--active",
+    ]);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        LINEAR_CYCLE_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Linear cycle observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "Linear cycle observation",
@@ -2746,27 +3127,78 @@ fn fetch_linear_ticket_group(
     deadline: Instant,
     group: TicketGroup,
     filters: &[&str],
+    incremental: bool,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<LinearTicket>, RefreshError> {
-    let mut command = crate::noninteractive_process::command(program);
-    command.args(["issues", "list", "--team", team]);
-    command.args(filters);
-    command.args(["-l", "100", "--compact"]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Linear observation failed: {error}"))
+    let mut argv = vec![
+        "--compact".to_string(),
+        "--fields".to_string(),
+        LINEAR_LIST_FIELDS.to_string(),
+        "issues".to_string(),
+        "list".to_string(),
+        "--team".to_string(),
+        team.to_string(),
+    ];
+    argv.extend(filters.iter().map(|filter| (*filter).to_string()));
+    argv.extend(["-l".to_string(), "100".to_string()]);
+
+    let mut baseline = Vec::new();
+    let mut request_argv = argv.clone();
+    if incremental && !bypass {
+        if let Some(cached) = cache.and_then(|cache| cache.cached(Provider::Linear, &argv)) {
+            let observed_now = cache.map_or_else(SystemTime::now, ProviderCache::current_time);
+            let age = observed_now.duration_since(cached.fetched_at).ok();
+            if age.is_some_and(|age| age < LINEAR_FULL_LIST_INTERVAL) {
+                baseline = parse_linear_ticket_group_output(&cached.stdout, group)?;
+                request_argv.push("--created-after".to_string());
+                request_argv.push(utc_date(cached.fetched_at));
             }
-        },
-    )?;
+        }
+    }
+
+    let mut command = crate::noninteractive_process::command(program);
+    command.args(&request_argv);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        LINEAR_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Linear observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "Linear observation",
             &output,
         )));
     }
-    let value = serde_json::from_slice::<Value>(&output.stdout)
+    let incremental = parse_linear_ticket_group_output(&output.stdout, group)?;
+    for ticket in incremental {
+        if let Some(existing) = baseline
+            .iter_mut()
+            .find(|existing| existing.identifier == ticket.identifier)
+        {
+            *existing = ticket;
+        } else {
+            baseline.push(ticket);
+        }
+    }
+    Ok(baseline)
+}
+
+fn parse_linear_ticket_group_output(
+    stdout: &[u8],
+    group: TicketGroup,
+) -> Result<Vec<LinearTicket>, RefreshError> {
+    let value = serde_json::from_slice::<Value>(stdout)
         .map_err(|_| RefreshError::Failed("Linear observation returned invalid JSON".into()))?;
     let Some(nodes) = value.get("nodes").and_then(Value::as_array) else {
         return Err(RefreshError::Failed(
@@ -2777,6 +3209,28 @@ fn fetch_linear_ticket_group(
         .iter()
         .filter_map(|node| parse_linear_ticket(node, group))
         .collect())
+}
+
+fn utc_date(time: SystemTime) -> String {
+    let days = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    let z = i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_add(719_468);
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn nested_text(value: Option<&Value>, field: &str) -> Option<String> {
@@ -2837,6 +3291,8 @@ fn fetch_attachments(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Vec<Attachment> {
     let mut results = Vec::new();
     for chunk in tickets.chunks(8) {
@@ -2850,6 +3306,8 @@ fn fetch_attachments(
                             ticket,
                             &program,
                             target_deadline(batch_deadline, target_timeout),
+                            cache,
+                            bypass,
                         )
                     })
                 })
@@ -2871,6 +3329,8 @@ fn fetch_ticket_attachments(
     ticket: &LinearTicket,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<Attachment>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args([
@@ -2881,15 +3341,21 @@ fn fetch_ticket_attachments(
         "github",
         "--compact",
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(error.to_string())
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        LINEAR_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(error.to_string())
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "attachment observation",
@@ -3155,6 +3621,26 @@ fn resolve_program(name: &str) -> std::path::PathBuf {
 }
 
 impl crate::app::App {
+    fn note_work_index_contexts(&mut self, panes: &[WorkIndexPane], now: Instant) -> bool {
+        let fingerprint = panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.workspace_id.clone(),
+                    pane.tab_id.clone(),
+                    pane.pane_id.clone(),
+                    pane.work_context.clone(),
+                )
+            })
+            .collect::<WorkIndexContextFingerprint>();
+        if fingerprint == self.work_index_context_fingerprint {
+            return false;
+        }
+        self.work_index_context_fingerprint = fingerprint;
+        self.next_work_index_refresh = now;
+        true
+    }
+
     pub(crate) fn work_index_gh_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_gh_program_override.as_ref() {
@@ -3197,6 +3683,8 @@ impl crate::app::App {
         if !self.work_index_config.enabled {
             return;
         }
+        let panes = self.collect_work_index_panes();
+        self.note_work_index_contexts(&panes, now);
         if self
             .work_index_refresh_in_flight
             .as_ref()
@@ -3221,7 +3709,6 @@ impl crate::app::App {
             view.refreshing = true;
         }
         let config = self.work_index_config.clone();
-        let panes = self.collect_work_index_panes();
         let mut session_config = config.clone();
         session_config.repos = work_index_repos(&config, &panes);
         let selected_missive = self
@@ -3238,6 +3725,18 @@ impl crate::app::App {
         let session_missive_users =
             (!session.missive_users.is_empty()).then(|| session.missive_users.clone());
         let previous_snapshot = self.work_index_snapshot.clone();
+        let selected_ticket = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.as_ref())
+            .and_then(|key| key.ticket_id.clone())
+            .or_else(|| {
+                crate::ui::dock::linear::focused_ticket_key(&self.state)
+                    .and_then(|key| key.ticket_id)
+            });
+        let cache_bypass = std::mem::take(&mut self.work_index_cache_bypass);
+        let provider_cache = ProviderCache::new(&crate::config::state_dir());
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
@@ -3245,10 +3744,12 @@ impl crate::app::App {
                     (session.linear, session.linear_query_identity) = fetch_linear_directory(
                         &linearis_program,
                         target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
+                        Some(&provider_cache),
+                        cache_bypass.linear,
                     );
                     session.linear.resolved = true;
                 }
-                let snapshot = refresh_work_index_with_missive(
+                let mut snapshot = refresh_work_index_with_missive(
                     &config,
                     &missive,
                     &panes,
@@ -3257,6 +3758,9 @@ impl crate::app::App {
                         session_missive_users: session_missive_users.as_deref(),
                         previous: previous_snapshot.as_ref(),
                         linear_assignee: session.linear_query_identity.as_deref(),
+                        selected_ticket: selected_ticket.as_deref(),
+                        provider_cache: Some(&provider_cache),
+                        cache_bypass,
                     },
                     Instant::now(),
                     deadline,
@@ -3273,7 +3777,10 @@ impl crate::app::App {
                     WORK_INDEX_TARGET_TIMEOUT,
                     &gh_program,
                     &linearis_program,
+                    Some(&provider_cache),
+                    cache_bypass,
                 );
+                finalize_provider_refresh(&mut snapshot, &provider_cache);
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkIndexRefreshed {
                     generation,
                     snapshot: Box::new(snapshot),
@@ -3397,6 +3904,7 @@ impl crate::app::App {
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
+        let provider_cache = ProviderCache::new(&crate::config::state_dir());
         let _ = std::thread::Builder::new()
             .name("herdr-work-item-details".into())
             .spawn(move || {
@@ -3409,6 +3917,7 @@ impl crate::app::App {
                                 let key = key.clone();
                                 let gh_program = gh_program.clone();
                                 let linearis_program = linearis_program.clone();
+                                let provider_cache = provider_cache.clone();
                                 scope.spawn(move || {
                                     let target =
                                         target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT);
@@ -3419,6 +3928,8 @@ impl crate::app::App {
                                                 number,
                                                 &gh_program,
                                                 target,
+                                                Some(&provider_cache),
+                                                false,
                                             ),
                                             "GitHub PR detail",
                                         ),
@@ -3427,6 +3938,8 @@ impl crate::app::App {
                                                 ticket,
                                                 &linearis_program,
                                                 target,
+                                                Some(&provider_cache),
+                                                false,
                                             ),
                                             "Linear ticket detail",
                                         ),
@@ -3461,6 +3974,7 @@ impl crate::app::App {
                         break;
                     }
                 }
+                provider_cache.finish_refresh();
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkItemDetailRefreshed {
                     generation,
                     details,
@@ -3780,6 +4294,8 @@ esac
             &curl,
             Instant::now() + Duration::from_secs(5),
             Duration::from_secs(2),
+            None,
+            false,
         )
         .expect("Missive snapshot");
 
@@ -3848,6 +4364,8 @@ esac
             &curl,
             Instant::now() + Duration::from_secs(5),
             Duration::from_secs(2),
+            None,
+            false,
         )
         .expect("Missive pane fallback");
 
@@ -3948,6 +4466,8 @@ esac
             &curl,
             Instant::now() + Duration::from_secs(2),
             Duration::from_secs(1),
+            None,
+            false,
         )
         .expect("cached session identity should avoid /users");
 
@@ -4034,6 +4554,24 @@ esac
             tab_id: "tab".into(),
             pane_id: "pane".into(),
         }]
+    }
+
+    #[test]
+    fn pane_declaration_change_makes_work_index_refresh_immediately_due() {
+        let mut app = test_app_with_work_index();
+        let later = Instant::now() + Duration::from_secs(300);
+        app.next_work_index_refresh = later;
+        let mut context = PaneWorkContext::default();
+        context.ticket_ids.push("SCA-18".into());
+        let panes = panes_with_context(context);
+
+        let now = Instant::now();
+        assert!(app.note_work_index_contexts(&panes, now));
+        assert_eq!(app.next_work_index_refresh, now);
+
+        app.next_work_index_refresh = later;
+        assert!(!app.note_work_index_contexts(&panes, now));
+        assert_eq!(app.next_work_index_refresh, later);
     }
 
     fn fake_programs(
@@ -4137,7 +4675,7 @@ printf '%s\n' "$*" >> '{}'
 case "$*" in
   "issues list"*) printf '%s' '{{"nodes":[]}}' ;;
   "cycles list"*) printf '%s' '{{"nodes":[]}}' ;;
-  "issues read SCA-9999") printf '%s' '{{"identifier":"SCA-9999","title":"Outside filter","description":"full summary","state":{{"name":"Canceled"}},"assignee":{{"name":"other"}},"priority":1,"branchName":"issue/sca-9999"}}' ;;
+  *"issues read SCA-9999") printf '%s' '{{"identifier":"SCA-9999","title":"Outside filter","description":"full summary","state":{{"name":"Canceled"}},"assignee":{{"name":"other"}},"priority":1,"branchName":"issue/sca-9999"}}' ;;
   "attachments list SCA-9999"*) printf '%s' '[]' ;;
   *) exit 43 ;;
 esac
@@ -4191,7 +4729,7 @@ esac
         let linear_argv = std::fs::read_to_string(linear_log).expect("Linear argv");
         assert!(linear_argv
             .lines()
-            .any(|line| line == "issues read SCA-9999"));
+            .any(|line| line.ends_with("issues read SCA-9999")));
     }
 
     #[test]
@@ -4474,6 +5012,8 @@ esac
             WORK_INDEX_TARGET_TIMEOUT,
             &gh,
             &linearis,
+            None,
+            WorkIndexCacheBypass::default(),
         );
 
         assert_eq!(session.linear.viewer.as_deref(), Some("Matthias"));
@@ -4495,6 +5035,8 @@ esac
             WORK_INDEX_TARGET_TIMEOUT,
             Path::new("/usr/bin/false"),
             Path::new("/usr/bin/false"),
+            None,
+            WorkIndexCacheBypass::default(),
         );
         assert_eq!(
             unchanged, session,
@@ -4520,6 +5062,8 @@ esac
         let (fallback, fallback_identity) = fetch_linear_directory(
             &fallback_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         );
         assert_eq!(fallback.viewer.as_deref(), Some("Matthias"));
         assert_eq!(fallback_identity.as_deref(), Some("Matthias"));
@@ -4535,9 +5079,9 @@ printf '%s\n' "$*" >> '{}'
 case "$*" in
   "auth status --compact") printf '%s' '{{"authenticated":true}}' ;;
   "users list --active -l 250 --compact") printf '%s' '{{"nodes":[]}}' ;;
-  "issues list --team SCA -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"unfiltered","state":{{"name":"In Progress"}},"assignee":{{"name":"Ada"}}}}]}}' ;;
-  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[]}}' ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[]}}' ;;
+  *"issues list --team SCA -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"unfiltered","state":{{"name":"In Progress"}},"assignee":{{"name":"Ada"}}}}]}}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{{"nodes":[]}}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{{"nodes":[]}}' ;;
   *) exit 42 ;;
 esac
 "#,
@@ -4547,6 +5091,8 @@ esac
         let (unresolved, unresolved_identity) = fetch_linear_directory(
             &unresolved_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         );
         assert!(unresolved.viewer.is_none());
         assert!(unresolved_identity.is_none());
@@ -4555,6 +5101,8 @@ esac
             unresolved_identity.as_deref(),
             &unresolved_linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("unfiltered Linear tickets");
         let tickets = observation.tickets;
@@ -4566,7 +5114,7 @@ esac
         let argv = std::fs::read_to_string(argv_log).expect("Linear argv");
         assert!(argv
             .lines()
-            .any(|call| call == "issues list --team SCA -l 100 --compact"));
+            .any(|call| call.ends_with("issues list --team SCA -l 100")));
         assert!(!argv.split_whitespace().any(|argument| argument == "me"));
     }
 
@@ -4586,6 +5134,8 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"l
             "owner/repo",
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .unwrap_or_else(|_| panic!("GitHub pull request fetch failed"));
 
@@ -4624,6 +5174,8 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
             7,
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .unwrap_or_else(|_| panic!("GitHub pull request detail fetch failed"));
 
@@ -4672,6 +5224,8 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Fetched on demand","author":{
             7,
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("on-demand GitHub detail");
         let key = work_item_key(7);
@@ -4755,6 +5309,8 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Fetched on demand","author":{
             125,
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("GitHub pull request detail from captured CLI fixture");
 
@@ -4807,6 +5363,8 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
             None,
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("Linear ticket fetch");
         let tickets = observation.tickets;
@@ -4832,10 +5390,10 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 case "$*" in
-  "issues list --team SCA --assignee linear-user-1 -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
-  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[{{"id":"cycle-id-34","name":"cycle 34"}}]}}' ;;
-  "issues list --team SCA --cycle cycle-id-34 --status Done -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4}}]}}' ;;
+  *"issues list --team SCA --assignee linear-user-1 -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{{"nodes":[{{"id":"cycle-id-34","name":"cycle 34"}}]}}' ;;
+  *"issues list --team SCA --cycle cycle-id-34 --status Done -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4}}]}}' ;;
   *) exit 42 ;;
 esac
 "#,
@@ -4848,6 +5406,8 @@ esac
             Some("linear-user-1"),
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("Linear ticket sets");
         assert!(observation.group_failures.is_empty());
@@ -4875,9 +5435,9 @@ esac
             "#!/bin/sh\nprintf '%s' '[]'\n",
             r#"#!/bin/sh
 case "$*" in
-  "issues list --team SCA -l 100 --compact") printf '%s' '{"nodes":[]}' ;;
-  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous triage","state":{"name":"Triage"}}]}' ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{"nodes":[]}' ;;
+  *"issues list --team SCA -l 100") printf '%s' '{"nodes":[]}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous triage","state":{"name":"Triage"}}]}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{"nodes":[]}' ;;
   "attachments list"*) printf '%s' '[]' ;;
   *) exit 42 ;;
 esac
@@ -4898,10 +5458,10 @@ esac
             &linearis,
             r#"#!/bin/sh
 case "$*" in
-  "issues list --team SCA -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
-  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' 'triage unavailable' >&2; exit 42 ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
-  "issues list --team SCA --cycle cycle-id-34 --status Done -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-3","title":"Done","state":{"name":"Done"}}]}' ;;
+  *"issues list --team SCA -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' 'triage unavailable' >&2; exit 42 ;;
+  *"cycles list --team SCA --active") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
+  *"issues list --team SCA --cycle cycle-id-34 --status Done -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-3","title":"Done","state":{"name":"Done"}}]}' ;;
   "attachments list"*) printf '%s' '[]' ;;
   *) exit 43 ;;
 esac
@@ -4953,10 +5513,10 @@ esac
             "#!/bin/sh\nprintf '%s' '[]'\n",
             r#"#!/bin/sh
 case "$*" in
-  "issues list --team SCA -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
-  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Triage","state":{"name":"Triage"}}]}' ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
-  "issues list --team SCA --cycle cycle-id-34 --status Done -l 100 --compact") printf '%s' 'done unavailable' >&2; exit 42 ;;
+  *"issues list --team SCA -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Triage","state":{"name":"Triage"}}]}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
+  *"issues list --team SCA --cycle cycle-id-34 --status Done -l 100") printf '%s' 'done unavailable' >&2; exit 42 ;;
   "attachments list"*) printf '%s' '[]' ;;
   *) exit 43 ;;
 esac
@@ -5009,6 +5569,8 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
             "SCA-7",
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("Linear ticket detail");
         assert_eq!(detail.title.as_deref(), Some("ticket"));
@@ -5029,6 +5591,8 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
             "SCA-3165",
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("Linear ticket detail from captured CLI fixture");
 
@@ -5532,8 +6096,8 @@ esac
 "#,
             r#"#!/bin/sh
 case "$*" in
-  "issues list"*) printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous ticket","state":{"name":"In Progress"}}]}' ;;
-  "cycles list"*) printf '%s' '{"nodes":[]}' ;;
+  *"issues list"*) printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous ticket","state":{"name":"In Progress"}}]}' ;;
+  *"cycles list"*) printf '%s' '{"nodes":[]}' ;;
   "attachments list"*) printf '%s' '[]' ;;
   *) exit 42 ;;
 esac
@@ -5607,6 +6171,168 @@ esac
         assert_eq!(
             snapshot.unavailable_reason(WorkIndexSource::Missive),
             Some("team is not configured")
+        );
+    }
+
+    #[test]
+    fn linear_lists_use_compact_fields_and_increment_after_the_ten_minute_ttl() {
+        let dir = fixture_dir("linear-incremental");
+        let log = dir.join("argv.log");
+        let (_gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *"--created-after 2026-09-07") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"new","state":{{"name":"Triage"}}}}]}}' ;;
+  *) printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"full","state":{{"name":"Triage"}}}}]}}' ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let base = parse_rfc3339_system_time("2026-09-07T08:00:00Z").expect("base time");
+        let first_cache = ProviderCache::at_time(&dir, base);
+        let first = fetch_linear_ticket_group(
+            "SCA",
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            TicketGroup::Triage,
+            &["--status", "Triage"],
+            true,
+            Some(&first_cache),
+            false,
+        )
+        .expect("full query");
+        assert_eq!(first.len(), 1);
+
+        let incremental_cache = ProviderCache::at_time(&dir, base + Duration::from_secs(10 * 60));
+        let merged = fetch_linear_ticket_group(
+            "SCA",
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            TicketGroup::Triage,
+            &["--status", "Triage"],
+            true,
+            Some(&incremental_cache),
+            false,
+        )
+        .expect("incremental query");
+        assert_eq!(
+            merged
+                .iter()
+                .map(|ticket| ticket.identifier.as_str())
+                .collect::<Vec<_>>(),
+            ["SCA-1", "SCA-2"]
+        );
+        let calls = std::fs::read_to_string(log).expect("argv log");
+        assert_eq!(calls.lines().count(), 2);
+        assert!(calls.lines().all(|call| call.contains(LINEAR_LIST_FIELDS)));
+        assert!(calls.contains("--created-after 2026-09-07"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn selected_ticket_is_read_even_when_lists_do_not_contain_it() {
+        let dir = fixture_dir("selected-ticket-refresh");
+        let log = dir.join("argv.log");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *"issues read SCA-77") printf '%s' '{{"identifier":"SCA-77","title":"selected","state":{{"name":"In Progress"}}}}' ;;
+  *"issues list"*|*"cycles list"*) printf '%s' '{{"nodes":[]}}' ;;
+  *"attachments list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let mut config = config();
+        config.repos.clear();
+        let snapshot = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &[],
+            WorkIndexRefreshContext {
+                selected_ticket: Some("SCA-77"),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+        assert!(snapshot.items.iter().any(|item| {
+            item.ticket_details
+                .iter()
+                .any(|ticket| ticket.identifier == "SCA-77")
+        }));
+        let calls = std::fs::read_to_string(log).expect("argv log");
+        assert!(calls.lines().any(|call| {
+            call.contains(LINEAR_ITEM_FIELDS) && call.ends_with("issues read SCA-77")
+        }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn degradation_text_is_short_but_keeps_the_raw_reason() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let raw = r#"{"error":"Rate limit exceeded. Only 2500 requests are allowed per 1 hour"}"#;
+        let mut unavailable = WorkIndexUnavailable::only(WorkIndexSource::Linear, raw);
+        unavailable
+            .record_rate_limit_until(WorkIndexSource::Linear, now + Duration::from_secs(12 * 60));
+        assert_eq!(
+            unavailable
+                .short_reason(WorkIndexSource::Linear, now)
+                .as_deref(),
+            Some("rate limited · retry in 12m")
+        );
+        assert_eq!(unavailable.reason(WorkIndexSource::Linear), Some(raw));
+
+        let previous = Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(unavailable.clone()),
+            observed_at: now,
+        };
+        let mut next = WorkIndexUnavailable::only(WorkIndexSource::Linear, "rate limited");
+        preserve_previous_rate_limit_reasons(&mut next, Some(&previous));
+        assert_eq!(next.reason(WorkIndexSource::Linear), Some(raw));
+
+        let timeout = WorkIndexUnavailable::only(
+            WorkIndexSource::Github,
+            "pull request observation timed out",
+        );
+        assert_eq!(
+            timeout
+                .short_reason(WorkIndexSource::Github, now)
+                .as_deref(),
+            Some("timed out (30s)")
+        );
+        let missive =
+            WorkIndexUnavailable::only(WorkIndexSource::Missive, "Missive team is not configured");
+        assert_eq!(
+            missive
+                .short_reason(WorkIndexSource::Missive, now)
+                .as_deref(),
+            Some("team not configured")
+        );
+        let group = WorkIndexUnavailable::only(
+            WorkIndexSource::Linear,
+            "Triage: Linear observation failed: opaque provider JSON",
+        );
+        assert_eq!(
+            group.short_reason(WorkIndexSource::Linear, now).as_deref(),
+            Some("Triage query failed (see log)")
         );
     }
 

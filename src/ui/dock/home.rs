@@ -1070,7 +1070,9 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             Some(source) => projection
                 .unavailable
                 .as_ref()
-                .and_then(|unavailable| unavailable.reason(source))
+                .and_then(|unavailable| {
+                    unavailable.short_reason(source, std::time::SystemTime::now())
+                })
                 .map(|reason| (source, reason)),
             None => None,
         };

@@ -39,7 +39,10 @@ pub(crate) fn render_missive(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(item) = focused_conversation(app) else {
         let message = match app.work_index_snapshot.as_ref() {
             Some(snapshot) => snapshot
-                .unavailable_reason(crate::work_index::WorkIndexSource::Missive)
+                .short_unavailable_reason(
+                    crate::work_index::WorkIndexSource::Missive,
+                    std::time::SystemTime::now(),
+                )
                 .map(|reason| format!(" Missive: {reason}"))
                 .unwrap_or_else(|| " conversation absent from latest index".into()),
             None => " conversation not indexed yet".into(),
@@ -238,7 +241,7 @@ mod tests {
             missive_users: Vec::new(),
             unavailable: Some(WorkIndexUnavailable::only(
                 WorkIndexSource::Missive,
-                "token unavailable",
+                "team is not configured",
             )),
             observed_at: SystemTime::UNIX_EPOCH,
         });
@@ -253,7 +256,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("Missive: token unavailable"), "{text:?}");
+        assert!(text.contains("Missive: team not configured"), "{text:?}");
         assert!(!text.contains("not indexed yet"), "{text:?}");
 
         app.work_index_snapshot

@@ -93,7 +93,10 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         return;
     }
     if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
-        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Missive)
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Missive,
+            std::time::SystemTime::now(),
+        )
     }) {
         lines.push(Line::styled(
             format!("Missive: {reason}"),
@@ -152,6 +155,10 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
         render_missive_detail(app, state, item, detail_inner, frame);
+    } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Missive)
+    }) {
+        frame.render_widget(Paragraph::new(format!(" details\n {reason}")), detail_inner);
     }
 }
 
@@ -342,7 +349,10 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         return;
     }
     if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
-        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Linear)
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Linear,
+            std::time::SystemTime::now(),
+        )
     }) {
         lines.push(Line::styled(
             format!("Linear: {reason}"),
@@ -396,6 +406,10 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
         render_ticket_detail(app, state, item, detail_inner, frame);
+    } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Linear)
+    }) {
+        frame.render_widget(Paragraph::new(format!(" details\n {reason}")), detail_inner);
     }
 }
 
@@ -437,7 +451,10 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
     };
     let mut lines = Vec::new();
     if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
-        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Github,
+            std::time::SystemTime::now(),
+        )
     }) {
         lines.push(Line::styled(
             format!("GitHub: {reason}"),
@@ -552,7 +569,10 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
         return;
     }
     if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
-        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
+        snapshot.short_unavailable_reason(
+            crate::work_index::WorkIndexSource::Github,
+            std::time::SystemTime::now(),
+        )
     }) {
         lines.push(Line::styled(
             format!("GitHub: {reason}"),
@@ -605,6 +625,10 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
     frame.render_widget(detail_block, columns[1]);
     if let Some(item) = items.get(selected) {
         render_pr_detail(app, state, item, detail_inner, frame);
+    } else if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
+    }) {
+        frame.render_widget(Paragraph::new(format!(" details\n {reason}")), detail_inner);
     }
 }
 
@@ -1526,7 +1550,7 @@ mod tests {
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
         ))
-        .contains("GitHub: observation failed"));
+        .contains("GitHub: query failed (see log)"));
 
         let mut placeholder = WorkViewState::new(true, Some(snapshot(Vec::new())));
         placeholder.projection = WorkProjection::Tickets;
@@ -1557,7 +1581,7 @@ mod tests {
             }),
         );
         unavailable.projection = WorkProjection::ReviewQueue;
-        assert!(rendered_text(&unavailable).contains("unavailable"));
+        assert!(rendered_text(&unavailable).contains("query failed (see log)"));
     }
 
     #[test]
@@ -1897,10 +1921,7 @@ mod tests {
             observed_at: SystemTime::UNIX_EPOCH,
         });
         let failed = rendered_text(&state);
-        assert!(
-            failed.contains("Missive: observation timed out"),
-            "{failed}"
-        );
+        assert!(failed.contains("Missive: timed out (30s)"), "{failed}");
 
         state.snapshot.as_mut().expect("snapshot").unavailable = None;
         let empty = rendered_text(&state);

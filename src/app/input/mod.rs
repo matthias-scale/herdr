@@ -1589,6 +1589,21 @@ impl App {
             KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 self.next_work_index_refresh = std::time::Instant::now();
+                if let Some(view) = self.state.work_view.as_ref() {
+                    match view.projection {
+                        crate::app::state::WorkProjection::PullRequests
+                        | crate::app::state::WorkProjection::ReviewQueue => {
+                            self.work_index_cache_bypass.github = true;
+                        }
+                        crate::app::state::WorkProjection::Tickets => {
+                            self.work_index_cache_bypass.linear = true;
+                        }
+                        crate::app::state::WorkProjection::Missive => {
+                            self.work_index_cache_bypass.missive = true;
+                        }
+                        crate::app::state::WorkProjection::Agents => {}
+                    }
+                }
                 if let Some(state) = self.state.work_view.as_mut() {
                     state.refreshing = true;
                 }
@@ -2088,6 +2103,17 @@ impl App {
         }
         if succeeded {
             self.next_work_index_refresh = std::time::Instant::now();
+            match write {
+                crate::work_index::WorkItemWrite::CommentOnPullRequest { .. }
+                | crate::work_index::WorkItemWrite::ApprovePullRequest { .. }
+                | crate::work_index::WorkItemWrite::ClosePullRequest { .. }
+                | crate::work_index::WorkItemWrite::MarkPullRequestDraft { .. }
+                | crate::work_index::WorkItemWrite::MarkPullRequestReady { .. }
+                | crate::work_index::WorkItemWrite::MergePullRequest { .. } => {
+                    self.work_index_cache_bypass.github = true;
+                }
+                _ => self.work_index_cache_bypass.linear = true,
+            }
         }
     }
 
@@ -5285,6 +5311,24 @@ navigate_workspace_down = "ctrl+j"
         view.projection = crate::app::state::WorkProjection::Missive;
         app.state.work_view = Some(view);
         app
+    }
+
+    #[test]
+    fn explicit_work_view_refresh_bypasses_only_the_visible_provider_cache() {
+        let mut app = app_with_missive_view();
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.next_work_index_refresh = later;
+
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()));
+
+        assert!(app.next_work_index_refresh < later);
+        assert_eq!(
+            app.work_index_cache_bypass,
+            crate::work_index::WorkIndexCacheBypass {
+                missive: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

@@ -201,6 +201,8 @@ pub struct App {
     pub(crate) last_work_index_refresh_generation: u64,
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
+    pub(crate) work_index_context_fingerprint: crate::work_index::WorkIndexContextFingerprint,
+    pub(crate) work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
     pub(crate) work_index_session: crate::work_index::WorkIndexSession,
     pub(crate) work_item_detail_refresh_in_flight:
@@ -1190,6 +1192,8 @@ impl App {
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
+            work_index_context_fingerprint: Vec::new(),
+            work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass::default(),
             work_index_snapshot,
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_refresh_in_flight: None,
