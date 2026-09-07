@@ -905,6 +905,12 @@
           "description": "Hide whitespace-only changes in the diff surface."
         },
         {
+          "key": "ui.nerd_font",
+          "type": "boolean",
+          "default": "true",
+          "description": "Render Nerd Font glyphs for file kinds. Disable this to use portable two-character labels."
+        },
+        {
           "key": "ui.new_thread_workspace",
           "type": "string",
           "default": "\"current_checkout\"",
