@@ -104,6 +104,20 @@ pub(crate) struct WorkItemCommit {
     pub(crate) subject: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewThreadComment {
+    pub(crate) path: String,
+    pub(crate) line: Option<u64>,
+    pub(crate) body: String,
+    pub(crate) author: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnresolvedReviewThreads {
+    pub(crate) count: usize,
+    pub(crate) comments: Vec<ReviewThreadComment>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemDetail {
     pub(crate) number: Option<u64>,
@@ -2517,11 +2531,10 @@ fn fetch_github_pull_request_detail(
     })
 }
 
-/// GraphQL query for a PR's review-thread resolution state. `gh pr view --json`
-/// does not expose this, so it takes a second call, kept small (thread
-/// resolution only) and best-effort: a failure here must never fail or delay
-/// the PR detail it's attached to.
-const UNRESOLVED_REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }";
+/// GraphQL query for a PR's review threads. `gh pr view --json` does not expose
+/// these, so the detail path makes a second best-effort call and the fix action
+/// can reuse it on demand.
+const UNRESOLVED_REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved comments(first: 20) { nodes { path line body author { login } } } } } } } }";
 
 /// Count a pull request's unresolved review threads via `gh api graphql`.
 /// Degrades to `None` on any failure (bad repo slug, non-zero exit, timeout,
@@ -2534,6 +2547,15 @@ fn fetch_unresolved_review_thread_count(
     cache: Option<&ProviderCache>,
     bypass: bool,
 ) -> Option<usize> {
+    fetch_unresolved_review_threads(repo, number, program, deadline).map(|threads| threads.count)
+}
+
+pub(crate) fn fetch_unresolved_review_threads(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Option<UnresolvedReviewThreads> {
     let (owner, name) = repo.split_once('/')?;
     let mut command = crate::noninteractive_process::command(program);
     command.args([
@@ -2561,13 +2583,10 @@ fn fetch_unresolved_review_thread_count(
         return None;
     }
     let value = serde_json::from_slice::<Value>(&output.stdout).ok()?;
-    parse_unresolved_review_thread_count(&value)
+    parse_unresolved_review_threads(&value)
 }
 
-/// Pure parse of the `unresolvedReviewThreadsQuery` GraphQL response. Kept
-/// separate from the `gh` shellout so it can be exercised with a fixture
-/// instead of a live network call.
-fn parse_unresolved_review_thread_count(value: &Value) -> Option<usize> {
+fn parse_unresolved_review_threads(value: &Value) -> Option<UnresolvedReviewThreads> {
     let nodes = value
         .get("data")?
         .get("repository")?
@@ -2575,12 +2594,38 @@ fn parse_unresolved_review_thread_count(value: &Value) -> Option<usize> {
         .get("reviewThreads")?
         .get("nodes")?
         .as_array()?;
-    Some(
-        nodes
-            .iter()
-            .filter(|node| node.get("isResolved").and_then(Value::as_bool) == Some(false))
-            .count(),
-    )
+    let unresolved = nodes
+        .iter()
+        .filter(|node| node.get("isResolved").and_then(Value::as_bool) == Some(false))
+        .collect::<Vec<_>>();
+    let comments = unresolved
+        .iter()
+        .flat_map(|thread| {
+            thread
+                .get("comments")
+                .and_then(|comments| comments.get("nodes"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|comment| {
+            Some(ReviewThreadComment {
+                path: comment.get("path")?.as_str()?.to_string(),
+                line: comment.get("line").and_then(Value::as_u64),
+                body: comment.get("body")?.as_str()?.to_string(),
+                author: comment
+                    .get("author")
+                    .and_then(|author| author.get("login"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect();
+    Some(UnresolvedReviewThreads {
+        count: unresolved.len(),
+        comments,
+    })
 }
 
 /// Read one Linear issue with its comment threads.
@@ -4110,7 +4155,10 @@ mod tests {
         )
         .expect("valid fixture");
 
-        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(2));
+        assert_eq!(
+            super::parse_unresolved_review_threads(&value).map(|threads| threads.count),
+            Some(2)
+        );
     }
 
     #[test]
@@ -4122,7 +4170,10 @@ mod tests {
         )
         .expect("valid fixture");
 
-        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(0));
+        assert_eq!(
+            super::parse_unresolved_review_threads(&value).map(|threads| threads.count),
+            Some(0)
+        );
     }
 
     #[test]
@@ -4130,7 +4181,7 @@ mod tests {
         let value: Value = serde_json::from_str(r#"{"data":null,"errors":[{"message":"boom"}]}"#)
             .expect("valid fixture");
 
-        assert_eq!(super::parse_unresolved_review_thread_count(&value), None);
+        assert_eq!(super::parse_unresolved_review_threads(&value), None);
     }
 
     #[test]

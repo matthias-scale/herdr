@@ -2630,6 +2630,50 @@ impl App {
                 }
             }
             PrActionKind::AskQuestion | PrActionKind::Explain | PrActionKind::FixFindings => {
+                let findings_prompt = if kind == PrActionKind::FixFindings {
+                    let Some(number) = key.pr_number else {
+                        return;
+                    };
+                    let Some(threads) = crate::work_index::fetch_unresolved_review_threads(
+                        &key.repo,
+                        number,
+                        &self.work_index_gh_program(),
+                        std::time::Instant::now() + crate::work_index::WORK_INDEX_TARGET_TIMEOUT,
+                    ) else {
+                        return;
+                    };
+                    let mut detail = self
+                        .state
+                        .work_item_detail_cache
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(crate::work_index::WorkItemDetail::empty);
+                    detail.unresolved_review_threads = Some(threads.count);
+                    self.state
+                        .work_item_detail_cache
+                        .insert(key.clone(), detail);
+                    if threads.count == 0 {
+                        return;
+                    }
+                    Some(
+                        threads
+                            .comments
+                            .iter()
+                            .map(|comment| {
+                                let line = comment
+                                    .line
+                                    .map_or_else(|| "?".into(), |line| line.to_string());
+                                format!(
+                                    "{}:{} — {}: {}",
+                                    comment.path, line, comment.author, comment.body
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    )
+                } else {
+                    None
+                };
                 let parts = self.pr_parts_for_key(&key);
                 let Some((head, pr, title)) = parts else {
                     return;
@@ -2642,19 +2686,7 @@ impl App {
                         "Walk the diff for this PR and explain what changed, why, and what I should read closely."
                             .into()
                     }
-                    PrActionKind::FixFindings => self
-                        .state
-                        .work_item_detail_cache
-                        .get(&key)
-                        .map(|detail| {
-                            detail
-                                .comments
-                                .iter()
-                                .map(|comment| comment.body.as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n\n")
-                        })
-                        .unwrap_or_default(),
+                    PrActionKind::FixFindings => findings_prompt.unwrap_or_default(),
                     _ => String::new(),
                 };
                 self.open_pr_home(
@@ -4527,6 +4559,62 @@ mod tests {
         )
     }
 
+    fn pr_action_test_app() -> (App, crate::app::state::WorkItemKey) {
+        let mut app = test_app();
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(7),
+            pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+            ticket_id: None,
+        };
+        let item = crate::work_index::WorkItem {
+            repo: key.repo.clone(),
+            pr_number: key.pr_number,
+            pr_url: key.pr_url.clone(),
+            pr_title: Some("repair parser".into()),
+            pr_state: Some("open".into()),
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 1,
+            deletions: 0,
+            author: Some("ada".into()),
+            assignees: vec!["ada".into()],
+            labels: vec!["bug".into()],
+            check_state: crate::work_index::PrCheckState::Passing,
+            audience: crate::work_index::PrAudience::Authored,
+            cached_pr_detail: None,
+            ticket_ids: Vec::new(),
+            ticket_title: None,
+            ticket_state: None,
+            ticket_details: Vec::new(),
+            branch: Some("fix/parser".into()),
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: Default::default(),
+        };
+        app.state.work_view = Some(crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::now(),
+            }),
+        ));
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.head_ref_name = Some("fix/parser".into());
+        detail.comments = vec![crate::work_index::WorkItemComment {
+            author: Some("issue-author".into()),
+            body: "ordinary issue comment".into(),
+            created_at: None,
+        }];
+        app.state.work_item_detail_cache.insert(key.clone(), detail);
+        (app, key)
+    }
+
     #[test]
     fn chooser_shortcuts_open_available_surfaces_and_ignore_the_rest() {
         let mut app = test_app();
@@ -5253,6 +5341,85 @@ mod tests {
             crate::ui::work_list_detail::PrActionKind::AskQuestion,
         );
         assert!(app.state.home.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_findings_fetches_only_unresolved_review_thread_comments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut app, key) = pr_action_test_app();
+        let fixture_dir =
+            std::env::temp_dir().join(format!("herdr-fix-findings-{}", std::process::id()));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture directory");
+        let gh = fixture_dir.join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true,"comments":{"nodes":[{"path":"src/resolved.rs","line":4,"body":"resolved finding","author":{"login":"resolved-reviewer"}}]}},{"isResolved":false,"comments":{"nodes":[{"path":"src/parser.rs","line":17,"body":"handle the empty token","author":{"login":"reviewer"}}]}}]}}}}}'
+"#,
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(&gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("make fake gh executable");
+        app.work_index_gh_program_override = Some(gh);
+
+        app.activate_pr_action(key, crate::ui::work_list_detail::PrActionKind::FixFindings);
+
+        let prompt = &app.state.home.as_ref().expect("fix thread home").prompt;
+        assert_eq!(
+            prompt,
+            "src/parser.rs:17 — reviewer: handle the empty token"
+        );
+        assert!(!prompt.contains("resolved finding"));
+        assert!(!prompt.contains("ordinary issue comment"));
+        let _ = std::fs::remove_dir_all(fixture_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_findings_dims_after_fetch_finds_no_unresolved_threads() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut app, key) = pr_action_test_app();
+        let fixture_dir =
+            std::env::temp_dir().join(format!("herdr-fix-findings-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture directory");
+        let gh = fixture_dir.join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true,"comments":{"nodes":[{"path":"src/resolved.rs","line":4,"body":"done","author":{"login":"reviewer"}}]}}]}}}}}'
+"#,
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(&gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("make fake gh executable");
+        app.work_index_gh_program_override = Some(gh);
+
+        app.activate_pr_action(
+            key.clone(),
+            crate::ui::work_list_detail::PrActionKind::FixFindings,
+        );
+
+        assert!(app.state.home.is_none());
+        let fix_findings = app
+            .pr_action_table(&key)
+            .expect("PR action table")
+            .into_iter()
+            .find(|action| action.kind == crate::ui::work_list_detail::PrActionKind::FixFindings)
+            .expect("fix findings action");
+        assert_eq!(
+            fix_findings.disabled_reason,
+            Some("No unresolved review threads")
+        );
+        let _ = std::fs::remove_dir_all(fixture_dir);
     }
 
     #[test]
