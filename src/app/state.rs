@@ -939,6 +939,8 @@ pub struct TabCardArea {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct SidebarWorkFilter {
+    /// Persisted row-search query shared by every sidebar view.
+    pub(crate) query: String,
     /// Legacy field names preserve existing 2b presentation files.
     pub(crate) team: Option<String>,
     pub(crate) assignee: Option<String>,
@@ -1078,6 +1080,7 @@ impl SidebarWorkFilter {
 impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
+            query: String::new(),
             team: Some("SCA".into()),
             assignee: Some("me".into()),
             linear_statuses: default_linear_statuses(),
@@ -1309,12 +1312,20 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) work_filter: SidebarWorkFilter,
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
+    pub(crate) search_active: bool,
+    pub(crate) new_thread: Option<SidebarNewThreadState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
+}
+
+/// Attach-local project picker opened from the sidebar header.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SidebarNewThreadState {
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
 }
 
 /// Attach-local state for the action menu anchored to a sidebar work object.
@@ -1834,6 +1845,8 @@ pub struct ViewState {
     pub(crate) sidebar_footer_ticket_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen Missive conversation view.
     pub(crate) sidebar_footer_missive_hit_area: Rect,
+    /// Sidebar-footer entry for refreshing work and Git metadata.
+    pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -2867,6 +2880,15 @@ pub struct AppState {
     pub(crate) sidebar_work_filter: SidebarWorkFilter,
     pub(crate) sidebar_filter_menu_open: bool,
     pub(crate) sidebar_filter_menu_selected: usize,
+    /// Typed input goes to the persisted sidebar row query while this is set.
+    pub(crate) sidebar_search_active: bool,
+    /// Downward recent-project picker. Project paths are derived at render time.
+    pub(crate) sidebar_new_thread: Option<SidebarNewThreadState>,
+    /// Server-owned request and busy state for the sidebar refresh operation.
+    /// These fields deliberately stay outside `SidebarPresentationState` so
+    /// input from an attached client is visible to the runtime work loop.
+    pub(crate) sidebar_refresh_requested: bool,
+    pub(crate) sidebar_refreshing: bool,
     /// Dim work-item header the operator selected with the mouse. Enter on it
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
@@ -3683,6 +3705,15 @@ impl AppState {
         self.sidebar_work_filter_persistence_request.take()
     }
 
+    pub(crate) fn request_sidebar_refresh(&mut self) -> bool {
+        if self.sidebar_refreshing {
+            return false;
+        }
+        self.sidebar_refresh_requested = true;
+        self.sidebar_refreshing = true;
+        true
+    }
+
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
@@ -3723,6 +3754,8 @@ impl AppState {
             &mut self.sidebar_filter_menu_selected,
             &mut other.filter_menu_selected,
         );
+        std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
+        std::mem::swap(&mut self.sidebar_new_thread, &mut other.new_thread);
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
             &mut other.selected_work_group,
@@ -4285,6 +4318,10 @@ impl AppState {
             sidebar_work_filter: SidebarWorkFilter::default(),
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
+            sidebar_search_active: false,
+            sidebar_new_thread: None,
+            sidebar_refresh_requested: false,
+            sidebar_refreshing: false,
             sidebar_selected_work_group: None,
             sidebar_object_menu: None,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
@@ -4320,6 +4357,7 @@ impl AppState {
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
+                sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -4906,6 +4944,18 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn sidebar_refresh_request_remains_server_owned_during_presentation_swaps() {
+        let mut app = AppState::test_new();
+        let mut presentation = SidebarPresentationState::default();
+
+        assert!(app.request_sidebar_refresh());
+        app.swap_sidebar_presentation(&mut presentation);
+
+        assert!(app.sidebar_refresh_requested);
+        assert!(app.sidebar_refreshing);
+    }
 
     #[test]
     fn work_projection_rotation_includes_missive_in_both_directions() {

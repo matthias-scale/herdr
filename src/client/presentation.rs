@@ -191,6 +191,7 @@ mod tests {
     fn per_view_sidebar_filters_round_trip_with_the_group_mode() {
         let path = temp_path();
         let mut filters = crate::app::state::SidebarWorkFilter {
+            query: "label:billing pricing".into(),
             team: Some("ENG".into()),
             assignee: None,
             ..Default::default()
@@ -238,6 +239,7 @@ mod tests {
 
         assert_eq!(filters.team.as_deref(), Some("OPS"));
         assert_eq!(filters.assignee.as_deref(), Some("Ada"));
+        assert!(filters.query.is_empty());
         assert_eq!(
             filters.github,
             crate::app::state::GithubSidebarFilter::default()

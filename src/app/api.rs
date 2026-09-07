@@ -221,7 +221,7 @@ impl App {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
-        changed
+        changed | self.finish_sidebar_refresh_if_idle()
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {

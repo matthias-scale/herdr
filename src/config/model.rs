@@ -735,6 +735,8 @@ pub struct KeysConfig {
     pub toggle_sidebar: BindingConfig,
     /// Cycle the sidebar grouping mode. Unset by default.
     pub sidebar_cycle_group_mode: BindingConfig,
+    /// Refresh sidebar work and Git metadata. Unset by default.
+    pub sidebar_refresh: BindingConfig,
     /// Toggle the sidebar blocked filter. Default: "prefix+f".
     pub toggle_blocked_filter: BindingConfig,
     /// Toggle dock collapse. Default: ["prefix+shift+e", "ctrl+alt+d"]
@@ -916,6 +918,7 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     sidebar_cycle_group_mode: Option<BindingConfig>,
+    sidebar_refresh: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_blocked_filter: Option<BindingConfig>,
@@ -1034,6 +1037,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
         apply_field!(sidebar_cycle_group_mode);
+        apply_field!(sidebar_refresh);
         apply_field!(toggle_blocked_filter);
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
@@ -1165,6 +1169,7 @@ impl KeysConfig {
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_effective_action_field!(sidebar_cycle_group_mode, keybinds.sidebar_cycle_group_mode);
+        copy_effective_action_field!(sidebar_refresh, keybinds.sidebar_refresh);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
@@ -1601,6 +1606,7 @@ impl Default for KeysConfig {
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             sidebar_cycle_group_mode: BindingConfig::empty(),
+            sidebar_refresh: BindingConfig::empty(),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),

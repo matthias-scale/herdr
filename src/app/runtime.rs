@@ -408,6 +408,7 @@ impl App {
 
         changed |= self.refresh_pane_settlement_at(now);
 
+        changed |= self.start_sidebar_refresh_if_requested(now);
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
         self.start_usage_scan_if_requested();
@@ -455,6 +456,7 @@ impl App {
         self.start_foreground_process_refresh_if_due(now);
         self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
+        changed |= self.finish_sidebar_refresh_if_idle();
         self.start_dock_diff_refresh_if_needed();
         self.start_dock_files_refresh_if_needed();
         self.start_home_ref_refresh_if_requested();
