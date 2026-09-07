@@ -365,7 +365,23 @@ pub struct Config {
     pub source_control: SourceControlConfig,
     pub files: FilesConfig,
     pub panel: PanelConfig,
+    pub linear: LinearConfig,
     pub actions: Vec<ActionConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LinearLayoutConfig {
+    #[default]
+    List,
+    Board,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct LinearConfig {
+    /// Initial layout for the full-screen Linear view.
+    pub default_layout: LinearLayoutConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -1980,6 +1996,22 @@ default_surfaces = ["home", "pull_request", "keys", "note"]
             ]
         );
         assert!(Config::default().panel.default_surfaces.is_empty());
+    }
+
+    #[test]
+    fn linear_default_layout_defaults_to_list_and_parses_board() {
+        assert_eq!(
+            Config::default().linear.default_layout,
+            LinearLayoutConfig::List
+        );
+        let config: Config = toml::from_str(
+            r#"
+[linear]
+default_layout = "board"
+"#,
+        )
+        .expect("linear config");
+        assert_eq!(config.linear.default_layout, LinearLayoutConfig::Board);
     }
 
     #[test]

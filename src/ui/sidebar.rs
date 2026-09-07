@@ -640,69 +640,42 @@ fn expanded_sidebar_content(area: Rect) -> Rect {
     )
 }
 
-pub(crate) fn sidebar_footer_work_hit_area(area: Rect) -> Rect {
+fn sidebar_footer_slot(area: Rect, index: u16) -> Rect {
     let content_width = area.width.saturating_sub(1);
-    if content_width < 3 || area.height == 0 {
+    let x_offset = 1 + index.saturating_mul(2);
+    if content_width < x_offset.saturating_add(2) || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
-        area.x.saturating_add(1),
+        area.x.saturating_add(x_offset),
         area.bottom().saturating_sub(1),
-        3,
+        2,
         1,
     )
+}
+
+pub(crate) fn sidebar_footer_settings_hit_area(area: Rect) -> Rect {
+    sidebar_footer_slot(area, 0)
+}
+
+pub(crate) fn sidebar_footer_work_hit_area(area: Rect) -> Rect {
+    sidebar_footer_slot(area, 1)
 }
 
 pub(crate) fn sidebar_footer_ticket_hit_area(area: Rect) -> Rect {
-    let content_width = area.width.saturating_sub(1);
-    if content_width < 6 || area.height == 0 {
-        return Rect::default();
-    }
-    Rect::new(
-        area.x.saturating_add(4),
-        area.bottom().saturating_sub(1),
-        3,
-        1,
-    )
+    sidebar_footer_slot(area, 3)
 }
 
 pub(crate) fn sidebar_footer_usage_hit_area(area: Rect) -> Rect {
-    let content_width = area.width.saturating_sub(1);
-    if content_width < 9 || area.height == 0 {
-        return Rect::default();
-    }
-    Rect::new(
-        area.x.saturating_add(7),
-        area.bottom().saturating_sub(1),
-        3,
-        1,
-    )
+    sidebar_footer_slot(area, 2)
 }
 
 pub(crate) fn sidebar_footer_missive_hit_area(area: Rect) -> Rect {
-    let content_width = area.width.saturating_sub(1);
-    if content_width < 12 || area.height == 0 {
-        return Rect::default();
-    }
-    Rect::new(
-        area.x.saturating_add(10),
-        area.bottom().saturating_sub(1),
-        3,
-        1,
-    )
+    sidebar_footer_slot(area, 4)
 }
 
 pub(crate) fn sidebar_footer_refresh_hit_area(area: Rect) -> Rect {
-    let content_width = area.width.saturating_sub(1);
-    if content_width < 15 || area.height == 0 {
-        return Rect::default();
-    }
-    Rect::new(
-        area.x.saturating_add(13),
-        area.bottom().saturating_sub(1),
-        3,
-        1,
-    )
+    sidebar_footer_slot(area, 5)
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -3991,58 +3964,89 @@ pub(super) fn render_sidebar(
     let ws_area = workspace_list_rect_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_sidebar_header(app, frame, area, p);
+    let settings = sidebar_footer_settings_hit_area(area);
+    if settings.width > 0 {
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Settings,
+            app.mode == Mode::Settings,
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled("⚙ ", style)), settings);
+    }
     let work = sidebar_footer_work_hit_area(area);
     if work.width > 0 {
-        let style = if app.work_view.is_some() {
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.overlay0)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(" ⑂ ", style)), work);
-    }
-    let tickets = sidebar_footer_ticket_hit_area(area);
-    if tickets.width > 0 {
-        let style = if app
-            .work_view
-            .as_ref()
-            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Tickets)
-        {
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.overlay0)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(" ◎ ", style)), tickets);
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::PullRequests,
+            app.work_view.as_ref().is_some_and(|view| {
+                view.projection == crate::app::state::WorkProjection::PullRequests
+            }),
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled("⑂ ", style)), work);
     }
     let usage = sidebar_footer_usage_hit_area(area);
     if usage.width > 0 {
-        let style = if app.usage_view.is_some() {
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.overlay0)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(" ▥ ", style)), usage);
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Usage,
+            app.usage_view.is_some(),
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled("▥ ", style)), usage);
+    }
+    let tickets = sidebar_footer_ticket_hit_area(area);
+    if tickets.width > 0 {
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Linear,
+            app.work_view
+                .as_ref()
+                .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Tickets),
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled("◎ ", style)), tickets);
     }
     let missive = sidebar_footer_missive_hit_area(area);
     if missive.width > 0 {
-        let style = if app
-            .work_view
-            .as_ref()
-            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Missive)
-        {
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.overlay0)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(" ✉ ", style)), missive);
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Missive,
+            app.work_view
+                .as_ref()
+                .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Missive),
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled("✉ ", style)), missive);
     }
     let refresh = sidebar_footer_refresh_hit_area(area);
     if refresh.width > 0 {
-        let style = if app.sidebar_refreshing {
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.overlay0)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(" ⟳ ", style)), refresh);
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Refresh,
+            app.sidebar_refreshing,
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled("⟳ ", style)), refresh);
+    }
+}
+
+fn sidebar_footer_style(
+    app: &AppState,
+    item: crate::app::state::SidebarFooterItem,
+    selected: bool,
+    palette: &Palette,
+) -> Style {
+    if selected {
+        Style::default()
+            .fg(palette.accent)
+            .bg(palette.surface0)
+            .add_modifier(Modifier::BOLD)
+    } else if app.sidebar_footer_hover == Some(item) {
+        Style::default().fg(palette.text).bg(palette.surface0)
+    } else {
+        Style::default().fg(palette.overlay0)
     }
 }
 
@@ -5417,6 +5421,19 @@ pub(crate) mod tests {
                 assert_eq!(buffer[(separator_col, row)].symbol(), "│");
             }
         }
+    }
+
+    #[test]
+    fn sidebar_footer_renders_f17b_glyph_order() {
+        let app = AppState::test_new();
+        let area = Rect::new(0, 0, 26, 8);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("footer terminal");
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("render footer");
+        let footer = row_text(terminal.backend().buffer(), area.bottom() - 1, area.width);
+        assert!(footer.contains("⚙ ⑂ ▥ ◎ ✉ ⟳"), "{footer:?}");
     }
 
     #[test]

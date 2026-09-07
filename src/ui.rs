@@ -50,7 +50,7 @@ mod widgets;
 mod work_link_picker;
 pub(crate) mod work_list_detail;
 mod work_status;
-mod work_view;
+pub(crate) mod work_view;
 
 use self::add_project::render_add_project_overlay;
 use self::dialogs::{
@@ -533,6 +533,11 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_work_hit_area(sidebar_area)
     };
+    let sidebar_footer_settings_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_settings_hit_area(sidebar_area)
+    };
     let sidebar_footer_usage_hit_area = if app.sidebar_collapsed {
         Rect::default()
     } else {
@@ -673,6 +678,7 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
+        sidebar_footer_settings_hit_area,
         sidebar_footer_work_hit_area,
         sidebar_footer_usage_hit_area,
         usage_hit_areas,
@@ -937,6 +943,7 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
+        sidebar_footer_settings_hit_area: Rect::default(),
         sidebar_footer_work_hit_area: Rect::default(),
         sidebar_footer_usage_hit_area: Rect::default(),
         usage_hit_areas: Vec::new(),
