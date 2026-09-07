@@ -32,7 +32,7 @@ fn env_bool(name: &str) -> Option<bool> {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    stamp_fork_build();
+    emit_fork_build_info();
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig.zon");
@@ -103,35 +103,35 @@ fn main() {
 //
 // Upstream ships every build as bare `0.8.0`, which makes a fork build and a
 // stock build indistinguishable from `--version`, from `herdr status`, and from
-// the version the socket API reports for a running server. Stamping the channel
-// closes that gap without touching update logic: `update.rs` compares
-// `BASE_VERSION`, which is unchanged, and `is_preview()` stays false.
+// the version the socket API reports for a running server. The git stamp closes
+// that gap without changing the Cargo package version or the wire protocol.
 // ---------------------------------------------------------------------------
 
-fn stamp_fork_build() {
-    println!("cargo:rerun-if-env-changed=HERDR_FORK_STAMP");
+fn emit_fork_build_info() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    watch_git_head(manifest_dir);
 
-    if env_bool("HERDR_FORK_STAMP") == Some(false) {
-        return;
-    }
-    // An explicit channel wins; release builds set it deliberately.
-    if env::var_os("HERDR_BUILD_CHANNEL").is_some() {
-        return;
-    }
-    let Some(build_id) = git_build_id() else {
-        return;
-    };
+    let git_sha = git_output(manifest_dir, &["rev-parse", "--short=12", "HEAD"])
+        .unwrap_or_else(|| "unknown".to_string());
+    let dirty = git_worktree_is_dirty(manifest_dir);
 
-    println!("cargo:rustc-env=HERDR_BUILD_CHANNEL=fork");
+    println!("cargo:rustc-env=HERDR_BUILD_GIT_SHA={git_sha}");
+    println!(
+        "cargo:rustc-env=HERDR_BUILD_DIRTY={}",
+        if dirty { "1" } else { "0" }
+    );
+    if env::var_os("HERDR_BUILD_CHANNEL").is_none() {
+        println!("cargo:rustc-env=HERDR_BUILD_CHANNEL=fork");
+    }
     if env::var_os("HERDR_BUILD_ID").is_none() {
-        println!("cargo:rustc-env=HERDR_BUILD_ID={build_id}");
+        println!("cargo:rustc-env=HERDR_BUILD_ID={git_sha}");
     }
 }
 
-/// Short HEAD sha, suffixed `.dirty` when tracked files are modified, so a
-/// hand-built binary cannot claim to be a clean commit.
-fn git_build_id() -> Option<String> {
-    let head_path = git_output(&["rev-parse", "--git-path", "HEAD"])?;
+fn watch_git_head(manifest_dir: &Path) {
+    let Some(head_path) = git_output(manifest_dir, &["rev-parse", "--git-path", "HEAD"]) else {
+        return;
+    };
     println!("cargo:rerun-if-changed={head_path}");
 
     // On a checked-out branch `.git/HEAD` is a symref whose contents stay
@@ -141,30 +141,34 @@ fn git_build_id() -> Option<String> {
     // packed-refs for the case where that loose ref has been packed away. Only
     // emit paths that exist: a missing rerun-if-changed target makes cargo
     // rebuild the crate on every invocation.
-    if let Some(symref) = git_output(&["symbolic-ref", "--quiet", "HEAD"]) {
-        if let Some(ref_path) = git_output(&["rev-parse", "--git-path", &symref]) {
+    if let Some(symref) = git_output(manifest_dir, &["symbolic-ref", "--quiet", "HEAD"]) {
+        if let Some(ref_path) = git_output(manifest_dir, &["rev-parse", "--git-path", &symref]) {
             if Path::new(&ref_path).exists() {
                 println!("cargo:rerun-if-changed={ref_path}");
             }
         }
     }
-    if let Some(packed) = git_output(&["rev-parse", "--git-path", "packed-refs"]) {
+    if let Some(packed) = git_output(manifest_dir, &["rev-parse", "--git-path", "packed-refs"]) {
         if Path::new(&packed).exists() {
             println!("cargo:rerun-if-changed={packed}");
         }
     }
-
-    let sha = git_output(&["rev-parse", "--short=8", "HEAD"])?;
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
-        .output()
-        .is_ok_and(|out| out.status.success() && !out.stdout.is_empty());
-
-    Some(if dirty { format!("{sha}.dirty") } else { sha })
 }
 
-fn git_output(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
+fn git_worktree_is_dirty(manifest_dir: &Path) -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(manifest_dir)
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
+fn git_output(manifest_dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(manifest_dir)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

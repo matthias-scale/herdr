@@ -367,6 +367,20 @@ fn integration_status_rejects_unknown_flags() {
 }
 
 #[test]
+fn version_flag_reports_stamped_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--version")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("herdr {}\n", expected_version())
+    );
+}
+
+#[test]
 fn status_commands_report_client_and_server_versions() {
     let base = unique_test_dir();
     let config_home = base.join("config");
