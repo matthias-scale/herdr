@@ -894,38 +894,23 @@ impl super::super::App {
             return;
         }
         match item {
-            crate::ui::SidebarObjectMenuItem::ClosePullRequest
-            | crate::ui::SidebarObjectMenuItem::MarkPullRequestDraft
-            | crate::ui::SidebarObjectMenuItem::MarkPullRequestReady => {
-                let Some((repo, number)) = crate::ui::sidebar_pull_request_target(&self.state)
-                else {
+            crate::ui::SidebarObjectMenuItem::PullRequest(action) => {
+                let action_enabled = crate::ui::sidebar_pull_request_actions(&self.state)
+                    .get(index)
+                    .is_some_and(|action| action.enabled());
+                if !action_enabled {
+                    return;
+                }
+                let Some(key) = crate::ui::sidebar_pull_request_key(&self.state) else {
                     self.state.config_diagnostic =
                         Some("pull request is no longer available".to_string());
                     self.state.sidebar_object_menu = None;
                     return;
                 };
-                let action = match item {
-                    crate::ui::SidebarObjectMenuItem::ClosePullRequest => {
-                        super::PullRequestAction::Close
-                    }
-                    crate::ui::SidebarObjectMenuItem::MarkPullRequestDraft => {
-                        super::PullRequestAction::MarkDraft
-                    }
-                    crate::ui::SidebarObjectMenuItem::MarkPullRequestReady => {
-                        super::PullRequestAction::MarkReady
-                    }
-                    _ => return,
-                };
-                self.state.dock_pending_write =
-                    Some(Self::pull_request_write(action, repo, number));
-                self.state.dock_write_notice = None;
-                if let Some(menu) = self.state.sidebar_object_menu.as_mut() {
-                    menu.page = crate::app::state::SidebarObjectMenuPage::Confirmation;
-                    menu.selected = 0;
-                }
+                self.state.sidebar_object_menu = None;
+                self.activate_pr_action(key, action);
             }
-            crate::ui::SidebarObjectMenuItem::CheckOut
-            | crate::ui::SidebarObjectMenuItem::StartThread => {
+            crate::ui::SidebarObjectMenuItem::StartThread => {
                 let target = self
                     .state
                     .sidebar_object_menu
@@ -1451,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_object_writes_use_the_shared_confirmation_gate() {
+    fn sidebar_pr_writes_use_the_shared_modal_confirmation_gate() {
         let mut app = app_for_mouse_test();
         app.state = crate::ui::sidebar_work_item_fixture();
         app.work_index_gh_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
@@ -1459,21 +1444,19 @@ mod tests {
             "github:https://github.com/scalable-so/herdr/pull/159".into(),
         );
 
-        app.apply_sidebar_object_menu_action(0);
+        app.apply_sidebar_object_menu_action(11);
         assert!(matches!(
-            app.state.dock_pending_write,
-            Some(crate::work_index::WorkItemWrite::ClosePullRequest {
-                ref repo,
-                number: 159,
-            }) if repo == "scalable-so/herdr"
+            app.state.pr_action_confirmation,
+            Some(crate::app::state::PrActionConfirmation {
+                ref key,
+                action: crate::ui::work_list_detail::PrActionKind::Close,
+            }) if key.repo == "scalable-so/herdr" && key.pr_number == Some(159)
         ));
-        assert_eq!(
-            app.state.sidebar_object_menu.as_ref().map(|menu| menu.page),
-            Some(crate::app::state::SidebarObjectMenuPage::Confirmation)
-        );
+        assert!(app.state.sidebar_object_menu.is_none());
+        assert!(app.state.dock_pending_write.is_none());
         assert!(app.state.dock_write_notice.is_none());
 
-        assert!(app.handle_sidebar_object_menu_key(KeyEvent::new(
+        assert!(app.handle_pr_action_confirmation_key(KeyEvent::new(
             KeyCode::Char('y'),
             KeyModifiers::empty(),
         )));

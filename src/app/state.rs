@@ -1365,6 +1365,9 @@ pub(crate) struct DockPresentationState {
     pub(crate) scroll: u16,
     pub(crate) editor_focused: bool,
     pub(crate) diff_focused: bool,
+    pub(crate) pr_focused: bool,
+    pub(crate) pr_checkout_menu: Option<PrCheckoutChoice>,
+    pub(crate) pr_action_menu: Option<PrActionMenuState>,
     pub(crate) diff_ignore_whitespace: bool,
     pub(crate) diff_selected: usize,
     pub(crate) diff_collapsed: std::collections::HashSet<String>,
@@ -1410,6 +1413,9 @@ impl Default for DockPresentationState {
             scroll: 0,
             editor_focused: false,
             diff_focused: false,
+            pr_focused: false,
+            pr_checkout_menu: None,
+            pr_action_menu: None,
             diff_ignore_whitespace: false,
             diff_selected: 0,
             diff_collapsed: std::collections::HashSet::new(),
@@ -2855,7 +2861,7 @@ pub struct AppState {
     pub(crate) request_git_action: Option<GitAction>,
     pub(crate) request_user_action: Option<usize>,
     pub(crate) request_save_add_action: bool,
-    pub(crate) request_pr_land: Option<PrLandConfirmation>,
+    pub(crate) request_pr_command: Option<PrCommandRequest>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
     pub request_pin_toggle: Option<(usize, usize)>,
@@ -3000,7 +3006,7 @@ pub struct AppState {
     /// staged confirmation are not.
     pub(crate) dock_pr_focused: bool,
     pub(crate) dock_pr_checkout_menu: Option<PrCheckoutChoice>,
-    pub(crate) dock_pr_pending_land: Option<PrLandConfirmation>,
+    pub(crate) dock_pr_action_menu: Option<PrActionMenuState>,
     /// `git diff -w` for the Diff surface. Initialised from
     /// `ui.hide_whitespace_in_diff` and written by both the dock's own
     /// whitespace toggle and the General settings row, so the two never drift.
@@ -3049,6 +3055,9 @@ pub struct AppState {
     /// A write staged by a button but not yet confirmed. Nothing leaves herdr
     /// until the user presses the confirm key with this set.
     pub(crate) dock_pending_write: Option<crate::work_index::WorkItemWrite>,
+    /// Shared modal gate for PR writes opened by the full view, dock, or sidebar.
+    /// This is client-local TUI state; pull-request facts stay in the work index.
+    pub(crate) pr_action_confirmation: Option<PrActionConfirmation>,
     /// The outcome of the last write, shown until the next one is staged.
     pub(crate) dock_write_notice: Option<String>,
     pub(crate) dock_home_section: DockHomeSection,
@@ -3078,8 +3087,8 @@ pub struct AppState {
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
     pub(crate) work_index_enabled: bool,
-    /// Client-local approval label used by the PR landing gate.
-    pub(crate) land_approval_label: String,
+    /// Merge method behind the primary PR action, applied on live config reload.
+    pub(crate) pr_merge_method: crate::config::MergeMethodConfig,
     /// `source_control.branch_prefix`: the prefix Herdr puts in front of a
     /// branch name derived from a ticket.
     pub(crate) branch_prefix: String,
@@ -3377,7 +3386,7 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_open_only: bool,
     pub(crate) detail_tab: PrDetailTab,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
-    pub(crate) pending_land: Option<PrLandConfirmation>,
+    pub(crate) pr_action_menu: Option<PrActionMenuState>,
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
     pub(crate) ticket_more_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
@@ -3532,12 +3541,77 @@ pub(crate) enum PrCheckoutChoice {
     NewWorktree,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PrActionMenuState {
+    pub(crate) selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrLandConfirmation {
+pub(crate) struct PrActionConfirmation {
+    pub(crate) key: WorkItemKey,
+    pub(crate) action: crate::ui::work_list_detail::PrActionKind,
+}
+
+impl PrActionConfirmation {
+    pub(crate) fn title(&self) -> &'static str {
+        use crate::ui::work_list_detail::PrActionKind;
+        match self.action {
+            PrActionKind::Merge(_) => "Merge pull request?",
+            PrActionKind::ConvertToDraft => "Convert pull request to draft?",
+            PrActionKind::MarkReady => "Mark pull request ready?",
+            PrActionKind::EnableAutoMerge(_) => "Enable auto-merge?",
+            PrActionKind::DisableAutoMerge => "Disable auto-merge?",
+            PrActionKind::Close => "Close pull request?",
+            _ => "Confirm pull request action?",
+        }
+    }
+
+    pub(crate) fn body(&self) -> String {
+        use crate::ui::work_list_detail::PrActionKind;
+        let number = self.key.pr_number.unwrap_or_default();
+        match self.action {
+            PrActionKind::Merge(method) => {
+                format!("This merges #{number} using {}.", method.label())
+            }
+            PrActionKind::ConvertToDraft => format!("This converts #{number} to a draft."),
+            PrActionKind::MarkReady => format!("This marks #{number} ready for review."),
+            PrActionKind::EnableAutoMerge(method) => format!(
+                "This enables auto-merge for #{number} using {}.",
+                method.label()
+            ),
+            PrActionKind::DisableAutoMerge => {
+                format!("This disables auto-merge for #{number}.")
+            }
+            PrActionKind::Close => format!("This closes #{number}."),
+            _ => format!("This changes #{number}."),
+        }
+    }
+
+    pub(crate) fn confirm_label(&self) -> &'static str {
+        use crate::ui::work_list_detail::PrActionKind;
+        match self.action {
+            PrActionKind::Merge(_) => "Merge",
+            PrActionKind::ConvertToDraft => "Convert",
+            PrActionKind::MarkReady => "Mark ready",
+            PrActionKind::EnableAutoMerge(_) => "Enable",
+            PrActionKind::DisableAutoMerge => "Disable",
+            PrActionKind::Close => "Close",
+            _ => "Confirm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrCommandRequest {
     pub(crate) repo: String,
     pub(crate) number: u64,
-    pub(crate) head_sha: String,
-    pub(crate) approval_signal: String,
+    pub(crate) action: PrCommandAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrCommandAction {
+    Merge(crate::config::MergeMethodConfig),
+    OpenOnGithub,
 }
 
 impl WorkViewState {
@@ -3557,7 +3631,7 @@ impl WorkViewState {
             ticket_open_only: false,
             detail_tab: PrDetailTab::Summary,
             checkout_menu: None,
-            pending_land: None,
+            pr_action_menu: None,
             ticket_start_menu: None,
             ticket_transition_menu: None,
             ticket_more_menu: None,
@@ -3909,6 +3983,9 @@ impl AppState {
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
+        std::mem::swap(&mut self.dock_pr_focused, &mut other.pr_focused);
+        std::mem::swap(&mut self.dock_pr_checkout_menu, &mut other.pr_checkout_menu);
+        std::mem::swap(&mut self.dock_pr_action_menu, &mut other.pr_action_menu);
         std::mem::swap(
             &mut self.dock_diff_ignore_whitespace,
             &mut other.diff_ignore_whitespace,
@@ -4335,7 +4412,7 @@ impl AppState {
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
-            request_pr_land: None,
+            request_pr_command: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -4497,7 +4574,7 @@ impl AppState {
             dock_diff_focused: false,
             dock_pr_focused: false,
             dock_pr_checkout_menu: None,
-            dock_pr_pending_land: None,
+            dock_pr_action_menu: None,
             dock_diff_ignore_whitespace: false,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
@@ -4528,6 +4605,7 @@ impl AppState {
             dock_home_focus_unbound: false,
             dock_comment_draft: None,
             dock_pending_write: None,
+            pr_action_confirmation: None,
             dock_write_notice: None,
             dock_home_section: DockHomeSection::Prs,
             dock_home_detail_tab: DockHomeDetailTab::Overview,
@@ -4540,7 +4618,7 @@ impl AppState {
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
-            land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
+            pr_merge_method: crate::config::MergeMethodConfig::Merge,
             branch_prefix: crate::config::DEFAULT_BRANCH_PREFIX.into(),
             commit_message_model: String::new(),
             commit_stage_all: false,

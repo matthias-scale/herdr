@@ -1323,6 +1323,7 @@ mod tests {
             reviewers: vec!["reviewer".into()],
             mergeable: Some("MERGEABLE".into()),
             merge_state_status: Some("BLOCKED".into()),
+            auto_merge_enabled: false,
             head_sha: Some("abc1234".into()),
             checks: Some(crate::work_index::WorkItemCheckSummary {
                 failing: 2,
@@ -1369,6 +1370,7 @@ mod tests {
             reviewers: Vec::new(),
             mergeable: None,
             merge_state_status: None,
+            auto_merge_enabled: false,
             head_sha: None,
             checks: None,
             comments: Vec::new(),

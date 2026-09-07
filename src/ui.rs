@@ -29,6 +29,7 @@ mod mobile;
 mod navigator;
 mod onboarding;
 mod panes;
+pub(crate) mod pr_actions;
 mod release_notes;
 mod scrollbar;
 mod settings;
@@ -143,15 +144,16 @@ pub(crate) use self::{
         sidebar_header_overflow_rect, sidebar_header_search_rect, sidebar_missive_copy_url,
         sidebar_nested_header_at, sidebar_new_thread_layout, sidebar_new_thread_matches,
         sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
-        sidebar_object_menu_items, sidebar_pull_request_target, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
-        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
-        sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
-        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
-        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem,
-        SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
+        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        sidebar_show_more_key, sidebar_thread_entries, sidebar_ticket_action_entries,
+        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
+        WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -1181,6 +1183,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_new_thread(app, frame);
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
+    pr_actions::render_confirmation(app, frame, frame.area());
 }
 
 fn render_navigation_chrome(

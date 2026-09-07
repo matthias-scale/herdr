@@ -100,6 +100,8 @@ pub(crate) struct WorkItemDetail {
     pub(crate) reviewers: Vec<String>,
     pub(crate) mergeable: Option<String>,
     pub(crate) merge_state_status: Option<String>,
+    #[serde(default)]
+    pub(crate) auto_merge_enabled: bool,
     pub(crate) head_sha: Option<String>,
     pub(crate) checks: Option<WorkItemCheckSummary>,
     pub(crate) comments: Vec<WorkItemComment>,
@@ -138,6 +140,7 @@ impl WorkItemDetail {
             reviewers: Vec::new(),
             mergeable: None,
             merge_state_status: None,
+            auto_merge_enabled: false,
             head_sha: None,
             checks: None,
             comments: Vec::new(),
@@ -2100,7 +2103,7 @@ fn pr_check_state(value: Option<&Value>) -> PrCheckState {
 }
 
 const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
-    "number,title,body,author,baseRefName,headRefName,headRefOid,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,reviews,comments,files,commits,mergeable,mergeStateStatus";
+    "number,title,body,author,baseRefName,headRefName,headRefOid,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,reviews,comments,files,commits,mergeable,mergeStateStatus,autoMergeRequest";
 
 fn fetch_github_pull_request_detail(
     repo: &str,
@@ -2186,6 +2189,9 @@ fn fetch_github_pull_request_detail(
             }),
         mergeable: value_text(value.get("mergeable")),
         merge_state_status: value_text(value.get("mergeStateStatus")),
+        auto_merge_enabled: value
+            .get("autoMergeRequest")
+            .is_some_and(|request| !request.is_null()),
         head_sha: value_text(value.get("headRefOid")),
         checks: status_check_summary(value.get("statusCheckRollup")),
         comments: github_comments(value.get("comments")),
@@ -4638,7 +4644,7 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"l
             &format!(
                 r#"#!/bin/sh
 test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
-printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"reviews":[{{"author":{{"login":"grace"}}}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}}'
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"reviews":[{{"author":{{"login":"grace"}}}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","autoMergeRequest":{{"enabledAt":"2026-08-30T12:30:00Z"}}}}'
 "#
             ),
             "#!/bin/sh\nprintf '%s' '[]'\n",
@@ -4657,6 +4663,7 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         assert_eq!(detail.reviewers, vec!["grace"]);
         assert_eq!(detail.head_sha.as_deref(), Some("abcdef012345"));
         assert_eq!(detail.merge_state_status.as_deref(), Some("CLEAN"));
+        assert!(detail.auto_merge_enabled);
         assert_eq!(detail.labels, vec!["high-risk"]);
         assert_eq!(detail.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
         assert_eq!(
@@ -5863,6 +5870,12 @@ pub(crate) enum WorkItemWrite {
         repo: String,
         number: u64,
     },
+    SetPullRequestAutoMerge {
+        repo: String,
+        number: u64,
+        enabled: bool,
+        method: crate::config::MergeMethodConfig,
+    },
 }
 
 impl WorkItemWrite {
@@ -5899,6 +5912,15 @@ impl WorkItemWrite {
             Self::MarkPullRequestReady { repo, number } => {
                 format!("mark {repo}#{number} ready")
             }
+            Self::SetPullRequestAutoMerge {
+                repo,
+                number,
+                enabled,
+                ..
+            } => format!(
+                "{} auto-merge for {repo}#{number}",
+                if *enabled { "enable" } else { "disable" }
+            ),
         }
     }
 
@@ -5911,12 +5933,15 @@ impl WorkItemWrite {
             | Self::MergePullRequest { repo, number }
             | Self::ClosePullRequest { repo, number }
             | Self::MarkPullRequestDraft { repo, number }
-            | Self::MarkPullRequestReady { repo, number } => Some(crate::app::state::WorkItemKey {
-                repo: repo.clone(),
-                pr_number: Some(*number),
-                pr_url: None,
-                ticket_id: None,
-            }),
+            | Self::MarkPullRequestReady { repo, number }
+            | Self::SetPullRequestAutoMerge { repo, number, .. } => {
+                Some(crate::app::state::WorkItemKey {
+                    repo: repo.clone(),
+                    pr_number: Some(*number),
+                    pr_url: None,
+                    ticket_id: None,
+                })
+            }
             Self::CommentOnTicket { identifier, .. }
             | Self::TransitionTicket { identifier, .. }
             | Self::AssignTicket { identifier, .. }
@@ -6028,6 +6053,35 @@ pub(crate) fn run_work_item_write(
         WorkItemWrite::MarkPullRequestReady { repo, number } => {
             let mut command = crate::noninteractive_process::command(gh_program);
             command.args(["pr", "ready", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+        WorkItemWrite::SetPullRequestAutoMerge {
+            repo,
+            number,
+            enabled,
+            method,
+        } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            if *enabled {
+                command.args([
+                    "pr",
+                    "merge",
+                    &number.to_string(),
+                    "--auto",
+                    method.flag(),
+                    "-R",
+                    repo,
+                ]);
+            } else {
+                command.args([
+                    "pr",
+                    "merge",
+                    &number.to_string(),
+                    "--disable-auto",
+                    "-R",
+                    repo,
+                ]);
+            }
             (command, None)
         }
     };
@@ -6184,6 +6238,18 @@ mod work_item_write_tests {
                 repo: "owner/repo".into(),
                 number: 42,
             },
+            WorkItemWrite::SetPullRequestAutoMerge {
+                repo: "owner/repo".into(),
+                number: 42,
+                enabled: true,
+                method: crate::config::MergeMethodConfig::Rebase,
+            },
+            WorkItemWrite::SetPullRequestAutoMerge {
+                repo: "owner/repo".into(),
+                number: 42,
+                enabled: false,
+                method: crate::config::MergeMethodConfig::Merge,
+            },
         ] {
             run_work_item_write(&write, &gh, Path::new("/usr/bin/false"), deadline)
                 .expect("pull request state command");
@@ -6195,6 +6261,8 @@ mod work_item_write_tests {
                 "pr close 42 -R owner/repo",
                 "pr ready --undo 42 -R owner/repo",
                 "pr ready 42 -R owner/repo",
+                "pr merge 42 --auto --rebase -R owner/repo",
+                "pr merge 42 --disable-auto -R owner/repo",
                 "",
             ]
             .join("\n")

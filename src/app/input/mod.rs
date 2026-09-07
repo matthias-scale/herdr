@@ -138,8 +138,6 @@ enum PullRequestAction {
     Approve,
     Merge,
     Close,
-    MarkDraft,
-    MarkReady,
 }
 
 impl App {
@@ -158,10 +156,13 @@ impl App {
         if self.state.popup_pane.is_some() {
             return self.handle_terminal_key(key).await;
         }
+        let key_event = key.as_key_event();
+        if self.handle_pr_action_confirmation_key(key_event) {
+            return None;
+        }
         if self.handle_dock_surface_menu_key(&key) {
             return None;
         }
-        let key_event = key.as_key_event();
         if self.state.handle_sidebar_new_thread_key(key_event) {
             return None;
         }
@@ -542,12 +543,6 @@ impl App {
             PullRequestAction::Close => {
                 crate::work_index::WorkItemWrite::ClosePullRequest { repo, number }
             }
-            PullRequestAction::MarkDraft => {
-                crate::work_index::WorkItemWrite::MarkPullRequestDraft { repo, number }
-            }
-            PullRequestAction::MarkReady => {
-                crate::work_index::WorkItemWrite::MarkPullRequestReady { repo, number }
-            }
         }
     }
 
@@ -651,7 +646,9 @@ impl App {
     }
 
     pub(crate) fn handle_dock_pr_key_headless(&mut self, key: &TerminalKey) -> bool {
-        self.state.popup_pane.is_none() && self.handle_dock_pr_key(key)
+        self.state.popup_pane.is_none()
+            && (self.handle_pr_action_confirmation_key(key.as_key_event())
+                || self.handle_dock_pr_key(key))
     }
 
     #[cfg(test)]
@@ -1442,16 +1439,38 @@ impl App {
             }
             return true;
         }
-        if state.pending_land.is_some() {
+        if let Some(menu) = state.pr_action_menu {
+            let actions = self.selected_pr_action_table();
             match key.code {
-                KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
+                KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                     if let Some(state) = self.state.work_view.as_mut() {
-                        self.state.request_pr_land = state.pending_land.take();
+                        if let Some(menu) = state.pr_action_menu.as_mut() {
+                            crate::ui::pr_actions::move_selection(menu, &actions, -1);
+                        }
                     }
                 }
-                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                     if let Some(state) = self.state.work_view.as_mut() {
-                        state.pending_land = None;
+                        if let Some(menu) = state.pr_action_menu.as_mut() {
+                            crate::ui::pr_actions::move_selection(menu, &actions, 1);
+                        }
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(action) = crate::ui::pr_actions::menu_actions(&actions)
+                        .get(menu.selected)
+                        .filter(|action| action.enabled())
+                    {
+                        let kind = action.kind;
+                        if let Some(state) = self.state.work_view.as_mut() {
+                            state.pr_action_menu = None;
+                        }
+                        self.activate_selected_pr_action(kind);
+                    }
+                }
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.pr_action_menu = None;
                     }
                 }
                 _ => {}
@@ -1661,13 +1680,19 @@ impl App {
                 }) {
                     self.stage_ticket_link_pr();
                 } else {
-                    self.stage_selected_pr_land();
+                    self.activate_selected_pr_action(
+                        crate::ui::work_list_detail::PrActionKind::Merge(
+                            self.state.pr_merge_method,
+                        ),
+                    );
                 }
             }
             KeyCode::Char('m') if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
                     if state.projection == crate::app::state::WorkProjection::Tickets {
                         state.ticket_more_menu = Some(Default::default());
+                    } else if state.projection == crate::app::state::WorkProjection::PullRequests {
+                        state.pr_action_menu = Some(Default::default());
                     }
                 }
             }
@@ -1761,7 +1786,6 @@ impl App {
                     view.sort,
                     view.open_only,
                     observed_at,
-                    &self.state.land_approval_label,
                     Some((
                         &self.state.sidebar_work_filter,
                         &self.state.work_index_session,
@@ -2516,39 +2540,241 @@ impl App {
         self.state.home = Some(home);
     }
 
-    fn stage_selected_pr_land(&mut self) {
+    fn selected_pr_action_table(&self) -> Vec<crate::ui::work_list_detail::PrAction> {
+        self.state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone())
+            .or_else(|| self.visible_pr_view_keys().first().cloned())
+            .and_then(|key| self.pr_action_table(&key))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn pr_action_table(
+        &self,
+        key: &crate::app::state::WorkItemKey,
+    ) -> Option<Vec<crate::ui::work_list_detail::PrAction>> {
+        let summary = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.snapshot.as_ref())
+            .or(self.state.work_index_snapshot.as_ref())?
+            .items
+            .iter()
+            .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)?;
+        let checkout_available = self.pr_head_ref(key).is_some();
+        Some(
+            crate::ui::work_list_detail::PrItem {
+                summary,
+                cached_detail: self.state.work_item_detail_cache.get(key),
+                observed_at: std::time::SystemTime::now(),
+            }
+            .action_table(self.state.pr_merge_method, checkout_available),
+        )
+    }
+
+    fn activate_selected_pr_action(&mut self, kind: crate::ui::work_list_detail::PrActionKind) {
         let Some((key, _, _)) = self.selected_pr_parts() else {
             return;
         };
-        let Some(confirmation) = self.pr_land_confirmation(&key) else {
+        self.activate_pr_action(key, kind);
+    }
+
+    pub(crate) fn activate_pr_action(
+        &mut self,
+        key: crate::app::state::WorkItemKey,
+        kind: crate::ui::work_list_detail::PrActionKind,
+    ) {
+        use crate::ui::work_list_detail::PrActionKind;
+        let enabled = self
+            .pr_action_table(&key)
+            .into_iter()
+            .flatten()
+            .any(|action| action.kind == kind && action.enabled());
+        if !enabled {
             return;
-        };
-        if let Some(view) = self.state.work_view.as_mut() {
-            view.pending_land = Some(confirmation);
+        }
+        match kind {
+            PrActionKind::Refresh => {
+                self.state.work_item_detail_cache.remove(&key);
+                self.next_work_index_refresh = std::time::Instant::now();
+                if let Some(view) = self.state.work_view.as_mut() {
+                    view.refreshing = true;
+                }
+            }
+            PrActionKind::AskQuestion | PrActionKind::Explain | PrActionKind::FixFindings => {
+                let parts = self.pr_parts_for_key(&key);
+                let Some((head, pr, title)) = parts else {
+                    return;
+                };
+                let prompt = match kind {
+                    PrActionKind::AskQuestion => {
+                        format!("About PR #{} ({}): ", pr.number, title)
+                    }
+                    PrActionKind::Explain => {
+                        "Walk the diff for this PR and explain what changed, why, and what I should read closely."
+                            .into()
+                    }
+                    PrActionKind::FixFindings => self
+                        .state
+                        .work_item_detail_cache
+                        .get(&key)
+                        .map(|detail| {
+                            detail
+                                .comments
+                                .iter()
+                                .map(|comment| comment.body.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                self.open_pr_home(
+                    head,
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                    prompt,
+                    pr,
+                );
+                if kind == PrActionKind::Explain {
+                    if let Some(home) = self.state.home.as_mut() {
+                        home.selected_ref = None;
+                    }
+                    self.dispatch_home_prompt();
+                }
+            }
+            PrActionKind::OpenOnGithub => {
+                if let Some(number) = key.pr_number {
+                    self.state.request_pr_command = Some(crate::app::state::PrCommandRequest {
+                        repo: key.repo,
+                        number,
+                        action: crate::app::state::PrCommandAction::OpenOnGithub,
+                    });
+                }
+            }
+            PrActionKind::CopyLink => {
+                if let Some(url) = self.pr_url_for_key(&key) {
+                    self.state.request_clipboard_write = Some(url.into_bytes());
+                }
+            }
+            PrActionKind::CheckOut => {}
+            PrActionKind::ConvertToDraft
+            | PrActionKind::MarkReady
+            | PrActionKind::EnableAutoMerge(_)
+            | PrActionKind::DisableAutoMerge
+            | PrActionKind::Merge(_)
+            | PrActionKind::Close => {
+                self.state.pr_action_confirmation =
+                    Some(crate::app::state::PrActionConfirmation { key, action: kind });
+            }
         }
     }
 
-    /// The Land confirmation for `key`, or `None` when landing is disabled.
-    /// Shared by the full-screen view and the compact dock surface so both
-    /// gate on exactly the same evidence.
-    pub(crate) fn pr_land_confirmation(
+    fn pr_parts_for_key(
         &self,
         key: &crate::app::state::WorkItemKey,
-    ) -> Option<crate::app::state::PrLandConfirmation> {
-        let number = key.pr_number?;
-        let detail = self.state.work_item_detail_cache.get(key)?;
-        let crate::ui::work_list_detail::PrLandStatus::Enabled(approval_signal) =
-            crate::ui::work_list_detail::pr_land_status(detail, &self.state.land_approval_label)
-        else {
-            return None;
-        };
-        let head_sha = detail.head_sha.clone()?;
-        Some(crate::app::state::PrLandConfirmation {
-            repo: key.repo.clone(),
-            number,
-            head_sha,
-            approval_signal: approval_signal.confirmation_label(),
+    ) -> Option<(String, crate::app::home::HomePrContext, String)> {
+        let summary = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.snapshot.as_ref())
+            .or(self.state.work_index_snapshot.as_ref())?
+            .items
+            .iter()
+            .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)?;
+        let number = summary.pr_number?;
+        let url = self.pr_url_for_key(key)?;
+        let head = self.pr_head_ref(key)?;
+        Some((
+            head,
+            crate::app::home::HomePrContext {
+                url,
+                number,
+                repo: summary.repo.clone(),
+            },
+            summary.pr_title.clone().unwrap_or_default(),
+        ))
+    }
+
+    fn pr_url_for_key(&self, key: &crate::app::state::WorkItemKey) -> Option<String> {
+        key.pr_url.clone().or_else(|| {
+            self.state
+                .work_item_detail_cache
+                .get(key)
+                .and_then(|detail| detail.url.clone())
         })
+    }
+
+    fn handle_pr_action_confirmation_key(&mut self, key: KeyEvent) -> bool {
+        let Some(confirmation) = self.state.pr_action_confirmation.clone() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
+                self.state.pr_action_confirmation = None;
+                self.execute_pr_action_confirmation(confirmation);
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') if key.modifiers.is_empty() => {
+                self.state.pr_action_confirmation = None;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn execute_pr_action_confirmation(
+        &mut self,
+        confirmation: crate::app::state::PrActionConfirmation,
+    ) {
+        use crate::ui::work_list_detail::PrActionKind;
+        let Some(number) = confirmation.key.pr_number else {
+            return;
+        };
+        let repo = confirmation.key.repo;
+        match confirmation.action {
+            PrActionKind::Merge(method) => {
+                self.state.request_pr_command = Some(crate::app::state::PrCommandRequest {
+                    repo,
+                    number,
+                    action: crate::app::state::PrCommandAction::Merge(method),
+                });
+            }
+            action => {
+                let write = match action {
+                    PrActionKind::ConvertToDraft => {
+                        crate::work_index::WorkItemWrite::MarkPullRequestDraft { repo, number }
+                    }
+                    PrActionKind::MarkReady => {
+                        crate::work_index::WorkItemWrite::MarkPullRequestReady { repo, number }
+                    }
+                    PrActionKind::EnableAutoMerge(method) => {
+                        crate::work_index::WorkItemWrite::SetPullRequestAutoMerge {
+                            repo,
+                            number,
+                            enabled: true,
+                            method,
+                        }
+                    }
+                    PrActionKind::DisableAutoMerge => {
+                        crate::work_index::WorkItemWrite::SetPullRequestAutoMerge {
+                            repo,
+                            number,
+                            enabled: false,
+                            method: self.state.pr_merge_method,
+                        }
+                    }
+                    PrActionKind::Close => {
+                        crate::work_index::WorkItemWrite::ClosePullRequest { repo, number }
+                    }
+                    _ => return,
+                };
+                self.state.dock_pending_write = Some(write);
+                self.run_pending_dock_write();
+                self.next_work_index_refresh = std::time::Instant::now();
+            }
+        }
     }
 
     /// Branch to check out for `key`: the fetched head, else the branch the
@@ -2569,7 +2795,7 @@ impl App {
             })
     }
 
-    /// Keys of the compact PR surface: the same Check out and Land actions as
+    /// Keys of the compact PR surface, backed by the shared PR action table.
     /// the full-screen view, over the focused pane's primary pull request.
     fn handle_dock_pr_key(&mut self, key: &TerminalKey) -> bool {
         if self.state.mode != Mode::Terminal
@@ -2586,12 +2812,34 @@ impl App {
         if self.handle_pending_dock_write_key(event) {
             return true;
         }
-        if self.state.dock_pr_pending_land.is_some() {
+        if let Some(menu) = self.state.dock_pr_action_menu {
+            let actions = crate::ui::dock::pr::focused_pr_key(&self.state)
+                .and_then(|key| self.pr_action_table(&key))
+                .unwrap_or_default();
             match event.code {
-                KeyCode::Char('y' | 'Y') => {
-                    self.state.request_pr_land = self.state.dock_pr_pending_land.take();
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(menu) = self.state.dock_pr_action_menu.as_mut() {
+                        crate::ui::pr_actions::move_selection(menu, &actions, -1);
+                    }
                 }
-                KeyCode::Esc | KeyCode::Char('n' | 'N') => self.state.dock_pr_pending_land = None,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(menu) = self.state.dock_pr_action_menu.as_mut() {
+                        crate::ui::pr_actions::move_selection(menu, &actions, 1);
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(action) = crate::ui::pr_actions::menu_actions(&actions)
+                        .get(menu.selected)
+                        .filter(|action| action.enabled())
+                    {
+                        let kind = action.kind;
+                        self.state.dock_pr_action_menu = None;
+                        if let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) {
+                            self.activate_pr_action(key, kind);
+                        }
+                    }
+                }
+                KeyCode::Esc => self.state.dock_pr_action_menu = None,
                 _ => {}
             }
             return true;
@@ -2618,16 +2866,10 @@ impl App {
             KeyCode::Char('c') => {
                 self.state.dock_pr_checkout_menu = Some(Default::default());
             }
-            KeyCode::Char('l') => self.stage_dock_pr_land(),
-            KeyCode::Char('x') => {
-                return self.stage_dock_pr_action(PullRequestAction::Close);
-            }
-            KeyCode::Char('d') => {
-                return self.stage_dock_pr_action(PullRequestAction::MarkDraft);
-            }
-            KeyCode::Char('r') => {
-                return self.stage_dock_pr_action(PullRequestAction::MarkReady);
-            }
+            KeyCode::Char('l') => self.activate_dock_pr_action(
+                crate::ui::work_list_detail::PrActionKind::Merge(self.state.pr_merge_method),
+            ),
+            KeyCode::Char('m') => self.state.dock_pr_action_menu = Some(Default::default()),
             KeyCode::Esc => self.state.dock_pr_focused = false,
             _ => return false,
         }
@@ -2938,26 +3180,11 @@ impl App {
         self.open_pr_home(head, choice, String::new(), pr);
     }
 
-    fn stage_dock_pr_land(&mut self) {
+    fn activate_dock_pr_action(&mut self, action: crate::ui::work_list_detail::PrActionKind) {
         let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
             return;
         };
-        self.state.dock_pr_pending_land = self.pr_land_confirmation(&key);
-    }
-
-    fn stage_dock_pr_action(&mut self, action: PullRequestAction) -> bool {
-        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
-            return false;
-        };
-        let Some(number) = key.pr_number else {
-            return false;
-        };
-        if key.repo.is_empty() {
-            return false;
-        }
-        self.state.dock_pending_write = Some(Self::pull_request_write(action, key.repo, number));
-        self.state.dock_write_notice = None;
-        true
+        self.activate_pr_action(key, action);
     }
 
     fn open_selected_symphony_workflow(&mut self) {
@@ -3303,6 +3530,29 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        if self.state.pr_action_confirmation.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some((cancel, confirm)) = crate::ui::pr_actions::confirmation_button_rects(
+                    &self.state,
+                    self.state.screen_rect(),
+                ) {
+                    let hit = |rect: ratatui::layout::Rect| {
+                        mouse.column >= rect.x
+                            && mouse.column < rect.right()
+                            && mouse.row >= rect.y
+                            && mouse.row < rect.bottom()
+                    };
+                    if hit(confirm) {
+                        if let Some(confirmation) = self.state.pr_action_confirmation.take() {
+                            self.execute_pr_action_confirmation(confirmation);
+                        }
+                    } else if hit(cancel) {
+                        self.state.pr_action_confirmation = None;
+                    }
+                }
+            }
+            return;
+        }
         if self.state.usage_view.is_some() {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let target = self
@@ -4383,7 +4633,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_pr_surface_keys_drive_the_5a_checkout_and_land_actions() {
+    fn compact_pr_surface_keys_open_checkout_and_shared_action_menus() {
         let mut app = test_app();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
@@ -4405,25 +4655,15 @@ mod tests {
         assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
         assert!(app.state.dock_pr_checkout_menu.is_none());
 
-        // Land is staged as a confirmation and only lands on an explicit yes,
-        // exactly as the full-screen view does.
-        let confirmation = crate::app::state::PrLandConfirmation {
-            repo: "owner/repo".into(),
-            number: 42,
-            head_sha: "abc123".into(),
-            approval_signal: "approved review".into(),
-        };
-        app.state.dock_pr_pending_land = Some(confirmation.clone());
         assert!(
-            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()))
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()))
         );
-        assert!(app.state.dock_pr_pending_land.is_none());
-        assert!(app.state.request_pr_land.is_none());
-        app.state.dock_pr_pending_land = Some(confirmation.clone());
-        assert!(
-            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()))
+        assert_eq!(
+            app.state.dock_pr_action_menu,
+            Some(crate::app::state::PrActionMenuState::default())
         );
-        assert_eq!(app.state.request_pr_land, Some(confirmation));
+        assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.dock_pr_action_menu.is_none());
 
         app.state.dock_pr_focused = false;
         assert!(
@@ -4584,50 +4824,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_pr_state_writes_wait_for_confirmation() {
-        let mut app = dock_home_test_app(&[42]);
-        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
-        app.state.dock_home_focused = false;
-        app.state.dock_pr_focused = true;
-        app.work_index_gh_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
-
-        for (key, expected) in [
-            (
-                'x',
-                crate::work_index::WorkItemWrite::ClosePullRequest {
-                    repo: "owner/repo".into(),
-                    number: 42,
-                },
-            ),
-            (
-                'd',
-                crate::work_index::WorkItemWrite::MarkPullRequestDraft {
-                    repo: "owner/repo".into(),
-                    number: 42,
-                },
-            ),
-            (
-                'r',
-                crate::work_index::WorkItemWrite::MarkPullRequestReady {
-                    repo: "owner/repo".into(),
-                    number: 42,
-                },
-            ),
-        ] {
-            assert!(app
-                .handle_dock_pr_key(&TerminalKey::new(KeyCode::Char(key), KeyModifiers::empty(),)));
-            assert_eq!(app.state.dock_pending_write.as_ref(), Some(&expected));
-            assert!(
-                app.state.dock_write_notice.is_none(),
-                "staging must not invoke the configured gh program"
-            );
-            assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
-            assert!(app.state.dock_pending_write.is_none());
-        }
-    }
-
-    #[test]
-    fn compact_pr_land_gate_matches_the_full_screen_matrix() {
+    fn shared_pr_confirmation_cancels_or_dispatches_the_selected_merge_method() {
         let mut app = test_app();
         let key = crate::app::state::WorkItemKey {
             repo: "owner/repo".into(),
@@ -4635,27 +4832,32 @@ mod tests {
             pr_url: Some("https://github.com/owner/repo/pull/42".into()),
             ticket_id: None,
         };
-        assert!(app.pr_land_confirmation(&key).is_none());
-        for (states, merge, expected) in [
-            (vec!["SUCCESS"], "CLEAN", true),
-            (vec!["FAILURE"], "CLEAN", false),
-            (vec!["SUCCESS"], "BEHIND", false),
-            (Vec::new(), "CLEAN", false),
-        ] {
-            let mut detail = crate::work_index::WorkItemDetail::empty();
-            detail.actions = states
-                .iter()
-                .map(|state| crate::work_index::WorkItemAction {
-                    name: "check".into(),
-                    state: (*state).into(),
-                })
-                .collect();
-            detail.merge_state_status = Some(merge.into());
-            detail.head_sha = Some("abc123".into());
-            detail.review_decision = Some("APPROVED".into());
-            app.state.work_item_detail_cache.insert(key.clone(), detail);
-            assert_eq!(app.pr_land_confirmation(&key).is_some(), expected);
-        }
+        let confirmation = crate::app::state::PrActionConfirmation {
+            key,
+            action: crate::ui::work_list_detail::PrActionKind::Merge(
+                crate::config::MergeMethodConfig::Rebase,
+            ),
+        };
+        app.state.pr_action_confirmation = Some(confirmation.clone());
+        assert!(app
+            .handle_pr_action_confirmation_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.pr_action_confirmation.is_none());
+        assert!(app.state.request_pr_command.is_none());
+
+        app.state.pr_action_confirmation = Some(confirmation);
+        assert!(app.handle_pr_action_confirmation_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
+        assert!(matches!(
+            app.state.request_pr_command,
+            Some(crate::app::state::PrCommandRequest {
+                action: crate::app::state::PrCommandAction::Merge(
+                    crate::config::MergeMethodConfig::Rebase
+                ),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -4971,6 +5173,138 @@ mod tests {
         );
         home.prompt = "continue the review".into();
         assert_eq!(home.dispatch_plan().expect("dispatch plan").pr, home.pr);
+    }
+
+    #[test]
+    fn cannot_activate_ask_question_without_pr_head_context() {
+        let mut app = test_app();
+        let item = crate::work_index::WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: Some(7),
+            pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+            pr_title: Some("repair parser".into()),
+            pr_state: Some("open".into()),
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 1,
+            deletions: 0,
+            author: Some("ada".into()),
+            assignees: vec!["ada".into()],
+            labels: vec!["bug".into()],
+            check_state: crate::work_index::PrCheckState::Passing,
+            audience: crate::work_index::PrAudience::Authored,
+            cached_pr_detail: None,
+            ticket_ids: Vec::new(),
+            ticket_title: None,
+            ticket_state: None,
+            ticket_details: Vec::new(),
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: Default::default(),
+        };
+
+        app.state.work_view = Some(crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::now(),
+            }),
+        ));
+
+        app.activate_pr_action(
+            crate::app::state::WorkItemKey {
+                repo: "owner/repo".into(),
+                pr_number: Some(7),
+                pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+                ticket_id: None,
+            },
+            crate::ui::work_list_detail::PrActionKind::AskQuestion,
+        );
+        assert!(app.state.home.is_none());
+    }
+
+    #[test]
+    fn selected_pr_action_menu_stays_interactive_without_head_context() {
+        let mut app = test_app();
+        let item = crate::work_index::WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            pr_title: Some("repair parser".into()),
+            pr_state: Some("open".into()),
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 1,
+            deletions: 0,
+            author: Some("ada".into()),
+            assignees: vec!["ada".into()],
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Passing,
+            audience: crate::work_index::PrAudience::Authored,
+            cached_pr_detail: None,
+            ticket_ids: Vec::new(),
+            ticket_title: None,
+            ticket_state: None,
+            ticket_details: Vec::new(),
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: Default::default(),
+        };
+        app.state.work_view = Some(crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::now(),
+            }),
+        ));
+
+        let actions = app.selected_pr_action_table();
+        fn enabled(
+            actions: &[crate::ui::work_list_detail::PrAction],
+            kind: crate::ui::work_list_detail::PrActionKind,
+        ) -> bool {
+            actions
+                .iter()
+                .find(|action| action.kind == kind)
+                .is_some_and(crate::ui::work_list_detail::PrAction::enabled)
+        }
+
+        assert!(enabled(
+            &actions,
+            crate::ui::work_list_detail::PrActionKind::Refresh
+        ));
+        assert!(enabled(
+            &actions,
+            crate::ui::work_list_detail::PrActionKind::OpenOnGithub
+        ));
+        assert!(enabled(
+            &actions,
+            crate::ui::work_list_detail::PrActionKind::CopyLink
+        ));
+        assert!(!enabled(
+            &actions,
+            crate::ui::work_list_detail::PrActionKind::AskQuestion
+        ));
+        assert!(!enabled(
+            &actions,
+            crate::ui::work_list_detail::PrActionKind::Explain
+        ));
+        assert!(!enabled(
+            &actions,
+            crate::ui::work_list_detail::PrActionKind::CheckOut
+        ));
     }
 
     fn ticket_view_app() -> App {

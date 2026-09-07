@@ -191,9 +191,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # editor, shortcuts, context, scratchpad.
 # default_surfaces = []
 
-[land]
-# PRs can land after an approved review or this exact label.
-# approval_label = "approved"
+[source_control]
+# Merge strategy for the primary PR action: "merge", "squash", or "rebase".
+# merge_method = "merge"
 
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
@@ -1063,8 +1063,8 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
         assert!(DEFAULT_CONFIG.contains("# settle_after_days = 3"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
-        assert!(DEFAULT_CONFIG.contains("[land]\n# PRs can land after"));
-        assert!(DEFAULT_CONFIG.contains("# approval_label = \"approved\""));
+        assert!(DEFAULT_CONFIG.contains("[source_control]\n# Merge strategy"));
+        assert!(DEFAULT_CONFIG.contains("# merge_method = \"merge\""));
     }
 
     #[test]

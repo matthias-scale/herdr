@@ -79,29 +79,10 @@ pub(crate) struct LinkedPr {
     pub(crate) check_state: PrCheckState,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WorkActionKind {
-    CheckOut,
-    Land,
-    FixInThread,
-    StartThread,
-    Transition,
-    LinkPr,
-    More,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WorkAction {
-    pub(crate) kind: WorkActionKind,
-    pub(crate) label: &'static str,
-    pub(crate) enabled: bool,
-}
-
 pub(crate) trait WorkItem {
     fn key(&self) -> String;
     fn row(&self) -> WorkRow;
     fn detail(&self) -> WorkDetail;
-    fn actions(&self) -> Vec<WorkAction>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,49 +142,100 @@ pub(crate) struct PrItem<'a> {
     pub(crate) summary: &'a IndexedWorkItem,
     pub(crate) cached_detail: Option<&'a IndexedWorkItemDetail>,
     pub(crate) observed_at: SystemTime,
-    pub(crate) approval_label: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrActionKind {
+    CheckOut,
+    Refresh,
+    AskQuestion,
+    Explain,
+    FixFindings,
+    ConvertToDraft,
+    MarkReady,
+    EnableAutoMerge(crate::config::MergeMethodConfig),
+    DisableAutoMerge,
+    Merge(crate::config::MergeMethodConfig),
+    OpenOnGithub,
+    CopyLink,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrActionPlacement {
+    Header,
+    Menu { group: u8 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PrApprovalSignal {
-    ApprovedReview,
-    Label(String),
+pub(crate) struct PrAction {
+    pub(crate) kind: PrActionKind,
+    pub(crate) label: String,
+    pub(crate) placement: PrActionPlacement,
+    pub(crate) disabled_reason: Option<&'static str>,
 }
 
-impl PrApprovalSignal {
-    pub(crate) fn confirmation_label(&self) -> String {
-        match self {
-            Self::ApprovedReview => "approved review".into(),
-            Self::Label(label) => format!("label {label}"),
-        }
+impl PrAction {
+    pub(crate) fn enabled(&self) -> bool {
+        self.disabled_reason.is_none()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PrLandStatus {
-    Enabled(PrApprovalSignal),
-    AwaitingApproval,
-    Blocked,
-}
-
-pub(crate) fn pr_land_status(detail: &IndexedWorkItemDetail, approval_label: &str) -> PrLandStatus {
-    let checks_and_merge_ready = !detail.actions.is_empty()
-        && detail.actions.iter().all(|check| check.state == "SUCCESS")
-        && detail.merge_state_status.as_deref() == Some("CLEAN");
-    if !checks_and_merge_ready {
-        return PrLandStatus::Blocked;
-    }
-    if detail
-        .review_decision
+fn merge_disabled_reason(
+    summary: &IndexedWorkItem,
+    detail: Option<&IndexedWorkItemDetail>,
+) -> Option<&'static str> {
+    if !summary
+        .pr_state
         .as_deref()
-        .is_some_and(|decision| decision.eq_ignore_ascii_case("APPROVED"))
+        .is_none_or(|state| state.eq_ignore_ascii_case("open"))
     {
-        return PrLandStatus::Enabled(PrApprovalSignal::ApprovedReview);
+        return Some("pull request is closed");
     }
-    if detail.labels.iter().any(|label| label == approval_label) {
-        return PrLandStatus::Enabled(PrApprovalSignal::Label(approval_label.into()));
+    let Some(detail) = detail else {
+        return Some("details not loaded");
+    };
+    if detail.is_draft.unwrap_or(summary.draft) {
+        return Some("pull request is a draft");
     }
-    PrLandStatus::AwaitingApproval
+    if detail.actions.iter().any(|check| {
+        matches!(
+            check.state.to_ascii_uppercase().as_str(),
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT"
+        )
+    }) {
+        return Some("checks failing");
+    }
+    match detail.mergeable.as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("MERGEABLE") => None,
+        Some(value) if value.eq_ignore_ascii_case("UNKNOWN") => Some("mergeability pending"),
+        Some(_) => Some("not mergeable"),
+        None => Some("mergeability not loaded"),
+    }
+}
+
+fn auto_merge_disabled_reason(
+    summary: &IndexedWorkItem,
+    detail: Option<&IndexedWorkItemDetail>,
+) -> Option<&'static str> {
+    if !summary
+        .pr_state
+        .as_deref()
+        .is_none_or(|state| state.eq_ignore_ascii_case("open"))
+    {
+        return Some("pull request is closed");
+    }
+    let Some(detail) = detail else {
+        return Some("details not loaded");
+    };
+    if detail.is_draft.unwrap_or(summary.draft) {
+        return Some("pull request is a draft");
+    }
+    detail
+        .mergeable
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("CONFLICTING"))
+        .then_some("not mergeable")
 }
 
 impl PrItem<'_> {
@@ -240,23 +272,137 @@ impl PrItem<'_> {
         text_terms.iter().all(|term| haystack.contains(term))
     }
 
-    pub(crate) fn land_enabled(&self) -> bool {
-        let Some(detail) = self.cached_detail else {
-            return false;
-        };
-        matches!(
-            pr_land_status(detail, self.approval_label),
-            PrLandStatus::Enabled(_)
-        )
+    pub(crate) fn merge_disabled_reason(&self) -> Option<&'static str> {
+        merge_disabled_reason(self.summary, self.cached_detail)
     }
 
-    pub(crate) fn land_status(&self) -> PrLandStatus {
-        self.cached_detail.map_or(PrLandStatus::Blocked, |detail| {
-            pr_land_status(detail, self.approval_label)
-        })
+    pub(crate) fn action_table(
+        &self,
+        default_method: crate::config::MergeMethodConfig,
+        checkout_available: bool,
+    ) -> Vec<PrAction> {
+        let open = self.is_open();
+        let draft = self
+            .cached_detail
+            .and_then(|detail| detail.is_draft)
+            .unwrap_or(self.summary.draft);
+        let url_available = self
+            .cached_detail
+            .and_then(|detail| detail.url.as_ref())
+            .or(self.summary.pr_url.as_ref())
+            .is_some();
+        let merge_reason = self.merge_disabled_reason();
+        let auto_enabled = self
+            .cached_detail
+            .is_some_and(|detail| detail.auto_merge_enabled);
+        let fix_reason = self
+            .cached_detail
+            .is_none_or(|detail| detail.comments.is_empty())
+            .then_some("no actionable findings");
+        let mut actions = vec![
+            PrAction {
+                kind: PrActionKind::CheckOut,
+                label: "Check out ▾".into(),
+                placement: PrActionPlacement::Header,
+                disabled_reason: (!checkout_available).then_some("checkout unavailable"),
+            },
+            PrAction {
+                kind: PrActionKind::Merge(default_method),
+                label: "Merge".into(),
+                placement: PrActionPlacement::Header,
+                disabled_reason: merge_reason,
+            },
+            PrAction {
+                kind: PrActionKind::Refresh,
+                label: "Refresh".into(),
+                placement: PrActionPlacement::Menu { group: 0 },
+                disabled_reason: None,
+            },
+            PrAction {
+                kind: PrActionKind::AskQuestion,
+                label: "Ask a question".into(),
+                placement: PrActionPlacement::Menu { group: 1 },
+                disabled_reason: (!checkout_available).then_some("checkout unavailable"),
+            },
+            PrAction {
+                kind: PrActionKind::Explain,
+                label: "Explain this PR".into(),
+                placement: PrActionPlacement::Menu { group: 1 },
+                disabled_reason: (!checkout_available).then_some("checkout unavailable"),
+            },
+            PrAction {
+                kind: PrActionKind::FixFindings,
+                label: "Fix findings in a thread".into(),
+                placement: PrActionPlacement::Menu { group: 1 },
+                disabled_reason: fix_reason,
+            },
+            PrAction {
+                kind: if draft {
+                    PrActionKind::MarkReady
+                } else {
+                    PrActionKind::ConvertToDraft
+                },
+                label: if draft {
+                    "Mark ready"
+                } else {
+                    "Convert to draft"
+                }
+                .into(),
+                placement: PrActionPlacement::Menu { group: 2 },
+                disabled_reason: (!open).then_some("pull request is closed"),
+            },
+            PrAction {
+                kind: if auto_enabled {
+                    PrActionKind::DisableAutoMerge
+                } else {
+                    PrActionKind::EnableAutoMerge(default_method)
+                },
+                label: if auto_enabled {
+                    "Disable auto-merge"
+                } else {
+                    "Enable auto-merge"
+                }
+                .into(),
+                placement: PrActionPlacement::Menu { group: 2 },
+                disabled_reason: auto_merge_disabled_reason(self.summary, self.cached_detail),
+            },
+        ];
+        actions.extend(crate::config::MergeMethodConfig::ALL.map(|method| {
+            PrAction {
+                kind: PrActionKind::Merge(method),
+                label: match method {
+                    crate::config::MergeMethodConfig::Merge => "Merge",
+                    crate::config::MergeMethodConfig::Squash => "Squash",
+                    crate::config::MergeMethodConfig::Rebase => "Rebase",
+                }
+                .into(),
+                placement: PrActionPlacement::Menu { group: 3 },
+                disabled_reason: merge_reason,
+            }
+        }));
+        actions.extend([
+            PrAction {
+                kind: PrActionKind::OpenOnGithub,
+                label: "Open on GitHub".into(),
+                placement: PrActionPlacement::Menu { group: 4 },
+                disabled_reason: (!url_available).then_some("link unavailable"),
+            },
+            PrAction {
+                kind: PrActionKind::CopyLink,
+                label: "Copy link".into(),
+                placement: PrActionPlacement::Menu { group: 4 },
+                disabled_reason: (!url_available).then_some("link unavailable"),
+            },
+            PrAction {
+                kind: PrActionKind::Close,
+                label: "Close pull request".into(),
+                placement: PrActionPlacement::Menu { group: 5 },
+                disabled_reason: (!open).then_some("pull request is closed"),
+            },
+        ]);
+        actions
     }
 }
-
 impl WorkItem for PrItem<'_> {
     fn key(&self) -> String {
         format!(
@@ -382,28 +528,6 @@ impl WorkItem for PrItem<'_> {
             },
         }
     }
-
-    fn actions(&self) -> Vec<WorkAction> {
-        vec![
-            WorkAction {
-                kind: WorkActionKind::CheckOut,
-                label: "Check out ▾",
-                enabled: true,
-            },
-            WorkAction {
-                kind: WorkActionKind::Land,
-                label: "Land",
-                enabled: self.land_enabled(),
-            },
-            WorkAction {
-                kind: WorkActionKind::FixInThread,
-                label: "Fix in a thread",
-                enabled: self
-                    .cached_detail
-                    .is_some_and(|detail| !detail.comments.is_empty()),
-            },
-        ]
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -527,21 +651,6 @@ impl WorkItem for ConversationItem<'_> {
             ..WorkDetail::default()
         }
     }
-
-    fn actions(&self) -> Vec<WorkAction> {
-        vec![
-            WorkAction {
-                kind: WorkActionKind::StartThread,
-                label: "Start thread ▾",
-                enabled: true,
-            },
-            WorkAction {
-                kind: WorkActionKind::More,
-                label: "Open in Missive",
-                enabled: true,
-            },
-        ]
-    }
 }
 
 pub(crate) fn sorted_filtered_conversations<'a>(
@@ -618,12 +727,6 @@ impl TicketItem<'_> {
             .state
             .as_deref()
             .is_some_and(|state| state.eq_ignore_ascii_case(target))
-    }
-
-    pub(crate) fn url(&self) -> Option<&str> {
-        self.cached_detail
-            .and_then(|detail| detail.url.as_deref())
-            .or(self.summary.url.as_deref())
     }
 }
 
@@ -730,31 +833,6 @@ impl WorkItem for TicketItem<'_> {
             linked_prs,
             ..WorkDetail::default()
         }
-    }
-
-    fn actions(&self) -> Vec<WorkAction> {
-        vec![
-            WorkAction {
-                kind: WorkActionKind::StartThread,
-                label: "Start thread ▾",
-                enabled: self.url().is_some(),
-            },
-            WorkAction {
-                kind: WorkActionKind::Transition,
-                label: "Transition ▾",
-                enabled: true,
-            },
-            WorkAction {
-                kind: WorkActionKind::LinkPr,
-                label: "Link PR",
-                enabled: self.has_context_pr,
-            },
-            WorkAction {
-                kind: WorkActionKind::More,
-                label: "⋯",
-                enabled: true,
-            },
-        ]
     }
 }
 
@@ -908,7 +986,6 @@ pub(crate) fn sorted_filtered_prs<'a>(
     sort: PrSort,
     open_only: bool,
     observed_at: SystemTime,
-    approval_label: &'a str,
     sidebar_filter: Option<(
         &crate::app::state::SidebarWorkFilter,
         &crate::work_index::WorkIndexSession,
@@ -928,7 +1005,6 @@ pub(crate) fn sorted_filtered_prs<'a>(
                 summary,
                 cached_detail: details.get(&key),
                 observed_at,
-                approval_label,
             }
         })
         .filter(|item| {
@@ -1016,6 +1092,14 @@ mod tests {
             total: states.len(),
         });
         detail.merge_state_status = Some(merge.into());
+        detail.mergeable = Some(
+            if merge == "CLEAN" {
+                "MERGEABLE"
+            } else {
+                "CONFLICTING"
+            }
+            .into(),
+        );
         detail.head_sha = Some("abc123".into());
         if with_comment {
             detail.comments.push(WorkItemComment {
@@ -1118,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_item_projects_list_detail_and_actions() {
+    fn conversation_item_projects_list_and_detail() {
         let conversation = conversation("open", false, true);
         let item = ConversationItem {
             summary: &conversation,
@@ -1136,13 +1220,6 @@ mod tests {
         assert_eq!(
             detail.open_url.as_deref(),
             Some(conversation.app_url.as_str())
-        );
-        assert_eq!(
-            item.actions()
-                .iter()
-                .map(|action| action.label)
-                .collect::<Vec<_>>(),
-            ["Start thread ▾", "Open in Missive"]
         );
     }
 
@@ -1232,7 +1309,6 @@ mod tests {
             PrSort::Updated,
             true,
             SystemTime::UNIX_EPOCH + Duration::from_secs(60),
-            "approved",
             None,
         );
         assert_eq!(
@@ -1277,7 +1353,6 @@ mod tests {
             PrSort::Number,
             false,
             SystemTime::UNIX_EPOCH,
-            "approved",
             Some((&filters, &session)),
         );
 
@@ -1304,7 +1379,6 @@ mod tests {
             summary: &summary,
             cached_detail: Some(&cached),
             observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
-            approval_label: "approved",
         };
         let projected = item.detail();
         assert_eq!(projected.heading, "owner/repo #7 ↗");
@@ -1314,118 +1388,105 @@ mod tests {
     }
 
     #[test]
-    fn pr_action_enablement_matrix() {
-        assert_eq!(
-            PrApprovalSignal::Label("approved".into()).confirmation_label(),
-            "label approved"
-        );
+    fn pr_action_table_has_exact_order_dynamic_labels_and_merge_gates() {
         let summary = item(7, PrAudience::Authored, 20);
         let uncached = PrItem {
             summary: &summary,
             cached_detail: None,
             observed_at: SystemTime::UNIX_EPOCH,
-            approval_label: "approved",
         };
-        let uncached_actions = uncached.actions();
+        let uncached_actions = uncached.action_table(crate::config::MergeMethodConfig::Merge, true);
+        assert_eq!(uncached.merge_disabled_reason(), Some("details not loaded"));
         assert!(uncached_actions
             .iter()
-            .find(|action| action.kind == WorkActionKind::CheckOut)
-            .is_some_and(|action| action.enabled));
-        assert!(!uncached_actions
+            .find(|action| action.kind == PrActionKind::CheckOut)
+            .is_some_and(PrAction::enabled));
+
+        let mut cached = detail(&["SUCCESS"], "CLEAN", true);
+        let item = PrItem {
+            summary: &summary,
+            cached_detail: Some(&cached),
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        let labels = item
+            .action_table(crate::config::MergeMethodConfig::Squash, true)
+            .into_iter()
+            .filter(|action| matches!(action.placement, PrActionPlacement::Menu { .. }))
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "Refresh",
+                "Ask a question",
+                "Explain this PR",
+                "Fix findings in a thread",
+                "Convert to draft",
+                "Enable auto-merge",
+                "Merge",
+                "Squash",
+                "Rebase",
+                "Open on GitHub",
+                "Copy link",
+                "Close pull request",
+            ]
+        );
+
+        cached.auto_merge_enabled = true;
+        let item = PrItem {
+            summary: &summary,
+            cached_detail: Some(&cached),
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        assert!(item
+            .action_table(crate::config::MergeMethodConfig::Merge, true)
             .iter()
-            .any(|action| action.kind != WorkActionKind::CheckOut && action.enabled));
-        for (states, merge, review, labels, comment, land, status, fix) in [
+            .any(|action| {
+                action.kind == PrActionKind::DisableAutoMerge
+                    && action.label == "Disable auto-merge"
+            }));
+
+        for (states, mergeable, draft, expected) in [
+            (vec!["SUCCESS"], "MERGEABLE", false, None),
+            (vec!["FAILURE"], "MERGEABLE", false, Some("checks failing")),
+            (vec!["SUCCESS"], "CONFLICTING", false, Some("not mergeable")),
             (
                 vec!["SUCCESS"],
-                "CLEAN",
-                Some("APPROVED"),
-                Vec::new(),
+                "MERGEABLE",
                 true,
-                true,
-                PrLandStatus::Enabled(PrApprovalSignal::ApprovedReview),
-                true,
-            ),
-            (
-                vec!["SUCCESS"],
-                "CLEAN",
-                None,
-                Vec::new(),
-                false,
-                false,
-                PrLandStatus::AwaitingApproval,
-                false,
-            ),
-            (
-                vec!["SUCCESS"],
-                "CLEAN",
-                None,
-                vec!["approved"],
-                false,
-                true,
-                PrLandStatus::Enabled(PrApprovalSignal::Label("approved".into())),
-                false,
-            ),
-            (
-                vec!["FAILURE"],
-                "CLEAN",
-                Some("APPROVED"),
-                Vec::new(),
-                true,
-                false,
-                PrLandStatus::Blocked,
-                true,
-            ),
-            (
-                vec!["SUCCESS"],
-                "BEHIND",
-                Some("APPROVED"),
-                Vec::new(),
-                false,
-                false,
-                PrLandStatus::Blocked,
-                false,
-            ),
-            (
-                Vec::new(),
-                "CLEAN",
-                Some("APPROVED"),
-                Vec::new(),
-                false,
-                false,
-                PrLandStatus::Blocked,
-                false,
+                Some("pull request is a draft"),
             ),
         ] {
-            let mut cached = detail(&states, merge, comment);
-            cached.review_decision = review.map(str::to_string);
-            cached.labels = labels.into_iter().map(str::to_string).collect();
+            let mut cached = detail(&states, "CLEAN", false);
+            cached.mergeable = Some(mergeable.into());
+            cached.is_draft = Some(draft);
             let item = PrItem {
                 summary: &summary,
                 cached_detail: Some(&cached),
                 observed_at: SystemTime::UNIX_EPOCH,
-                approval_label: "approved",
             };
-            let actions = item.actions();
-            assert!(actions
-                .iter()
-                .find(|action| action.kind == WorkActionKind::CheckOut)
-                .is_some_and(|action| action.enabled));
-            assert_eq!(
-                actions
-                    .iter()
-                    .find(|action| action.kind == WorkActionKind::Land)
-                    .map(|action| action.enabled),
-                Some(land)
-            );
-            assert_eq!(item.land_status(), status);
-            assert_eq!(
-                actions
-                    .iter()
-                    .find(|action| action.kind == WorkActionKind::FixInThread)
-                    .map(|action| action.enabled),
-                Some(fix)
-            );
+            assert_eq!(item.merge_disabled_reason(), expected);
         }
+    }
+
+    #[test]
+    fn pr_action_table_disables_ask_question_without_pr_context() {
+        let mut summary = item(7, PrAudience::Authored, 20);
+        summary.branch = None;
+        let item = PrItem {
+            summary: &summary,
+            cached_detail: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        let ask_question = item
+            .action_table(crate::config::MergeMethodConfig::Merge, false)
+            .into_iter()
+            .find(|action| action.kind == PrActionKind::AskQuestion)
+            .expect("ask question action");
+
+        assert_eq!(ask_question.disabled_reason, Some("checkout unavailable"));
+        assert!(!ask_question.enabled());
     }
 
     #[test]
@@ -1573,11 +1634,17 @@ mod tests {
         };
         assert!(!item.transition_enabled("In Progress"));
         assert!(item.transition_enabled("Done"));
-        assert!(!item
-            .actions()
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &summary, None, None, None, false,
+        );
+        let actions = crate::ui::ticket_actions::ticket_action_table(
+            &context,
+            crate::ui::ticket_actions::TicketActionMenuPage::Actions,
+        );
+        assert!(!actions
             .iter()
-            .find(|action| action.kind == WorkActionKind::LinkPr)
-            .is_some_and(|action| action.enabled));
+            .find(|action| action.action == crate::ui::ticket_actions::TicketAction::LinkPr)
+            .is_some_and(crate::ui::ticket_actions::TicketActionEntry::enabled));
 
         let branch = ticket_worktree_branch(
             crate::config::DEFAULT_BRANCH_PREFIX,

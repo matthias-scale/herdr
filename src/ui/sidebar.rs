@@ -22,6 +22,7 @@ use crate::detect::{Agent, AgentState};
 use crate::terminal::state::derive_completion_tier;
 use crate::terminal::state::CompletionTier;
 use crate::terminal::TerminalRuntimeRegistry;
+use crate::ui::work_list_detail::{PrAction, PrActionKind, PrActionPlacement, PrItem};
 use crate::ui::work_status::WorkGroupStatus;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
@@ -3413,10 +3414,7 @@ pub(crate) fn sidebar_work_group_activation(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarObjectMenuItem {
-    ClosePullRequest,
-    MarkPullRequestDraft,
-    MarkPullRequestReady,
-    CheckOut,
+    PullRequest(PrActionKind),
     Ticket(crate::ui::ticket_actions::TicketAction),
     StartThread,
     CopyMissiveUrl,
@@ -3425,10 +3423,7 @@ pub(crate) enum SidebarObjectMenuItem {
 impl SidebarObjectMenuItem {
     pub(crate) fn label(self) -> String {
         match self {
-            Self::ClosePullRequest => "Close".into(),
-            Self::MarkPullRequestDraft => "Mark draft".into(),
-            Self::MarkPullRequestReady => "Mark ready".into(),
-            Self::CheckOut => "Check out".into(),
+            Self::PullRequest(_) => String::new(),
             Self::Ticket(action) => action.label(),
             Self::StartThread => "Start thread".into(),
             Self::CopyMissiveUrl => "Open in Missive".into(),
@@ -3492,12 +3487,10 @@ pub(crate) fn sidebar_object_menu_items(app: &AppState) -> Vec<SidebarObjectMenu
         return Vec::new();
     }
     if menu.target.starts_with("github:") {
-        vec![
-            SidebarObjectMenuItem::ClosePullRequest,
-            SidebarObjectMenuItem::MarkPullRequestDraft,
-            SidebarObjectMenuItem::MarkPullRequestReady,
-            SidebarObjectMenuItem::CheckOut,
-        ]
+        sidebar_pull_request_actions(app)
+            .into_iter()
+            .map(|action| SidebarObjectMenuItem::PullRequest(action.kind))
+            .collect()
     } else if menu.target.starts_with("linear:") {
         sidebar_ticket_action_entries(app)
             .into_iter()
@@ -3513,7 +3506,46 @@ pub(crate) fn sidebar_object_menu_items(app: &AppState) -> Vec<SidebarObjectMenu
     }
 }
 
-pub(crate) fn sidebar_pull_request_target(app: &AppState) -> Option<(String, u64)> {
+pub(crate) fn sidebar_pull_request_actions(app: &AppState) -> Vec<PrAction> {
+    let Some(menu) = app.sidebar_object_menu.as_ref() else {
+        return Vec::new();
+    };
+    let Some(target) = menu.target.strip_prefix("github:") else {
+        return Vec::new();
+    };
+    let Some(summary) = app.work_index_snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .items
+            .iter()
+            .find(|item| item.pr_url.as_deref() == Some(target))
+    }) else {
+        return Vec::new();
+    };
+    let key = crate::app::state::WorkItemKey {
+        repo: summary.repo.clone(),
+        pr_number: summary.pr_number,
+        pr_url: summary.pr_url.clone(),
+        ticket_id: None,
+    };
+    PrItem {
+        summary,
+        cached_detail: app.work_item_detail_cache.get(&key),
+        observed_at: std::time::SystemTime::now(),
+    }
+    .action_table(
+        app.pr_merge_method,
+        app.work_item_detail_cache
+            .get(&key)
+            .and_then(|detail| detail.head_ref_name.as_ref())
+            .or(summary.branch.as_ref())
+            .is_some(),
+    )
+    .into_iter()
+    .filter(|action| matches!(action.placement, PrActionPlacement::Menu { .. }))
+    .collect()
+}
+
+pub(crate) fn sidebar_pull_request_key(app: &AppState) -> Option<crate::app::state::WorkItemKey> {
     let target = app
         .sidebar_object_menu
         .as_ref()?
@@ -3525,7 +3557,12 @@ pub(crate) fn sidebar_pull_request_target(app: &AppState) -> Option<(String, u64
         .items
         .iter()
         .find(|item| item.pr_url.as_deref() == Some(target))?;
-    Some((item.repo.clone(), item.pr_number?))
+    Some(crate::app::state::WorkItemKey {
+        repo: item.repo.clone(),
+        pr_number: item.pr_number,
+        pr_url: item.pr_url.clone(),
+        ticket_id: None,
+    })
 }
 
 pub(crate) fn sidebar_ticket_target(app: &AppState) -> Option<String> {
@@ -5064,6 +5101,16 @@ pub(crate) fn sidebar_object_menu_labels(app: &AppState) -> Vec<String> {
             .map(crate::ui::ticket_actions::TicketActionEntry::display_label)
             .collect();
     }
+    if app
+        .sidebar_object_menu
+        .as_ref()
+        .is_some_and(|menu| menu.target.starts_with("github:"))
+    {
+        return sidebar_pull_request_actions(app)
+            .into_iter()
+            .map(|action| action.label)
+            .collect();
+    }
     sidebar_object_menu_items(app)
         .into_iter()
         .map(SidebarObjectMenuItem::label)
@@ -5075,6 +5122,23 @@ pub(crate) fn sidebar_object_menu_layout(
     area: Rect,
 ) -> Option<super::dropdown::DropdownLayout> {
     let anchor = sidebar_object_menu_anchor_rect(app)?;
+    if app
+        .sidebar_object_menu
+        .as_ref()
+        .is_some_and(|menu| menu.target.starts_with("github:"))
+    {
+        let actions = sidebar_pull_request_actions(app);
+        let selected = app
+            .sidebar_object_menu
+            .as_ref()
+            .map_or(0, |menu| menu.selected);
+        return super::pr_actions::layout(
+            area,
+            anchor,
+            &actions,
+            crate::app::state::PrActionMenuState { selected },
+        );
+    }
     let labels = sidebar_object_menu_labels(app);
     let width = labels
         .iter()
@@ -5104,6 +5168,26 @@ pub(crate) fn sidebar_object_menu_item_at(
     col: u16,
     row: u16,
 ) -> Option<usize> {
+    if app
+        .sidebar_object_menu
+        .as_ref()
+        .is_some_and(|menu| menu.target.starts_with("github:"))
+    {
+        let anchor = sidebar_object_menu_anchor_rect(app)?;
+        let actions = sidebar_pull_request_actions(app);
+        let selected = app
+            .sidebar_object_menu
+            .as_ref()
+            .map_or(0, |menu| menu.selected);
+        return super::pr_actions::hit_test(
+            area,
+            anchor,
+            &actions,
+            crate::app::state::PrActionMenuState { selected },
+            col,
+            row,
+        );
+    }
     let layout = sidebar_object_menu_layout(app, area)?;
     super::dropdown::hit_test(&layout, col, row)
 }
@@ -5112,6 +5196,23 @@ pub(super) fn render_sidebar_object_menu(app: &AppState, frame: &mut Frame) {
     let Some(menu) = app.sidebar_object_menu.as_ref() else {
         return;
     };
+    if menu.target.starts_with("github:") {
+        let Some(anchor) = sidebar_object_menu_anchor_rect(app) else {
+            return;
+        };
+        let actions = sidebar_pull_request_actions(app);
+        super::pr_actions::render(
+            app,
+            frame,
+            frame.area(),
+            anchor,
+            &actions,
+            crate::app::state::PrActionMenuState {
+                selected: menu.selected,
+            },
+        );
+        return;
+    }
     let Some(layout) = sidebar_object_menu_layout(app, frame.area()) else {
         if let Some(anchor) = sidebar_object_menu_anchor_rect(app) {
             frame.render_widget(
@@ -10495,7 +10596,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         for (target, expected) in [
             (
                 "github:https://github.com/scalable-so/herdr/pull/159",
-                vec!["Close", "Mark draft", "Mark ready", "Check out"],
+                vec![
+                    "Refresh",
+                    "Ask a question",
+                    "Explain this PR",
+                    "Fix findings in a thread",
+                    "Convert to draft",
+                    "Enable auto-merge",
+                    "Merge",
+                    "Squash",
+                    "Rebase",
+                    "Open on GitHub",
+                    "Copy link",
+                    "Close pull request",
+                ],
             ),
             (
                 "linear:SCA-3102",

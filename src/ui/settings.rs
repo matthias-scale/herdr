@@ -430,9 +430,9 @@ fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect)
             "worktrees.directory",
         ),
         (
-            "landing approval label",
-            app.land_approval_label.clone(),
-            "land.approval_label",
+            "pull request merge method",
+            app.pr_merge_method.label().to_string(),
+            "source_control.merge_method",
         ),
     ];
     let width = body.width as usize;

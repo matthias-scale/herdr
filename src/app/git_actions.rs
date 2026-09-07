@@ -39,6 +39,7 @@ enum GitActionPanePhase {
 #[derive(Debug, Clone)]
 enum BottomActionCompletion {
     Git(GitAction),
+    Pr,
     User,
     AddProjectClone {
         target: std::path::PathBuf,
@@ -239,6 +240,18 @@ pub(crate) fn wrapped_user_command(command: &str) -> String {
     )
 }
 
+pub(crate) fn wrapped_argv(argv: &[String]) -> String {
+    let command = argv
+        .iter()
+        .map(|argument| shell_single_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"sh -c {}; status=$?; printf "\n__t3_exit=%s\n" "$status""#,
+        shell_single_quote(&command)
+    )
+}
+
 pub(crate) fn wrapped_clone_command(
     git_program: &std::path::Path,
     url: &str,
@@ -301,8 +314,8 @@ fn apply_pr_url(terminal: &mut crate::terminal::TerminalState, url: &str) -> Res
 }
 
 impl App {
-    pub(crate) fn apply_pr_land_request(&mut self) -> bool {
-        let Some(request) = self.state.request_pr_land.take() else {
+    pub(crate) fn apply_pr_command_request(&mut self) -> bool {
+        let Some(request) = self.state.request_pr_command.take() else {
             return false;
         };
         let cwd = self.state.workspaces.iter().find_map(|workspace| {
@@ -321,53 +334,14 @@ impl App {
                 });
             matches.then(|| workspace.identity_cwd.clone())
         });
-        let Some(ws_idx) = self.state.active else {
-            return false;
-        };
-        let before = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(crate::workspace::Workspace::focused_pane_id);
-        self.runtime_pane_split(
-            "tui.pr-land.split",
-            crate::api::schema::PaneSplitParams {
-                workspace_id: None,
-                target_pane_id: None,
-                direction: crate::api::schema::SplitDirection::Down,
-                ratio: None,
-                cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
-                focus: true,
-                env: Default::default(),
-                work_context: None,
-            },
-        );
-        let Some(pane_id) = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(crate::workspace::Workspace::focused_pane_id)
-            .filter(|pane_id| Some(*pane_id) != before)
-        else {
-            return false;
-        };
-        let Some(runtime) =
-            self.state
-                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-        else {
-            return false;
-        };
-        if !request
-            .head_sha
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-        {
-            tracing::warn!("refusing PR land request with a non-hex head SHA");
+        let argv = pr_command_argv(&self.work_index_gh_program(), &request);
+        let spawned =
+            self.spawn_bottom_action_pane(wrapped_argv(&argv), BottomActionCompletion::Pr, cwd);
+        if !spawned {
             return false;
         }
-        let command = pr_land_argv(&request).join(" ");
-        runtime.send_bytes_after(Bytes::from(format!("{command}\r")), COMMAND_SEND_DELAY);
         self.state.clear_work_view();
+        self.next_work_index_refresh = Instant::now();
         true
     }
 
@@ -673,6 +647,9 @@ impl App {
                     if matches!(&state.completion, BottomActionCompletion::Git(_)) {
                         self.mark_git_status_refresh_due(now);
                     }
+                    if matches!(&state.completion, BottomActionCompletion::Pr) {
+                        self.next_work_index_refresh = now;
+                    }
                     if let Some(action_state) = self.git_action_panes.get_mut(&pane_id) {
                         action_state.phase = GitActionPanePhase::Succeeded {
                             close_at: now + SUCCESS_CLOSE_DELAY,
@@ -721,16 +698,24 @@ impl App {
     }
 }
 
-pub(crate) fn pr_land_argv(request: &crate::app::state::PrLandConfirmation) -> Vec<String> {
-    vec![
-        "gh".into(),
-        "pr".into(),
-        "merge".into(),
-        request.number.to_string(),
-        "--squash".into(),
-        "--match-head-commit".into(),
-        request.head_sha.clone(),
-    ]
+pub(crate) fn pr_command_argv(
+    gh_program: &std::path::Path,
+    request: &crate::app::state::PrCommandRequest,
+) -> Vec<String> {
+    let mut argv = vec![gh_program.to_string_lossy().into_owned(), "pr".into()];
+    match request.action {
+        crate::app::state::PrCommandAction::Merge(method) => {
+            argv.extend([
+                "merge".into(),
+                request.number.to_string(),
+                method.flag().into(),
+            ]);
+        }
+        crate::app::state::PrCommandAction::OpenOnGithub => {
+            argv.extend(["view".into(), request.number.to_string(), "--web".into()]);
+        }
+    }
+    argv
 }
 
 #[cfg(test)]
@@ -1086,24 +1071,30 @@ exit "$HERDR_TEST_GENERATOR_STATUS"
     }
 
     #[test]
-    fn land_command_is_bound_to_confirmed_head() {
-        let request = crate::app::state::PrLandConfirmation {
+    fn merge_commands_use_the_injected_gh_and_selected_method() {
+        for method in crate::config::MergeMethodConfig::ALL {
+            let request = crate::app::state::PrCommandRequest {
+                repo: "owner/repo".into(),
+                number: 42,
+                action: crate::app::state::PrCommandAction::Merge(method),
+            };
+            assert_eq!(
+                pr_command_argv(std::path::Path::new("/test/gh"), &request),
+                ["/test/gh", "pr", "merge", "42", method.flag()]
+            );
+        }
+    }
+
+    #[test]
+    fn open_on_github_uses_the_injected_gh() {
+        let request = crate::app::state::PrCommandRequest {
             repo: "owner/repo".into(),
             number: 42,
-            head_sha: "abc123".into(),
-            approval_signal: "approved review".into(),
+            action: crate::app::state::PrCommandAction::OpenOnGithub,
         };
         assert_eq!(
-            pr_land_argv(&request),
-            [
-                "gh",
-                "pr",
-                "merge",
-                "42",
-                "--squash",
-                "--match-head-commit",
-                "abc123"
-            ]
+            pr_command_argv(std::path::Path::new("/test/gh"), &request),
+            ["/test/gh", "pr", "view", "42", "--web"]
         );
     }
 

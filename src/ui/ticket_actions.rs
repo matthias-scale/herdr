@@ -1,12 +1,6 @@
 //! Shared Linear ticket actions for the full view, dock, and sidebar menu.
 
-use ratatui::{
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Clear, Paragraph},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 
 use crate::{
     app::state::{Palette, TicketTransitionChoice},
@@ -306,45 +300,14 @@ pub(crate) fn render_ticket_action_menu(
     let Some(layout) = ticket_action_menu_layout(anchor, area, context, state) else {
         return;
     };
-    let lines = entries
+    let rows = entries
         .iter()
-        .enumerate()
-        .skip(layout.first_visible)
-        .take(layout.visible_rows)
-        .map(|(index, item)| {
-            let selected = index == state.selected;
-            let mut style = Style::default().bg(if selected {
-                palette.surface1
-            } else {
-                palette.panel_bg
-            });
-            style = if item.enabled() {
-                style.fg(if selected {
-                    palette.text
-                } else {
-                    palette.subtext0
-                })
-            } else {
-                style.fg(palette.overlay0).add_modifier(Modifier::DIM)
-            };
-            if selected {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            Line::from(Span::styled(
-                format!(
-                    "{} {}",
-                    if selected { "▸" } else { " " },
-                    item.display_label()
-                ),
-                style,
-            ))
+        .map(|item| crate::ui::dropdown::DropdownMenuRow::Item {
+            label: item.display_label(),
+            enabled: item.enabled(),
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Clear, layout.rect);
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(palette.panel_bg)),
-        layout.list_rect,
-    );
+    crate::ui::dropdown::render_menu(palette, frame, &layout, &rows, state.selected);
 }
 
 #[cfg(test)]

@@ -826,7 +826,7 @@ impl App {
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
-            request_pr_land: None,
+            request_pr_command: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -978,7 +978,7 @@ impl App {
             dock_diff_focused: false,
             dock_pr_focused: false,
             dock_pr_checkout_menu: None,
-            dock_pr_pending_land: None,
+            dock_pr_action_menu: None,
             dock_diff_ignore_whitespace: config.ui.hide_whitespace_in_diff,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
@@ -1009,6 +1009,7 @@ impl App {
             dock_home_focus_unbound: false,
             dock_comment_draft: None,
             dock_pending_write: None,
+            pr_action_confirmation: None,
             dock_write_notice: None,
             dock_home_section: state::DockHomeSection::Prs,
             dock_home_detail_tab: state::DockHomeDetailTab::Overview,
@@ -1022,7 +1023,7 @@ impl App {
             work_item_detail_cache,
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
-            land_approval_label: config.land.approval_label.clone(),
+            pr_merge_method: config.source_control.merge_method,
             branch_prefix: config.source_control.branch_prefix.clone(),
             commit_message_model: config.source_control.commit_message_model.clone(),
             commit_stage_all: config.source_control.commit_stage_all,
@@ -1653,7 +1654,7 @@ impl App {
             if self.apply_save_add_action_request() {
                 needs_render = true;
             }
-            if self.apply_pr_land_request() {
+            if self.apply_pr_command_request() {
                 needs_render = true;
             }
 
@@ -2336,11 +2337,8 @@ impl App {
             self.state.usage_pricing = config.usage.clone();
         }
 
-        if !invalid_section("land") {
-            self.state.land_approval_label = config.land.approval_label.clone();
-        }
-
         if !invalid_section("source_control") {
+            self.state.pr_merge_method = config.source_control.merge_method;
             self.state.branch_prefix = config.source_control.branch_prefix.clone();
             self.state.commit_message_model = config.source_control.commit_message_model.clone();
             self.state.commit_stage_all = config.source_control.commit_stage_all;
@@ -5049,7 +5047,7 @@ mod tests {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = temp_config_path("settings-source-control-live-reload");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "[land]\napproval_label = 17\n").unwrap();
+        std::fs::write(&path, "[source_control]\nmerge_method = \"merge\"\n").unwrap();
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
@@ -5071,12 +5069,11 @@ mod tests {
         });
         let report = app.reload_config();
 
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
-        assert!(report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("invalid land config")));
-        assert_eq!(app.state.land_approval_label, "approved");
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.pr_merge_method,
+            crate::config::MergeMethodConfig::Merge
+        );
         assert!(crate::app::git_actions::wrapped_command(
             state::GitAction::Commit,
             &app.state.commit_message_model,
@@ -5103,7 +5100,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            "[land]\napproval_label = \"ship-it\"\n[source_control]\ncommit_message_model = 17\nbranch_prefix = \"ignored/\"\n[worktrees]\ndirectory = \"/tmp/herdr-live-worktrees\"\n",
+            "[source_control]\nmerge_method = \"squash\"\ncommit_message_model = 17\nbranch_prefix = \"ignored/\"\n[worktrees]\ndirectory = \"/tmp/herdr-live-worktrees\"\n",
         )
         .unwrap();
         let report = app.reload_config();
@@ -5112,7 +5109,10 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("invalid source control config")));
-        assert_eq!(app.state.land_approval_label, "ship-it");
+        assert_eq!(
+            app.state.pr_merge_method,
+            crate::config::MergeMethodConfig::Merge
+        );
         assert_eq!(app.state.commit_message_model, "claude-opus-5");
         assert_eq!(app.state.branch_prefix, "live/");
 

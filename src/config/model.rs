@@ -361,7 +361,6 @@ pub struct Config {
     pub work_index: WorkIndexConfig,
     pub missive: MissiveConfig,
     pub usage: UsageConfig,
-    pub land: LandConfig,
     pub source_control: SourceControlConfig,
     pub files: FilesConfig,
     pub panel: PanelConfig,
@@ -541,31 +540,46 @@ pub struct FilesConfig {
     pub icons: FilesIconConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-pub struct LandConfig {
-    /// PR label accepted as an explicit landing approval signal.
-    pub approval_label: String,
+/// Prefix Herdr puts in front of a derived worktree branch name.
+pub const DEFAULT_BRANCH_PREFIX: &str = "issue/";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethodConfig {
+    #[default]
+    Merge,
+    Squash,
+    Rebase,
 }
 
-pub const DEFAULT_LAND_APPROVAL_LABEL: &str = "approved";
+impl MergeMethodConfig {
+    pub(crate) const ALL: [Self; 3] = [Self::Merge, Self::Squash, Self::Rebase];
 
-impl Default for LandConfig {
-    fn default() -> Self {
-        Self {
-            approval_label: DEFAULT_LAND_APPROVAL_LABEL.into(),
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    pub(crate) const fn flag(self) -> &'static str {
+        match self {
+            Self::Merge => "--merge",
+            Self::Squash => "--squash",
+            Self::Rebase => "--rebase",
         }
     }
 }
 
-/// Prefix Herdr puts in front of a derived worktree branch name.
-pub const DEFAULT_BRANCH_PREFIX: &str = "issue/";
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SourceControlConfig {
-    /// Model passed to Claude Code or Codex to draft a commit message. Empty
-    /// leaves `git commit` on its editor path.
+    /// Merge strategy used by the primary pull-request action and auto-merge.
+    pub merge_method: MergeMethodConfig,
+    /// Model name exported to the Commit action as
+    /// `HERDR_COMMIT_MESSAGE_MODEL`, so a `prepare-commit-msg` hook can draft
+    /// the message with it. Empty leaves `git commit` exactly as it was.
     pub commit_message_model: String,
     /// Stage every working-tree change before generating and committing.
     pub commit_stage_all: bool,
@@ -576,6 +590,7 @@ pub struct SourceControlConfig {
 impl Default for SourceControlConfig {
     fn default() -> Self {
         Self {
+            merge_method: MergeMethodConfig::Merge,
             commit_message_model: String::new(),
             commit_stage_all: false,
             branch_prefix: DEFAULT_BRANCH_PREFIX.into(),
@@ -2599,24 +2614,22 @@ scrollback_lines = 12345
     #[test]
     fn source_control_keys_default_to_todays_behaviour_and_parse() {
         let defaults = Config::default().source_control;
+        assert_eq!(defaults.merge_method, MergeMethodConfig::Merge);
         assert_eq!(defaults.commit_message_model, "");
         assert!(!defaults.commit_stage_all);
         assert_eq!(defaults.branch_prefix, "issue/");
 
         let config: Config = toml::from_str(
-            "[source_control]\ncommit_message_model = \"claude-opus-5\"\ncommit_stage_all = true\nbranch_prefix = \"feat/\"\n",
+            "[source_control]\nmerge_method = \"rebase\"\ncommit_message_model = \"claude-opus-5\"\ncommit_stage_all = true\nbranch_prefix = \"feat/\"\n",
         )
         .unwrap();
+        assert_eq!(
+            config.source_control.merge_method,
+            MergeMethodConfig::Rebase
+        );
         assert_eq!(config.source_control.commit_message_model, "claude-opus-5");
         assert!(config.source_control.commit_stage_all);
         assert_eq!(config.source_control.branch_prefix, "feat/");
-    }
-
-    #[test]
-    fn land_approval_label_defaults_and_parses() {
-        assert_eq!(Config::default().land.approval_label, "approved");
-        let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
-        assert_eq!(config.land.approval_label, "ship-it");
     }
 
     #[test]
