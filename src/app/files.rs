@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -9,18 +10,14 @@ use crate::events::AppEvent;
 use crate::files::{FileTreeRow, FileTreeRowKind};
 use crate::input::TerminalKey;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FileOpenTarget {
-    DockEditor,
-    RightSplit,
-}
+const FILE_DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+const FILE_PREVIEW_LIMIT_BYTES: u64 = 512 * 1024;
 
-pub(crate) fn file_open_target(editor_open: bool) -> FileOpenTarget {
-    if editor_open {
-        FileOpenTarget::DockEditor
-    } else {
-        FileOpenTarget::RightSplit
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FileClickAction {
+    DirectoryToggled,
+    Preview(PathBuf),
+    Open(PathBuf),
 }
 
 impl AppState {
@@ -119,8 +116,13 @@ impl AppState {
         }
     }
 
-    pub(crate) fn click_dock_file_row(&mut self, col: u16, row: u16) -> bool {
-        let Some(hit) = self
+    pub(crate) fn click_dock_file_row_at(
+        &mut self,
+        col: u16,
+        row: u16,
+        now: std::time::Instant,
+    ) -> Option<FileClickAction> {
+        let hit = self
             .view
             .dock_file_row_hit_areas
             .iter()
@@ -130,16 +132,31 @@ impl AppState {
                     && row >= hit.rect.y
                     && row < hit.rect.y.saturating_add(hit.rect.height)
             })
-            .cloned()
-        else {
-            return false;
-        };
+            .cloned()?;
         self.dock_files_selection = Some(hit.path.clone());
         self.dock_files_focused = true;
-        if hit.kind == FileTreeRowKind::Directory && !self.dock_files_collapsed.remove(&hit.path) {
-            self.dock_files_collapsed.insert(hit.path);
+        if hit.kind == FileTreeRowKind::Directory {
+            self.dock_files_last_click = None;
+            if !self.dock_files_collapsed.remove(&hit.path) {
+                self.dock_files_collapsed.insert(hit.path);
+            }
+            return Some(FileClickAction::DirectoryToggled);
         }
-        true
+        let double_click = self
+            .dock_files_last_click
+            .as_ref()
+            .is_some_and(|(path, clicked_at)| {
+                path == &hit.path
+                    && now
+                        .checked_duration_since(*clicked_at)
+                        .is_some_and(|age| age <= FILE_DOUBLE_CLICK_WINDOW)
+            });
+        self.dock_files_last_click = (!double_click).then(|| (hit.path.clone(), now));
+        Some(if double_click {
+            FileClickAction::Open(hit.path)
+        } else {
+            FileClickAction::Preview(hit.path)
+        })
     }
 
     pub(crate) fn cycle_dock_files_sort(&mut self) {
@@ -273,6 +290,9 @@ impl App {
         }
         let event = key.as_key_event();
         match event.code {
+            KeyCode::Esc if self.state.dock_editor_preview.is_some() => {
+                self.state.dock_editor_preview = None;
+            }
             KeyCode::Esc if !self.state.dock_files_filter.is_empty() => {
                 self.state.dock_files_filter.clear();
                 self.state.dock_scroll = 0;
@@ -296,7 +316,7 @@ impl App {
                 Some(row) if row.kind == FileTreeRowKind::Directory => {
                     self.state.toggle_selected_dock_directory();
                 }
-                Some(row) => self.open_dock_file(row.path),
+                Some(row) => self.open_dock_file_in_editor(row.path),
                 None => {}
             },
             KeyCode::Backspace if event.modifiers.is_empty() => {
@@ -330,18 +350,28 @@ impl App {
         true
     }
 
-    fn open_dock_file(&mut self, relative: PathBuf) {
+    pub(crate) fn preview_dock_file(&mut self, relative: PathBuf) {
         let Some(root) = self.state.dock_files_root.clone() else {
             return;
         };
         let path = root.join(relative);
-        match file_open_target(self.state.dock_open_surfaces.contains(&DockSurface::Editor)) {
-            FileOpenTarget::DockEditor => self.open_file_in_dock_editor(path),
-            FileOpenTarget::RightSplit => self.open_file_in_right_split(path),
-        }
+        self.state.dock_editor_preview = Some(read_file_preview(path));
+    }
+
+    pub(crate) fn refresh_dock_editor_preview(&mut self) {
+        let Some(path) = self
+            .state
+            .dock_editor_preview
+            .as_ref()
+            .map(|preview| preview.path.clone())
+        else {
+            return;
+        };
+        self.state.dock_editor_preview = Some(read_file_preview(path));
     }
 
     pub(crate) fn open_file_in_dock_editor(&mut self, path: PathBuf) {
+        self.state.dock_editor_preview = None;
         self.state.open_dock_surface(DockSurface::Editor);
         self.state.dock_editor_focused = true;
         self.state.dock_files_focused = false;
@@ -362,112 +392,56 @@ impl App {
         let Some(runtime) = self.terminal_runtimes.get(&terminal_id) else {
             return;
         };
-        let escaped = vim_fnameescape(&path.to_string_lossy());
-        let command = format!("\x1b:e {escaped}\r");
-        let _ = runtime.try_send_bytes(Bytes::from(command));
+        let escaped = crate::app::repo_editor::vim_fnameescape(&path.to_string_lossy());
+        let _ = runtime.try_send_bytes(Bytes::from(format!("\x1b:e {escaped}\r")));
     }
 
-    fn open_file_in_right_split(&mut self, path: PathBuf) {
-        let before = self.state.current_pane_focus_target();
-        self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Right);
-        let after = self.state.current_pane_focus_target();
-        if after.is_none() || after == before {
-            return;
-        }
-        let Some(ws_idx) = self.state.active else {
-            return;
-        };
-        let Some(runtime) = self
+    pub(crate) fn open_dock_editor_preview_in_editor(&mut self) {
+        let Some(path) = self
             .state
-            .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            .dock_editor_preview
+            .take()
+            .map(|preview| preview.path)
         else {
             return;
         };
-        let Some(argv) = crate::ui::dock::editor::editor_argv_candidates(Some(&path))
-            .into_iter()
-            .next()
-        else {
+        self.open_repo_editor_file(path);
+    }
+
+    pub(crate) fn open_dock_file_in_editor(&mut self, relative: PathBuf) {
+        let Some(root) = self.state.dock_files_root.clone() else {
             return;
         };
-        let Some(shell_name) = crate::app::agents::available_shell_name(runtime) else {
-            return;
-        };
-        let Some(command) = crate::platform::interactive_shell_command(&argv, &shell_name) else {
-            return;
-        };
-        let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
-        let _ = runtime.try_send_bytes(Bytes::from(bytes));
-        self.state.dock_files_focused = false;
+        self.state.dock_editor_preview = None;
+        self.open_repo_editor_file(root.join(relative));
     }
 }
 
-fn vim_fnameescape(path: &str) -> String {
-    path.chars()
-        .flat_map(|character| {
-            if matches!(character, ' ' | '\\' | '|' | '%' | '#') {
-                vec!['\\', character]
-            } else {
-                vec![character]
-            }
-        })
-        .collect()
+fn read_file_preview(path: PathBuf) -> crate::app::state::DockEditorPreview {
+    let mut content = Vec::new();
+    let result = std::fs::File::open(&path).and_then(|file| {
+        file.take(FILE_PREVIEW_LIMIT_BYTES + 1)
+            .read_to_end(&mut content)
+    });
+    let mut notice = result.err().map(|error| format!("render failure: {error}"));
+    if notice.is_none() && content.contains(&0) {
+        content.clear();
+        notice = Some("binary file cannot be previewed".to_string());
+    }
+    if content.len() > FILE_PREVIEW_LIMIT_BYTES as usize {
+        content.truncate(FILE_PREVIEW_LIMIT_BYTES as usize);
+        notice = Some("preview truncated at 512 KiB".to_string());
+    }
+    crate::app::state::DockEditorPreview {
+        path,
+        content: String::from_utf8_lossy(&content).into_owned(),
+        notice,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn open_action_targets_editor_when_open_and_right_split_when_not() {
-        assert_eq!(file_open_target(true), FileOpenTarget::DockEditor);
-        assert_eq!(file_open_target(false), FileOpenTarget::RightSplit);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn existing_editor_receives_an_escaped_edit_command() {
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            tokio::sync::mpsc::unbounded_channel().1,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("editor")];
-        app.state.active = Some(0);
-        app.state.ensure_test_terminals();
-        let pane_id = app.state.workspaces[0]
-            .focused_pane_id()
-            .expect("focused pane");
-        let pane_terminal_id = app.state.workspaces[0]
-            .terminal_id(pane_id)
-            .expect("pane terminal")
-            .clone();
-        app.state
-            .terminals
-            .get_mut(&pane_terminal_id)
-            .expect("pane state")
-            .detected_agent = Some(crate::detect::Agent::Codex);
-        let editor_terminal_id = crate::terminal::TerminalId::alloc();
-        let (runtime, mut input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
-        app.terminal_runtimes
-            .insert(editor_terminal_id.clone(), runtime);
-        app.state.dock_editor_sessions.insert(
-            pane_id,
-            crate::app::state::DockEditorSession {
-                pane_id: crate::layout::PaneId::alloc(),
-                terminal_id: editor_terminal_id,
-            },
-        );
-        app.state.dock_collapsed = false;
-
-        app.open_file_in_dock_editor(PathBuf::from("/repo/two words.rs"));
-
-        assert_eq!(
-            input.try_recv().expect("editor input"),
-            Bytes::from_static(b"\x1b:e /repo/two\\ words.rs\r")
-        );
-        assert_eq!(app.state.dock_tab, Some(DockSurface::Editor));
-    }
 
     #[test]
     fn directory_keys_collapse_and_expand() {
@@ -488,6 +462,7 @@ mod tests {
                 files: vec![crate::files::FileRecord {
                     path: PathBuf::from("src/lib.rs"),
                     status: None,
+                    kind: FileTreeRowKind::File,
                 }],
                 fingerprint: 1,
                 source: crate::files::FileTreeSource::Git,
@@ -559,10 +534,103 @@ mod tests {
             rect: ratatui::layout::Rect::new(20, 4, 12, 1),
         }];
 
-        assert!(state.click_dock_file_row(24, 4));
+        let now = std::time::Instant::now();
+        assert_eq!(
+            state.click_dock_file_row_at(24, 4, now),
+            Some(FileClickAction::DirectoryToggled)
+        );
         assert!(state.dock_files_collapsed.contains(Path::new("src")));
-        assert!(state.click_dock_file_row(24, 4));
+        assert_eq!(
+            state.click_dock_file_row_at(24, 4, now + std::time::Duration::from_millis(50)),
+            Some(FileClickAction::DirectoryToggled)
+        );
         assert!(!state.dock_files_collapsed.contains(Path::new("src")));
+    }
+
+    #[test]
+    fn file_click_dispatch_distinguishes_single_and_double_clicks() {
+        let mut state = AppState::test_new();
+        state.view.dock_file_row_hit_areas = vec![crate::app::state::DockFileRowHitArea {
+            path: PathBuf::from("src/lib.rs"),
+            kind: FileTreeRowKind::File,
+            rect: ratatui::layout::Rect::new(20, 4, 12, 1),
+        }];
+        let now = std::time::Instant::now();
+
+        assert_eq!(
+            state.click_dock_file_row_at(24, 4, now),
+            Some(FileClickAction::Preview(PathBuf::from("src/lib.rs")))
+        );
+        assert_eq!(
+            state.click_dock_file_row_at(24, 4, now + std::time::Duration::from_millis(200)),
+            Some(FileClickAction::Open(PathBuf::from("src/lib.rs")))
+        );
+        assert_eq!(
+            state.click_dock_file_row_at(24, 4, now + std::time::Duration::from_secs(1)),
+            Some(FileClickAction::Preview(PathBuf::from("src/lib.rs")))
+        );
+    }
+
+    #[test]
+    fn preview_replaces_the_previous_file_without_starting_a_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-file-preview-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("preview root");
+        std::fs::write(root.join("first.rs"), "fn first() {}\n").expect("first file");
+        std::fs::write(root.join("second.py"), "def second():\n    pass\n").expect("second file");
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.dock_files_root = Some(root.clone());
+        let runtime_count = app.terminal_runtimes.len();
+
+        app.preview_dock_file(PathBuf::from("first.rs"));
+        app.preview_dock_file(PathBuf::from("second.py"));
+
+        let preview = app
+            .state
+            .dock_editor_preview
+            .as_ref()
+            .expect("second preview");
+        assert_eq!(preview.path, root.join("second.py"));
+        assert!(preview.content.contains("def second"));
+        assert_eq!(app.terminal_runtimes.len(), runtime_count);
+        std::fs::remove_dir_all(root).expect("remove preview root");
+    }
+
+    #[test]
+    fn escape_closes_a_preview_before_leaving_the_files_surface() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(DockSurface::Files);
+        app.state.dock_files_focused = true;
+        app.state.dock_editor_preview = Some(crate::app::state::DockEditorPreview {
+            path: PathBuf::from("/repo/src/lib.rs"),
+            content: "fn main() {}".to_string(),
+            notice: None,
+        });
+
+        assert!(app.handle_dock_files_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
+
+        assert!(app.state.dock_editor_preview.is_none());
+        assert!(app.state.dock_files_focused);
     }
 
     #[test]

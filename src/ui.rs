@@ -669,6 +669,14 @@ fn compute_view_internal(
         } else {
             (Rect::default(), Rect::default())
         };
+    let editor_preview_area =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Editor) {
+            dock_body_rect
+        } else {
+            terminal_area
+        };
+    let (editor_preview_refresh_rect, editor_preview_open_rect) =
+        dock::editor::preview_action_hit_areas(app, editor_preview_area);
     let dock_agent_row_hit_areas =
         if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Agents) {
             dock::agents::row_hit_areas(app, dock_body_rect)
@@ -769,6 +777,8 @@ fn compute_view_internal(
         dock_file_row_hit_areas,
         dock_files_refresh_rect,
         dock_files_sort_rect,
+        editor_preview_refresh_rect,
+        editor_preview_open_rect,
         dock_agent_row_hit_areas,
         dock_body_rect,
     };
@@ -951,6 +961,8 @@ fn compute_mobile_view(
     } else {
         Vec::new()
     };
+    let (editor_preview_refresh_rect, editor_preview_open_rect) =
+        dock::editor::preview_action_hit_areas(app, terminal_area);
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
@@ -1017,6 +1029,8 @@ fn compute_mobile_view(
         dock_file_row_hit_areas: Vec::new(),
         dock_files_refresh_rect: Rect::default(),
         dock_files_sort_rect: Rect::default(),
+        editor_preview_refresh_rect,
+        editor_preview_open_rect,
         dock_agent_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
@@ -1081,7 +1095,11 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_action_buttons(app, frame);
     }
-    if let Some(detail) = app.symphony_detail.as_ref() {
+    let preview_is_in_dock =
+        !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Editor);
+    if app.dock_editor_preview.is_some() && !preview_is_in_dock {
+        dock::editor::render_editor_preview(app, frame, terminal_area);
+    } else if let Some(detail) = app.symphony_detail.as_ref() {
         render_symphony(
             &app.palette,
             &detail.snapshot,
