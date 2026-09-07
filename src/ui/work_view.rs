@@ -577,7 +577,7 @@ fn render_ticket_board(app: &AppState, state: &WorkViewState, area: Rect, frame:
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             ratatui::text::Span::styled(
-                format!("Tickets{refresh} "),
+                "Tickets ",
                 Style::default()
                     .fg(app.palette.text)
                     .add_modifier(Modifier::BOLD),
@@ -591,6 +591,7 @@ fn render_ticket_board(app: &AppState, state: &WorkViewState, area: Rect, frame:
                     .bg(app.palette.surface0)
                     .add_modifier(Modifier::BOLD),
             ),
+            ratatui::text::Span::styled(refresh, Style::default().fg(app.palette.subtext0)),
         ])),
         Rect::new(area.x, area.y, area.width, 1),
     );
@@ -1826,6 +1827,13 @@ mod tests {
         assert!(text.contains("List | Board"), "{text}");
         assert!(text.contains("In Progress"), "{text}");
         assert!(text.contains("SCA-5"), "{text}");
+
+        state.refreshing = true;
+        let narrow_text = rendered_text_at(&state, 80, 24);
+        assert!(
+            narrow_text.contains("Tickets List | Board"),
+            "{narrow_text}"
+        );
     }
 
     #[test]
