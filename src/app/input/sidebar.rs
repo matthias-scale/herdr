@@ -381,9 +381,9 @@ impl AppState {
         true
     }
 
-    /// `Enter` on a selected dim Linear or Missive item opens its composer;
-    /// `n` dispatches immediately. The selection only exists while one is
-    /// selected, so this never swallows a keystroke meant for a pane.
+    /// `Enter` opens a selected provider object without creating a pane; `n`
+    /// keeps the direct thread-start shortcut. The selection only exists while
+    /// one row is selected, so this never swallows input meant for a pane.
     pub(crate) fn handle_sidebar_work_group_key(
         &mut self,
         key: KeyEvent,
@@ -392,23 +392,7 @@ impl AppState {
             return SidebarWorkGroupKeyAction::Ignored;
         };
         match key.code {
-            KeyCode::Enter
-                if key.modifiers.is_empty()
-                    && selected != crate::ui::sidebar_show_more_key(self.sidebar_group_mode)
-                    && matches!(
-                        self.sidebar_group_mode,
-                        crate::app::state::SidebarGroupMode::LinearTeam
-                            | crate::app::state::SidebarGroupMode::Missive
-                    ) =>
-            {
-                self.sidebar_selected_work_group = None;
-                if !self.open_home_composer_for_work_group(&selected) {
-                    self.config_diagnostic =
-                        Some("unassigned object is no longer available".to_string());
-                }
-                SidebarWorkGroupKeyAction::Consumed
-            }
-            KeyCode::Enter | KeyCode::Char('n') if key.modifiers.is_empty() => {
+            KeyCode::Enter if key.modifiers.is_empty() => {
                 self.sidebar_selected_work_group = None;
                 if selected == crate::ui::sidebar_show_more_key(self.sidebar_group_mode) {
                     self.sidebar_unassigned_expanded_views
@@ -418,8 +402,16 @@ impl AppState {
                         self.view.sidebar_rect,
                         self.workspace_scroll,
                     );
-                    return SidebarWorkGroupKeyAction::Consumed;
+                } else if !self.open_sidebar_unassigned_object(&selected) {
+                    match self.sidebar_unassigned_dispatch_plan(&selected) {
+                        Ok(plan) => return SidebarWorkGroupKeyAction::Dispatch(Box::new(plan)),
+                        Err(error) => self.config_diagnostic = Some(error),
+                    }
                 }
+                SidebarWorkGroupKeyAction::Consumed
+            }
+            KeyCode::Char('n') if key.modifiers.is_empty() => {
+                self.sidebar_selected_work_group = None;
                 match self.sidebar_unassigned_dispatch_plan(&selected) {
                     Ok(plan) => SidebarWorkGroupKeyAction::Dispatch(Box::new(plan)),
                     Err(error) => {
@@ -1517,6 +1509,52 @@ mod tests {
             crate::ui::sidebar_object_menu_layout_for_test(&app.state, Rect::new(0, 0, 80, 24))
                 .expect("sidebar action menu");
         assert_eq!(layout.rect.y, row + 1);
+    }
+
+    #[test]
+    fn f27_sidebar_row_click_opens_pr_tab_without_starting_a_pane() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.state.sidebar_work_filter.github.assignee = None;
+        app.state.dock_collapsed = false;
+        app.state
+            .work_index_snapshot
+            .as_mut()
+            .and_then(|snapshot| {
+                snapshot
+                    .items
+                    .iter_mut()
+                    .find(|item| item.pr_number == Some(159))
+            })
+            .expect("pull request fixture")
+            .source
+            .github = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let target = "github:https://github.com/scalable-so/herdr/pull/159";
+        let row = (app.state.view.sidebar_rect.y..app.state.view.sidebar_rect.bottom())
+            .find(|row| {
+                crate::ui::sidebar_dim_header_at(&app.state, *row).as_deref() == Some(target)
+            })
+            .expect("No agent yet PR row");
+        let pane_count = app.state.workspaces[0].tabs[0].panes.len();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            app.state.view.sidebar_rect.x.saturating_add(2),
+            row,
+        ));
+
+        assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), pane_count);
+        assert!(app.state.home.is_none());
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Pr));
+        assert_eq!(app.state.dock_tab_label(0), "#159");
+        assert_eq!(
+            app.state
+                .active_dock_object(crate::app::DockSurface::Pr)
+                .map(|object| object.key.as_str()),
+            Some("https://github.com/scalable-so/herdr/pull/159")
+        );
     }
 
     #[test]
