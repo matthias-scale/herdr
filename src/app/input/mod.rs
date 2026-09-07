@@ -2596,7 +2596,8 @@ impl App {
                 | crate::work_index::WorkItemWrite::ClosePullRequest { .. }
                 | crate::work_index::WorkItemWrite::MarkPullRequestDraft { .. }
                 | crate::work_index::WorkItemWrite::MarkPullRequestReady { .. }
-                | crate::work_index::WorkItemWrite::MergePullRequest { .. } => {
+                | crate::work_index::WorkItemWrite::MergePullRequest { .. }
+                | crate::work_index::WorkItemWrite::AddPullRequestReviewer { .. } => {
                     self.work_index_cache_bypass.github = true;
                 }
                 _ => self.work_index_cache_bypass.linear = true,
@@ -6993,6 +6994,97 @@ navigate_workspace_down = "ctrl+j"
                 ..Default::default()
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_reviewer_assignment_refreshes_pr_detail_with_cache_bypass() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut app, key) = pr_action_test_app();
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "herdr-reviewer-refresh-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture directory");
+        let log = fixture_dir.join("detail.log");
+        let argv_log = fixture_dir.join("argv.log");
+        let gh = fixture_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "pr edit 7 --add-reviewer grace -R owner/repo") exit 0 ;;
+  "pr view 7 --repo owner/repo --json "*)
+    printf '%s\n' detail >> '{}'
+    printf '%s' '{{"number":7,"title":"Detail","url":"https://github.com/owner/repo/pull/7","reviews":[{{"author":{{"login":"grace"}}}}]}}'
+    ;;
+  "api repos/owner/repo/issues/7/timeline"*) printf '%s' '[]' ;;
+  "api graphql"*) printf '%s' '{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[]}}}}}}}}}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                argv_log.display(),
+                log.display()
+            ),
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(&gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("make fake gh executable");
+        app.work_index_gh_program_override = Some(gh);
+        app.work_index_provider_cache_root_override = Some(fixture_dir.clone());
+
+        app.add_selected_pr_reviewer("grace".into());
+
+        assert!(app.work_index_cache_bypass.github);
+        assert!(!app.work_index_cache_bypass.linear);
+        // The scheduled index refresh invalidates detail entries before the
+        // focused surface hydrates the selected PR again.
+        app.state.work_item_detail_cache.clear();
+        app.start_work_item_detail_refresh_if_due(
+            std::time::Instant::now(),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let event = loop {
+            match app.event_rx.try_recv() {
+                Ok(event) => break event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!(
+                    "detail refresh event missing: {error}; argv: {}",
+                    std::fs::read_to_string(&argv_log).unwrap_or_default()
+                ),
+            }
+        };
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(app.handle_work_item_detail_refreshed(generation, details));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("read detail counter"),
+            "detail\n"
+        );
+        assert!(app
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .is_some_and(|detail| detail.reviewers == ["grace"]));
+        let _ = std::fs::remove_dir_all(fixture_dir);
     }
 
     #[test]
