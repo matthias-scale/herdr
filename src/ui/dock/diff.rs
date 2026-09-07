@@ -34,25 +34,16 @@ pub(crate) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let additions = entry.files.iter().map(|file| file.additions).sum::<usize>();
-    let deletions = entry.files.iter().map(|file| file.deletions).sum::<usize>();
-    let file_word = if entry.files.len() == 1 {
-        "file"
-    } else {
-        "files"
-    };
     let whitespace = if app.dock_diff_ignore_whitespace {
         "[w -w]"
     } else {
         "[w all]"
     };
+    let totals = diff_totals(entry)
+        .map(|totals| format!("   {totals}"))
+        .unwrap_or_default();
     let mut lines = vec![Line::from(Span::styled(
-        format!(
-            " base {} ← {}   {} {file_word} +{additions} −{deletions}",
-            key.base,
-            entry.branch,
-            entry.files.len()
-        ),
+        format!(" base {} ← {}{totals}", key.base, entry.branch),
         Style::default()
             .fg(app.palette.text)
             .add_modifier(Modifier::BOLD),
@@ -128,6 +119,23 @@ pub(crate) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
             1,
         ),
     );
+}
+
+fn diff_totals(entry: &DiffCacheEntry) -> Option<String> {
+    if entry.files.is_empty() {
+        return None;
+    }
+    let additions = entry.files.iter().map(|file| file.additions).sum::<usize>();
+    let deletions = entry.files.iter().map(|file| file.deletions).sum::<usize>();
+    let file_word = if entry.files.len() == 1 {
+        "file"
+    } else {
+        "files"
+    };
+    Some(format!(
+        "{} {file_word} +{additions} −{deletions}",
+        entry.files.len()
+    ))
 }
 
 fn styled_diff_line(app: &AppState, line: &DiffLine) -> Line<'static> {
@@ -290,5 +298,33 @@ mod tests {
         assert_eq!(buffer[(3, 3)].fg, app.palette.red);
         assert_eq!(buffer[(3, 4)].fg, app.palette.green);
         assert_eq!(buffer[(3, 6)].fg, app.palette.green);
+    }
+
+    #[test]
+    fn empty_diff_hides_aggregate_totals() {
+        let mut app = diff_app();
+        let key = app.dock_diff_active_key.clone().expect("active diff");
+        let entry = app.dock_diff_cache.get_mut(&key).expect("cached diff");
+        entry.files.clear();
+        entry.contents.clear();
+        assert_eq!(diff_totals(entry), None);
+
+        let backend = TestBackend::new(80, 4);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_diff(&app, frame, Rect::new(0, 0, 80, 4)))
+            .expect("render diff");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("base main ← feature"));
+        assert!(rendered.contains("no changes"));
+        assert!(!rendered.contains("0 files"));
+        assert!(!rendered.contains("+0 −0"));
     }
 }

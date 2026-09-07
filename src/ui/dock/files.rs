@@ -22,7 +22,11 @@ pub(crate) fn visible_rows(app: &AppState) -> Vec<FileTreeRow> {
         return Vec::new();
     };
     let matched = matched_files(snapshot, &app.dock_files_filter);
-    snapshot.rows(&app.dock_files_collapsed, matched.as_ref())
+    snapshot.rows_sorted(
+        &app.dock_files_collapsed,
+        matched.as_ref(),
+        app.dock_files_sort,
+    )
 }
 
 fn matched_files(snapshot: &FileTreeSnapshot, query: &str) -> Option<HashSet<PathBuf>> {
@@ -170,19 +174,59 @@ fn with_tail(prefix: &str, value: &str, width: usize) -> Option<String> {
 }
 
 fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
+    let (refresh, sort) = header_hit_areas(app, area);
     let text = if app.dock_files_filter.is_empty() {
-        " ⟳ / search files…".to_string()
+        "/ search files…".to_string()
     } else {
-        format!(" ⟳ / {}", app.dock_files_filter)
+        format!("/ {}", app.dock_files_filter)
     };
+    frame.render_widget(
+        Paragraph::new(" ⟳ ").style(Style::default().fg(app.palette.overlay0)),
+        refresh,
+    );
+    let search = Rect::new(
+        refresh.x.saturating_add(refresh.width),
+        area.y,
+        area.width
+            .saturating_sub(refresh.width)
+            .saturating_sub(sort.width),
+        1,
+    );
     frame.render_widget(
         Paragraph::new(text).style(Style::default().fg(if app.dock_files_filter.is_empty() {
             app.palette.overlay0
         } else {
             app.palette.text
         })),
-        area,
+        search,
     );
+    if sort.width > 0 {
+        frame.render_widget(
+            Paragraph::new(format!(" ⇅ {} ", app.dock_files_sort.label()))
+                .style(Style::default().fg(app.palette.overlay0)),
+            sort,
+        );
+    }
+}
+
+pub(crate) fn header_hit_areas(app: &AppState, area: Rect) -> (Rect, Rect) {
+    if area.width == 0 || area.height == 0 {
+        return (Rect::default(), Rect::default());
+    }
+    let refresh = Rect::new(area.x, area.y, area.width.min(3), 1);
+    let label = format!(" ⇅ {} ", app.dock_files_sort.label());
+    let sort_width = u16::try_from(crate::ui::text::display_width(&label)).unwrap_or(u16::MAX);
+    let sort = if area.width >= refresh.width.saturating_add(sort_width) {
+        Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(sort_width)),
+            area.y,
+            sort_width,
+            1,
+        )
+    } else {
+        Rect::default()
+    };
+    (refresh, sort)
 }
 
 fn render_message(app: &AppState, frame: &mut Frame, area: Rect, row: u16, message: &str) {
@@ -449,5 +493,20 @@ mod tests {
                 Path::new("src/ui/sidebar.rs")
             ]
         );
+    }
+
+    #[test]
+    fn files_header_exposes_refresh_and_sort_hit_areas() {
+        let app = AppState::test_new();
+        let area = Rect::new(20, 4, 42, 8);
+
+        let (refresh, sort) = header_hit_areas(&app, area);
+        let screen = rendered(&app, Rect::new(0, 0, 42, 2));
+
+        assert_eq!(refresh, Rect::new(20, 4, 3, 1));
+        assert_eq!(sort.y, 4);
+        assert_eq!(sort.x.saturating_add(sort.width), 62);
+        assert!(screen[0].contains("⟳"));
+        assert!(screen[0].contains("⇅ name"));
     }
 }

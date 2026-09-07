@@ -564,15 +564,19 @@ icons = "nerd"
 
 ## Source control
 
-Settings → Source control shows these keys. Both defaults keep Herdr's previous
+Settings → Source control shows these keys. Their defaults keep Herdr's previous
 behaviour:
 
 ```toml
 [source_control]
-# Model exported to the Commit action as HERDR_COMMIT_MESSAGE_MODEL, so a
-# prepare-commit-msg hook can draft the message with it. Empty, the default,
-# runs `git commit` unchanged. Only bare model tokens are exported.
+# Claude Code or Codex model used to draft a conventional commit message from
+# the cached diff, or the unstaged diff when the cache is empty. Empty, the
+# default, runs `git commit` unchanged. Only bare model tokens are accepted.
 commit_message_model = ""
+
+# Stage all working-tree changes before drafting and committing. The default
+# leaves the index unchanged.
+commit_stage_all = false
 
 # Prefix Herdr puts in front of a branch name derived from a ticket, for
 # example issue/sca-3165-image-edit. Default: "issue/".

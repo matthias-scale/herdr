@@ -318,6 +318,11 @@ fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect)
             "source_control.commit_message_model",
         ),
         (
+            "stage all before commit",
+            if app.commit_stage_all { "yes" } else { "no" }.to_string(),
+            "source_control.commit_stage_all",
+        ),
+        (
             "default branch prefix",
             branch_prefix,
             "source_control.branch_prefix",
