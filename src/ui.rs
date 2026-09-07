@@ -153,9 +153,9 @@ pub(crate) use self::{
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
         sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
         sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
-        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_ticket_target, sidebar_unassigned_dock_object, sidebar_unassigned_spawn_at,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
@@ -314,6 +314,14 @@ fn compute_view_internal(
     app.view_observed_at = std::time::Instant::now();
     app.reconcile_sidebar_presentation();
     app.reconcile_dock_context_tabs();
+    if !app.dock_collapsed {
+        if let Some(object) = app.dock_object_preview.clone() {
+            let surface = object.surface;
+            app.open_dock_object(object, crate::app::state::DockTabOrigin::User);
+            app.dock_pr_focused = surface == crate::app::DockSurface::Pr;
+            app.dock_linear_focused = surface == crate::app::DockSurface::Linear;
+        }
+    }
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -345,6 +353,7 @@ fn compute_view_internal(
         || app.loop_run_history_detail.is_some()
         || app.usage_view.is_some()
         || app.work_view.is_some()
+        || app.dock_object_preview.is_some()
         || app.home.is_some()
         || app.inbox.is_some();
     let dock_w = if app.dock_collapsed {
@@ -1127,6 +1136,8 @@ fn render_with_runtime_registry_inner(
         render_usage(app, terminal_area, frame);
     } else if app.work_view.is_some() {
         render_work_view(app, terminal_area, frame);
+    } else if app.dock_collapsed && app.dock_object_preview.is_some() {
+        dock::render_object_preview(app, frame, terminal_area);
     } else if app.home.is_some() {
         let queue = app.blocked_agents();
         let counts = app.home_counts(&queue);

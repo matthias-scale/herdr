@@ -2034,15 +2034,14 @@ pub(crate) struct SidebarWorkGroup {
     /// Where the work item stands, rendered as a glyph before the id.
     pub(crate) status: Option<WorkGroupStatus>,
     pub(crate) created_at: Option<std::time::SystemTime>,
-    /// What `Enter` on the dim header starts. `None` for the unlinked bucket,
-    /// which names no work item.
+    /// Provider object metadata used by the row's `+` and `n` spawn actions.
+    /// `None` for the unlinked bucket, which names no work item.
     pub(crate) activation: Option<SidebarWorkGroupActivation>,
 }
 
-/// The prefilled composer a dim work-item header opens.
+/// The launch context for an agentless work item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SidebarWorkGroupActivation {
-    pub(crate) prompt: String,
     /// Prompt sent to the new agent. It always contains the object's link.
     pub(crate) spawn_prompt: String,
     pub(crate) object_link: String,
@@ -2143,7 +2142,6 @@ fn ticket_activation(
     SidebarWorkGroupActivation {
         spawn_prompt: format!("{prompt}\n{object_link}"),
         object_link: object_link.clone(),
-        prompt,
         directory: ticket_directory(app, row),
         git_ref: row
             .ticket
@@ -2476,7 +2474,6 @@ pub(crate) fn sidebar_work_groups(
                 )),
                 created_at: conversation.last_activity_at,
                 activation: Some(SidebarWorkGroupActivation {
-                    prompt: missive_prompt(app, url),
                     spawn_prompt: format!("{}\n{url}", missive_prompt(app, url)),
                     object_link: url.to_string(),
                     directory: None,
@@ -2615,7 +2612,6 @@ pub(crate) fn sidebar_work_groups(
                                 created_at: conversation
                                     .and_then(|conversation| conversation.last_activity_at),
                                 activation: Some(SidebarWorkGroupActivation {
-                                    prompt: missive_prompt(app, group_url),
                                     spawn_prompt: format!(
                                         "{}\n{group_url}",
                                         missive_prompt(app, group_url)
@@ -2646,6 +2642,7 @@ pub(crate) fn sidebar_work_groups(
 }
 
 pub(crate) const UNASSIGNED_SECTION_TITLE: &str = "Unassigned";
+pub(crate) const NO_AGENT_YET_SECTION_TITLE: &str = "No agent yet";
 const UNASSIGNED_INITIAL_ROWS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2703,7 +2700,6 @@ fn github_activation(
     let number = item.pr_number?;
     let prompt = work_item_prompt(item, url);
     Some(SidebarWorkGroupActivation {
-        prompt: prompt.clone(),
         spawn_prompt: prompt,
         object_link: url.to_string(),
         directory: repo_directory(app, &item.repo),
@@ -2844,7 +2840,6 @@ pub(crate) fn sidebar_unassigned_objects(
                         created_at,
                         status: None,
                         activation: SidebarWorkGroupActivation {
-                            prompt: link.clone(),
                             spawn_prompt: link.clone(),
                             object_link: link,
                             directory: Some(directory),
@@ -2913,9 +2908,15 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
     {
         return;
     }
-    let collapsed = section_is_collapsed(app, UNASSIGNED_SECTION_TITLE);
+    let title = match app.sidebar_group_mode {
+        SidebarGroupMode::LinearTeam | SidebarGroupMode::RepoPr | SidebarGroupMode::Missive => {
+            NO_AGENT_YET_SECTION_TITLE
+        }
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => UNASSIGNED_SECTION_TITLE,
+    };
+    let collapsed = section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
-        title: UNASSIGNED_SECTION_TITLE,
+        title,
         count: objects.len(),
         collapsed,
     });
@@ -2975,6 +2976,31 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
             spawn: false,
         });
     }
+}
+
+/// Resolve a provider row into the object identity used by dock tabs and the
+/// centre preview. Repository rows have no object surface.
+pub(crate) fn sidebar_unassigned_dock_object(
+    app: &AppState,
+    key: &str,
+) -> Option<crate::app::state::DockObjectRef> {
+    let entries = sidebar_thread_entries(app);
+    let object = sidebar_unassigned_objects(app, &entries, app.sidebar_group_mode)
+        .into_iter()
+        .find(|object| object.key == key)?;
+    let (surface, key) = match app.sidebar_group_mode {
+        SidebarGroupMode::LinearTeam => (
+            crate::app::DockSurface::Linear,
+            object.key.strip_prefix("linear:")?.to_string(),
+        ),
+        SidebarGroupMode::RepoPr => (crate::app::DockSurface::Pr, object.activation.object_link),
+        SidebarGroupMode::Missive => (
+            crate::app::DockSurface::Missive,
+            object.activation.object_link,
+        ),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => return None,
+    };
+    Some(crate::app::state::DockObjectRef { surface, key })
 }
 
 fn unassigned_empty_text(app: &AppState) -> String {
@@ -11547,7 +11573,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn indexed_missive_conversation_without_pane_is_dim_and_enter_prefills() {
+    fn indexed_missive_conversation_without_pane_is_dim_and_enter_previews() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = sidebar_work_item_fixture();
@@ -11585,9 +11611,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
             crate::app::SidebarWorkGroupKeyAction::Consumed
         ));
-        let home = app.home.as_ref().expect("home composer remains open");
-        assert_eq!(home.prompt, "ccc333: Customer cannot update card");
-        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert!(app.home.is_none());
+        assert_eq!(
+            app.dock_object_preview,
+            Some(crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Missive,
+                key: CONVERSATION_C.into(),
+            })
+        );
     }
 
     #[test]
@@ -11801,18 +11832,26 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f20_unassigned_section_renders_when_empty_with_active_filter_text() {
+    fn f27_no_agent_yet_titles_each_provider_view_and_keeps_filter_text() {
         let mut app = sidebar_work_item_fixture();
-        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         app.work_index_session.github.viewer = Some("matthias-scale".into());
-        let rows = sidebar_rows(&app);
-
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader { title, count: 0, .. }
-                if *title == UNASSIGNED_SECTION_TITLE
-        )));
-        assert!(rows.iter().any(|row| matches!(
+        for mode in [
+            SidebarGroupMode::LinearTeam,
+            SidebarGroupMode::RepoPr,
+            SidebarGroupMode::Missive,
+        ] {
+            app.sidebar_group_mode = mode;
+            assert!(
+                sidebar_rows(&app).iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader { title, .. }
+                        if *title == NO_AGENT_YET_SECTION_TITLE
+                )),
+                "missing provider title for {mode:?}"
+            );
+        }
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(
             row,
             SidebarRow::NestedHeader { key, title, .. }
                 if key.starts_with("unassigned-empty:")
@@ -12240,7 +12279,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn enter_on_unassigned_linear_and_missive_rows_prefills_home_and_stays_open() {
+    fn f27_enter_on_no_agent_yet_rows_opens_centre_preview_without_a_pane() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -12270,22 +12309,66 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarWorkGroupKeyAction::Consumed
         ));
         assert_eq!(app.sidebar_selected_work_group, None);
-        let home = app.home.as_ref().expect("ticket composer stays open");
-        assert_eq!(home.prompt, "SCA-9999: unassigned");
-        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
-        assert!(home.pending_dispatch.is_none());
+        assert!(app.home.is_none());
+        assert_eq!(
+            app.dock_object_preview,
+            Some(crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Linear,
+                key: "SCA-9999".into(),
+            })
+        );
 
-        app.home = None;
         app.sidebar_group_mode = SidebarGroupMode::Missive;
-        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_B}"));
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .conversations
+            .push(missive_conversation("ccc333", "new lead", CONVERSATION_C));
+        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_C}"));
         assert!(matches!(
             app.handle_sidebar_work_group_key(enter),
             SidebarWorkGroupKeyAction::Consumed
         ));
-        let home = app.home.as_ref().expect("conversation composer stays open");
-        assert_eq!(home.prompt, "bbb222: fix pricing");
-        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
-        assert!(home.pending_dispatch.is_none());
+        assert_eq!(
+            app.dock_object_preview,
+            Some(crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Missive,
+                key: CONVERSATION_C.into(),
+            })
+        );
+    }
+
+    #[test]
+    fn f27_enter_on_no_agent_yet_row_opens_an_object_tab_when_dock_is_open() {
+        use crate::app::SidebarWorkGroupKeyAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let mut ticket = work_ticket("SCA-9999", "unassigned", "jacob", &[]);
+        ticket.url = Some("https://linear.app/scalable/issue/SCA-9999".into());
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .items
+            .push(work_item("scalable-so/herdr", None, vec![ticket]));
+        let pane_count = app.workspaces[0].tabs[0].panes.len();
+        app.dock_collapsed = false;
+        app.sidebar_selected_work_group = Some("linear:SCA-9999".into());
+
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert_eq!(app.workspaces[0].tabs[0].panes.len(), pane_count);
+        assert!(app.home.is_none());
+        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Linear));
+        assert_eq!(app.dock_tab_label(0), "SCA-9999");
+        assert_eq!(
+            app.active_dock_object(crate::app::DockSurface::Linear)
+                .map(|object| object.key.as_str()),
+            Some("SCA-9999")
+        );
     }
 
     #[test]
@@ -12509,7 +12592,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             matches!(
                 row,
                 SidebarRow::SectionHeader {
-                    title: UNASSIGNED_SECTION_TITLE,
+                    title: NO_AGENT_YET_SECTION_TITLE,
                     ..
                 }
             )
@@ -12585,7 +12668,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         let activation =
             sidebar_work_group_activation(&app, "linear:SCA-3102").expect("ticket activation");
-        assert_eq!(activation.prompt, "SCA-3102: annual credits");
+        assert!(activation
+            .spawn_prompt
+            .starts_with("SCA-3102: annual credits\n"));
         assert_eq!(
             activation.directory,
             Some(std::path::PathBuf::from("/tmp/herdr-fixture/herdr"))
@@ -12594,14 +12679,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // A ticket with no linked pull request leaves the directory alone.
         let unlinked =
             sidebar_work_group_activation(&app, "linear:SCA-3170").expect("ticket activation");
-        assert_eq!(unlinked.prompt, "SCA-3170: ads skill map");
+        assert!(unlinked
+            .spawn_prompt
+            .starts_with("SCA-3170: ads skill map\n"));
         assert_eq!(unlinked.directory, None);
 
         app.sidebar_group_mode = SidebarGroupMode::Missive;
         let conversation =
             sidebar_work_group_activation(&app, &format!("missive:{CONVERSATION_B}"))
                 .expect("conversation activation");
-        assert_eq!(conversation.prompt, "bbb222: fix pricing");
+        assert_eq!(
+            conversation.spawn_prompt,
+            format!("bbb222: fix pricing\n{CONVERSATION_B}")
+        );
     }
 
     fn sidebar_grouping_fixture() -> AppState {

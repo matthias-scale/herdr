@@ -205,6 +205,20 @@ pub(super) fn render_dock(
     chooser::render_menu(app, frame);
 }
 
+/// Render a sidebar-selected provider object in the pane area while the dock
+/// stays collapsed. These are the same renderers used by object dock tabs.
+pub(crate) fn render_object_preview(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(object) = app.dock_object_preview.as_ref() else {
+        return;
+    };
+    match object.surface {
+        DockSurface::Pr => pr::render_pr(app, frame, area),
+        DockSurface::Linear => linear::render_linear(app, frame, area),
+        DockSurface::Missive => missive::render_missive(app, frame, area),
+        _ => {}
+    }
+}
+
 /// Surfaces whose body arrives in a later slice announce themselves rather than
 /// rendering an empty rectangle the user cannot tell from a bug.
 fn render_placeholder(app: &AppState, frame: &mut Frame, area: Rect, surface: DockSurface) {
@@ -393,5 +407,43 @@ mod tests {
                 .unwrap_or_default(),
             " no repository for this pane  "
         );
+    }
+
+    #[test]
+    fn f27_collapsed_dock_hosts_rich_ticket_preview_in_the_pane_area() {
+        let mut app = crate::ui::sidebar_work_item_fixture();
+        app.sidebar_group_mode = crate::app::state::SidebarGroupMode::LinearTeam;
+        app.dock_collapsed = true;
+        app.dock_open_surfaces = vec![DockSurface::Linear];
+        app.dock_tab_bindings = vec![Some(crate::app::state::DockTabBinding {
+            object: crate::app::state::DockObjectRef {
+                surface: DockSurface::Linear,
+                key: "SCA-3165".into(),
+            },
+            origin: crate::app::state::DockTabOrigin::User,
+        })];
+        app.dock_tab = Some(DockSurface::Linear);
+        app.dock_active_tab_index = Some(0);
+        assert!(app.open_sidebar_unassigned_object("linear:OPS-12"));
+        let area = Rect::new(0, 0, 70, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("preview terminal");
+
+        terminal
+            .draw(|frame| render_object_preview(&app, frame, area))
+            .expect("render centre preview");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(app.dock_collapsed);
+        assert_eq!(app.dock_tab_label(0), "SCA-3165");
+        assert!(text.contains("OPS-12"), "{text:?}");
+        assert!(text.contains("pixel EMQ drop"), "{text:?}");
+        assert!(text.contains("Start thread"), "{text:?}");
     }
 }
