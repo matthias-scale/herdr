@@ -821,6 +821,8 @@ impl AppState {
                         && self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.dock_agents_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_linear_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Linear);
                     self.mark_session_dirty();
                     return None;
                 }
@@ -857,6 +859,8 @@ impl AppState {
                             self.dock_tab == Some(crate::app::DockSurface::Files);
                         self.dock_agents_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Agents);
+                        self.dock_linear_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Linear);
                     }
                     return None;
                 }
@@ -875,6 +879,7 @@ impl AppState {
                     self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
                     self.dock_files_focused = tab == crate::app::DockSurface::Files;
                     self.dock_agents_focused = tab == crate::app::DockSurface::Agents;
+                    self.dock_linear_focused = tab == crate::app::DockSurface::Linear;
                     if self.dock_agents_focused {
                         self.reconcile_dock_agents_selection();
                     }
@@ -964,6 +969,8 @@ impl AppState {
                     self.dock_files_focused = self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.dock_agents_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_linear_focused =
+                        self.dock_tab == Some(crate::app::DockSurface::Linear);
                     // Clicking an empty dock hands it the keyboard so the card
                     // shortcuts work without a tab to focus first.
                     self.dock_chooser_focused = self.dock_tab.is_none();

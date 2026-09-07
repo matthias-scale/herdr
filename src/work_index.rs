@@ -568,6 +568,17 @@ pub(crate) struct ProviderDirectory {
     resolved: bool,
 }
 
+impl WorkIndexSession {
+    pub(crate) fn linear_viewer_identity(&self) -> Option<&str> {
+        self.linear_query_identity.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_linear_viewer_identity_for_test(&mut self, identity: impl Into<String>) {
+        self.linear_query_identity = Some(identity.into());
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GithubPullRequest {
     repo: String,
@@ -5804,6 +5815,14 @@ pub(crate) enum WorkItemWrite {
         identifier: String,
         state: String,
     },
+    AssignTicket {
+        identifier: String,
+        assignee: String,
+    },
+    SetTicketPriority {
+        identifier: String,
+        priority: u8,
+    },
     LinkTicketPullRequest {
         identifier: String,
         title: String,
@@ -5843,6 +5862,14 @@ impl WorkItemWrite {
             Self::TransitionTicket { identifier, state } => {
                 format!("move {identifier} to {state}")
             }
+            Self::AssignTicket {
+                identifier,
+                assignee,
+            } => format!("assign {identifier} to {assignee}"),
+            Self::SetTicketPriority {
+                identifier,
+                priority,
+            } => format!("set {identifier} priority to P{priority}"),
             Self::LinkTicketPullRequest { identifier, .. } => {
                 format!("link pull request to {identifier}")
             }
@@ -5877,6 +5904,8 @@ impl WorkItemWrite {
             }),
             Self::CommentOnTicket { identifier, .. }
             | Self::TransitionTicket { identifier, .. }
+            | Self::AssignTicket { identifier, .. }
+            | Self::SetTicketPriority { identifier, .. }
             | Self::LinkTicketPullRequest { identifier, .. } => {
                 Some(crate::app::state::WorkItemKey {
                     repo: String::new(),
@@ -5920,6 +5949,28 @@ pub(crate) fn run_work_item_write(
         WorkItemWrite::TransitionTicket { identifier, state } => {
             let mut command = crate::noninteractive_process::command(linearis_program);
             command.args(["issues", "update", identifier, "--status", state]);
+            (command, None)
+        }
+        WorkItemWrite::AssignTicket {
+            identifier,
+            assignee,
+        } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args(["issues", "update", identifier, "--assignee", assignee]);
+            (command, None)
+        }
+        WorkItemWrite::SetTicketPriority {
+            identifier,
+            priority,
+        } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args([
+                "issues",
+                "update",
+                identifier,
+                "--priority",
+                &priority.to_string(),
+            ]);
             (command, None)
         }
         WorkItemWrite::LinkTicketPullRequest {
@@ -6049,12 +6100,56 @@ mod work_item_write_tests {
             deadline,
         )
         .expect("link command");
+        run_work_item_write(
+            &WorkItemWrite::AssignTicket {
+                identifier: "SCA-7".into(),
+                assignee: "viewer-id".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("assign command");
+        run_work_item_write(
+            &WorkItemWrite::SetTicketPriority {
+                identifier: "SCA-7".into(),
+                priority: 1,
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("priority command");
+        run_work_item_write(
+            &WorkItemWrite::CommentOnTicket {
+                identifier: "SCA-7".into(),
+                body: "ship it".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("comment command");
+        run_work_item_write(
+            &WorkItemWrite::TransitionTicket {
+                identifier: "SCA-7".into(),
+                state: "Canceled".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("cancel command");
 
         let argv = std::fs::read_to_string(log).expect("read recorder log");
         assert!(argv.contains("issues update SCA-7 --status In Review"));
         assert!(argv.contains(
             "attachments create SCA-7 --title owner/repo#42 --url https://github.com/owner/repo/pull/42"
         ));
+        assert!(argv.contains("issues update SCA-7 --assignee viewer-id"));
+        assert!(argv.contains("issues update SCA-7 --priority 1"));
+        assert!(argv.contains("issues discuss SCA-7 --body ship it"));
+        assert!(argv.contains("issues update SCA-7 --status Canceled"));
     }
 
     #[test]

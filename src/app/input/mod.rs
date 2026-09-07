@@ -217,6 +217,9 @@ impl App {
         if self.handle_dock_diff_key(&key) {
             return None;
         }
+        if self.handle_dock_linear_key(&key) {
+            return None;
+        }
         if self.handle_dock_pr_key(&key) {
             return None;
         }
@@ -643,6 +646,11 @@ impl App {
 
     pub(crate) fn handle_dock_pr_key_headless(&mut self, key: &TerminalKey) -> bool {
         self.state.popup_pane.is_none() && self.handle_dock_pr_key(key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_dock_linear_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_linear_key(key)
     }
 
     /// Same for the surface chooser: an empty dock owns its card shortcuts
@@ -1384,19 +1392,30 @@ impl App {
             }
             return true;
         }
-        if let Some(choice) = state.ticket_more_menu {
+        if let Some(mut menu) = state.ticket_more_menu {
+            let entries = self
+                .selected_ticket_action_context()
+                .map(|context| crate::ui::ticket_actions::ticket_action_table(&context, menu.page))
+                .unwrap_or_default();
             match key.code {
                 KeyCode::Up if key.modifiers.is_empty() => {
+                    menu.move_by(-1, entries.len());
                     if let Some(state) = self.state.work_view.as_mut() {
-                        state.ticket_more_menu = Some(choice.move_by(-1));
+                        state.ticket_more_menu = Some(menu);
                     }
                 }
                 KeyCode::Down if key.modifiers.is_empty() => {
+                    menu.move_by(1, entries.len());
                     if let Some(state) = self.state.work_view.as_mut() {
-                        state.ticket_more_menu = Some(choice.move_by(1));
+                        state.ticket_more_menu = Some(menu);
                     }
                 }
-                KeyCode::Enter if key.modifiers.is_empty() => self.activate_ticket_more(choice),
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(entry) = entries.get(menu.selected).filter(|entry| entry.enabled())
+                    {
+                        self.activate_ticket_action(entry.action);
+                    }
+                }
                 KeyCode::Esc if key.modifiers.is_empty() => {
                     if let Some(state) = self.state.work_view.as_mut() {
                         state.ticket_more_menu = None;
@@ -1889,6 +1908,28 @@ impl App {
             .as_ref()
             .and_then(|state| state.ticket_start_menu)
             .unwrap_or_default();
+        let prompt = Self::ticket_work_prompt(&ticket);
+        self.open_ticket_home(ticket, repo, prompt, choice);
+    }
+
+    fn ticket_work_prompt(ticket: &crate::work_index::WorkTicket) -> String {
+        match (ticket.title.as_deref(), ticket.description.as_deref()) {
+            (Some(title), Some(description)) if !description.trim().is_empty() => {
+                format!("{title}\n\n{description}")
+            }
+            (Some(title), _) => title.to_string(),
+            (_, Some(description)) => description.to_string(),
+            _ => ticket.identifier.clone(),
+        }
+    }
+
+    fn open_ticket_home(
+        &mut self,
+        ticket: crate::work_index::WorkTicket,
+        repo: String,
+        prompt: String,
+        choice: crate::app::state::PrCheckoutChoice,
+    ) {
         let directory = self.ticket_checkout_directory(&ticket.identifier, &repo);
         let mut home = self.state.new_home_state();
         home.directory = directory.clone();
@@ -1917,14 +1958,7 @@ impl App {
                 crate::work_context::linear_ticket_url(&ticket.identifier).unwrap_or_default()
             }),
         });
-        home.prompt = match (ticket.title.as_deref(), ticket.description.as_deref()) {
-            (Some(title), Some(description)) if !description.trim().is_empty() => {
-                format!("{title}\n\n{description}")
-            }
-            (Some(title), _) => title.to_string(),
-            (_, Some(description)) => description.to_string(),
-            _ => ticket.identifier,
-        };
+        home.prompt = prompt;
         self.state.work_view = None;
         self.state.inbox = None;
         self.state.home = Some(home);
@@ -2001,35 +2035,158 @@ impl App {
         }
     }
 
-    fn activate_ticket_more(&mut self, choice: crate::app::state::TicketMoreChoice) {
-        let Some((key, ticket, _repo)) = self.selected_ticket_parts() else {
+    fn selected_ticket_action_context(
+        &self,
+    ) -> Option<crate::ui::ticket_actions::TicketActionContext> {
+        let (key, ticket, _repo) = self.selected_ticket_parts()?;
+        Some(crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket,
+            self.state.work_item_detail_cache.get(&key),
+            self.state.work_index_session.linear.viewer.as_deref(),
+            self.state.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(&self.state).is_some(),
+        ))
+    }
+
+    fn activate_ticket_action(&mut self, action: crate::ui::ticket_actions::TicketAction) {
+        use crate::ui::ticket_actions::{TicketAction, TicketActionMenuPage};
+        let Some((key, ticket, repo)) = self.selected_ticket_parts() else {
             return;
         };
-        if let Some(state) = self.state.work_view.as_mut() {
-            state.ticket_more_menu = None;
-        }
-        match choice {
-            crate::app::state::TicketMoreChoice::Open => {
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket,
+            self.state.work_item_detail_cache.get(&key),
+            self.state.work_index_session.linear.viewer.as_deref(),
+            self.state.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(&self.state).is_some(),
+        );
+        match action {
+            TicketAction::TransitionMenu | TicketAction::PriorityMenu => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu =
+                        Some(crate::ui::ticket_actions::TicketActionMenuState {
+                            page: if action == TicketAction::TransitionMenu {
+                                TicketActionMenuPage::Transitions
+                            } else {
+                                TicketActionMenuPage::Priorities
+                            },
+                            selected: 0,
+                        });
+                }
+            }
+            TicketAction::Refresh => {
+                self.next_work_index_refresh = std::time::Instant::now();
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                    state.refreshing = true;
+                }
+            }
+            TicketAction::AskQuestion => {
+                self.open_ticket_home(
+                    ticket,
+                    repo,
+                    format!("About {} ({}): ", context.identifier, context.title),
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                );
+            }
+            TicketAction::Explain => {
+                self.open_ticket_home(
+                    ticket,
+                    repo,
+                    format!(
+                        "Summarise {} ({}). Include the ticket, linked pull requests, and the acceptance criteria block.",
+                        context.identifier, context.title
+                    ),
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                );
+            }
+            TicketAction::WorkInThread => self.open_ticket_home(
+                ticket.clone(),
+                repo,
+                Self::ticket_work_prompt(&ticket),
+                crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            ),
+            TicketAction::Transition(choice) => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                    state.pending_write =
+                        Some(crate::work_index::WorkItemWrite::TransitionTicket {
+                            identifier: ticket.identifier,
+                            state: choice.label().to_string(),
+                        });
+                }
+            }
+            TicketAction::AssignToMe => {
+                let Some(viewer) = context.viewer_id else {
+                    return;
+                };
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                    state.pending_write = Some(crate::work_index::WorkItemWrite::AssignTicket {
+                        identifier: ticket.identifier,
+                        assignee: viewer,
+                    });
+                }
+            }
+            TicketAction::SetPriority(priority) => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                    state.pending_write =
+                        Some(crate::work_index::WorkItemWrite::SetTicketPriority {
+                            identifier: ticket.identifier,
+                            priority,
+                        });
+                }
+            }
+            TicketAction::LinkPr => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                }
+                self.stage_ticket_link_pr();
+            }
+            TicketAction::Comment => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                    state.ticket_comment_draft = Some(String::new());
+                }
+            }
+            TicketAction::OpenInLinear => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                }
                 let url = self
-                    .state
-                    .work_item_detail_cache
-                    .get(&key)
-                    .and_then(|detail| detail.url.as_deref())
-                    .or(ticket.url.as_deref());
+                    .selected_ticket_action_context()
+                    .and_then(|context| context.url);
                 if let Some(url) = url {
-                    if let Err(error) = crate::platform::open_url(url) {
+                    if let Err(error) = crate::platform::open_url(&url) {
                         if let Some(state) = self.state.work_view.as_mut() {
                             state.hint = Some(format!("could not open ticket: {error}"));
                         }
                     }
                 }
             }
-            crate::app::state::TicketMoreChoice::CopyIdentifier => {
+            TicketAction::CopyLink => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                }
+                if let Some(url) = context.url {
+                    self.state.request_clipboard_write = Some(url.into_bytes());
+                }
+            }
+            TicketAction::CopyIdentifier => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_more_menu = None;
+                }
                 self.state.request_clipboard_write = Some(ticket.identifier.into_bytes());
             }
-            crate::app::state::TicketMoreChoice::Comment => {
+            TicketAction::Cancel => {
                 if let Some(state) = self.state.work_view.as_mut() {
-                    state.ticket_comment_draft = Some(String::new());
+                    state.ticket_more_menu = None;
+                    state.pending_write =
+                        Some(crate::work_index::WorkItemWrite::TransitionTicket {
+                            identifier: ticket.identifier,
+                            state: "Canceled".into(),
+                        });
                 }
             }
         }
@@ -2350,6 +2507,288 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    fn focused_dock_ticket_parts(
+        &self,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        crate::work_index::WorkTicket,
+        String,
+    )> {
+        let key = crate::ui::dock::linear::focused_ticket_key(&self.state)?;
+        let ticket_id = key.ticket_id.as_deref()?;
+        let source = self
+            .state
+            .work_index_snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| {
+                item.ticket_details
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))
+            })?;
+        let ticket = source
+            .ticket_details
+            .iter()
+            .find(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))?
+            .clone();
+        Some((key, ticket, source.repo.clone()))
+    }
+
+    fn dock_ticket_action_context(&self) -> Option<crate::ui::ticket_actions::TicketActionContext> {
+        let (key, ticket, _repo) = self.focused_dock_ticket_parts()?;
+        Some(crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket,
+            self.state.work_item_detail_cache.get(&key),
+            self.state.work_index_session.linear.viewer.as_deref(),
+            self.state.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(&self.state).is_some(),
+        ))
+    }
+
+    fn handle_dock_linear_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Linear)
+            || !self.state.dock_linear_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        if self.handle_pending_dock_write_key(event) {
+            return true;
+        }
+        if let Some(draft) = self.state.dock_ticket_comment_draft.as_mut() {
+            match event.code {
+                KeyCode::Esc => self.state.dock_ticket_comment_draft = None,
+                KeyCode::Backspace => {
+                    draft.pop();
+                }
+                KeyCode::Enter => self.stage_dock_ticket_comment(),
+                KeyCode::Char(character) => draft.push(character),
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = self.state.dock_ticket_start_menu {
+            match event.code {
+                KeyCode::Up | KeyCode::Down => {
+                    self.state.dock_ticket_start_menu = Some(match choice {
+                        crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                            crate::app::state::PrCheckoutChoice::NewWorktree
+                        }
+                        crate::app::state::PrCheckoutChoice::NewWorktree => {
+                            crate::app::state::PrCheckoutChoice::CurrentCheckout
+                        }
+                    });
+                }
+                KeyCode::Enter => self.open_dock_ticket_thread(choice),
+                KeyCode::Esc => self.state.dock_ticket_start_menu = None,
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(mut menu) = self.state.dock_ticket_action_menu {
+            let entries = self
+                .dock_ticket_action_context()
+                .map(|context| crate::ui::ticket_actions::ticket_action_table(&context, menu.page))
+                .unwrap_or_default();
+            match event.code {
+                KeyCode::Up => {
+                    menu.move_by(-1, entries.len());
+                    self.state.dock_ticket_action_menu = Some(menu);
+                }
+                KeyCode::Down => {
+                    menu.move_by(1, entries.len());
+                    self.state.dock_ticket_action_menu = Some(menu);
+                }
+                KeyCode::Enter => {
+                    if let Some(entry) = entries.get(menu.selected).filter(|entry| entry.enabled())
+                    {
+                        self.activate_dock_ticket_action(entry.action);
+                    }
+                }
+                KeyCode::Esc => self.state.dock_ticket_action_menu = None,
+                _ => {}
+            }
+            return true;
+        }
+        match event.code {
+            KeyCode::Char('c') => self.state.dock_ticket_start_menu = Some(Default::default()),
+            KeyCode::Char('m') => self.state.dock_ticket_action_menu = Some(Default::default()),
+            KeyCode::Esc => self.state.dock_linear_focused = false,
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_dock_ticket_thread(&mut self, choice: crate::app::state::PrCheckoutChoice) {
+        let Some((_key, ticket, repo)) = self.focused_dock_ticket_parts() else {
+            return;
+        };
+        let prompt = Self::ticket_work_prompt(&ticket);
+        self.state.dock_ticket_start_menu = None;
+        self.open_ticket_home(ticket, repo, prompt, choice);
+    }
+
+    fn stage_dock_ticket_comment(&mut self) {
+        let Some((_key, ticket, _repo)) = self.focused_dock_ticket_parts() else {
+            return;
+        };
+        let Some(body) = self
+            .state
+            .dock_ticket_comment_draft
+            .as_deref()
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.state.dock_ticket_comment_draft = None;
+        self.state.dock_pending_write = Some(crate::work_index::WorkItemWrite::CommentOnTicket {
+            identifier: ticket.identifier,
+            body,
+        });
+        self.state.dock_write_notice = None;
+    }
+
+    fn activate_dock_ticket_action(&mut self, action: crate::ui::ticket_actions::TicketAction) {
+        use crate::ui::ticket_actions::{TicketAction, TicketActionMenuPage};
+        let Some((key, ticket, repo)) = self.focused_dock_ticket_parts() else {
+            return;
+        };
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket,
+            self.state.work_item_detail_cache.get(&key),
+            self.state.work_index_session.linear.viewer.as_deref(),
+            self.state.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(&self.state).is_some(),
+        );
+        match action {
+            TicketAction::TransitionMenu | TicketAction::PriorityMenu => {
+                self.state.dock_ticket_action_menu =
+                    Some(crate::ui::ticket_actions::TicketActionMenuState {
+                        page: if action == TicketAction::TransitionMenu {
+                            TicketActionMenuPage::Transitions
+                        } else {
+                            TicketActionMenuPage::Priorities
+                        },
+                        selected: 0,
+                    });
+            }
+            TicketAction::Refresh => {
+                self.state.dock_ticket_action_menu = None;
+                self.next_work_index_refresh = std::time::Instant::now();
+            }
+            TicketAction::AskQuestion => self.open_ticket_home(
+                ticket,
+                repo,
+                format!("About {} ({}): ", context.identifier, context.title),
+                crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            ),
+            TicketAction::Explain => self.open_ticket_home(
+                ticket,
+                repo,
+                format!(
+                    "Summarise {} ({}). Include the ticket, linked pull requests, and the acceptance criteria block.",
+                    context.identifier, context.title
+                ),
+                crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            ),
+            TicketAction::WorkInThread => {
+                let prompt = Self::ticket_work_prompt(&ticket);
+                self.open_ticket_home(
+                    ticket,
+                    repo,
+                    prompt,
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                );
+            }
+            TicketAction::Transition(choice) => {
+                self.state.dock_ticket_action_menu = None;
+                self.state.dock_pending_write =
+                    Some(crate::work_index::WorkItemWrite::TransitionTicket {
+                        identifier: ticket.identifier,
+                        state: choice.label().to_string(),
+                    });
+                self.state.dock_write_notice = None;
+            }
+            TicketAction::AssignToMe => {
+                let Some(viewer) = context.viewer_id else {
+                    return;
+                };
+                self.state.dock_ticket_action_menu = None;
+                self.state.dock_pending_write =
+                    Some(crate::work_index::WorkItemWrite::AssignTicket {
+                        identifier: ticket.identifier,
+                        assignee: viewer,
+                    });
+                self.state.dock_write_notice = None;
+            }
+            TicketAction::SetPriority(priority) => {
+                self.state.dock_ticket_action_menu = None;
+                self.state.dock_pending_write =
+                    Some(crate::work_index::WorkItemWrite::SetTicketPriority {
+                        identifier: ticket.identifier,
+                        priority,
+                    });
+                self.state.dock_write_notice = None;
+            }
+            TicketAction::LinkPr => {
+                let Some(pr) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+                    return;
+                };
+                let (Some(number), Some(url)) = (pr.pr_number, pr.pr_url) else {
+                    return;
+                };
+                self.state.dock_ticket_action_menu = None;
+                self.state.dock_pending_write = Some(
+                    crate::work_index::WorkItemWrite::LinkTicketPullRequest {
+                        identifier: ticket.identifier,
+                        title: format!("{}#{number}", pr.repo),
+                        url,
+                    },
+                );
+                self.state.dock_write_notice = None;
+            }
+            TicketAction::Comment => {
+                self.state.dock_ticket_action_menu = None;
+                self.state.dock_ticket_comment_draft = Some(String::new());
+            }
+            TicketAction::OpenInLinear => {
+                self.state.dock_ticket_action_menu = None;
+                if let Some(url) = context.url {
+                    if let Err(error) = crate::platform::open_url(&url) {
+                        self.state.dock_write_notice = Some(format!("could not open ticket: {error}"));
+                    }
+                }
+            }
+            TicketAction::CopyLink => {
+                self.state.dock_ticket_action_menu = None;
+                if let Some(url) = context.url {
+                    self.state.request_clipboard_write = Some(url.into_bytes());
+                }
+            }
+            TicketAction::CopyIdentifier => {
+                self.state.dock_ticket_action_menu = None;
+                self.state.request_clipboard_write = Some(ticket.identifier.into_bytes());
+            }
+            TicketAction::Cancel => {
+                self.state.dock_ticket_action_menu = None;
+                self.state.dock_pending_write =
+                    Some(crate::work_index::WorkItemWrite::TransitionTicket {
+                        identifier: ticket.identifier,
+                        state: "Canceled".into(),
+                    });
+                self.state.dock_write_notice = None;
+            }
+        }
     }
 
     fn open_dock_pr_checkout(&mut self, choice: crate::app::state::PrCheckoutChoice) {
@@ -3721,6 +4160,158 @@ mod tests {
         app.state.dock_pr_focused = false;
         assert!(
             !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+    }
+
+    fn dock_linear_test_app() -> App {
+        let mut app = test_app();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Linear);
+        app.state.dock_linear_focused = true;
+        app.state.work_index_session.linear.viewer = Some("Viewer Name".into());
+        app.state
+            .work_index_session
+            .set_linear_viewer_identity_for_test("viewer-id");
+        app
+    }
+
+    #[test]
+    fn compact_linear_menu_stages_viewer_and_priority_writes() {
+        let mut app = dock_linear_test_app();
+        app.work_index_linearis_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
+        let key = |code| TerminalKey::new(code, KeyModifiers::empty());
+
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Char('m'))));
+        for _ in 0..5 {
+            assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Down)));
+        }
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Enter)));
+        assert_eq!(
+            app.state.dock_pending_write,
+            Some(crate::work_index::WorkItemWrite::AssignTicket {
+                identifier: "SCA-3102".into(),
+                assignee: "viewer-id".into(),
+            })
+        );
+        assert!(app.state.dock_write_notice.is_none());
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Esc)));
+
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Char('m'))));
+        for _ in 0..6 {
+            assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Down)));
+        }
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Enter)));
+        assert_eq!(
+            app.state.dock_ticket_action_menu.map(|menu| menu.page),
+            Some(crate::ui::ticket_actions::TicketActionMenuPage::Priorities)
+        );
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Down)));
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Enter)));
+        assert_eq!(
+            app.state.dock_pending_write,
+            Some(crate::work_index::WorkItemWrite::SetTicketPriority {
+                identifier: "SCA-3102".into(),
+                priority: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn compact_linear_question_opens_ticket_home_with_fixed_prefix() {
+        let mut app = dock_linear_test_app();
+        let key = |code| TerminalKey::new(code, KeyModifiers::empty());
+
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Char('m'))));
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Down)));
+        assert!(app.handle_dock_linear_key_headless(&key(KeyCode::Enter)));
+
+        let home = app.state.home.as_ref().expect("ticket home card");
+        assert_eq!(home.prompt, "About SCA-3102 (annual credits): ");
+        assert_eq!(
+            home.ticket
+                .as_ref()
+                .map(|ticket| ticket.identifier.as_str()),
+            Some("SCA-3102")
+        );
+    }
+
+    #[test]
+    fn full_ticket_menu_keyboard_uses_shared_assignment_action() {
+        let mut app = dock_linear_test_app();
+        let mut view =
+            crate::app::state::WorkViewState::new(true, app.state.work_index_snapshot.clone());
+        view.projection = crate::app::state::WorkProjection::Tickets;
+        view.selected = Some(crate::app::state::WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some("SCA-3102".into()),
+        });
+        app.state.work_view = Some(view);
+
+        assert!(app.handle_work_view_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty(),)));
+        for _ in 0..5 {
+            assert!(app.handle_work_view_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty(),)));
+        }
+        assert!(app.handle_work_view_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.pending_write.as_ref()),
+            Some(&crate::work_index::WorkItemWrite::AssignTicket {
+                identifier: "SCA-3102".into(),
+                assignee: "viewer-id".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn full_ticket_explain_uses_fixed_prompt_and_cancel_stages_confirmation() {
+        let mut app = dock_linear_test_app();
+        let mut view =
+            crate::app::state::WorkViewState::new(true, app.state.work_index_snapshot.clone());
+        view.projection = crate::app::state::WorkProjection::Tickets;
+        view.selected = Some(crate::app::state::WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some("SCA-3102".into()),
+        });
+        app.state.work_view = Some(view.clone());
+        let key = |code| KeyEvent::new(code, KeyModifiers::empty());
+
+        assert!(app.handle_work_view_key(key(KeyCode::Char('m'))));
+        assert!(app.handle_work_view_key(key(KeyCode::Down)));
+        assert!(app.handle_work_view_key(key(KeyCode::Down)));
+        assert!(app.handle_work_view_key(key(KeyCode::Enter)));
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some(
+                "Summarise SCA-3102 (annual credits). Include the ticket, linked pull requests, and the acceptance criteria block."
+            )
+        );
+
+        app.state.home = None;
+        app.state.work_view = Some(view);
+        assert!(app.handle_work_view_key(key(KeyCode::Char('m'))));
+        for _ in 0..12 {
+            assert!(app.handle_work_view_key(key(KeyCode::Down)));
+        }
+        assert!(app.handle_work_view_key(key(KeyCode::Enter)));
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.pending_write.as_ref()),
+            Some(&crate::work_index::WorkItemWrite::TransitionTicket {
+                identifier: "SCA-3102".into(),
+                state: "Canceled".into(),
+            })
         );
     }
 

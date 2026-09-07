@@ -1994,6 +1994,7 @@ fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_diff_focused = state.dock_tab == Some(crate::app::DockSurface::Diff);
     state.dock_files_focused = state.dock_tab == Some(crate::app::DockSurface::Files);
     state.dock_agents_focused = state.dock_tab == Some(crate::app::DockSurface::Agents);
+    state.dock_linear_focused = state.dock_tab == Some(crate::app::DockSurface::Linear);
     if state.dock_agents_focused {
         state.reconcile_dock_agents_selection();
     }
@@ -2316,6 +2317,7 @@ pub(super) fn execute_navigate_action_in_context(
                 state.dock_diff_focused = false;
                 state.dock_files_focused = false;
                 state.dock_agents_focused = false;
+                state.dock_linear_focused = false;
             }
             leave_navigate_mode(state);
         }
