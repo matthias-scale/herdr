@@ -81,6 +81,7 @@ struct UsageProjection {
     providers: BTreeMap<UsageProvider, (Totals, usize)>,
     breakdown: Vec<(String, Totals)>,
     bars: Vec<f64>,
+    provider_bars: BTreeMap<UsageProvider, Vec<f64>>,
     cache_savings: f64,
 }
 
@@ -99,7 +100,7 @@ pub(crate) fn layout(area: Rect) -> UsageLayout {
     let narrow = outer.width < 80;
     let rows = Layout::vertical([
         Constraint::Length(header_rows(outer.width)),
-        Constraint::Length(if narrow { 10 } else { 9 }),
+        Constraint::Length(if narrow { 11 } else { 9 }),
         Constraint::Length(if narrow { 3 } else { 2 }),
         Constraint::Min(3),
         Constraint::Length(if narrow { 2 } else { 1 }),
@@ -288,6 +289,7 @@ fn project(
     let mut provider_sessions: BTreeMap<UsageProvider, BTreeSet<String>> = BTreeMap::new();
     let mut breakdown: BTreeMap<String, Totals> = BTreeMap::new();
     let mut bars = vec![0.0_f64; bucket_count];
+    let mut provider_bars: BTreeMap<UsageProvider, Vec<f64>> = BTreeMap::new();
     let mut cache_savings = 0.0;
     for sample in snapshot.samples_between(start, end) {
         let model_pricing = pricing_for(&sample.model, pricing);
@@ -309,10 +311,14 @@ fn project(
         let bucket = usize::try_from((sample.timestamp - start) / bucket_seconds)
             .unwrap_or_default()
             .min(bucket_count.saturating_sub(1));
-        bars[bucket] += match state.metric {
+        let bucket_value = match state.metric {
             UsageMetric::Cost => model_pricing.map_or(0.0, |price| sample_cost(sample, price)),
             UsageMetric::Tokens => sample.processed_tokens() as f64,
         };
+        bars[bucket] += bucket_value;
+        provider_bars
+            .entry(sample.provider)
+            .or_insert_with(|| vec![0.0; bucket_count])[bucket] += bucket_value;
         if let Some(price) = model_pricing {
             cache_savings +=
                 sample.cache_read_tokens as f64 * (price.input - price.cache_read) / 1_000_000.0;
@@ -341,6 +347,7 @@ fn project(
         providers,
         breakdown,
         bars,
+        provider_bars,
         cache_savings,
     }
 }
@@ -494,6 +501,14 @@ fn render_chart(
         (UsageMetric::Cost, false) => "Daily cost",
         (UsageMetric::Tokens, false) => "Daily tokens",
     };
+    if projection.provider_bars.len() > 1
+        && area.height
+            >= u16::try_from(projection.provider_bars.len().saturating_add(3)).unwrap_or(u16::MAX)
+    {
+        render_provider_chart(projection, hourly, title, area, palette, frame);
+        return;
+    }
+
     let max_columns = usize::from(area.width);
     let visible = chart_values(&projection.bars, max_columns);
     let tallest = visible.iter().copied().fold(0.0_f64, f64::max);
@@ -547,6 +562,93 @@ fn render_chart(
         ]),
         area,
     );
+}
+
+fn render_provider_chart(
+    projection: &UsageProjection,
+    hourly: bool,
+    title: &str,
+    area: Rect,
+    palette: &Palette,
+    frame: &mut Frame,
+) {
+    let chart_width = usize::from(area.width.saturating_sub(2));
+    let visible = projection
+        .provider_bars
+        .iter()
+        .map(|(provider, values)| (*provider, chart_values(values, chart_width)))
+        .collect::<Vec<_>>();
+    let tallest = visible
+        .iter()
+        .flat_map(|(_, values)| values.iter().copied())
+        .fold(0.0_f64, f64::max);
+    let legend = visible
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (provider, _))| {
+            let separator = (index > 0).then(|| Span::raw("  "));
+            separator.into_iter().chain(std::iter::once(Span::styled(
+                format!(
+                    "{} {}",
+                    provider_series_marker(*provider),
+                    provider_label(*provider)
+                ),
+                Style::default().fg(provider_color(*provider, palette)),
+            )))
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        Line::styled(
+            title,
+            Style::default()
+                .fg(palette.subtext0)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(legend),
+    ];
+    for (provider, values) in visible {
+        let bars = values
+            .iter()
+            .map(|value| {
+                if tallest <= 0.0 {
+                    BAR_GLYPHS[0]
+                } else {
+                    let index = ((value / tallest) * 7.0).round().clamp(0.0, 7.0) as usize;
+                    BAR_GLYPHS[index]
+                }
+            })
+            .collect::<String>();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", provider_series_marker(provider)),
+                Style::default().fg(provider_color(provider, palette)),
+            ),
+            Span::styled(bars, Style::default().fg(provider_color(provider, palette))),
+        ]));
+    }
+    let middle = projection
+        .start
+        .saturating_add((projection.now - projection.start) / 2);
+    let labels = if hourly {
+        axis_labels(
+            &format_hour(projection.start),
+            &format_hour(middle),
+            &format_hour(projection.now),
+            u16::try_from(chart_width).unwrap_or(area.width),
+        )
+    } else {
+        axis_labels(
+            &format_day(projection.start),
+            &format_day(middle),
+            &format_day(projection.now),
+            u16::try_from(chart_width).unwrap_or(area.width),
+        )
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(labels, Style::default().fg(palette.subtext0)),
+    ]));
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_totals(projection: &UsageProjection, area: Rect, palette: &Palette, frame: &mut Frame) {
@@ -727,6 +829,13 @@ fn provider_color(provider: UsageProvider, palette: &Palette) -> ratatui::style:
     }
 }
 
+fn provider_series_marker(provider: UsageProvider) -> char {
+    match provider {
+        UsageProvider::ClaudeCode => '◆',
+        UsageProvider::Codex => '●',
+    }
+}
+
 fn format_cost(value: Option<f64>) -> String {
     value.map_or_else(|| "—".to_string(), |value| format!("${value:.2}"))
 }
@@ -844,9 +953,13 @@ mod tests {
     }
 
     fn render_at(width: u16, height: u16) -> String {
+        render_snapshot_at(width, height, fixture())
+    }
+
+    fn render_snapshot_at(width: u16, height: u16, snapshot: UsageSnapshot) -> String {
         let mut app = AppState::test_new();
         app.status_now_unix = Some(1_787_992_841);
-        app.usage_snapshot = Some(fixture());
+        app.usage_snapshot = Some(snapshot);
         app.usage_view = Some(UsageViewState::new(app.usage_snapshot.clone()));
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -883,6 +996,41 @@ mod tests {
             assert!(text.contains("unknown-local-model"));
             assert!(text.contains('—'));
         }
+    }
+
+    #[test]
+    fn two_provider_records_render_stacked_series_with_legend_without_a_pty() {
+        for (width, height) in [(120, 40), (80, 24)] {
+            let text = render_at(width, height);
+            assert!(
+                text.contains("◆ Claude Code  ● Codex"),
+                "missing provider legend at {width}x{height}\n{text}"
+            );
+            assert!(
+                text.lines().any(|line| line.contains("◆ ▁")),
+                "missing Claude series at {width}x{height}\n{text}"
+            );
+            assert!(
+                text.lines().any(|line| line.contains("● ▁")),
+                "missing Codex series at {width}x{height}\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_provider_record_keeps_aggregate_chart_fallback_without_a_pty() {
+        let mut snapshot = fixture();
+        snapshot
+            .samples
+            .retain(|sample| sample.provider == UsageProvider::ClaudeCode);
+        let text = render_snapshot_at(120, 40, snapshot);
+        assert!(text.contains("Daily cost"), "{text}");
+        assert!(
+            BAR_GLYPHS.iter().any(|glyph| text.contains(*glyph)),
+            "{text}"
+        );
+        assert!(!text.contains("◆ Claude Code  ● Codex"), "{text}");
+        assert!(text.matches("2026-").count() >= 3, "{text}");
     }
 
     #[test]
