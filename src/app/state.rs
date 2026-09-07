@@ -1663,6 +1663,7 @@ pub enum DockSurface {
     Shortcuts,
     Context,
     Scratchpad,
+    Symphony,
 }
 
 /// Stable identity of one work object shown by a compact dock tab.
@@ -1697,7 +1698,7 @@ pub(crate) struct PaneDockTabs {
 
 impl DockSurface {
     /// Every surface the chooser can open, in menu order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
@@ -1710,6 +1711,7 @@ impl DockSurface {
         Self::Shortcuts,
         Self::Context,
         Self::Scratchpad,
+        Self::Symphony,
     ];
 
     /// The card grid of the empty dock, each with its single-key shortcut.
@@ -1742,6 +1744,7 @@ impl DockSurface {
             Self::Linear => "linear",
             Self::Missive => "missive",
             Self::Agents => "agents",
+            Self::Symphony => "flow",
         }
     }
 
@@ -1760,6 +1763,7 @@ impl DockSurface {
             Self::Linear => "Linear",
             Self::Missive => "Missive",
             Self::Agents => "Agents",
+            Self::Symphony => "Symphony",
         }
     }
 
@@ -1792,6 +1796,7 @@ impl DockSurface {
             Self::Shortcuts => 'K',
             Self::Context => 'X',
             Self::Scratchpad => 'N',
+            Self::Symphony => 'Y',
         }
     }
 
@@ -1814,6 +1819,15 @@ impl DockSurface {
         matches!(self, Self::Terminal | Self::Files)
             .then(|| format!("{}: coming in a later slice", self.title()))
     }
+}
+
+/// The Symphony job the dock surface is showing. Identity only: phase, wait and
+/// age are read back out of the live snapshot every frame, so an open panel
+/// tracks the workflow rather than a copy of it that goes stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SymphonyDockSelection {
+    pub(crate) workflow_id: String,
+    pub(crate) run_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2843,6 +2857,9 @@ pub struct AppState {
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
+    /// Which job the dock's Symphony surface is bound to. Client presentation
+    /// state: the runtime knows nothing about which panel is open.
+    pub(crate) dock_symphony: Option<SymphonyDockSelection>,
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
@@ -3770,6 +3787,35 @@ impl AppState {
                 observed_at: std::time::SystemTime::now(),
             });
         }
+    }
+
+    /// Bind the dock's Symphony surface to `workflow` and bring it up.
+    pub(crate) fn bind_symphony_dock(&mut self, workflow: &crate::symphony::Workflow) {
+        self.dock_symphony = Some(SymphonyDockSelection {
+            workflow_id: workflow.workflow_id.clone(),
+            run_id: workflow.run_id.clone(),
+        });
+        self.dock_collapsed = false;
+        self.open_dock_surface(DockSurface::Symphony);
+    }
+
+    /// The workflow the dock surface is bound to, as it stands in the current
+    /// snapshot. `None` once the job closes and leaves the snapshot.
+    pub(crate) fn dock_symphony_workflow(&self) -> Option<&crate::symphony::Workflow> {
+        let selection = self.dock_symphony.as_ref()?;
+        self.symphony_snapshot.workflows.iter().find(|workflow| {
+            workflow.workflow_id == selection.workflow_id && workflow.run_id == selection.run_id
+        })
+    }
+
+    /// The dashboard URL when `(column, row)` lands on the Symphony surface's
+    /// dashboard link. Uses the same rect the surface draws, so a click can
+    /// never open a link that was not on screen.
+    pub(crate) fn dock_symphony_dashboard_click(&self, column: u16, row: u16) -> Option<String> {
+        let rect = crate::ui::dock_symphony_dashboard_link_rect(self, self.view.dock_body_rect)?;
+        (row == rect.y && column >= rect.x && column < rect.right())
+            .then(|| crate::ui::dock_symphony_dashboard_url(self))
+            .flatten()
     }
 
     pub(crate) fn clear_symphony(&mut self) {
@@ -4815,6 +4861,7 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            dock_symphony: None,
             work_view: None,
             linear_default_layout: LinearViewLayout::List,
             sidebar_footer_hover: None,

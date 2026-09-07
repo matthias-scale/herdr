@@ -82,6 +82,16 @@ pub(super) enum MouseAction {
         menu: ContextMenuState,
         idx: usize,
     },
+    /// Open a Symphony job: its checkout terminal plus the dock surface bound
+    /// to it. Index into the current snapshot, resolved by the app because
+    /// creating the tab needs the runtime.
+    OpenSymphonyWorkflow {
+        index: usize,
+    },
+    /// Hand a link to the desktop browser.
+    OpenUrl {
+        url: String,
+    },
 }
 
 enum MobileMouseResult {
@@ -1027,6 +1037,11 @@ impl AppState {
                     self.set_dock_home_detail_tab(detail_tab);
                     return None;
                 }
+                if in_dock && self.dock_tab == Some(crate::app::DockSurface::Symphony) {
+                    if let Some(url) = self.dock_symphony_dashboard_click(mouse.column, mouse.row) {
+                        return Some(MouseAction::OpenUrl { url });
+                    }
+                }
                 if in_dock {
                     self.dock_editor_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Editor);
@@ -1241,6 +1256,9 @@ impl AppState {
                     if let Some(key) = crate::ui::sidebar_dim_header_at(self, mouse.row) {
                         self.sidebar_selected_work_group = Some(key);
                         return None;
+                    }
+                    if let Some(index) = crate::ui::sidebar_symphony_job_at(self, mouse.row) {
+                        return Some(MouseAction::OpenSymphonyWorkflow { index });
                     }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
@@ -2724,6 +2742,104 @@ mod tests {
                 tab_idx: 0
             })
         ));
+    }
+
+    #[test]
+    fn clicking_a_symphony_row_opens_that_workflow() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let workflow = |name: &str| crate::symphony::Workflow {
+            workflow_id: format!("wf-{name}"),
+            run_id: format!("run-{name}"),
+            name: name.to_string(),
+            phase: "runFlowStep".to_string(),
+            wait: None,
+            started_at: None,
+            ticket: None,
+            repo: None,
+            pr: None,
+            receipts: None,
+        };
+        app.state.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: vec![workflow("first"), workflow("second")],
+            unavailable: None,
+        };
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let row = (sidebar.y..sidebar.bottom())
+            .find(|row| crate::ui::sidebar_symphony_job_at(&app.state, *row) == Some(1))
+            .expect("second symphony row");
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), sidebar.x + 4, row),
+        );
+
+        assert!(matches!(
+            action,
+            Some(MouseAction::OpenSymphonyWorkflow { index: 1 })
+        ));
+    }
+
+    #[test]
+    fn clicking_the_symphony_dashboard_link_opens_the_job_url() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: vec![crate::symphony::Workflow {
+                workflow_id: "symphony-MAT-138".to_string(),
+                run_id: "019a".to_string(),
+                name: "blocker dashboard".to_string(),
+                phase: "runFlowStep".to_string(),
+                wait: None,
+                started_at: None,
+                ticket: None,
+                repo: None,
+                pr: None,
+                receipts: None,
+            }],
+            unavailable: None,
+        };
+        let workflow = app.state.symphony_snapshot.workflows[0].clone();
+        app.state.bind_symphony_dock(&workflow);
+        assert_eq!(
+            app.state.dock_tab,
+            Some(crate::app::DockSurface::Symphony),
+            "opening a job brings its surface up"
+        );
+        app.state.mode = Mode::Terminal;
+        app.state.view.dock_rect = Rect::new(60, 0, 40, 20);
+        app.state.view.dock_body_rect = Rect::new(60, 2, 40, 18);
+        let link =
+            crate::ui::dock_symphony_dashboard_link_rect(&app.state, app.state.view.dock_body_rect)
+                .expect("dashboard link");
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), link.x, link.y),
+        );
+
+        assert!(
+            matches!(action, Some(MouseAction::OpenUrl { ref url })
+                if url == "http://localhost:8233/namespaces/default/workflows/symphony-MAT-138/019a/history"),
+            "the link must open the job's dashboard url"
+        );
+
+        // A click one row below the link is an ordinary dock click.
+        let elsewhere = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                link.x,
+                link.y.saturating_add(1),
+            ),
+        );
+        assert!(!matches!(elsewhere, Some(MouseAction::OpenUrl { .. })));
     }
 
     fn add_test_work_link(app: &mut crate::app::App, ws_idx: usize) {

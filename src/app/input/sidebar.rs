@@ -659,7 +659,8 @@ impl AppState {
                 crate::ui::SidebarRow::Agent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
-                | crate::ui::SidebarRow::NestedHeader { .. } => None,
+                | crate::ui::SidebarRow::NestedHeader { .. }
+                | crate::ui::SidebarRow::SymphonyJob { .. } => None,
             })
     }
 
@@ -680,7 +681,8 @@ impl AppState {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
-                | crate::ui::SidebarRow::NestedHeader { .. } => None,
+                | crate::ui::SidebarRow::NestedHeader { .. }
+                | crate::ui::SidebarRow::SymphonyJob { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -1307,6 +1309,7 @@ mod tests {
                     format!("section:{title}")
                 }
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
+                crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
             })
             .collect()
     }

@@ -1316,6 +1316,20 @@ pub(crate) enum SidebarRow {
         /// An unassigned object that can spawn a thread from its trailing `+`.
         spawn: bool,
     },
+    /// A Symphony workflow running outside this app. It owns no pane, so like
+    /// the headers it stays out of every card-area list: it cannot be focused
+    /// or navigated onto, and clicking it opens the Symphony window instead.
+    SymphonyJob {
+        /// Index into `AppState::symphony_snapshot.workflows`, so a click can
+        /// open the window on the workflow the row was drawn from.
+        index: usize,
+        name: String,
+        phase: String,
+        /// The named wait the workflow is parked on, if any. A waiting workflow
+        /// owes a human an answer, so it earns the blocked dot.
+        wait: Option<String>,
+        started_at: Option<String>,
+    },
 }
 
 /// Agents waiting on a human are the only ones whose wait you can end, so they
@@ -1327,6 +1341,9 @@ pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
 #[cfg(test)]
 pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
+/// Symphony workflows run headless on a Temporal worker, so nothing in the
+/// pane list ever shows them. The section is the only ambient surface they get.
+pub(crate) const SYMPHONY_SECTION_TITLE: &str = "Symphony";
 
 /// Only the group that demands action is coloured. Pinned and Spaces are
 /// organisation, not urgency, so they stay in the muted chrome tone.
@@ -1489,7 +1506,7 @@ fn compact_sidebar_rows_inner(
             }))
     {
         append_legacy_space_rows(app, &mut rows, visible_entries, expand_worktrees);
-        append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
+        append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
     match app.sidebar_group_mode {
@@ -1501,7 +1518,7 @@ fn compact_sidebar_rows_inner(
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
     }
-    append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
+    append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
     rows
 }
 
@@ -1787,6 +1804,19 @@ fn append_object_group_rows(
     ) {
         append_unassigned_rows(app, rows, entries);
     }
+}
+
+/// The two sections that close the list, in order: Symphony first so open
+/// workflows sit directly under the spaces they relate to, then Settled, which
+/// is history and always sinks to the bottom.
+fn append_tail_sections(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    settled_entries: Vec<AgentPanelEntry>,
+    expand_worktrees: bool,
+) {
+    append_symphony_rows(app, rows);
+    append_settled_rows(app, rows, settled_entries, expand_worktrees);
 }
 
 fn append_settled_rows(
@@ -3156,6 +3186,38 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
     }
 }
 
+/// The Symphony section is omitted entirely when no workflow is open, so a
+/// user who never runs Symphony never pays a row for it. A runtime that is
+/// merely unreachable stays silent too: the Symphony window reports that, and
+/// a permanent error row in the sidebar would be noise on every frame.
+fn append_symphony_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
+    let workflows = &app.symphony_snapshot.workflows;
+    if workflows.is_empty() {
+        return;
+    }
+    let collapsed = section_is_collapsed(app, SYMPHONY_SECTION_TITLE);
+    rows.push(SidebarRow::SectionHeader {
+        title: SYMPHONY_SECTION_TITLE,
+        count: workflows.len(),
+        collapsed,
+    });
+    if collapsed {
+        return;
+    }
+    rows.extend(
+        workflows
+            .iter()
+            .enumerate()
+            .map(|(index, workflow)| SidebarRow::SymphonyJob {
+                index,
+                name: workflow.name.clone(),
+                phase: workflow.phase.clone(),
+                wait: workflow.wait.clone(),
+                started_at: workflow.started_at.clone(),
+            }),
+    );
+}
+
 fn append_recently_done_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
@@ -3442,7 +3504,8 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         }
         SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
-        | SidebarRow::NestedHeader { .. } => 1,
+        | SidebarRow::NestedHeader { .. }
+        | SidebarRow::SymphonyJob { .. } => 1,
     }
 }
 
@@ -3491,6 +3554,9 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         // the two groups read as separate lists rather than one long one.
         (SidebarRow::SectionHeader { .. }, _) => 0,
         (_, SidebarRow::SectionHeader { .. }) => app.sidebar_agents.row_gap,
+        // Symphony jobs are a dense read-only list, so they hug each other and
+        // whatever follows them; the gap before the next header is enough.
+        (SidebarRow::SymphonyJob { .. }, _) | (_, SidebarRow::SymphonyJob { .. }) => 0,
     }
 }
 
@@ -3551,6 +3617,8 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         // workspace must never land on one.
         SidebarRow::SectionHeader { .. } => false,
         SidebarRow::NestedHeader { .. } => false,
+        // A Symphony workflow runs on a worker, not in a workspace.
+        SidebarRow::SymphonyJob { .. } => false,
     }
 }
 
@@ -3671,7 +3739,8 @@ pub(crate) fn compute_sidebar_row_areas(
             }
             SidebarRow::Tab { .. }
             | SidebarRow::SectionHeader { .. }
-            | SidebarRow::NestedHeader { .. } => {}
+            | SidebarRow::NestedHeader { .. }
+            | SidebarRow::SymphonyJob { .. } => {}
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
@@ -3861,6 +3930,143 @@ pub(crate) fn sidebar_unassigned_spawn_at(app: &AppState, col: u16, row: u16) ->
                 && col < header.rect.right().saturating_sub(2)
         })
         .map(|header| header.key)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymphonyJobArea {
+    index: usize,
+    name: String,
+    phase: String,
+    wait: Option<String>,
+    started_at: Option<String>,
+    rect: Rect,
+}
+
+fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea> {
+    let ws_area = workspace_list_rect_for_app(app, area);
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let mut y = body.y;
+    let mut out = Vec::new();
+    let rows = sidebar_rows(app);
+    for (idx, row) in rows
+        .iter()
+        .enumerate()
+        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+    {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        if let SidebarRow::SymphonyJob {
+            index,
+            name,
+            phase,
+            wait,
+            started_at,
+        } = row
+        {
+            out.push(SymphonyJobArea {
+                index: *index,
+                name: name.clone(),
+                phase: phase.clone(),
+                wait: wait.clone(),
+                started_at: started_at.clone(),
+                rect: Rect::new(body.x, y, body.width, height),
+            });
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, &rows, idx));
+    }
+    out
+}
+
+/// Index into the Symphony snapshot for the job row at this screen row, if
+/// any. Clicking one opens the Symphony window on that workflow.
+pub(crate) fn sidebar_symphony_job_at(app: &AppState, row: u16) -> Option<usize> {
+    compute_symphony_job_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|job| row >= job.rect.y && row < job.rect.bottom())
+        .map(|job| job.index)
+}
+
+fn render_symphony_job(
+    app: &AppState,
+    frame: &mut Frame,
+    job: &SymphonyJobArea,
+    now: std::time::SystemTime,
+) {
+    if job.rect.width == 0 || job.rect.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let state = symphony_job_state(job.wait.as_deref());
+    // Exactly the agent row's fields, sized by the agent row's own width rules:
+    // dot, title, the status the row is in, and how long it has been in it. A
+    // workflow is one more thing that is either running or waiting on you.
+    let status = symphony_job_status(job.phase.as_str(), job.wait.as_deref());
+    let width = usize::from(job.rect.width);
+    let requested_prefix_width = SYMPHONY_ROW_DEPTH * 3 + 1;
+    let widths = compact_row_widths(&job.name, &status, width, requested_prefix_width);
+    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let title_width = width.saturating_sub(fixed_width);
+    let title = pad_right(&truncate_end(&job.name, title_width), title_width);
+    let dot = pad_right(
+        compact_dot_for_state(state, true, true, false, false),
+        SIDEBAR_DOT_FIELD_WIDTH,
+    );
+    let status = pad_left(&status, widths.provider);
+    let age = if widths.age > 0 {
+        pad_left(
+            &crate::ui::symphony::age_label_since(job.started_at.as_deref(), now),
+            widths.age,
+        )
+    } else {
+        String::new()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" ".repeat(widths.prefix)),
+            Span::styled(dot, Style::default().fg(state_label_color(state, true, p))),
+            Span::styled(title, Style::default().fg(p.subtext0)),
+            Span::styled(
+                status,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ),
+            Span::styled(
+                age,
+                Style::default().fg(if state == AgentState::Working {
+                    p.blue
+                } else {
+                    p.overlay0
+                }),
+            ),
+        ])),
+        Rect::new(job.rect.x, job.rect.y, job.rect.width, 1),
+    );
+}
+
+/// Symphony rows sit one level under their section header, like an agent under
+/// its space.
+const SYMPHONY_ROW_DEPTH: usize = 1;
+
+/// What the row's status column says: the named wait when the job is parked on
+/// one, because that is the fact you act on, else the running phase.
+fn symphony_job_status(phase: &str, wait: Option<&str>) -> String {
+    match wait {
+        Some(wait) if !wait.trim().is_empty() => wait.to_string(),
+        _ => phase.to_string(),
+    }
+}
+
+/// A workflow parked on a named wait owes a human an answer, which is exactly
+/// what the blocked dot means for an agent row; anything else is running.
+fn symphony_job_state(wait: Option<&str>) -> AgentState {
+    match wait {
+        Some(wait) if !wait.trim().is_empty() => AgentState::Blocked,
+        _ => AgentState::Working,
+    }
 }
 
 /// What a dim work-item header starts, resolved from the current projection.
@@ -4348,6 +4554,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
+            // Collapsed there is no room for a workflow name; the section rule
+            // above already shows that a Symphony run is open.
+            SidebarRow::SymphonyJob { .. } => {}
         }
     }
 
@@ -5204,6 +5413,12 @@ fn render_workspace_list(
     let narrow_prefix = tab_cards
         .first()
         .and_then(|card| narrow_view_tab_prefix(app, usize::from(card.rect.width)));
+    // One wall clock for the whole section, so two rows drawn in the same
+    // frame can never disagree about how old they are.
+    let symphony_now = std::time::SystemTime::now();
+    for job in compute_symphony_job_areas(app, sidebar_area) {
+        render_symphony_job(app, frame, &job, symphony_now);
+    }
     for card in tab_cards {
         render_tab_card(app, frame, &card, narrow_prefix);
     }
@@ -6876,6 +7091,7 @@ pub(crate) mod tests {
                 SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                 SidebarRow::SectionHeader { .. } => ('h', 0),
                 SidebarRow::NestedHeader { .. } => ('h', 0),
+                SidebarRow::SymphonyJob { .. } => ('s', 0),
             })
             .collect()
     }
@@ -8103,6 +8319,7 @@ pub(crate) mod tests {
                     SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                     SidebarRow::SectionHeader { .. } => ('h', 0),
                     SidebarRow::NestedHeader { .. } => ('h', 0),
+                    SidebarRow::SymphonyJob { .. } => ('s', 0),
                 })
                 .collect::<Vec<_>>(),
             vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
@@ -8137,7 +8354,8 @@ pub(crate) mod tests {
                 SidebarRow::Workspace { .. }
                 | SidebarRow::Agent { .. }
                 | SidebarRow::SectionHeader { .. }
-                | SidebarRow::NestedHeader { .. } => None,
+                | SidebarRow::NestedHeader { .. }
+                | SidebarRow::SymphonyJob { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(tabs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
@@ -8178,6 +8396,7 @@ pub(crate) mod tests {
                     ),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
+                    SidebarRow::SymphonyJob { .. } => ("symphony", 0, None, None),
                 })
                 .collect::<Vec<_>>()
         };
@@ -10133,6 +10352,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::Workspace { .. } => ("workspace", String::new()),
                 SidebarRow::Tab { .. } => ("tab", String::new()),
                 SidebarRow::NestedHeader { title, .. } => ("section", title),
+                SidebarRow::SymphonyJob { name, .. } => ("symphony", name),
             })
             .collect()
     }
@@ -12803,6 +13023,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     SidebarRow::Agent { .. } => "agent".to_string(),
                     SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
                     SidebarRow::NestedHeader { title, .. } => format!("nested:{title}"),
+                    SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 })
                 .collect::<Vec<_>>(),
             vec![
@@ -14491,5 +14712,170 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .as_ref()
             .and_then(|home| home.add_project.as_ref())
             .is_some());
+    }
+
+    fn symphony_workflow(name: &str) -> crate::symphony::Workflow {
+        crate::symphony::Workflow {
+            workflow_id: format!("wf-{name}"),
+            run_id: format!("run-{name}"),
+            name: name.to_string(),
+            phase: "runFlowStep".to_string(),
+            wait: None,
+            started_at: None,
+            ticket: None,
+            repo: None,
+            pr: None,
+            receipts: None,
+        }
+    }
+
+    fn app_with_symphony(names: &[&str]) -> AppState {
+        let mut app = app_with_agents(&["one"]);
+        app.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: names.iter().copied().map(symphony_workflow).collect(),
+            unavailable: None,
+        };
+        app
+    }
+
+    #[test]
+    fn symphony_section_is_absent_without_open_workflows() {
+        let app = app_with_agents(&["one"]);
+        assert!(!sidebar_rows(&app)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SectionHeader { title, .. }
+                if *title == SYMPHONY_SECTION_TITLE)));
+
+        // An unreachable runtime is reported by the Symphony window, not by a
+        // permanent error row in the sidebar.
+        let mut unavailable = app;
+        unavailable.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: Vec::new(),
+            unavailable: Some("Temporal runtime is unreachable".to_string()),
+        };
+        assert!(!sidebar_rows(&unavailable)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SymphonyJob { .. })));
+    }
+
+    #[test]
+    fn symphony_section_lists_open_workflows_and_collapses() {
+        let mut app = app_with_symphony(&["blocker dashboard", "docs sync"]);
+        let rows = sidebar_rows(&app);
+        let position = |wanted: &str| {
+            rows.iter().position(
+                |row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == wanted),
+            )
+        };
+        let symphony = position(SYMPHONY_SECTION_TITLE).expect("symphony section");
+        assert!(
+            position(SPACES_SECTION_TITLE).is_some_and(|spaces| spaces < symphony),
+            "symphony belongs under the spaces list"
+        );
+        assert!(matches!(
+            rows.get(symphony),
+            Some(SidebarRow::SectionHeader {
+                count: 2,
+                collapsed: false,
+                ..
+            })
+        ));
+        assert_eq!(
+            rows.iter()
+                .filter_map(|row| match row {
+                    SidebarRow::SymphonyJob { index, name, .. } => Some((*index, name.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "blocker dashboard".to_string()),
+                (1, "docs sync".to_string())
+            ]
+        );
+
+        app.toggle_sidebar_group(SYMPHONY_SECTION_TITLE);
+        let rows = sidebar_rows(&app);
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SymphonyJob { .. })));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, collapsed: true, .. }
+                if *title == SYMPHONY_SECTION_TITLE
+        )));
+    }
+
+    #[test]
+    fn symphony_row_dot_follows_the_agent_vocabulary_for_named_waits() {
+        let mut app = app_with_symphony(&["sync"]);
+        app.symphony_snapshot.workflows[0].wait = Some("plan-sign-off".to_string());
+        let area = Rect::new(0, 0, 40, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..area.height)
+            .find(|row| row_text(buffer, *row, area.width - 1).contains("sync"))
+            .expect("symphony row");
+        let dot = (0..area.width)
+            .find_map(|column| {
+                let cell = buffer.cell((column, row))?;
+                (cell.symbol() == "\u{25cb}").then(|| cell.clone())
+            })
+            .unwrap_or_else(|| panic!("{:?}", row_text(buffer, row, area.width - 1)));
+        assert_eq!(
+            dot.fg, app.palette.red,
+            "a named wait owes a human an answer"
+        );
+    }
+
+    #[test]
+    fn symphony_rows_render_name_and_phase_and_never_become_cards() {
+        let app = app_with_symphony(&["blocker dash"]);
+        let area = Rect::new(0, 0, 40, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let text = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>();
+        assert!(
+            text.iter()
+                .any(|line| line.contains(SYMPHONY_SECTION_TITLE)),
+            "{text:?}"
+        );
+        let job_line = text
+            .iter()
+            .find(|line| line.contains("blocker"))
+            .unwrap_or_else(|| panic!("{text:?}"));
+        // The status column is the agent row's provider column, so a long phase
+        // is truncated to it rather than pushing the age out of alignment.
+        assert!(job_line.contains("runFlowStep"), "{job_line:?}");
+        // Dot, title, status and age land in the agent row's columns.
+        let agent_line = text
+            .iter()
+            .find(|line| line.contains("pi"))
+            .unwrap_or_else(|| panic!("{text:?}"));
+        assert_eq!(
+            job_line.find('\u{25cf}'),
+            agent_line.find('\u{25cf}'),
+            "{job_line:?} vs {agent_line:?}"
+        );
+        // Same dot vocabulary as an agent row: running is a filled dot.
+        assert!(job_line.contains('\u{25cf}'), "{job_line:?}");
+
+        // A workflow owns no pane, so it must stay out of every focusable list.
+        let job_row = compute_symphony_job_areas(&app, area)
+            .first()
+            .cloned()
+            .expect("symphony job area");
+        assert!(compute_agent_card_areas(&app, area)
+            .iter()
+            .all(|card| card.rect.y != job_row.rect.y));
+        assert!(compute_tab_card_areas(&app, area)
+            .iter()
+            .all(|card| card.rect.y != job_row.rect.y));
     }
 }

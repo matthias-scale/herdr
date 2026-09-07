@@ -144,7 +144,9 @@ fn mobile_switcher_target_for_row(
             ws_idx: entry.ws_idx,
             tab_idx: entry.tab_idx,
         },
-        SidebarRow::SectionHeader { .. } | SidebarRow::NestedHeader { .. } => return None,
+        SidebarRow::SectionHeader { .. }
+        | SidebarRow::NestedHeader { .. }
+        | SidebarRow::SymphonyJob { .. } => return None,
     })
 }
 
@@ -164,7 +166,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         SidebarRow::Workspace { .. }
         | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
-        | SidebarRow::NestedHeader { .. } => 1,
+        | SidebarRow::NestedHeader { .. }
+        | SidebarRow::SymphonyJob { .. } => 1,
         SidebarRow::Agent { .. } => 1,
     }
 }
@@ -786,6 +789,20 @@ fn render_mobile_switcher_content(
                     p.panel_bg,
                     Line::from(Span::styled(
                         label,
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::SymphonyJob { name, phase, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("   {name} {phase}"),
                         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                     )),
                 );
