@@ -63,6 +63,10 @@ pub(super) enum MouseAction {
     FocusToastTarget,
     RefreshDockFiles,
     SortDockFiles,
+    PreviewDockFile(std::path::PathBuf),
+    OpenDockFile(std::path::PathBuf),
+    RefreshEditorPreview,
+    OpenEditorPreview,
     MoveWorkspace {
         source_ws_idx: usize,
         insert_idx: usize,
@@ -701,6 +705,24 @@ impl AppState {
             return None;
         }
 
+        if self.dock_editor_preview.is_some()
+            && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
+        {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if rect_contains(
+                    self.view.editor_preview_refresh_rect,
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    return Some(MouseAction::RefreshEditorPreview);
+                }
+                if rect_contains(self.view.editor_preview_open_rect, mouse.column, mouse.row) {
+                    return Some(MouseAction::OpenEditorPreview);
+                }
+            }
+            return None;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
@@ -1008,8 +1030,18 @@ impl AppState {
                     self.toggle_selected_dock_diff_file();
                     return None;
                 }
-                if self.click_dock_file_row(mouse.column, mouse.row) {
-                    return None;
+                if let Some(action) =
+                    self.click_dock_file_row_at(mouse.column, mouse.row, std::time::Instant::now())
+                {
+                    return match action {
+                        crate::app::files::FileClickAction::DirectoryToggled => None,
+                        crate::app::files::FileClickAction::Preview(path) => {
+                            Some(MouseAction::PreviewDockFile(path))
+                        }
+                        crate::app::files::FileClickAction::Open(path) => {
+                            Some(MouseAction::OpenDockFile(path))
+                        }
+                    };
                 }
                 if self.click_dock_agent_row(mouse.column, mouse.row) {
                     return None;

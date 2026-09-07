@@ -70,6 +70,15 @@ pub(crate) struct DockEditorSession {
     pub terminal_id: crate::terminal::TerminalId,
 }
 
+/// Read-only file content shown in the main pane area by the Editor renderer.
+/// It stays attach-local and never enters the server protocol or pane runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockEditorPreview {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) content: String,
+    pub(crate) notice: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -1448,6 +1457,7 @@ pub(crate) struct DockPresentationState {
     /// attach-local TUI state and never enters the session protocol.
     pub(crate) object_views: std::collections::HashMap<WorkItemKey, ObjectViewState>,
     pub(crate) editor_focused: bool,
+    pub(crate) editor_preview: Option<DockEditorPreview>,
     pub(crate) diff_focused: bool,
     pub(crate) pr_focused: bool,
     pub(crate) pr_checkout_menu: Option<PrCheckoutChoice>,
@@ -1463,6 +1473,7 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
     pub(crate) files_sort: crate::files::FileSort,
     pub(crate) files_search_active: bool,
+    pub(crate) files_last_click: Option<(std::path::PathBuf, std::time::Instant)>,
     pub(crate) agents_focused: bool,
     pub(crate) agents_selection: Option<String>,
     pub(crate) linear_focused: bool,
@@ -1506,6 +1517,7 @@ impl Default for DockPresentationState {
             scroll: 0,
             object_views: std::collections::HashMap::new(),
             editor_focused: false,
+            editor_preview: None,
             diff_focused: false,
             pr_focused: false,
             pr_checkout_menu: None,
@@ -1521,6 +1533,7 @@ impl Default for DockPresentationState {
             files_collapsed: std::collections::HashSet::new(),
             files_sort: crate::files::FileSort::Name,
             files_search_active: false,
+            files_last_click: None,
             agents_focused: false,
             agents_selection: None,
             linear_focused: false,
@@ -2068,6 +2081,8 @@ pub struct ViewState {
     pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
     pub(crate) dock_files_refresh_rect: Rect,
     pub(crate) dock_files_sort_rect: Rect,
+    pub(crate) editor_preview_refresh_rect: Rect,
+    pub(crate) editor_preview_open_rect: Rect,
     pub(crate) dock_agent_row_hit_areas: Vec<DockAgentRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
@@ -3188,6 +3203,7 @@ pub struct AppState {
     pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
     pub(crate) dock_files_sort: crate::files::FileSort,
     pub(crate) dock_files_search_active: bool,
+    pub(crate) dock_files_last_click: Option<(std::path::PathBuf, std::time::Instant)>,
     /// Selection and keyboard ownership for the focus-following Agents tree.
     /// Both fields are attach-local TUI presentation state.
     pub(crate) dock_agents_focused: bool,
@@ -3265,6 +3281,7 @@ pub struct AppState {
     pub(crate) commit_stage_all: bool,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
+    pub(crate) dock_editor_preview: Option<DockEditorPreview>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     pub(crate) dock_editor_requested_paths: std::collections::HashMap<PaneId, std::path::PathBuf>,
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
@@ -4612,6 +4629,7 @@ impl AppState {
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_object_views, &mut other.object_views);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
+        std::mem::swap(&mut self.dock_editor_preview, &mut other.editor_preview);
         std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
         std::mem::swap(&mut self.dock_pr_focused, &mut other.pr_focused);
         std::mem::swap(&mut self.dock_pr_checkout_menu, &mut other.pr_checkout_menu);
@@ -4633,6 +4651,7 @@ impl AppState {
             &mut self.dock_files_search_active,
             &mut other.files_search_active,
         );
+        std::mem::swap(&mut self.dock_files_last_click, &mut other.files_last_click);
         std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
         std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
         std::mem::swap(&mut self.dock_linear_focused, &mut other.linear_focused);
@@ -5166,6 +5185,8 @@ impl AppState {
                 dock_file_row_hit_areas: Vec::new(),
                 dock_files_refresh_rect: Rect::default(),
                 dock_files_sort_rect: Rect::default(),
+                editor_preview_refresh_rect: Rect::default(),
+                editor_preview_open_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
@@ -5228,6 +5249,7 @@ impl AppState {
             dock_files_collapsed: std::collections::HashSet::new(),
             dock_files_sort: crate::files::FileSort::Name,
             dock_files_search_active: false,
+            dock_files_last_click: None,
             dock_agents_focused: false,
             dock_agents_selection: None,
             dock_linear_focused: false,
@@ -5265,6 +5287,7 @@ impl AppState {
             commit_stage_all: false,
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_preview: None,
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
@@ -6148,11 +6171,16 @@ mod tests {
     }
 
     #[test]
-    fn dock_file_sort_and_search_are_swapped_with_client_presentation() {
+    fn dock_file_state_and_preview_are_swapped_with_client_presentation() {
         let mut state = AppState::test_new();
         let mut client = DockPresentationState {
             files_sort: crate::files::FileSort::GitStatus,
             files_search_active: true,
+            editor_preview: Some(DockEditorPreview {
+                path: "/repo/src/lib.rs".into(),
+                content: "fn lib() {}".into(),
+                notice: None,
+            }),
             ..DockPresentationState::default()
         };
 
@@ -6160,8 +6188,16 @@ mod tests {
 
         assert_eq!(state.dock_files_sort, crate::files::FileSort::GitStatus);
         assert!(state.dock_files_search_active);
+        assert_eq!(
+            state
+                .dock_editor_preview
+                .as_ref()
+                .map(|preview| preview.path.as_path()),
+            Some(std::path::Path::new("/repo/src/lib.rs"))
+        );
         assert_eq!(client.files_sort, crate::files::FileSort::Name);
         assert!(!client.files_search_active);
+        assert!(client.editor_preview.is_none());
     }
 
     fn app_with_object_and_bare_panes() -> (AppState, PaneId, PaneId) {

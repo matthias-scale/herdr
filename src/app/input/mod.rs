@@ -4325,8 +4325,12 @@ impl App {
             return;
         }
 
-        let handled_pane_double_click = self.handle_pane_double_click(mouse);
-        if !handled_pane_double_click {
+        let editor_preview_hit = self.state.dock_editor_preview.is_some()
+            && self
+                .state
+                .point_in_rect(self.state.view.terminal_area, mouse.column, mouse.row);
+        let handled_pane_double_click = !editor_preview_hit && self.handle_pane_double_click(mouse);
+        if !handled_pane_double_click && !editor_preview_hit {
             self.focus_pane_before_mouse_press(mouse);
         }
 
@@ -4387,6 +4391,10 @@ impl App {
                     }
                     MouseAction::RefreshDockFiles => self.force_dock_files_refresh(),
                     MouseAction::SortDockFiles => self.state.cycle_dock_files_sort(),
+                    MouseAction::PreviewDockFile(path) => self.preview_dock_file(path),
+                    MouseAction::OpenDockFile(path) => self.open_dock_file_in_editor(path),
+                    MouseAction::RefreshEditorPreview => self.refresh_dock_editor_preview(),
+                    MouseAction::OpenEditorPreview => self.open_dock_editor_preview_in_editor(),
                     MouseAction::MoveWorkspace {
                         source_ws_idx,
                         insert_idx,
