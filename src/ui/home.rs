@@ -147,7 +147,7 @@ struct ComposerBands {
     /// The card drawn around the composer, border included.
     frame: Rect,
     prompt: Rect,
-    /// Agent, model and effort, with the submit glyph carved off the right.
+    /// Agent, model, effort and access, with the submit glyph carved off the right.
     chips: Rect,
     submit: Rect,
     /// The rule between the pickers and the workspace row, drawn across the
@@ -359,7 +359,7 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
 }
 
 /// Composer bands for a chip-row test: the bottom row is wide enough that the
-/// start-in target keeps its place there and the chips stay the three pickers.
+/// start-in target keeps its place there and the chips stay on the picker row.
 #[cfg(test)]
 fn chip_row_bands(chips: Rect) -> ComposerBands {
     ComposerBands {
@@ -404,6 +404,9 @@ fn chip_specs(
     ];
     if let Some(effort) = &home.effort {
         specs.push((HomeFocus::Effort, format!("{effort} ▾")));
+    }
+    if let Some(access) = home.access {
+        specs.push((HomeFocus::Access, format!("{} ▾", access.label())));
     }
     if let Some(context) = &home.context_window {
         specs.push((HomeFocus::Context, format!("{context} ▾")));
@@ -466,6 +469,7 @@ fn chip_rects(app: &AppState, home: &HomeState, composer: ComposerBands) -> Vec<
             HomeFocus::Agent
             | HomeFocus::Model
             | HomeFocus::Effort
+            | HomeFocus::Access
             | HomeFocus::Context
             | HomeFocus::Target => MINIMUM_CHIP_WIDTH,
             _ => 0,
@@ -567,7 +571,10 @@ fn target_in_chip_row(app: &AppState, home: &HomeState, composer: ComposerBands)
     if wanted <= composer.bottom.width as usize {
         return false;
     }
-    let chips = 2 + usize::from(home.effort.is_some()) + usize::from(home.context_window.is_some());
+    let chips = 2
+        + usize::from(home.effort.is_some())
+        + usize::from(home.access.is_some())
+        + usize::from(home.context_window.is_some());
     let minimum = (chips + 1) * MINIMUM_CHIP_WIDTH + chips;
     minimum <= composer.chips.width as usize
 }
@@ -815,6 +822,11 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .map(|model| model.display_name.clone())
             .collect(),
         HomePicker::Effort => home.effort_options().to_vec(),
+        HomePicker::Access => home
+            .access_options()
+            .iter()
+            .map(|access| access.label().to_string())
+            .collect(),
         HomePicker::Context => home
             .context_options()
             .iter()
@@ -1241,6 +1253,7 @@ pub(super) fn home_hit_areas(
                     HomeFocus::Agent => HomeHitTarget::Agent,
                     HomeFocus::Model => HomeHitTarget::Model,
                     HomeFocus::Effort => HomeHitTarget::Effort,
+                    HomeFocus::Access => HomeHitTarget::Access,
                     HomeFocus::Context => HomeHitTarget::Context,
                     HomeFocus::Directory => HomeHitTarget::Directory,
                     HomeFocus::Workspace => HomeHitTarget::Workspace,
@@ -1878,9 +1891,8 @@ mod tests {
     fn dropdowns_open_downward_from_their_field() {
         let mut app = AppState::test_new();
         let mut home = HomeState::default();
-        home.set_model("claude-fable-5-1");
-        home.focus = Some(HomeFocus::Context);
-        home.picker = Some(HomePicker::Context);
+        home.focus = Some(HomeFocus::Access);
+        home.picker = Some(HomePicker::Access);
         app.home = Some(home);
         let queue = [blocked(0)];
         let area = Rect::new(0, 0, 60, 24);
@@ -1888,7 +1900,7 @@ mod tests {
         let composer = layout.composer.expect("composer should fit");
         let home = app.home.as_ref().expect("home");
         let field =
-            composer_field_rect(&app, home, composer, HomeFocus::Context).expect("context field");
+            composer_field_rect(&app, home, composer, HomeFocus::Access).expect("access field");
         let popup = picker_popup_rect(&app, home, composer, area).expect("an open picker");
 
         assert_eq!(
@@ -1998,8 +2010,8 @@ mod tests {
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         let chip_row = row_text(&buffer, composer.frame, composer.chips.y);
         assert!(
-            chip_row.contains("claude ▾ │ default ▾ │ auto ▾"),
-            "the picker row should read agent │ model │ effort: {chip_row:?}"
+            chip_row.contains("claude ▾ │ default ▾ │ auto ▾ │ default ▾"),
+            "the picker row should read agent │ model │ effort │ access: {chip_row:?}"
         );
         assert!(
             chip_row.ends_with("[ ↵ ]│"),
@@ -2027,6 +2039,7 @@ mod tests {
                 HomeFocus::Agent => HomeHitTarget::Agent,
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
+                HomeFocus::Access => HomeHitTarget::Access,
                 HomeFocus::Context => HomeHitTarget::Context,
                 HomeFocus::Directory => HomeHitTarget::Directory,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
@@ -2153,6 +2166,7 @@ mod tests {
             HomeFocus::Agent,
             HomeFocus::Model,
             HomeFocus::Effort,
+            HomeFocus::Access,
             HomeFocus::Directory,
             HomeFocus::Workspace,
             HomeFocus::Ref,
@@ -2167,6 +2181,8 @@ mod tests {
         home.set_model("claude-fable-5-1");
         home.focus = Some(HomeFocus::Effort);
         home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Access));
+        home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Context));
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Directory));
@@ -2178,9 +2194,11 @@ mod tests {
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Effort));
         home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Access));
+        home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Directory));
         home.move_focus(true);
-        assert_eq!(home.focus, Some(HomeFocus::Effort));
+        assert_eq!(home.focus, Some(HomeFocus::Access));
     }
 
     #[test]
@@ -2193,12 +2211,16 @@ mod tests {
         home.set_model("claude-fable-5-1");
         home.focus = Some(HomeFocus::Effort);
         home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Access));
+        home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Context));
 
         home.set_agent(crate::detect::Agent::Codex);
         home.focus = Some(HomeFocus::Model);
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Effort));
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Access));
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Directory));
     }
@@ -2217,9 +2239,10 @@ mod tests {
         let buffer = draw_home(&app, &queue, area);
         let chip_row = row_text(&buffer, area, composer.chips.y);
 
-        // The row keeps all three pickers, elided rather than dropped.
-        assert_eq!(rects.len(), 3);
-        assert_eq!(chip_row.matches("… ▾").count(), 3, "{chip_row:?}");
+        // The row keeps all four pickers, elided rather than dropped.
+        assert_eq!(rects.len(), 4);
+        assert_eq!(chip_row.matches('…').count(), 4, "{chip_row:?}");
+        assert!(chip_row.matches("… ▾").count() >= 3, "{chip_row:?}");
         assert!(!chip_row.contains("clau"), "{chip_row:?}");
         assert!(!chip_row.contains("defa"), "{chip_row:?}");
         assert_eq!(rects[0].1.right() + 1, rects[1].1.x);
@@ -2232,6 +2255,7 @@ mod tests {
                 HomeFocus::Agent => HomeHitTarget::Agent,
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
+                HomeFocus::Access => HomeHitTarget::Access,
                 HomeFocus::Context => HomeHitTarget::Context,
                 HomeFocus::Directory => HomeHitTarget::Directory,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
@@ -2330,16 +2354,16 @@ mod tests {
     }
 
     #[test]
-    fn unicode_model_labels_do_not_push_effort_out_of_a_narrow_row() {
+    fn unicode_model_labels_do_not_push_effort_or_access_out_of_a_narrow_row() {
         let mut home = HomeState::default();
         home.model = "模型六点一".into();
         let area = Rect::new(0, 0, 24, 1);
         let rects = chip_rects(&AppState::test_new(), &home, chip_row_bands(area));
 
-        assert_eq!(rects.len(), 3);
+        assert_eq!(rects.len(), 4);
         assert_eq!(
             rects.last().map(|(focus, _)| *focus),
-            Some(HomeFocus::Effort)
+            Some(HomeFocus::Access)
         );
         assert!(rects.windows(2).all(|pair| pair[0].1.right() < pair[1].1.x));
         assert!(rects.iter().all(|(_, rect)| rect.right() <= area.right()));
@@ -2578,10 +2602,12 @@ mod tests {
             let buffer = draw_home(&app, &queue, area);
             let row = row_text(&buffer, composer.frame, composer.chips.y);
 
-            assert!(
-                row.contains("claude ▾ │ Claude Fable 5.1 ▾ │ auto ▾ │ 200k ▾"),
-                "picker row at {columns} columns: {row:?}"
-            );
+            for label in ["Fable 5.1 ▾", "auto ▾", "default ▾", "200k ▾"] {
+                assert!(
+                    row.contains(label),
+                    "picker row at {columns} columns: {row:?}"
+                );
+            }
             assert!(!row.to_ascii_lowercase().contains("fablet"), "{row:?}");
         }
 
@@ -2608,6 +2634,34 @@ mod tests {
                 "Claude Haiku 4.5",
             ]
         );
+    }
+
+    #[test]
+    fn access_picker_uses_provider_options_and_hides_without_a_mapping() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::default();
+        home.picker = Some(HomePicker::Access);
+        assert_eq!(
+            picker_labels(&app, &home, HomePicker::Access),
+            ["default", "accept edits", "plan", "bypass"]
+        );
+
+        home.set_agent(crate::detect::Agent::Codex);
+        assert_eq!(
+            picker_labels(&app, &home, HomePicker::Access),
+            ["read-only", "workspace-write", "full"]
+        );
+
+        home.set_agent(crate::detect::Agent::Gemini);
+        app.home = Some(home);
+        let composer = bands(Rect::new(0, 0, 96, 20), 0)
+            .composer
+            .expect("composer");
+        let home = app.home.as_ref().expect("home");
+        assert!(home.access_options().is_empty());
+        assert!(!chip_specs(&app, home, composer)
+            .iter()
+            .any(|(focus, _)| *focus == HomeFocus::Access));
     }
 
     /// 1a-1: the card reads headline, prompt, pickers, divider, workspace/ref.
@@ -2694,6 +2748,7 @@ mod tests {
             HomeFocus::Agent,
             HomeFocus::Model,
             HomeFocus::Effort,
+            HomeFocus::Access,
             HomeFocus::Directory,
             HomeFocus::Workspace,
             HomeFocus::Ref,
@@ -2710,6 +2765,7 @@ mod tests {
             HomeFocus::Ref,
             HomeFocus::Workspace,
             HomeFocus::Directory,
+            HomeFocus::Access,
             HomeFocus::Effort,
             HomeFocus::Model,
             HomeFocus::Agent,

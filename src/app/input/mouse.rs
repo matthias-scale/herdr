@@ -34,6 +34,9 @@ fn dock_body_contains(app: &AppState, column: u16, row: u16) -> bool {
 }
 
 pub(super) enum MouseAction {
+    SidebarObjectMenu {
+        index: usize,
+    },
     SettledMenu {
         index: usize,
     },
@@ -55,6 +58,8 @@ pub(super) enum MouseAction {
         pane_id: crate::layout::PaneId,
     },
     FocusToastTarget,
+    RefreshDockFiles,
+    SortDockFiles,
     MoveWorkspace {
         source_ws_idx: usize,
         insert_idx: usize,
@@ -128,6 +133,31 @@ impl AppState {
         self.forwarded_pane_input = None;
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
+            return None;
+        }
+        if self.add_project_active() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let layout = self.view.add_project_layout.clone();
+                if rect_contains(layout.close, mouse.column, mouse.row) {
+                    self.close_add_project();
+                } else if let Some(tab) = layout.tabs.iter().find_map(|(tab, rect)| {
+                    rect_contains(*rect, mouse.column, mouse.row).then_some(*tab)
+                }) {
+                    self.add_project_select_tab(tab);
+                } else if let Some(index) = layout.list.as_ref().and_then(|dropdown| {
+                    crate::ui::dropdown::hit_test(dropdown, mouse.column, mouse.row)
+                }) {
+                    let tab = self
+                        .home
+                        .as_ref()
+                        .and_then(|home| home.add_project.as_ref())
+                        .map(|project| project.tab);
+                    self.add_project_select_row(index);
+                    if tab == Some(crate::app::home::AddProjectTab::GitHub) {
+                        self.accept_add_project();
+                    }
+                }
+            }
             return None;
         }
         if self.mode == Mode::AddAction {
@@ -219,6 +249,7 @@ impl AppState {
                                 HomeHitTarget::Agent => crate::app::home::HomePicker::Agent,
                                 HomeHitTarget::Model => crate::app::home::HomePicker::Model,
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
+                                HomeHitTarget::Access => crate::app::home::HomePicker::Access,
                                 HomeHitTarget::Context => crate::app::home::HomePicker::Context,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
                                 HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,
@@ -262,6 +293,15 @@ impl AppState {
         let group_menu_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
+        let new_thread_anchor = crate::ui::sidebar_header_new_thread_rect(self.view.sidebar_rect);
+        let add_project_anchor = crate::ui::sidebar_header_add_project_rect(self.view.sidebar_rect);
+        let search_anchor = crate::ui::sidebar_header_search_rect(self.view.sidebar_rect);
+        let new_thread_hit =
+            group_menu_enabled && self.point_in_rect(new_thread_anchor, mouse.column, mouse.row);
+        let add_project_hit =
+            group_menu_enabled && self.point_in_rect(add_project_anchor, mouse.column, mouse.row);
+        let search_hit =
+            group_menu_enabled && self.point_in_rect(search_anchor, mouse.column, mouse.row);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
         let filter_anchor = self.sidebar_filter_anchor_rect();
         let filter_anchor_hit =
@@ -271,6 +311,83 @@ impl AppState {
         let group_anchor_hit = group_menu_enabled
             && !filter_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_thread.is_some() {
+            if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
+                if let Some(picker) = self.sidebar_new_thread.as_mut() {
+                    picker.filter.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_new_thread.is_some()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            if new_thread_hit {
+                self.sidebar_new_thread = None;
+            } else if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
+                self.accept_sidebar_new_thread(index);
+            } else {
+                self.sidebar_new_thread = None;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && new_thread_hit {
+            self.open_sidebar_new_thread();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && add_project_hit {
+            self.open_add_project_from_sidebar();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && search_hit {
+            self.sidebar_group_menu_open = false;
+            self.sidebar_filter_menu_open = false;
+            self.sidebar_object_menu = None;
+            self.sidebar_search_active = true;
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_object_menu.is_some() {
+            if let Some(index) = crate::ui::sidebar_object_menu_item_at(
+                self,
+                self.screen_rect(),
+                mouse.column,
+                mouse.row,
+            ) {
+                if let Some(menu) = self.sidebar_object_menu.as_mut() {
+                    menu.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_object_menu.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = crate::ui::sidebar_object_menu_item_at(
+                    self,
+                    self.screen_rect(),
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    return Some(MouseAction::SidebarObjectMenu { index });
+                }
+                if self.sidebar_object_menu.as_ref().is_some_and(|menu| {
+                    menu.page == crate::app::state::SidebarObjectMenuPage::Confirmation
+                }) {
+                    self.dock_pending_write = None;
+                }
+                self.sidebar_object_menu = None;
+            }
+            return None;
+        }
+        if group_menu_enabled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(target) = crate::ui::sidebar_object_action_at(self, mouse.column, mouse.row)
+            {
+                self.open_sidebar_object_menu(target);
+                if let Some(menu) = self.sidebar_object_menu.as_mut() {
+                    menu.anchor_row = Some(mouse.row);
+                }
+                return None;
+            }
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
         {
             if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
@@ -392,6 +509,21 @@ impl AppState {
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && rect_contains(
+                self.view.repo_editor_button_hit_area,
+                mouse.column,
+                mouse.row,
+            )
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+        {
+            if self.repo_editor_available() {
+                self.request_open_repo_editor = true;
+                self.mode = Mode::Terminal;
+            }
+            return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && rect_contains(
                 self.view.add_action_button_hit_area,
                 mouse.column,
                 mouse.row,
@@ -486,6 +618,12 @@ impl AppState {
             && mouse.column < dock.x.saturating_add(dock.width)
             && mouse.row >= dock.y
             && mouse.row < dock.y.saturating_add(dock.height);
+
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            self.dock_hovered_tab_index = in_dock
+                .then(|| self.dock_tab_index_at(mouse.column, mouse.row))
+                .flatten();
+        }
 
         if self.handle_right_click_passthrough(
             terminal_runtimes,
@@ -739,6 +877,12 @@ impl AppState {
                         && self.dock_tab == Some(crate::app::DockSurface::Diff);
                     self.dock_files_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Files);
+                    self.dock_agents_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_pr_focused =
+                        !self.dock_collapsed && self.dock_tab == Some(crate::app::DockSurface::Pr);
+                    self.dock_linear_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Linear);
                     self.mark_session_dirty();
                     return None;
                 }
@@ -746,8 +890,8 @@ impl AppState {
                 // selects, anything else dismisses it before the click can
                 // reach the strip underneath.
                 if self.dock_surface_menu.is_some() {
-                    if let Some(surface) = self.dock_surface_menu_at(mouse.column, mouse.row) {
-                        if self.activate_dock_surface(surface) {
+                    if let Some(entry) = self.dock_surface_menu_entry_at(mouse.column, mouse.row) {
+                        if self.activate_dock_chooser_entry(entry) {
                             self.dock_surface_menu = None;
                         }
                         return None;
@@ -773,6 +917,11 @@ impl AppState {
                             self.dock_tab == Some(crate::app::DockSurface::Diff);
                         self.dock_files_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Files);
+                        self.dock_agents_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Agents);
+                        self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
+                        self.dock_linear_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Linear);
                     }
                     return None;
                 }
@@ -780,22 +929,37 @@ impl AppState {
                     self.toggle_dock_surface_menu();
                     return None;
                 }
-                if let Some(surface) = self.dock_surface_card_at(mouse.column, mouse.row) {
-                    self.activate_dock_surface(surface);
+                if let Some(entry) = self.dock_chooser_entry_at(mouse.column, mouse.row, true) {
+                    self.activate_dock_chooser_entry(entry);
                     return None;
                 }
-                if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
-                    self.open_dock_surface(tab);
+                if let Some(index) = self.dock_tab_index_at(mouse.column, mouse.row) {
+                    let tab = self.dock_open_surfaces.get(index).copied()?;
+                    self.select_dock_tab_index(index);
                     self.dock_editor_focused = tab == crate::app::DockSurface::Editor;
                     self.dock_home_focused = tab == crate::app::DockSurface::Home;
                     self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
                     self.dock_files_focused = tab == crate::app::DockSurface::Files;
+                    self.dock_agents_focused = tab == crate::app::DockSurface::Agents;
+                    self.dock_pr_focused = tab == crate::app::DockSurface::Pr;
+                    self.dock_linear_focused = tab == crate::app::DockSurface::Linear;
+                    if self.dock_agents_focused {
+                        self.reconcile_dock_agents_selection();
+                    }
                     return None;
                 }
                 if self.on_dock_diff_whitespace_toggle(mouse.column, mouse.row) {
                     self.toggle_dock_diff_whitespace();
                     self.dock_diff_focused = true;
                     return None;
+                }
+                if rect_contains(self.view.dock_files_refresh_rect, mouse.column, mouse.row) {
+                    self.dock_files_focused = true;
+                    return Some(MouseAction::RefreshDockFiles);
+                }
+                if rect_contains(self.view.dock_files_sort_rect, mouse.column, mouse.row) {
+                    self.dock_files_focused = true;
+                    return Some(MouseAction::SortDockFiles);
                 }
                 if let Some(index) = self.dock_diff_file_at(mouse.column, mouse.row) {
                     self.dock_diff_selected = index;
@@ -804,6 +968,9 @@ impl AppState {
                     return None;
                 }
                 if self.click_dock_file_row(mouse.column, mouse.row) {
+                    return None;
+                }
+                if self.click_dock_agent_row(mouse.column, mouse.row) {
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -871,6 +1038,11 @@ impl AppState {
                         self.dock_tab == Some(crate::app::DockSurface::Editor);
                     self.dock_diff_focused = self.dock_tab == Some(crate::app::DockSurface::Diff);
                     self.dock_files_focused = self.dock_tab == Some(crate::app::DockSurface::Files);
+                    self.dock_agents_focused =
+                        self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
+                    self.dock_linear_focused =
+                        self.dock_tab == Some(crate::app::DockSurface::Linear);
                     // Clicking an empty dock hands it the keyboard so the card
                     // shortcuts work without a tab to focus first.
                     self.dock_chooser_focused = self.dock_tab.is_none();
@@ -1047,6 +1219,8 @@ impl AppState {
                         return None;
                     }
                     if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
+                        self.sidebar_selected_work_group =
+                            crate::ui::sidebar_object_at(self, mouse.row);
                         self.toggle_sidebar_group(&key);
                         return None;
                     }
@@ -1481,12 +1655,20 @@ impl AppState {
             MouseEventKind::ScrollUp
                 if in_dock && dock_body_contains(self, mouse.column, mouse.row) =>
             {
-                self.dock_scroll = self.dock_scroll.saturating_sub(3);
+                if self.dock_tab == Some(crate::app::DockSurface::Agents) {
+                    self.scroll_dock_agents(-3);
+                } else {
+                    self.dock_scroll = self.dock_scroll.saturating_sub(3);
+                }
             }
             MouseEventKind::ScrollDown
                 if in_dock && dock_body_contains(self, mouse.column, mouse.row) =>
             {
-                self.dock_scroll = self.dock_scroll.saturating_add(3);
+                if self.dock_tab == Some(crate::app::DockSurface::Agents) {
+                    self.scroll_dock_agents(3);
+                } else {
+                    self.dock_scroll = self.dock_scroll.saturating_add(3);
+                }
             }
 
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
@@ -1804,7 +1986,7 @@ impl AppState {
         (rect.width > 1 && col == rect.x).then_some(idx)
     }
 
-    fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {
+    pub(super) fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {
         rect.width > 0
             && rect.height > 0
             && col >= rect.x
@@ -3234,6 +3416,12 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+            crate::app::DockSurface::Shortcuts,
+        ];
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.view.dock_rect = Rect::new(80, 0, 20, 20);
         app.state.view.dock_handle_rect = Rect::new(99, 0, 1, 20);
         app.state.view.dock_tab_hit_areas = vec![
@@ -3251,6 +3439,67 @@ mod tests {
 
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn files_header_clicks_route_sort_and_refresh_actions() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        app.state.view.dock_rect = Rect::new(80, 0, 20, 20);
+        app.state.view.dock_files_refresh_rect = Rect::new(81, 3, 3, 1);
+        app.state.view.dock_files_sort_rect = Rect::new(90, 3, 9, 1);
+        let mut workspace = Workspace::test_new("files-header");
+        workspace.identity_cwd = std::env::current_dir().expect("current directory");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let cached_root = std::path::PathBuf::from("/cached-tree");
+        app.state.dock_files_root = Some(cached_root.clone());
+        app.state.dock_file_cache.insert(
+            cached_root.clone(),
+            crate::files::FileTreeSnapshot {
+                root: cached_root.clone(),
+                files: Vec::new(),
+                fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
+            },
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 92, 3));
+        assert_eq!(app.state.dock_files_sort, crate::files::FileSort::Type);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 82, 3));
+        assert!(app.files_refresh_in_flight.is_some());
+        assert!(!app.state.dock_file_cache.contains_key(&cached_root));
+        assert!(app.state.dock_files_root.is_none());
+    }
+
+    #[test]
+    fn clicking_an_empty_panel_card_opens_it_as_the_first_tab() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let home_index = crate::app::DockSurface::CARDS
+            .iter()
+            .position(|surface| *surface == crate::app::DockSurface::Home)
+            .expect("Home card");
+        let card = app.state.view.dock_surface_card_hit_areas[home_index];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.x + 1,
+            card.y + 1,
+        ));
+
+        assert_eq!(
+            app.state.dock_open_surfaces,
+            vec![crate::app::DockSurface::Home]
+        );
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
     }
 
     #[test]
@@ -3306,6 +3555,12 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+            crate::app::DockSurface::Shortcuts,
+        ];
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let shortcuts_index = app
             .state
@@ -5911,6 +6166,44 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_footer_order_hit_areas_settings_and_hover_are_complete() {
+        use crate::app::state::SidebarFooterItem;
+
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+
+        let areas = [
+            app.state.view.sidebar_footer_settings_hit_area,
+            app.state.view.sidebar_footer_work_hit_area,
+            app.state.view.sidebar_footer_usage_hit_area,
+            app.state.view.sidebar_footer_ticket_hit_area,
+            app.state.view.sidebar_footer_missive_hit_area,
+            app.state.view.sidebar_footer_refresh_hit_area,
+        ];
+        assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
+        assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+
+        let linear = areas[3];
+        app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
+        assert_eq!(
+            app.state.sidebar_footer_hover,
+            Some(SidebarFooterItem::Linear)
+        );
+
+        let settings = areas[0];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            settings.x,
+            settings.y,
+        ));
+        assert_eq!(app.state.mode, Mode::Settings);
+    }
+
+    #[test]
     fn sidebar_footer_ticket_entry_opens_tickets_at_supported_widths() {
         for width in [80, 120] {
             let mut app = app_for_mouse_test();
@@ -5920,13 +6213,13 @@ mod tests {
             app.state.selected = 0;
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
-            let work = app.state.view.sidebar_footer_work_hit_area;
+            let usage = app.state.view.sidebar_footer_usage_hit_area;
             let hit = app.state.view.sidebar_footer_ticket_hit_area;
             assert_eq!(
                 hit.height, 1,
                 "ticket footer must render at {width} columns"
             );
-            assert_eq!(hit.x, work.right(), "ticket entry follows PR entry");
+            assert_eq!(hit.x, usage.right(), "ticket entry follows Usage");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 hit.x + 1,
@@ -5949,10 +6242,10 @@ mod tests {
             app.state.selected = 0;
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
-            let usage = app.state.view.sidebar_footer_usage_hit_area;
+            let tickets = app.state.view.sidebar_footer_ticket_hit_area;
             let hit = app.state.view.sidebar_footer_missive_hit_area;
             assert_eq!(hit.height, 1, "Missive footer renders at {width} columns");
-            assert_eq!(hit.x, usage.right(), "Missive entry follows usage");
+            assert_eq!(hit.x, tickets.right(), "Missive entry follows Linear");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 hit.x + 1,
@@ -5963,6 +6256,55 @@ mod tests {
                 view.projection == crate::app::state::WorkProjection::Missive
             }));
         }
+    }
+
+    #[test]
+    fn sidebar_footer_refresh_follows_missive_and_is_single_flight() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let missive = app.state.view.sidebar_footer_missive_hit_area;
+            let hit = app.state.view.sidebar_footer_refresh_hit_area;
+            assert_eq!(hit.height, 1, "refresh footer renders at {width} columns");
+            assert_eq!(hit.x, missive.right(), "refresh follows Missive");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+            assert!(app.state.sidebar_refreshing);
+            assert!(app.state.sidebar_refresh_requested);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+            assert!(
+                app.state.sidebar_refresh_requested,
+                "second click is ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_header_add_project_click_opens_existing_modal_directly() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let hit = crate::ui::sidebar_header_add_project_rect(app.state.view.sidebar_rect);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), hit.x, hit.y));
+
+        assert!(app.state.add_project_active());
     }
 
     #[test]
@@ -5977,10 +6319,10 @@ mod tests {
             app.state.selected = 0;
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
-            let tickets = app.state.view.sidebar_footer_ticket_hit_area;
+            let work = app.state.view.sidebar_footer_work_hit_area;
             let footer = app.state.view.sidebar_footer_usage_hit_area;
             assert!(footer.width > 0);
-            assert_eq!(footer.x, tickets.right(), "usage entry follows tickets");
+            assert_eq!(footer.x, work.right(), "usage entry follows PRs");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 footer.x,
@@ -6289,6 +6631,35 @@ mod tests {
             // No sibling on that side, so the toggle resolves to a split.
             assert_eq!(app.state.pane_toggle_sibling(direction), None);
         }
+    }
+
+    #[test]
+    fn repo_editor_button_queues_only_when_an_editor_is_available() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        app.state.repo_editor_argv = None;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let button = app.state.view.repo_editor_button_hit_area;
+        assert_eq!(button.width, crate::ui::REPO_EDITOR_BUTTON_WIDTH);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert!(!app.state.request_open_repo_editor);
+
+        app.state.repo_editor_argv = Some(vec!["nvim".into()]);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert!(app.state.request_open_repo_editor);
     }
 
     #[test]

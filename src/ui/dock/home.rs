@@ -869,7 +869,11 @@ fn ticket_detail_lines(
 }
 
 fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
-    if let Some(reason) = projection.unavailable.as_deref() {
+    if let Some(reason) = projection
+        .unavailable
+        .as_ref()
+        .map(crate::work_index::WorkIndexUnavailable::summary)
+    {
         return format!("unavailable: {reason}");
     }
     let Some(observed_at) = projection.observed_at else {
@@ -1057,8 +1061,23 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         DockHomeSection::XPolls => projection.poll_rows.is_empty(),
     };
     if active_empty {
-        let reason = if let Some(reason) = projection.unavailable.as_deref() {
-            format!("unavailable: {reason}")
+        let unavailable_source = match app.dock_home_section {
+            DockHomeSection::Prs => Some(crate::work_index::WorkIndexSource::Github),
+            DockHomeSection::Tickets => Some(crate::work_index::WorkIndexSource::Linear),
+            DockHomeSection::XPolls => None,
+        };
+        let unavailable_reason = match unavailable_source {
+            Some(source) => projection
+                .unavailable
+                .as_ref()
+                .and_then(|unavailable| {
+                    unavailable.short_reason(source, std::time::SystemTime::now())
+                })
+                .map(|reason| (source, reason)),
+            None => None,
+        };
+        let reason = if let Some((source, reason)) = unavailable_reason {
+            format!("unavailable: {}: {reason}", source.label())
         } else {
             match app.dock_home_section {
                 DockHomeSection::Prs => "no pr-bound panes",
@@ -1306,6 +1325,7 @@ mod tests {
             reviewers: vec!["reviewer".into()],
             mergeable: Some("MERGEABLE".into()),
             merge_state_status: Some("BLOCKED".into()),
+            auto_merge_enabled: false,
             head_sha: Some("abc1234".into()),
             checks: Some(crate::work_index::WorkItemCheckSummary {
                 failing: 2,
@@ -1329,6 +1349,10 @@ mod tests {
                 short_id: "abc1234".into(),
                 subject: "fix dock detail".into(),
             }],
+            timeline: Vec::new(),
+            timeline_unavailable: None,
+            collaborators: Vec::new(),
+            collaborators_unavailable: None,
             unresolved_review_threads: Some(3),
             unavailable: None,
             observed_at: SystemTime::now(),
@@ -1352,12 +1376,17 @@ mod tests {
             reviewers: Vec::new(),
             mergeable: None,
             merge_state_status: None,
+            auto_merge_enabled: false,
             head_sha: None,
             checks: None,
             comments: Vec::new(),
             actions: Vec::new(),
             files: Vec::new(),
             commits: Vec::new(),
+            timeline: Vec::new(),
+            timeline_unavailable: None,
+            collaborators: Vec::new(),
+            collaborators_unavailable: None,
             unresolved_review_threads: None,
             unavailable: None,
             observed_at: SystemTime::now(),
@@ -1406,6 +1435,7 @@ mod tests {
                     labels: Vec::new(),
                     check_state: crate::work_index::PrCheckState::Unknown,
                     audience: crate::work_index::PrAudience::Unclassified,
+                    cached_pr_detail: None,
                     ticket_ids: vec!["MAT-125".into()],
                     ticket_title: None,
                     ticket_state: None,
@@ -1415,6 +1445,7 @@ mod tests {
                         description: Some("Ticket body from Linear.".into()),
                         state: Some("In Progress".into()),
                         assignee: None,
+                        creator: None,
                         priority: None,
                         cycle: None,
                         group: crate::work_index::TicketGroup::Assigned,
@@ -1489,6 +1520,7 @@ mod tests {
             description: full.then(|| "A complete Linear description body.".into()),
             state: full.then(|| "In Progress".into()),
             assignee: full.then(|| "Matthias".into()),
+            creator: None,
             priority: full.then_some(2),
             cycle: full.then(|| "cycle 34".into()),
             group: crate::work_index::TicketGroup::Assigned,
@@ -1525,6 +1557,7 @@ mod tests {
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Unclassified,
+            cached_pr_detail: None,
             ticket_ids: vec![ticket.identifier.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
@@ -1552,6 +1585,7 @@ mod tests {
                 labels: Vec::new(),
                 check_state: crate::work_index::PrCheckState::Unknown,
                 audience: crate::work_index::PrAudience::Unclassified,
+                cached_pr_detail: None,
                 ticket_ids: vec!["SCA-3084".into()],
                 ticket_title: None,
                 ticket_state: None,
@@ -1584,6 +1618,7 @@ mod tests {
                         description: None,
                         state: None,
                         assignee: None,
+                        creator: None,
                         priority: None,
                         cycle: None,
                         group: crate::work_index::TicketGroup::Assigned,
@@ -1612,6 +1647,7 @@ mod tests {
                         labels: Vec::new(),
                         check_state: crate::work_index::PrCheckState::Unknown,
                         audience: crate::work_index::PrAudience::Unclassified,
+                        cached_pr_detail: None,
                         ticket_ids: vec![ticket.identifier.clone()],
                         ticket_title: None,
                         ticket_state: None,
@@ -1866,15 +1902,33 @@ mod tests {
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("Linear observation timed out".into()),
+            unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Linear,
+                "observation timed out",
+            )),
             observed_at: SystemTime::now(),
         });
         let unavailable = text(&render(&app, Rect::new(0, 0, 50, 12)));
         assert!(
-            unavailable.contains("unavailable: Linear observation timed out"),
+            unavailable.contains("unavailable: Linear: observation timed out"),
             "{unavailable:?}"
         );
         assert!(!unavailable.contains("no matching tickets"));
+
+        app.work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Github,
+            "rate limited",
+        ));
+        let healthy_empty = render(&app, Rect::new(0, 0, 50, 12));
+        let empty_line = line_text(&healthy_empty, TAB_ROWS);
+        assert!(empty_line.contains("no matching tickets"), "{empty_line:?}");
+        assert!(
+            !empty_line.contains("GitHub: rate limited"),
+            "{empty_line:?}"
+        );
     }
 
     #[test]
@@ -1907,12 +1961,15 @@ mod tests {
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("github timed out".into()),
+            unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Github,
+                "timed out",
+            )),
             observed_at: SystemTime::now(),
         });
         let terminal = render(&app, Rect::new(0, 0, 30, 10));
         let text = text(&terminal);
-        assert!(text.contains("unavailable: github timed out"), "{text:?}");
+        assert!(text.contains("unavailable: GitHub: timed out"), "{text:?}");
         assert!(!text.contains("observed"), "{text:?}");
     }
 

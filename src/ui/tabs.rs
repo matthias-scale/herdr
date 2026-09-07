@@ -25,6 +25,7 @@ pub(crate) const PANE_TOGGLE_BUTTON_WIDTH: u16 = 3;
 pub(crate) const PANE_TOGGLE_BELOW_GLYPH: char = '\u{25ad}';
 pub(crate) const PANE_TOGGLE_RIGHT_GLYPH: char = '\u{25af}';
 pub(crate) const GIT_MENU_BUTTON_WIDTH: u16 = 10;
+pub(crate) const REPO_EDITOR_BUTTON_WIDTH: u16 = 6;
 pub(crate) const ADD_ACTION_BUTTON_WIDTH: u16 = 10;
 pub(crate) const GIT_MENU_STATUS: &str = "⚠ Behind upstream. Pull first.";
 pub(crate) const GIT_MENU_UNAVAILABLE: &str = "Not a git repository";
@@ -55,6 +56,7 @@ pub(crate) struct TabBarView {
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub repo_editor_button_hit_area: Rect,
     pub add_action_button_hit_area: Rect,
     pub user_action_hit_areas: Vec<(usize, Rect)>,
     pub git_menu_button_hit_area: Rect,
@@ -368,7 +370,10 @@ pub(crate) fn compute_tab_bar_view(
         let budget =
             active_tab_cell_width(ws, &full_view).min(tab_width(ws, terminals, ws.active_tab));
         if budget > 0 && active_tab_cell_width(ws, &view) >= budget {
-            let add_x = area.x + area.width - actions_width;
+            let editor_x = area.x + area.width - actions_width;
+            view.repo_editor_button_hit_area =
+                Rect::new(editor_x, area.y, REPO_EDITOR_BUTTON_WIDTH, 1);
+            let add_x = editor_x + REPO_EDITOR_BUTTON_WIDTH;
             view.add_action_button_hit_area = Rect::new(add_x, area.y, ADD_ACTION_BUTTON_WIDTH, 1);
             let mut action_x = add_x + ADD_ACTION_BUTTON_WIDTH;
             view.user_action_hit_areas = user_actions
@@ -410,11 +415,12 @@ pub(crate) fn tab_action_fallback_hit_areas(
     status_bar_rect: Rect,
     mouse_chrome: bool,
     user_actions: &[(usize, String)],
-) -> (Rect, Vec<(usize, Rect)>, Rect, Rect, Rect) {
+) -> (Rect, Rect, Vec<(usize, Rect)>, Rect, Rect, Rect) {
     let user_widths = action_button_widths(user_actions, status_bar_rect.width);
     let actions_width = action_controls_width(&user_widths);
     if !mouse_chrome || status_bar_rect.height == 0 || status_bar_rect.width <= actions_width {
         return (
+            Rect::default(),
             Rect::default(),
             Vec::new(),
             Rect::default(),
@@ -422,7 +428,8 @@ pub(crate) fn tab_action_fallback_hit_areas(
             Rect::default(),
         );
     }
-    let add_x = status_bar_rect.x + status_bar_rect.width - actions_width;
+    let editor_x = status_bar_rect.x + status_bar_rect.width - actions_width;
+    let add_x = editor_x + REPO_EDITOR_BUTTON_WIDTH;
     let mut action_x = add_x + ADD_ACTION_BUTTON_WIDTH;
     let action_rects = user_actions
         .iter()
@@ -436,6 +443,7 @@ pub(crate) fn tab_action_fallback_hit_areas(
     let menu_x = action_x;
     let below_x = menu_x + GIT_MENU_BUTTON_WIDTH;
     (
+        Rect::new(editor_x, status_bar_rect.y, REPO_EDITOR_BUTTON_WIDTH, 1),
         Rect::new(add_x, status_bar_rect.y, ADD_ACTION_BUTTON_WIDTH, 1),
         action_rects,
         Rect::new(menu_x, status_bar_rect.y, GIT_MENU_BUTTON_WIDTH, 1),
@@ -450,7 +458,8 @@ pub(crate) fn tab_action_fallback_hit_areas(
 }
 
 fn action_button_widths(user_actions: &[(usize, String)], row_width: u16) -> Vec<u16> {
-    let fixed = ADD_ACTION_BUTTON_WIDTH
+    let fixed = REPO_EDITOR_BUTTON_WIDTH
+        .saturating_add(ADD_ACTION_BUTTON_WIDTH)
         .saturating_add(GIT_MENU_BUTTON_WIDTH)
         .saturating_add(PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2));
     let mut widths = user_actions
@@ -471,7 +480,8 @@ fn action_button_widths(user_actions: &[(usize, String)], row_width: u16) -> Vec
 }
 
 fn action_controls_width(user_widths: &[u16]) -> u16 {
-    ADD_ACTION_BUTTON_WIDTH
+    REPO_EDITOR_BUTTON_WIDTH
+        .saturating_add(ADD_ACTION_BUTTON_WIDTH)
         .saturating_add(user_widths.iter().copied().sum::<u16>())
         .saturating_add(GIT_MENU_BUTTON_WIDTH)
         .saturating_add(PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2))
@@ -480,13 +490,16 @@ fn action_controls_width(user_widths: &[u16]) -> u16 {
 /// The width the status row must keep clear when it hosts the toggles.
 pub(crate) fn tab_action_status_bar_reserved_width(app: &AppState, status_bar_rect: Rect) -> u16 {
     let menu = app.view.git_menu_button_hit_area;
+    let editor = app.view.repo_editor_button_hit_area;
     let add = app.view.add_action_button_hit_area;
     let below = app.view.pane_toggle_below_hit_area;
     let right = app.view.pane_toggle_right_hit_area;
     if menu.width == 0 || menu.y != status_bar_rect.y || status_bar_rect.height == 0 {
         return 0;
     }
-    add.width
+    editor
+        .width
+        .saturating_add(add.width)
         .saturating_add(
             app.view
                 .user_action_hit_areas
@@ -560,6 +573,7 @@ fn compute_tab_bar_view_inner(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area: Rect::default(),
+            repo_editor_button_hit_area: Rect::default(),
             add_action_button_hit_area: Rect::default(),
             user_action_hit_areas: Vec::new(),
             git_menu_button_hit_area: Rect::default(),
@@ -591,6 +605,7 @@ fn compute_tab_bar_view_inner(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area,
+            repo_editor_button_hit_area: Rect::default(),
             add_action_button_hit_area: Rect::default(),
             user_action_hit_areas: Vec::new(),
             git_menu_button_hit_area: Rect::default(),
@@ -640,6 +655,7 @@ fn compute_tab_bar_view_inner(
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
+        repo_editor_button_hit_area: Rect::default(),
         add_action_button_hit_area: Rect::default(),
         user_action_hit_areas: Vec::new(),
         git_menu_button_hit_area: Rect::default(),
@@ -695,6 +711,17 @@ fn tab_drop_indicator_x(
 /// status row whenever the tab row is hidden.
 pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
     let p = &app.palette;
+    let editor_rect = app.view.repo_editor_button_hit_area;
+    if app.mouse_capture && editor_rect.width > 0 {
+        let mut style = Style::default()
+            .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
+            .bg(p.surface0);
+        if !app.repo_editor_available() {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        frame.render_widget(Paragraph::new(" nvim ").style(style), editor_rect);
+    }
+
     let add_rect = app.view.add_action_button_hit_area;
     if app.mouse_capture && add_rect.width > 0 {
         let style = if app.mode == crate::app::Mode::AddAction {
@@ -873,7 +900,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
             Style::default()
-                .fg(p.overlay0)
+                .fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                ))
                 .bg(p.surface0)
                 .add_modifier(Modifier::DIM)
         };
@@ -888,7 +918,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
             Style::default()
-                .fg(p.overlay0)
+                .fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                ))
                 .bg(p.surface0)
                 .add_modifier(Modifier::DIM)
         };
@@ -974,7 +1007,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         if x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
                 .set_symbol("…")
-                .set_style(Style::default().fg(p.overlay0));
+                .set_style(Style::default().fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                )));
         }
     }
     if last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len()) {
@@ -988,7 +1024,10 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         if x >= area.x && x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
                 .set_symbol("…")
-                .set_style(Style::default().fg(p.overlay0));
+                .set_style(Style::default().fg(readable_fg_on(
+                    p.surface0,
+                    &[p.overlay0, p.overlay1, p.text],
+                )));
         }
     }
 
@@ -1615,6 +1654,15 @@ mod tests {
                 "width {width}"
             );
             assert_eq!(
+                view.repo_editor_button_hit_area.right(),
+                view.add_action_button_hit_area.x,
+                "width {width}"
+            );
+            assert_eq!(
+                view.repo_editor_button_hit_area.width, REPO_EDITOR_BUTTON_WIDTH,
+                "width {width}"
+            );
+            assert_eq!(
                 view.pane_toggle_below_hit_area,
                 Rect::new(width - 6, 0, 3, 1),
                 "width {width}"
@@ -1651,6 +1699,7 @@ mod tests {
         assert_eq!(narrow.pane_toggle_below_hit_area, Rect::default());
         assert_eq!(narrow.pane_toggle_right_hit_area, Rect::default());
         assert_eq!(narrow.git_menu_button_hit_area, Rect::default());
+        assert_eq!(narrow.repo_editor_button_hit_area, Rect::default());
 
         // The same long title with room to spare keeps the buttons.
         let wide = compute_tab_bar_view(
@@ -1680,6 +1729,7 @@ mod tests {
         assert_eq!(view.pane_toggle_below_hit_area, Rect::default());
         assert_eq!(view.pane_toggle_right_hit_area, Rect::default());
         assert_eq!(view.git_menu_button_hit_area, Rect::default());
+        assert_eq!(view.repo_editor_button_hit_area, Rect::default());
     }
 
     #[test]
@@ -1692,7 +1742,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.mouse_capture = true;
-        app.view.tab_bar_rect = Rect::new(0, 0, 40, 1);
+        app.view.tab_bar_rect = Rect::new(0, 0, 50, 1);
         let view = compute_tab_bar_view(
             &app.workspaces[0],
             &app.terminals,
@@ -1707,7 +1757,7 @@ mod tests {
         app.view.pane_toggle_below_hit_area = view.pane_toggle_below_hit_area;
         app.view.pane_toggle_right_hit_area = view.pane_toggle_right_hit_area;
 
-        let backend = TestBackend::new(40, 1);
+        let backend = TestBackend::new(50, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -1811,6 +1861,50 @@ mod tests {
     }
 
     #[test]
+    fn repo_editor_button_renders_before_add_action_and_dims_without_an_editor() {
+        let mut app = AppState::test_new();
+        app.mouse_capture = true;
+        let ws = Workspace::test_new("test");
+        let view = compute_tab_bar_view(
+            &ws,
+            &app.terminals,
+            Rect::new(0, 0, 80, 1),
+            0,
+            true,
+            true,
+            &[],
+        );
+        app.view.repo_editor_button_hit_area = view.repo_editor_button_hit_area;
+        app.view.add_action_button_hit_area = view.add_action_button_hit_area;
+        assert_eq!(
+            app.view.repo_editor_button_hit_area.right(),
+            app.view.add_action_button_hit_area.x
+        );
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_tab_action_buttons(&app, frame))
+            .expect("draw disabled button");
+        let cell = &terminal.backend().buffer()[(
+            app.view.repo_editor_button_hit_area.x + 1,
+            app.view.repo_editor_button_hit_area.y,
+        )];
+        assert_eq!(cell.symbol(), "n");
+        assert!(cell.style().add_modifier.contains(Modifier::DIM));
+
+        app.repo_editor_argv = Some(vec!["nvim".into()]);
+        terminal
+            .draw(|frame| render_tab_action_buttons(&app, frame))
+            .expect("draw enabled button");
+        let cell = &terminal.backend().buffer()[(
+            app.view.repo_editor_button_hit_area.x + 1,
+            app.view.repo_editor_button_hit_area.y,
+        )];
+        assert!(!cell.style().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
     fn user_action_buttons_have_ordered_hit_areas_at_required_widths() {
         let app = AppState::test_new();
         let ws = Workspace::test_new("test");
@@ -1832,6 +1926,10 @@ mod tests {
             assert_eq!(
                 view.add_action_button_hit_area.width,
                 ADD_ACTION_BUTTON_WIDTH
+            );
+            assert_eq!(
+                view.repo_editor_button_hit_area.right(),
+                view.add_action_button_hit_area.x
             );
             assert_eq!(view.user_action_hit_areas.len(), 2);
             assert_eq!(

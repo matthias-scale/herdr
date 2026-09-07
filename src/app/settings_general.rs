@@ -15,6 +15,7 @@ pub(crate) enum GeneralRow {
     HideWhitespace,
     NewThreadWorkspace,
     AddProjectStartDir,
+    DefaultPanelSurfaces,
     DeleteConfirmation,
 }
 
@@ -31,6 +32,7 @@ impl GeneralRow {
         Self::HideWhitespace,
         Self::NewThreadWorkspace,
         Self::AddProjectStartDir,
+        Self::DefaultPanelSurfaces,
         Self::DeleteConfirmation,
     ];
 
@@ -43,6 +45,7 @@ impl GeneralRow {
             Self::HideWhitespace => "Hide whitespace changes in diff",
             Self::NewThreadWorkspace => "New threads default workspace",
             Self::AddProjectStartDir => "Add project starts in",
+            Self::DefaultPanelSurfaces => "Default panel surfaces",
             Self::DeleteConfirmation => "Delete confirmation",
         }
     }
@@ -65,6 +68,7 @@ impl GeneralRow {
             Self::HideWhitespace => ("ui", "hide_whitespace_in_diff"),
             Self::NewThreadWorkspace => ("ui", "new_thread_workspace"),
             Self::AddProjectStartDir => ("ui", "add_project_start_dir"),
+            Self::DefaultPanelSurfaces => ("panel", "default_surfaces"),
             Self::DeleteConfirmation => ("ui", "confirm_close"),
         }
     }
@@ -90,6 +94,18 @@ impl GeneralRow {
                     state.add_project_start_dir.clone()
                 }
             }
+            Self::DefaultPanelSurfaces => {
+                if state.dock_default_surfaces.is_empty() {
+                    "none".to_string()
+                } else {
+                    state
+                        .dock_default_surfaces
+                        .iter()
+                        .map(|surface| surface.label())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            }
             Self::DeleteConfirmation => on_off(state.confirm_close),
         }
     }
@@ -97,7 +113,7 @@ impl GeneralRow {
     /// A path is not something a two-column list can edit; the row still names
     /// the key so the operator knows what to change.
     pub(crate) fn is_editable(self) -> bool {
-        self != Self::AddProjectStartDir
+        !matches!(self, Self::AddProjectStartDir | Self::DefaultPanelSurfaces)
     }
 }
 
@@ -165,7 +181,7 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
                 value: next.as_str().to_string(),
             })
         }
-        GeneralRow::AddProjectStartDir => None,
+        GeneralRow::AddProjectStartDir | GeneralRow::DefaultPanelSurfaces => None,
     }
 }
 
@@ -183,7 +199,7 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), total);
-        assert_eq!(total, 8);
+        assert_eq!(total, 9);
     }
 
     #[test]
@@ -196,6 +212,7 @@ mod tests {
             "current checkout"
         );
         assert_eq!(GeneralRow::AddProjectStartDir.value(&state), "last used");
+        assert_eq!(GeneralRow::DefaultPanelSurfaces.value(&state), "none");
 
         state.combine_repos_across_hosts = true;
         state.add_project_start_dir = "~/Repos".into();
@@ -236,12 +253,14 @@ mod tests {
     }
 
     #[test]
-    fn the_start_directory_row_is_not_editable_in_place() {
+    fn array_and_path_rows_are_not_editable_in_place() {
         let state = AppState::test_new();
-        assert!(!GeneralRow::AddProjectStartDir.is_editable());
-        assert_eq!(
-            cycle_general_row(&state, GeneralRow::AddProjectStartDir),
-            None
-        );
+        for row in [
+            GeneralRow::AddProjectStartDir,
+            GeneralRow::DefaultPanelSurfaces,
+        ] {
+            assert!(!row.is_editable());
+            assert_eq!(cycle_general_row(&state, row), None);
+        }
     }
 }

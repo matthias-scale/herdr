@@ -198,6 +198,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("sidebar_cycle_group_mode", "cycle sidebar grouping", |kb| {
                 &kb.sidebar_cycle_group_mode
             }),
+            built_in("sidebar_refresh", "sidebar.refresh", |kb| {
+                &kb.sidebar_refresh
+            }),
             built_in("toggle_blocked_filter", "toggle blocked filter", |kb| {
                 &kb.toggle_blocked_filter
             }),
@@ -209,6 +212,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
                 &kb.previous_dock_tab
             }),
             built_in("next_dock_tab", "next dock tab", |kb| &kb.next_dock_tab),
+            built_in("editor_open_repo", "editor.open_repo", |kb| {
+                &kb.editor_open_repo
+            }),
             built_in("toggle_info_panel", "toggle info panel", |kb| {
                 &kb.toggle_info_panel
             }),
@@ -329,5 +335,12 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row.heading && row.label == "user actions"));
+        assert!(rows.iter().any(|row| {
+            row.label == "editor.open_repo"
+                && row.target
+                    == Some(KeybindTarget::BuiltIn {
+                        field: "editor_open_repo",
+                    })
+        }));
     }
 }

@@ -32,6 +32,7 @@ pub(crate) enum HomeFocus {
     Agent,
     Model,
     Effort,
+    Access,
     Context,
     Directory,
     Workspace,
@@ -40,16 +41,25 @@ pub(crate) enum HomeFocus {
 }
 
 impl HomeFocus {
-    pub(crate) fn next(self, effort_visible: bool, context_visible: bool) -> Self {
+    pub(crate) fn next(
+        self,
+        effort_visible: bool,
+        access_visible: bool,
+        context_visible: bool,
+    ) -> Self {
         match self {
             Self::Reply => Self::Prompt,
             Self::Prompt => Self::Agent,
             Self::Agent => Self::Model,
             Self::Model if effort_visible => Self::Effort,
+            Self::Model if access_visible => Self::Access,
             Self::Model if context_visible => Self::Context,
             Self::Model => Self::Directory,
+            Self::Effort if access_visible => Self::Access,
             Self::Effort if context_visible => Self::Context,
             Self::Effort => Self::Directory,
+            Self::Access if context_visible => Self::Context,
+            Self::Access => Self::Directory,
             Self::Context => Self::Directory,
             Self::Directory => Self::Workspace,
             Self::Workspace => Self::Ref,
@@ -58,16 +68,25 @@ impl HomeFocus {
         }
     }
 
-    pub(crate) fn previous(self, effort_visible: bool, context_visible: bool) -> Self {
+    pub(crate) fn previous(
+        self,
+        effort_visible: bool,
+        access_visible: bool,
+        context_visible: bool,
+    ) -> Self {
         match self {
             Self::Reply => Self::Target,
             Self::Prompt => Self::Target,
             Self::Agent => Self::Prompt,
             Self::Model => Self::Agent,
             Self::Effort => Self::Model,
+            Self::Access if effort_visible => Self::Effort,
+            Self::Access => Self::Model,
+            Self::Context if access_visible => Self::Access,
             Self::Context if effort_visible => Self::Effort,
             Self::Context => Self::Model,
             Self::Directory if context_visible => Self::Context,
+            Self::Directory if access_visible => Self::Access,
             Self::Directory if effort_visible => Self::Effort,
             Self::Directory => Self::Model,
             Self::Workspace => Self::Directory,
@@ -82,6 +101,7 @@ pub(crate) enum HomePicker {
     Agent,
     Model,
     Effort,
+    Access,
     Context,
     Directory,
     Workspace,
@@ -97,12 +117,97 @@ impl HomePicker {
             HomeFocus::Agent => Some(Self::Agent),
             HomeFocus::Model => Some(Self::Model),
             HomeFocus::Effort => Some(Self::Effort),
+            HomeFocus::Access => Some(Self::Access),
             HomeFocus::Context => Some(Self::Context),
             HomeFocus::Directory => Some(Self::Directory),
             HomeFocus::Workspace => Some(Self::Workspace),
             HomeFocus::Ref => Some(Self::Ref),
             HomeFocus::Target => Some(Self::Target),
         }
+    }
+}
+
+/// Permission choices exposed by the home composer.
+///
+/// Labels stay provider-neutral in the card while each variant owns the exact
+/// CLI spelling its provider accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeAccess {
+    ClaudeDefault,
+    ClaudeAcceptEdits,
+    ClaudePlan,
+    ClaudeBypass,
+    CodexReadOnly,
+    CodexWorkspaceWrite,
+    CodexFull,
+}
+
+impl HomeAccess {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeDefault => "default",
+            Self::ClaudeAcceptEdits => "accept edits",
+            Self::ClaudePlan => "plan",
+            Self::ClaudeBypass => "bypass",
+            Self::CodexReadOnly => "read-only",
+            Self::CodexWorkspaceWrite => "workspace-write",
+            Self::CodexFull => "full",
+        }
+    }
+
+    fn flags(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeDefault => &["--permission-mode", "default"],
+            Self::ClaudeAcceptEdits => &["--permission-mode", "acceptEdits"],
+            Self::ClaudePlan => &["--permission-mode", "plan"],
+            Self::ClaudeBypass => &["--dangerously-skip-permissions"],
+            Self::CodexReadOnly => &["-s", "read-only"],
+            Self::CodexWorkspaceWrite => &["-s", "workspace-write"],
+            Self::CodexFull => &[
+                "-s",
+                "danger-full-access",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ],
+        }
+    }
+}
+
+const CLAUDE_ACCESS_OPTIONS: &[HomeAccess] = &[
+    HomeAccess::ClaudeDefault,
+    HomeAccess::ClaudeAcceptEdits,
+    HomeAccess::ClaudePlan,
+    HomeAccess::ClaudeBypass,
+];
+
+const CODEX_ACCESS_OPTIONS: &[HomeAccess] = &[
+    HomeAccess::CodexReadOnly,
+    HomeAccess::CodexWorkspaceWrite,
+    HomeAccess::CodexFull,
+];
+
+pub(crate) fn access_options(agent: Agent) -> &'static [HomeAccess] {
+    match agent {
+        Agent::Claude => CLAUDE_ACCESS_OPTIONS,
+        Agent::Codex => CODEX_ACCESS_OPTIONS,
+        _ => &[],
+    }
+}
+
+/// Client-local selections retained per provider between Home openings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeAgentChoice {
+    pub(crate) agent: Agent,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) context_window: Option<String>,
+    pub(crate) access: Option<HomeAccess>,
+}
+
+fn store_agent_choice(choices: &mut Vec<HomeAgentChoice>, choice: HomeAgentChoice) {
+    if let Some(saved) = choices.iter_mut().find(|saved| saved.agent == choice.agent) {
+        *saved = choice;
+    } else {
+        choices.push(choice);
     }
 }
 
@@ -138,6 +243,9 @@ impl HomeWorkspace {
 /// The last row of the directory picker: type a path instead of picking one.
 pub(crate) const BROWSE_OPTION_LABEL: &str = "Browse…";
 
+/// The project importer follows the direct path input in the headline picker.
+pub(crate) const ADD_PROJECT_OPTION_LABEL: &str = "+ Add project…";
+
 /// Shown under the card when the typed path is not a directory.
 pub(crate) const NO_SUCH_DIRECTORY: &str = "no such directory";
 
@@ -148,6 +256,7 @@ pub(crate) enum HomeDirectoryOption {
     Recent(PathBuf),
     Worktree(PathBuf),
     Browse,
+    AddProject,
 }
 
 impl HomeDirectoryOption {
@@ -156,13 +265,76 @@ impl HomeDirectoryOption {
             Self::Recent(path) => directory_label(path),
             Self::Worktree(path) => format!("⎇ {}", directory_label(path)),
             Self::Browse => BROWSE_OPTION_LABEL.to_string(),
+            Self::AddProject => ADD_PROJECT_OPTION_LABEL.to_string(),
         }
     }
 
     pub(crate) fn path(&self) -> Option<&Path> {
         match self {
             Self::Recent(path) | Self::Worktree(path) => Some(path),
-            Self::Browse => None,
+            Self::Browse | Self::AddProject => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AddProjectTab {
+    #[default]
+    LocalFolder,
+    GitUrl,
+    GitHub,
+}
+
+impl AddProjectTab {
+    pub(crate) const ALL: [Self; 3] = [Self::LocalFolder, Self::GitUrl, Self::GitHub];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::LocalFolder => "Local folder",
+            Self::GitUrl => "Git URL",
+            Self::GitHub => "GitHub",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddProjectCloneRequest {
+    pub(crate) url: String,
+    pub(crate) target: PathBuf,
+}
+
+/// Client-local state for the centred project importer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddProjectState {
+    pub(crate) tab: AddProjectTab,
+    pub(crate) browse: HomeBrowse,
+    pub(crate) git_url: String,
+    pub(crate) github_query: String,
+    pub(crate) github_owner: String,
+    pub(crate) github_repos: Vec<String>,
+    pub(crate) github_filter: DropdownFilterState,
+    pub(crate) github_loading: bool,
+    pub(crate) github_refresh_request: Option<String>,
+    pub(crate) clone_request: Option<AddProjectCloneRequest>,
+    pub(crate) clone_pending: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl AddProjectState {
+    pub(crate) fn starting_at(directory: &Path) -> Self {
+        Self {
+            tab: AddProjectTab::LocalFolder,
+            browse: HomeBrowse::starting_at(directory),
+            git_url: String::new(),
+            github_query: String::new(),
+            github_owner: String::new(),
+            github_repos: Vec::new(),
+            github_filter: DropdownFilterState::default(),
+            github_loading: false,
+            github_refresh_request: None,
+            clone_request: None,
+            clone_pending: false,
+            error: None,
         }
     }
 }
@@ -389,6 +561,7 @@ pub(crate) fn dispatchable_agents() -> &'static [Agent] {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeState {
     catalog: HomeCatalog,
+    agent_choices: Vec<HomeAgentChoice>,
     selected: usize,
     pub(crate) focus: Option<HomeFocus>,
     pub(crate) prompt: String,
@@ -397,6 +570,7 @@ pub(crate) struct HomeState {
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
+    pub(crate) access: Option<HomeAccess>,
     pub(crate) context_window: Option<String>,
     pub(crate) directory: PathBuf,
     pub(crate) workspace: HomeWorkspace,
@@ -406,6 +580,8 @@ pub(crate) struct HomeState {
     pub(crate) directory_filter: DropdownFilterState,
     /// Set while the directory picker's filter line is a path input.
     pub(crate) browse: Option<HomeBrowse>,
+    /// Centred add-project modal. TUI presentation state only.
+    pub(crate) add_project: Option<AddProjectState>,
     /// Linked worktrees of the selected directory's repository, refreshed when
     /// the picker opens so the render path stays off `git`.
     pub(crate) worktree_options: Vec<PathBuf>,
@@ -428,6 +604,7 @@ impl Default for HomeState {
     fn default() -> Self {
         Self {
             catalog: HomeCatalog::fallback(),
+            agent_choices: Vec::new(),
             selected: 0,
             focus: Some(HomeFocus::Prompt),
             prompt: String::new(),
@@ -436,6 +613,7 @@ impl Default for HomeState {
             agent: Agent::Claude,
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
+            access: Some(HomeAccess::ClaudeDefault),
             context_window: None,
             directory: default_directory(),
             workspace: HomeWorkspace::CurrentCheckout,
@@ -444,6 +622,7 @@ impl Default for HomeState {
             picker_selected: 0,
             directory_filter: DropdownFilterState::default(),
             browse: None,
+            add_project: None,
             worktree_options: Vec::new(),
             ref_filter: DropdownFilterState::default(),
             selected_ref: None,
@@ -476,6 +655,7 @@ impl HomeState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_catalog(catalog: HomeCatalog) -> Self {
         Self {
             catalog,
@@ -483,18 +663,19 @@ impl HomeState {
         }
     }
 
-    /// A fresh composer whose workspace picker starts on the configured
-    /// default (`ui.new_thread_workspace`) rather than always on the current
-    /// checkout.
-    pub(crate) fn with_catalog_and_workspace(
+    pub(crate) fn with_catalog_workspace_and_choices(
         catalog: HomeCatalog,
         workspace: HomeWorkspace,
+        agent_choices: Vec<HomeAgentChoice>,
     ) -> Self {
-        Self {
+        let mut home = Self {
             catalog,
             workspace,
+            agent_choices,
             ..Self::default()
-        }
+        };
+        home.apply_agent_choice(Agent::Claude);
+        home
     }
 
     pub(crate) fn replace_provider_catalog(&mut self, provider: HomeProviderCatalog) {
@@ -523,6 +704,7 @@ impl HomeState {
         let picker_len = match self.picker {
             Some(HomePicker::Model) => Some(self.model_options().len()),
             Some(HomePicker::Effort) => Some(self.effort_options().len()),
+            Some(HomePicker::Access) => Some(self.access_options().len()),
             Some(HomePicker::Context) => Some(self.context_options().len()),
             _ => None,
         };
@@ -549,6 +731,10 @@ impl HomeState {
             .and_then(|provider| provider.model(&self.model))
             .map(|model| model.efforts.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn access_options(&self) -> &'static [HomeAccess] {
+        access_options(self.agent)
     }
 
     pub(crate) fn model_display_name(&self) -> &str {
@@ -625,6 +811,10 @@ impl HomeState {
         self.effort.is_some()
     }
 
+    pub(crate) fn access_visible(&self) -> bool {
+        self.access.is_some()
+    }
+
     pub(crate) fn context_visible(&self) -> bool {
         self.context_window.is_some()
     }
@@ -632,9 +822,17 @@ impl HomeState {
     pub(crate) fn move_focus(&mut self, backwards: bool) {
         let current = self.focus.unwrap_or(HomeFocus::Prompt);
         self.focus = Some(if backwards {
-            current.previous(self.effort_visible(), self.context_visible())
+            current.previous(
+                self.effort_visible(),
+                self.access_visible(),
+                self.context_visible(),
+            )
         } else {
-            current.next(self.effort_visible(), self.context_visible())
+            current.next(
+                self.effort_visible(),
+                self.access_visible(),
+                self.context_visible(),
+            )
         });
     }
 
@@ -652,21 +850,48 @@ impl HomeState {
     }
 
     pub(crate) fn set_agent(&mut self, agent: Agent) {
+        self.remember_current_choice();
+        self.apply_agent_choice(agent);
+    }
+
+    fn apply_agent_choice(&mut self, agent: Agent) {
         self.agent = agent;
-        self.model = self
-            .catalog
-            .provider(agent)
-            .and_then(|catalog| catalog.models.first())
-            .map(|model| model.id.as_str())
-            .unwrap_or_default()
-            .to_string();
-        self.effort = self
-            .catalog
-            .provider(agent)
-            .and_then(|catalog| catalog.model(&self.model))
-            .and_then(|model| model.efforts.first())
+        let saved = self
+            .agent_choices
+            .iter()
+            .find(|choice| choice.agent == agent)
             .cloned();
+        let provider = self.catalog.provider(agent);
+        self.model = saved
+            .as_ref()
+            .filter(|choice| {
+                provider.is_some_and(|provider| provider.model(&choice.model).is_some())
+            })
+            .map(|choice| choice.model.clone())
+            .or_else(|| {
+                provider
+                    .and_then(|provider| provider.models.first())
+                    .map(|model| model.id.clone())
+            })
+            .unwrap_or_default();
+        let efforts = provider
+            .and_then(|provider| provider.model(&self.model))
+            .map(|model| model.efforts.as_slice())
+            .unwrap_or(&[]);
+        self.effort = saved
+            .as_ref()
+            .and_then(|choice| choice.effort.clone())
+            .filter(|effort| efforts.contains(effort))
+            .or_else(|| efforts.first().cloned());
+        let options = access_options(agent);
+        self.access = saved
+            .as_ref()
+            .and_then(|choice| choice.access)
+            .filter(|access| options.contains(access))
+            .or_else(|| options.first().copied());
+        self.context_window = saved.and_then(|choice| choice.context_window);
         self.reconcile_context_window();
+        self.remember_current_choice();
     }
 
     pub(crate) fn set_model(&mut self, model: impl Into<String>) {
@@ -689,6 +914,51 @@ impl HomeState {
             self.effort = efforts.first().cloned();
         }
         self.reconcile_context_window();
+        self.remember_current_choice();
+    }
+
+    pub(crate) fn set_effort(&mut self, effort: Option<String>) {
+        self.effort = effort;
+        self.remember_current_choice();
+    }
+
+    pub(crate) fn set_access(&mut self, access: HomeAccess) {
+        if self.access_options().contains(&access) {
+            self.access = Some(access);
+            self.remember_current_choice();
+        }
+    }
+
+    pub(crate) fn set_context_window(&mut self, context_window: Option<String>) {
+        self.context_window = context_window;
+        self.reconcile_context_window();
+        self.remember_current_choice();
+    }
+
+    fn remember_current_choice(&mut self) {
+        let choice = HomeAgentChoice {
+            agent: self.agent,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            context_window: self.context_window.clone(),
+            access: self.access,
+        };
+        store_agent_choice(&mut self.agent_choices, choice);
+    }
+
+    pub(crate) fn saved_agent_choices(&self) -> Vec<HomeAgentChoice> {
+        let mut choices = self.agent_choices.clone();
+        store_agent_choice(
+            &mut choices,
+            HomeAgentChoice {
+                agent: self.agent,
+                model: self.model.clone(),
+                effort: self.effort.clone(),
+                context_window: self.context_window.clone(),
+                access: self.access,
+            },
+        );
+        choices
     }
 
     fn reconcile_context_window(&mut self) {
@@ -739,6 +1009,7 @@ impl HomeState {
             catalog,
             &self.model,
             self.effort.as_deref().unwrap_or(AUTO_EFFORT),
+            self.access,
             self.context_window.as_deref(),
         )
     }
@@ -766,6 +1037,12 @@ impl HomeState {
         }) {
             return Err("select a supported context window".into());
         }
+        if !self
+            .access
+            .is_some_and(|access| self.access_options().contains(&access))
+        {
+            return Err("select an access mode supported by that agent".into());
+        }
 
         let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
         let Some(flags) = agent_launch_flags(
@@ -773,6 +1050,7 @@ impl HomeState {
             catalog,
             &self.model,
             effort,
+            self.access,
             self.context_window.as_deref(),
         ) else {
             return Err("that agent cannot be dispatched from home".into());
@@ -825,6 +1103,7 @@ pub(crate) fn agent_launch_flags(
     catalog: &crate::app::home_catalog::HomeProviderCatalog,
     model: &str,
     effort: &str,
+    access: Option<HomeAccess>,
     context_window: Option<&str>,
 ) -> Option<Vec<String>> {
     let mut flags: Vec<String> = Vec::new();
@@ -861,6 +1140,11 @@ pub(crate) fn agent_launch_flags(
         }
         _ => return None,
     }
+    let access = access?;
+    if !access_options(agent).contains(&access) {
+        return None;
+    }
+    flags.extend(access.flags().iter().map(|flag| (*flag).to_string()));
     Some(flags)
 }
 
@@ -959,15 +1243,14 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn toggle_home(&mut self) {
-        self.home = match self.home.take() {
-            Some(_) => None,
-            None => {
-                // Home and the inbox both want the whole frame; opening one puts
-                // the other away rather than stacking two overlays.
-                self.inbox = None;
-                Some(self.new_home_state())
-            }
-        };
+        if self.home.is_some() {
+            self.clear_home();
+        } else {
+            // Home and the inbox both want the whole frame; opening one puts
+            // the other away rather than stacking two overlays.
+            self.inbox = None;
+            self.home = Some(self.new_home_state());
+        }
         if self.home.is_some() {
             // Resolve the directory's repository once, here: the headline names
             // it on every frame and the render path must not run `git`.
@@ -987,9 +1270,10 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn new_home_state(&self) -> HomeState {
-        HomeState::with_catalog_and_workspace(
+        HomeState::with_catalog_workspace_and_choices(
             self.home_catalog.clone(),
             self.default_home_workspace(),
+            self.home_agent_choices.clone(),
         )
     }
 
@@ -1083,8 +1367,23 @@ impl crate::app::state::AppState {
         self.reset_home_ref_context(false);
     }
 
+    /// Open the existing Add project modal from the sidebar header.
+    pub(crate) fn open_add_project_from_sidebar(&mut self) {
+        let start = self.home_browse_start_directory();
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
+        home.picker = None;
+        home.browse = None;
+        home.directory_filter.set_query("");
+        home.add_project = Some(AddProjectState::starting_at(&start));
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
+    }
+
     pub(crate) fn clear_home(&mut self) {
-        self.home = None;
+        if let Some(home) = self.home.take() {
+            self.home_agent_choices = home.saved_agent_choices();
+        }
     }
 
     pub(crate) fn home_counts(&self, queue: &[BlockedAgent]) -> HomeCounts {
@@ -1149,6 +1448,7 @@ impl crate::app::state::AppState {
             }
         }
         options.push(HomeDirectoryOption::Browse);
+        options.push(HomeDirectoryOption::AddProject);
         options
     }
 
@@ -1380,6 +1680,11 @@ impl crate::app::state::AppState {
                 .as_ref()
                 .map(|home| home.effort_options().len())
                 .unwrap_or(0),
+            HomePicker::Access => self
+                .home
+                .as_ref()
+                .map(|home| home.access_options().len())
+                .unwrap_or(0),
             HomePicker::Context => self
                 .home
                 .as_ref()
@@ -1472,6 +1777,11 @@ impl crate::app::state::AppState {
                     home.effort_options()
                         .iter()
                         .position(|option| *option == effort)
+                }),
+                HomePicker::Access => home.access.and_then(|access| {
+                    home.access_options()
+                        .iter()
+                        .position(|option| *option == access)
                 }),
                 HomePicker::Context => home.context_window.as_deref().and_then(|context| {
                     home.context_options()
@@ -1621,7 +1931,7 @@ impl crate::app::state::AppState {
         }
     }
 
-    fn home_set_directory(&mut self, directory: PathBuf) {
+    pub(crate) fn home_set_directory(&mut self, directory: PathBuf) {
         if let Some(home) = self.home.as_mut() {
             home.directory = directory;
             home.browse = None;
@@ -1687,7 +1997,17 @@ impl crate::app::state::AppState {
                     .and_then(|home| home.effort_options().get(selected))
                     .cloned();
                 if let Some(home) = self.home.as_mut() {
-                    home.effort = effort;
+                    home.set_effort(effort);
+                }
+            }
+            HomePicker::Access => {
+                let access = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.access_options().get(selected))
+                    .copied();
+                if let (Some(home), Some(access)) = (self.home.as_mut(), access) {
+                    home.set_access(access);
                 }
             }
             HomePicker::Context => {
@@ -1697,7 +2017,7 @@ impl crate::app::state::AppState {
                     .and_then(|home| home.context_options().get(selected))
                     .map(|context| (*context).to_string());
                 if let Some(home) = self.home.as_mut() {
-                    home.context_window = context;
+                    home.set_context_window(context);
                 }
             }
             HomePicker::Directory => {
@@ -1712,6 +2032,16 @@ impl crate::app::state::AppState {
                         let directory = self.home_browse_start_directory();
                         if let Some(home) = self.home.as_mut() {
                             home.browse = Some(HomeBrowse::starting_at(&directory));
+                        }
+                        return;
+                    }
+                    Some(HomeDirectoryOption::AddProject) => {
+                        let directory = self.home_browse_start_directory();
+                        if let Some(home) = self.home.as_mut() {
+                            home.picker = None;
+                            home.browse = None;
+                            home.directory_filter.set_query("");
+                            home.add_project = Some(AddProjectState::starting_at(&directory));
                         }
                         return;
                     }
@@ -1744,6 +2074,9 @@ impl crate::app::state::AppState {
         }
         if let Some(home) = self.home.as_mut() {
             home.picker = None;
+        }
+        if let Some(choices) = self.home.as_ref().map(HomeState::saved_agent_choices) {
+            self.home_agent_choices = choices;
         }
     }
 
@@ -2015,7 +2348,15 @@ mod tests {
 
         assert_eq!(home.model, "default");
         assert_eq!(home.effort.as_deref(), Some("auto"));
-        assert_eq!(plan.argv, vec!["claude", "implement the retry cap"]);
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude",
+                "--permission-mode",
+                "default",
+                "implement the retry cap"
+            ]
+        );
     }
 
     #[test]
@@ -2086,6 +2427,8 @@ mod tests {
                     "gpt-5.6-sol".into(),
                     "-c".into(),
                     "model_reasoning_effort=ultra".into(),
+                    "-s".into(),
+                    "read-only".into(),
                     "cap the retry loop\nand log it".into(),
                 ],
             }
@@ -2176,14 +2519,23 @@ mod tests {
             workspace: HomeWorkspace::CurrentCheckout,
             ..Default::default()
         };
+        home.set_access(HomeAccess::ClaudeAcceptEdits);
+        let expected_argv = [
+            "claude",
+            "--permission-mode",
+            "acceptEdits",
+            "run the checks",
+        ];
         let current = home.dispatch_plan().expect("current checkout plan");
         assert_eq!(current.directory, PathBuf::from("/repo/root"));
         assert_eq!(current.workspace, HomeWorkspace::CurrentCheckout);
+        assert_eq!(current.argv, expected_argv);
 
         home.workspace = HomeWorkspace::NewWorktree;
         let new_worktree = home.dispatch_plan().expect("new worktree plan");
         assert_eq!(new_worktree.directory, PathBuf::from("/repo/root"));
         assert_eq!(new_worktree.workspace, HomeWorkspace::NewWorktree);
+        assert_eq!(new_worktree.argv, expected_argv);
 
         home.workspace = HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/old"));
         let previous = home.dispatch_plan().expect("previous worktree plan");
@@ -2192,6 +2544,7 @@ mod tests {
             previous.workspace,
             HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/old"))
         );
+        assert_eq!(previous.argv, expected_argv);
     }
 
     #[test]
@@ -2222,6 +2575,8 @@ mod tests {
                 "claude-fable-5-1",
                 "--effort",
                 "high",
+                "--permission-mode",
+                "default",
                 "implement the retry cap",
             ]
         );
@@ -2237,9 +2592,98 @@ mod tests {
                 "gpt-5.6-sol",
                 "-c",
                 "model_reasoning_effort=ultra",
+                "-s",
+                "read-only",
                 "implement the retry cap",
             ]
         );
+    }
+
+    #[test]
+    fn access_modes_map_to_exact_provider_argv() {
+        let cases = [
+            (
+                Agent::Claude,
+                HomeAccess::ClaudeDefault,
+                vec!["--permission-mode", "default"],
+            ),
+            (
+                Agent::Claude,
+                HomeAccess::ClaudeAcceptEdits,
+                vec!["--permission-mode", "acceptEdits"],
+            ),
+            (
+                Agent::Claude,
+                HomeAccess::ClaudePlan,
+                vec!["--permission-mode", "plan"],
+            ),
+            (
+                Agent::Claude,
+                HomeAccess::ClaudeBypass,
+                vec!["--dangerously-skip-permissions"],
+            ),
+            (
+                Agent::Codex,
+                HomeAccess::CodexReadOnly,
+                vec!["-s", "read-only"],
+            ),
+            (
+                Agent::Codex,
+                HomeAccess::CodexWorkspaceWrite,
+                vec!["-s", "workspace-write"],
+            ),
+            (
+                Agent::Codex,
+                HomeAccess::CodexFull,
+                vec![
+                    "-s",
+                    "danger-full-access",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                ],
+            ),
+        ];
+
+        for (agent, access, expected_flags) in cases {
+            let mut home = home_with_codex_catalog();
+            home.prompt = "ship it".into();
+            home.set_agent(agent);
+            home.set_access(access);
+            let plan = home.dispatch_plan().expect("access mode should dispatch");
+            let mut expected = vec![crate::detect::interactive_agent_executable(agent)];
+            expected.extend(expected_flags);
+            expected.push("ship it");
+            assert_eq!(plan.argv, expected, "{agent:?} {access:?}");
+        }
+    }
+
+    #[test]
+    fn provider_choices_survive_agent_switches_and_home_reopen() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.home_catalog = home_with_codex_catalog().catalog;
+        let mut home = app.new_home_state();
+        home.set_model("claude-fable-5-1");
+        home.set_effort(Some("high".into()));
+        home.set_access(HomeAccess::ClaudePlan);
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        home.set_effort(Some("ultra".into()));
+        home.set_access(HomeAccess::CodexFull);
+        home.set_agent(Agent::Claude);
+
+        assert_eq!(home.model, "claude-fable-5-1");
+        assert_eq!(home.effort.as_deref(), Some("high"));
+        assert_eq!(home.access, Some(HomeAccess::ClaudePlan));
+        app.home = Some(home);
+        app.clear_home();
+
+        let mut reopened = app.new_home_state();
+        assert_eq!(reopened.model, "claude-fable-5-1");
+        assert_eq!(reopened.effort.as_deref(), Some("high"));
+        assert_eq!(reopened.access, Some(HomeAccess::ClaudePlan));
+        reopened.set_agent(Agent::Codex);
+        assert_eq!(reopened.model, "gpt-5.6-sol");
+        assert_eq!(reopened.effort.as_deref(), Some("ultra"));
+        assert_eq!(reopened.access, Some(HomeAccess::CodexFull));
     }
 
     #[test]
@@ -2272,6 +2716,8 @@ mod tests {
                 "claude",
                 "--model",
                 "claude-opus-5[1m]",
+                "--permission-mode",
+                "default",
                 "use the larger window",
             ]
         );
@@ -2295,6 +2741,8 @@ mod tests {
                 "claude-sonnet-5",
                 "--context-window",
                 "1m",
+                "--permission-mode",
+                "default",
                 "use the larger window",
             ]
         );
@@ -2335,7 +2783,7 @@ mod tests {
         };
 
         let mut order = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..9 {
             home.move_focus(false);
             order.push(home.focus.expect("focus"));
         }
@@ -2346,6 +2794,7 @@ mod tests {
                 HomeFocus::Agent,
                 HomeFocus::Model,
                 HomeFocus::Effort,
+                HomeFocus::Access,
                 HomeFocus::Context,
                 HomeFocus::Directory,
                 HomeFocus::Workspace,
@@ -2356,7 +2805,7 @@ mod tests {
 
         // And the same stations backwards.
         let mut backwards = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..9 {
             home.move_focus(true);
             backwards.push(home.focus.expect("focus"));
         }
@@ -2365,7 +2814,7 @@ mod tests {
     }
 
     #[test]
-    fn the_directory_picker_lists_recents_then_worktrees_then_browse() {
+    fn the_directory_picker_lists_recents_then_worktrees_then_project_import() {
         let mut app = app_with_home(Path::new("/tmp/t3-f2-current"));
         app.home.as_mut().expect("home").worktree_options = vec![
             PathBuf::from("/tmp/t3-f2-current"),
@@ -2383,8 +2832,13 @@ mod tests {
         );
         assert_eq!(
             options.last(),
+            Some(&HomeDirectoryOption::AddProject),
+            "add project is always the last option"
+        );
+        assert_eq!(
+            options.get(options.len().saturating_sub(2)),
             Some(&HomeDirectoryOption::Browse),
-            "browse is always the last option"
+            "browse stays immediately before add project"
         );
         let worktrees = options
             .iter()
@@ -2411,7 +2865,31 @@ mod tests {
         );
         assert_eq!(
             options.last().map(HomeDirectoryOption::label),
-            Some(BROWSE_OPTION_LABEL.to_string())
+            Some(ADD_PROJECT_OPTION_LABEL.to_string())
+        );
+    }
+
+    #[test]
+    fn choosing_add_project_opens_modal_and_keeps_prompt() {
+        let directory = browse_fixture("add-project");
+        let mut app = app_with_home(&directory);
+        app.home.as_mut().expect("home").prompt = "preserve me".into();
+        app.home_open_picker(HomePicker::Directory);
+        let add_index = app
+            .home_directory_picker_options()
+            .iter()
+            .position(|option| *option == HomeDirectoryOption::AddProject)
+            .expect("add project option");
+        app.home.as_mut().expect("home").directory_filter.selected = add_index;
+
+        app.home_accept_picker();
+
+        let home = app.home.as_ref().expect("home");
+        assert_eq!(home.prompt, "preserve me");
+        assert!(home.picker.is_none());
+        assert_eq!(
+            home.add_project.as_ref().map(|project| project.tab),
+            Some(AddProjectTab::LocalFolder)
         );
     }
 

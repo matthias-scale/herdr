@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
     Frame,
 };
 
@@ -13,15 +13,19 @@ use crate::ui::work_list_detail::{comment_header, section_separator, TicketItem,
 
 pub(crate) fn focused_ticket_key(app: &AppState) -> Option<WorkItemKey> {
     let (context, _) = super::chooser::focused_availability(app);
+    let ticket_id = app
+        .active_dock_object(crate::app::DockSurface::Linear)
+        .map(|object| object.key.as_str())
+        .or_else(|| context.primary_ticket())?;
     Some(WorkItemKey {
         repo: String::new(),
         pr_number: None,
         pr_url: None,
-        ticket_id: Some(context.primary_ticket()?.to_string()),
+        ticket_id: Some(ticket_id.to_string()),
     })
 }
 
-fn focused_ticket_item(app: &AppState) -> Option<TicketItem<'_>> {
+pub(crate) fn focused_ticket_item(app: &AppState) -> Option<TicketItem<'_>> {
     let key = focused_ticket_key(app)?;
     let ticket_id = key.ticket_id.as_deref()?;
     let snapshot = app.work_index_snapshot.as_ref()?;
@@ -45,7 +49,7 @@ fn focused_ticket_item(app: &AppState) -> Option<TicketItem<'_>> {
             })
             .collect(),
         observed_at: snapshot.observed_at,
-        has_context_pr: false,
+        has_context_pr: super::pr::focused_pr_key(app).is_some(),
     })
 }
 
@@ -54,9 +58,18 @@ pub(crate) fn render_linear(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let Some(item) = focused_ticket_item(app) else {
+        let message = match app.work_index_snapshot.as_ref() {
+            Some(snapshot) => snapshot
+                .short_unavailable_reason(
+                    crate::work_index::WorkIndexSource::Linear,
+                    std::time::SystemTime::now(),
+                )
+                .map(|reason| format!(" Linear: {reason}"))
+                .unwrap_or_else(|| " ticket absent from latest index".into()),
+            None => " ticket not indexed yet".into(),
+        };
         frame.render_widget(
-            Paragraph::new(" ticket not indexed yet")
-                .style(Style::default().fg(app.palette.overlay1)),
+            Paragraph::new(message).style(Style::default().fg(app.palette.overlay1)),
             Rect::new(area.x, area.y, area.width, 1),
         );
         return;
@@ -81,6 +94,10 @@ pub(crate) fn render_ticket_item(
         Line::from(Span::styled(
             format!(" {}", detail.byline),
             Style::default().fg(app.palette.subtext0),
+        )),
+        Line::from(Span::styled(
+            " [Start thread ▾] [⋯]",
+            Style::default().fg(app.palette.accent),
         )),
     ];
     lines.extend(section_separator(
@@ -143,15 +160,107 @@ pub(crate) fn render_ticket_item(
             "    ",
         ));
     }
+    if let Some(draft) = app.dock_ticket_comment_draft.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!(" Comment: {draft}▏  Enter to stage · Esc cancel"),
+            Style::default().fg(app.palette.yellow),
+        )));
+    }
+    if let Some(write) = app.dock_pending_write.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(" Confirm {}? [y/N]", write.describe()),
+            Style::default()
+                .fg(app.palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(notice) = app.dock_write_notice.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(" {notice}"),
+            Style::default().fg(app.palette.subtext0),
+        )));
+    }
     frame.render_widget(Paragraph::new(lines).scroll((app.dock_scroll, 0)), area);
+
+    if let Some(choice) = app.dock_ticket_start_menu {
+        render_start_menu(app, frame, area, choice);
+    } else if let Some(menu) = app.dock_ticket_action_menu {
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            item.summary,
+            item.cached_detail,
+            app.work_index_session.linear.viewer.as_deref(),
+            app.work_index_session.linear_viewer_identity(),
+            item.has_context_pr,
+        );
+        crate::ui::ticket_actions::render_ticket_action_menu(
+            &app.palette,
+            frame,
+            area,
+            ticket_action_menu_anchor(area),
+            &context,
+            menu,
+        );
+    }
+}
+
+fn ticket_action_menu_anchor(area: Rect) -> Rect {
+    Rect::new(
+        area.right().saturating_sub(3),
+        area.y.saturating_add(2),
+        3.min(area.width),
+        1,
+    )
+}
+
+fn render_start_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    choice: crate::app::state::PrCheckoutChoice,
+) {
+    let anchor = Rect::new(area.x.saturating_add(1), area.y.saturating_add(2), 16, 1);
+    let Some(layout) = crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor,
+            item_count: 2,
+            selected: usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree),
+            has_filter: false,
+            max_rows: 2,
+            min_width: 20,
+        },
+        area,
+    ) else {
+        return;
+    };
+    let lines = [
+        (
+            crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            "Current checkout",
+        ),
+        (
+            crate::app::state::PrCheckoutChoice::NewWorktree,
+            "New worktree",
+        ),
+    ]
+    .into_iter()
+    .map(|(option, label)| {
+        Line::from(Span::styled(
+            format!("{} {label}", if option == choice { "▸" } else { " " }),
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.panel_bg),
+        ))
+    })
+    .collect::<Vec<_>>();
+    frame.render_widget(Clear, layout.rect);
+    frame.render_widget(Paragraph::new(lines), layout.rect);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::work_index::{
-        PrAudience, PrCheckState, TicketGroup, WorkItem as IndexedWorkItem, WorkItemComment,
-        WorkItemDetail, WorkItemSource, WorkTicket,
+        PrAudience, PrCheckState, TicketGroup, WorkIndexSource, WorkIndexUnavailable,
+        WorkItem as IndexedWorkItem, WorkItemComment, WorkItemDetail, WorkItemSource, WorkTicket,
     };
     use ratatui::{backend::TestBackend, Terminal};
     use std::time::SystemTime;
@@ -163,6 +272,7 @@ mod tests {
             description: Some("- [x] doc exists\n- [ ] registry updated".into()),
             state: Some("In Progress".into()),
             assignee: Some("matthias".into()),
+            creator: None,
             priority: Some(2),
             cycle: Some("cycle 34".into()),
             group: TicketGroup::Assigned,
@@ -194,6 +304,7 @@ mod tests {
             labels: Vec::new(),
             check_state: PrCheckState::Passing,
             audience: PrAudience::Other,
+            cached_pr_detail: None,
             ticket_ids: vec!["SCA-3165".into()],
             ticket_title: None,
             ticket_state: None,
@@ -253,6 +364,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(text.contains("SCA-3165"));
+        assert!(text.contains("[Start thread ▾] [⋯]"));
         assert!(text.contains("In Progress · P2 · matthias · cycle 34"));
         assert!(text.contains("#166 skill data  ✓"));
         assert!(text.contains("Description"));
@@ -272,6 +384,58 @@ mod tests {
     }
 
     #[test]
+    fn compact_linear_menu_uses_shared_ticket_actions() {
+        let mut app = AppState::test_new();
+        app.dock_ticket_action_menu = Some(Default::default());
+        let ticket = ticket();
+        let item = TicketItem {
+            summary: &ticket,
+            cached_detail: None,
+            linked_prs: Vec::new(),
+            observed_at: SystemTime::UNIX_EPOCH,
+            has_context_pr: false,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| render_ticket_item(&app, frame, frame.area(), &item))
+            .expect("render compact ticket menu");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for label in ["Refresh", "Ask a question", "Priority ▸", "Cancel ticket"] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+    }
+
+    #[test]
+    fn compact_linear_menu_opens_downward_and_clamps() {
+        let ticket = ticket();
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket, None, None, None, false,
+        );
+        let area = Rect::new(40, 3, 50, 7);
+        let anchor = ticket_action_menu_anchor(area);
+        let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
+            anchor,
+            area,
+            &context,
+            crate::ui::ticket_actions::TicketActionMenuState {
+                selected: 12,
+                ..Default::default()
+            },
+        )
+        .expect("rows below the dock action row");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert_eq!(layout.rect.bottom(), area.bottom());
+        assert!(layout.first_visible <= 12);
+        assert!(12 < layout.first_visible + layout.visible_rows);
+    }
+
+    #[test]
     fn compact_linear_surface_is_unavailable_without_ticket() {
         let app = AppState::test_new();
         assert!(focused_ticket_key(&app).is_none());
@@ -280,6 +444,66 @@ mod tests {
             crate::app::DockSurface::Linear,
             &crate::work_context::PaneWorkContext::default(),
             true,
+            false,
         ));
+    }
+
+    #[test]
+    fn unresolved_pane_ticket_shows_linear_failure_reason() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("linear")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-9999".into()],
+                ..Default::default()
+            });
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(WorkIndexUnavailable::only(
+                WorkIndexSource::Linear,
+                "rate limited",
+            )),
+            observed_at: SystemTime::UNIX_EPOCH,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(48, 4)).expect("test terminal");
+        terminal
+            .draw(|frame| render_linear(&app, frame, frame.area()))
+            .expect("render Linear failure");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Linear: rate limited"), "{text:?}");
+        assert!(!text.contains("not indexed yet"), "{text:?}");
+
+        app.work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .unavailable = None;
+        terminal
+            .draw(|frame| render_linear(&app, frame, frame.area()))
+            .expect("render successful empty Linear observation");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("ticket absent from latest index"), "{text:?}");
+        assert!(!text.contains("not indexed yet"), "{text:?}");
     }
 }

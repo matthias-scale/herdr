@@ -308,7 +308,7 @@ pub(crate) fn editor_argv_candidates(path: Option<&std::path::Path>) -> Vec<Vec<
     candidates
 }
 
-fn parse_editor_command(command: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_editor_command(command: &str) -> Option<Vec<String>> {
     let mut argv = Vec::new();
     let mut word = String::new();
     let mut quote = None;

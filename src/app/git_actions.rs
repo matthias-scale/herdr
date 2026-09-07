@@ -7,8 +7,28 @@ use super::{state::GitAction, App};
 use crate::layout::PaneId;
 
 const RESULT_PREFIX: &str = "__t3_exit=";
+const COMMIT_MESSAGE_INSTRUCTION: &str = "Write a lowercase conventional commit message for this diff. Return only the subject and optional body. Keep the subject concise and use an imperative verb.";
 const SUCCESS_CLOSE_DELAY: Duration = Duration::from_millis(1500);
 const COMMAND_SEND_DELAY: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone)]
+struct GitActionPrograms {
+    git: std::path::PathBuf,
+    gh: std::path::PathBuf,
+    claude: std::path::PathBuf,
+    codex: std::path::PathBuf,
+}
+
+impl Default for GitActionPrograms {
+    fn default() -> Self {
+        Self {
+            git: "git".into(),
+            gh: "gh".into(),
+            claude: "claude".into(),
+            codex: "codex".into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum GitActionPanePhase {
@@ -19,7 +39,11 @@ enum GitActionPanePhase {
 #[derive(Debug, Clone)]
 enum BottomActionCompletion {
     Git(GitAction),
+    Pr,
     User,
+    AddProjectClone {
+        target: std::path::PathBuf,
+    },
     WorktreeHooks {
         plan: Box<crate::app::home::HomeDispatchPlan>,
         create: Box<crate::app::state::WorktreeCreateState>,
@@ -34,17 +58,45 @@ pub(crate) struct GitActionPaneState {
     phase: GitActionPanePhase,
 }
 
-pub(crate) fn wrapped_command(action: GitAction, commit_message_model: &str) -> String {
-    let command = action.argv().join(" ");
-    // The Commit action is the one place a message model is meaningful. It is
-    // exported rather than spliced into the command line, so a
-    // `prepare-commit-msg` hook can use it and an unset model leaves the
-    // command byte for byte what it was.
-    let prefix = match (action, sanitized_model(commit_message_model)) {
-        (GitAction::Commit, Some(model)) => format!("HERDR_COMMIT_MESSAGE_MODEL={model} "),
-        _ => String::new(),
+pub(crate) fn wrapped_command(
+    action: GitAction,
+    commit_message_model: &str,
+    commit_stage_all: bool,
+) -> String {
+    wrapped_command_with_programs(
+        action,
+        commit_message_model,
+        commit_stage_all,
+        &GitActionPrograms::default(),
+    )
+}
+
+fn wrapped_command_with_programs(
+    action: GitAction,
+    commit_message_model: &str,
+    commit_stage_all: bool,
+    programs: &GitActionPrograms,
+) -> String {
+    if action == GitAction::Commit {
+        if let Some(generator) = commit_generator_argv(commit_message_model, programs) {
+            return wrapped_generated_commit(programs, &generator, commit_stage_all);
+        }
+    }
+    if action == GitAction::CreatePr {
+        return wrapped_create_pr(programs);
+    }
+
+    let argv = match action {
+        GitAction::Pull => vec![
+            programs.git.to_string_lossy().into_owned(),
+            "pull".into(),
+            "--rebase".into(),
+        ],
+        GitAction::Commit => vec![programs.git.to_string_lossy().into_owned(), "commit".into()],
+        GitAction::Push => vec![programs.git.to_string_lossy().into_owned(), "push".into()],
+        GitAction::CreatePr => unreachable!("Create PR uses its summary wrapper"),
     };
-    format!(r#"sh -c '{prefix}{command}; status=$?; printf "\n__t3_exit=%s\n" "$status"'"#)
+    wrapped_script_with_result(&shell_argv(&argv))
 }
 
 /// A model name only reaches the shell when it is a bare token, so the export
@@ -61,10 +113,159 @@ fn sanitized_model(model: &str) -> Option<&str> {
     Some(model)
 }
 
+fn commit_generator_argv(model: &str, programs: &GitActionPrograms) -> Option<Vec<String>> {
+    let model = sanitized_model(model)?;
+    if model.starts_with("claude") {
+        Some(vec![
+            programs.claude.to_string_lossy().into_owned(),
+            "-p".into(),
+            "--model".into(),
+            model.into(),
+            "--tools".into(),
+            String::new(),
+            "--permission-prompts".into(),
+            "none".into(),
+            "--no-session-persistence".into(),
+            "--output-format".into(),
+            "text".into(),
+            COMMIT_MESSAGE_INSTRUCTION.into(),
+        ])
+    } else {
+        Some(vec![
+            programs.codex.to_string_lossy().into_owned(),
+            "exec".into(),
+            "--sandbox".into(),
+            "read-only".into(),
+            "--model".into(),
+            model.into(),
+            COMMIT_MESSAGE_INSTRUCTION.into(),
+        ])
+    }
+}
+
+fn wrapped_generated_commit(
+    programs: &GitActionPrograms,
+    generator: &[String],
+    commit_stage_all: bool,
+) -> String {
+    let git = shell_single_quote(&programs.git.to_string_lossy());
+    let stage = if commit_stage_all {
+        format!("{git} add -A; stage_status=$?")
+    } else {
+        "stage_status=0".to_string()
+    };
+    let generator = shell_argv(generator);
+    let script = format!(
+        r#"tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/herdr-commit.XXXXXX" 2>/dev/null)
+if [ -z "$tmp_dir" ]; then
+  printf '\nCommit message generator unavailable; opening editor.\n'
+  {git} commit
+else
+  diff_file="$tmp_dir/diff"
+  message_file="$tmp_dir/message"
+  trap 'rm -f "$diff_file" "$message_file"; rmdir "$tmp_dir" 2>/dev/null || true' EXIT HUP INT TERM
+  {stage}
+  if [ "$stage_status" -ne 0 ]; then
+    false
+  else
+    {git} diff --cached > "$diff_file"
+    diff_status=$?
+    if [ "$diff_status" -eq 0 ] && [ ! -s "$diff_file" ]; then
+      {git} diff > "$diff_file"
+      diff_status=$?
+    fi
+    if [ "$diff_status" -eq 0 ]; then
+      {generator} < "$diff_file" > "$message_file"
+      generator_status=$?
+    else
+      generator_status=$diff_status
+    fi
+    if [ "$generator_status" -eq 0 ] && grep -q '[^[:space:]]' "$message_file"; then
+      printf '\nGenerated commit message:\n'
+      cat "$message_file"
+      printf '\n'
+      {git} commit -F "$message_file"
+    else
+      printf '\nCommit message generator unavailable; opening editor.\n'
+      {git} commit
+    fi
+  fi
+fi"#
+    );
+    wrapped_script_with_result(&script)
+}
+
+fn wrapped_create_pr(programs: &GitActionPrograms) -> String {
+    let gh = shell_argv(&[
+        programs.gh.to_string_lossy().into_owned(),
+        "pr".into(),
+        "create".into(),
+        "--fill".into(),
+    ]);
+    let script = format!(
+        r#"output=$({gh} 2>&1)
+status=$?
+printf '%s\n' "$output"
+if [ "$status" -eq 0 ]; then
+  url=$(printf '%s\n' "$output" | grep -Eo 'https://github\.com/[^[:space:]]+/[^[:space:]]+/pull/[0-9]+' | tail -n 1)
+  if [ -n "$url" ]; then
+    printf '\nPull request created: %s\n' "$url"
+  fi
+fi
+printf '\n{RESULT_PREFIX}%s\n' "$status""#
+    );
+    format!("sh -c {}", shell_single_quote(&script))
+}
+
+fn wrapped_script_with_result(script: &str) -> String {
+    let script = format!(
+        r#"{script}
+status=$?
+printf '\n{RESULT_PREFIX}%s\n' "$status""#
+    );
+    format!("sh -c {}", shell_single_quote(&script))
+}
+
+fn shell_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|argument| shell_single_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn wrapped_user_command(command: &str) -> String {
     format!(
         r#"sh -c {}; status=$?; printf "\n__t3_exit=%s\n" "$status""#,
         shell_single_quote(command)
+    )
+}
+
+pub(crate) fn wrapped_argv(argv: &[String]) -> String {
+    let command = argv
+        .iter()
+        .map(|argument| shell_single_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"sh -c {}; status=$?; printf "\n__t3_exit=%s\n" "$status""#,
+        shell_single_quote(&command)
+    )
+}
+
+pub(crate) fn wrapped_clone_command(
+    git_program: &std::path::Path,
+    url: &str,
+    target: &std::path::Path,
+) -> String {
+    let command = format!(
+        "{} clone -- {} {}",
+        shell_single_quote(&git_program.to_string_lossy()),
+        shell_single_quote(url),
+        shell_single_quote(&target.to_string_lossy())
+    );
+    format!(
+        r#"sh -c {}; status=$?; printf "\n__t3_exit=%s\n" "$status""#,
+        shell_single_quote(&command)
     )
 }
 
@@ -94,21 +295,18 @@ pub(crate) fn exit_code_from_screen(screen: &str) -> Option<i32> {
     })
 }
 
-fn apply_pr_url_from_screen(
-    terminal: &mut crate::terminal::TerminalState,
-    screen: &str,
-) -> Result<bool, String> {
-    let Some(url) = crate::work_context::extract_pr_urls(screen)
+fn pr_url_from_screen(screen: &str) -> Option<String> {
+    crate::work_context::extract_pr_urls(screen)
         .into_iter()
         .last()
-    else {
-        return Ok(false);
-    };
+}
+
+fn apply_pr_url(terminal: &mut crate::terminal::TerminalState, url: &str) -> Result<bool, String> {
     let mut pr_urls = terminal.effective_work_context().pr_urls.clone();
-    if pr_urls.contains(&url) {
+    if pr_urls.iter().any(|existing| existing == url) {
         return Ok(false);
     }
-    pr_urls.push(url);
+    pr_urls.push(url.to_string());
     terminal.apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
         pr_urls: Some(pr_urls),
         ..Default::default()
@@ -116,8 +314,8 @@ fn apply_pr_url_from_screen(
 }
 
 impl App {
-    pub(crate) fn apply_pr_land_request(&mut self) -> bool {
-        let Some(request) = self.state.request_pr_land.take() else {
+    pub(crate) fn apply_pr_command_request(&mut self) -> bool {
+        let Some(request) = self.state.request_pr_command.take() else {
             return false;
         };
         let cwd = self.state.workspaces.iter().find_map(|workspace| {
@@ -136,54 +334,14 @@ impl App {
                 });
             matches.then(|| workspace.identity_cwd.clone())
         });
-        let Some(ws_idx) = self.state.active else {
-            return false;
-        };
-        let before = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(crate::workspace::Workspace::focused_pane_id);
-        self.runtime_pane_split(
-            "tui.pr-land.split",
-            crate::api::schema::PaneSplitParams {
-                workspace_id: None,
-                target_pane_id: None,
-                direction: crate::api::schema::SplitDirection::Down,
-                ratio: None,
-                cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
-                focus: true,
-                right_click: Default::default(),
-                env: Default::default(),
-                work_context: None,
-            },
-        );
-        let Some(pane_id) = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(crate::workspace::Workspace::focused_pane_id)
-            .filter(|pane_id| Some(*pane_id) != before)
-        else {
-            return false;
-        };
-        let Some(runtime) =
-            self.state
-                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-        else {
-            return false;
-        };
-        if !request
-            .head_sha
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-        {
-            tracing::warn!("refusing PR land request with a non-hex head SHA");
+        let argv = pr_command_argv(&self.work_index_gh_program(), &request);
+        let spawned =
+            self.spawn_bottom_action_pane(wrapped_argv(&argv), BottomActionCompletion::Pr, cwd);
+        if !spawned {
             return false;
         }
-        let command = pr_land_argv(&request).join(" ");
-        runtime.send_bytes_after(Bytes::from(format!("{command}\r")), COMMAND_SEND_DELAY);
         self.state.clear_work_view();
+        self.next_work_index_refresh = Instant::now();
         true
     }
 
@@ -196,10 +354,50 @@ impl App {
 
     fn spawn_git_action_pane(&mut self, action: GitAction) -> bool {
         self.spawn_bottom_action_pane(
-            wrapped_command(action, &self.state.commit_message_model),
+            wrapped_command(
+                action,
+                &self.state.commit_message_model,
+                self.state.commit_stage_all,
+            ),
             BottomActionCompletion::Git(action),
             None,
         )
+    }
+
+    pub(crate) fn apply_add_project_clone_request(&mut self) -> bool {
+        let request = self
+            .state
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+            .and_then(|project| project.clone_request.take());
+        let Some(request) = request else {
+            return false;
+        };
+        let command = wrapped_clone_command(
+            &self.git_program_for_refresh(),
+            &request.url,
+            &request.target,
+        );
+        if self.spawn_bottom_action_pane(
+            command,
+            BottomActionCompletion::AddProjectClone {
+                target: request.target,
+            },
+            None,
+        ) {
+            return true;
+        }
+        if let Some(project) = self
+            .state
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+        {
+            project.clone_pending = false;
+            project.error = Some("A bottom pane is required to clone this project.".into());
+        }
+        true
     }
 
     pub(crate) fn apply_user_action_request(&mut self) -> bool {
@@ -383,6 +581,27 @@ impl App {
                     let Some(exit_code) = exit_code_from_screen(&screen) else {
                         continue;
                     };
+                    if let BottomActionCompletion::AddProjectClone { target } =
+                        state.completion.clone()
+                    {
+                        if exit_code == 0 {
+                            self.state.finish_add_project_clone(target, true);
+                            self.git_action_panes.insert(
+                                pane_id,
+                                GitActionPaneState {
+                                    phase: GitActionPanePhase::Succeeded {
+                                        close_at: now + SUCCESS_CLOSE_DELAY,
+                                    },
+                                    ..state
+                                },
+                            );
+                        } else {
+                            self.git_action_panes.remove(&pane_id);
+                            self.state.finish_add_project_clone(target, false);
+                        }
+                        changed = true;
+                        continue;
+                    }
                     if let BottomActionCompletion::WorktreeHooks {
                         plan,
                         create,
@@ -422,10 +641,15 @@ impl App {
                         &state.completion,
                         BottomActionCompletion::Git(GitAction::CreatePr)
                     ) {
-                        changed |= self.apply_created_pr_url(state.source_pane_id, &screen);
+                        changed |= self
+                            .apply_created_pr_url(state.source_pane_id, &screen)
+                            .is_some();
                     }
                     if matches!(&state.completion, BottomActionCompletion::Git(_)) {
                         self.mark_git_status_refresh_due(now);
+                    }
+                    if matches!(&state.completion, BottomActionCompletion::Pr) {
+                        self.next_work_index_refresh = now;
                     }
                     if let Some(action_state) = self.git_action_panes.get_mut(&pane_id) {
                         action_state.phase = GitActionPanePhase::Succeeded {
@@ -439,35 +663,60 @@ impl App {
         changed
     }
 
-    fn apply_created_pr_url(&mut self, source_pane_id: PaneId, screen: &str) -> bool {
-        let Some((ws_idx, pane)) = self.find_pane(source_pane_id) else {
-            return false;
-        };
+    fn apply_created_pr_url(&mut self, source_pane_id: PaneId, screen: &str) -> Option<String> {
+        let url = pr_url_from_screen(screen)?;
+        let (ws_idx, pane) = self.find_pane(source_pane_id)?;
         let terminal_id = pane.attached_terminal_id.clone();
         let changed = self
             .state
             .terminals
             .get_mut(&terminal_id)
-            .and_then(|terminal| apply_pr_url_from_screen(terminal, screen).ok())
+            .and_then(|terminal| apply_pr_url(terminal, &url).ok())
             .unwrap_or(false);
         if changed {
             self.schedule_session_save();
             self.emit_pane_updated(ws_idx, source_pane_id);
         }
-        changed
+        let previous_toast = self.state.toast.clone();
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::Finished,
+            title: "pull request created".into(),
+            context: url.clone(),
+            position: None,
+            target: None,
+        });
+        self.sync_toast_deadline(previous_toast);
+        if self
+            .event_tx
+            .try_send(crate::events::AppEvent::ClipboardWrite {
+                content: url.as_bytes().to_vec(),
+            })
+            .is_err()
+        {
+            tracing::warn!(%url, "failed to queue pull request URL clipboard event");
+        }
+        Some(url)
     }
 }
 
-pub(crate) fn pr_land_argv(request: &crate::app::state::PrLandConfirmation) -> Vec<String> {
-    vec![
-        "gh".into(),
-        "pr".into(),
-        "merge".into(),
-        request.number.to_string(),
-        "--squash".into(),
-        "--match-head-commit".into(),
-        request.head_sha.clone(),
-    ]
+pub(crate) fn pr_command_argv(
+    gh_program: &std::path::Path,
+    request: &crate::app::state::PrCommandRequest,
+) -> Vec<String> {
+    let mut argv = vec![gh_program.to_string_lossy().into_owned(), "pr".into()];
+    match request.action {
+        crate::app::state::PrCommandAction::Merge(method) => {
+            argv.extend([
+                "merge".into(),
+                request.number.to_string(),
+                method.flag().into(),
+            ]);
+        }
+        crate::app::state::PrCommandAction::OpenOnGithub => {
+            argv.extend(["view".into(), request.number.to_string(), "--web".into()]);
+        }
+    }
+    argv
 }
 
 #[cfg(test)]
@@ -483,13 +732,240 @@ mod tests {
             GitAction::CreatePr.argv(),
             &["gh", "pr", "create", "--fill"]
         );
-        assert!(wrapped_command(GitAction::Commit, "").contains("git commit; status=$?"));
-        assert!(!wrapped_command(GitAction::Commit, "").contains(" -m "));
-        assert!(wrapped_command(GitAction::Commit, "claude-opus-5")
-            .contains("HERDR_COMMIT_MESSAGE_MODEL=claude-opus-5 git commit"));
-        // Pull is untouched, and an unusable model name is ignored.
-        assert!(!wrapped_command(GitAction::Pull, "claude-opus-5").contains("HERDR_COMMIT"));
-        assert!(!wrapped_command(GitAction::Commit, "a; rm -rf /").contains("HERDR_COMMIT"));
+        assert!(!wrapped_command(GitAction::Commit, "", false).contains(" -F "));
+        assert!(wrapped_command(GitAction::Commit, "claude-opus-5", false)
+            .contains(COMMIT_MESSAGE_INSTRUCTION));
+        // Pull is untouched, and an unusable model name keeps the editor path.
+        assert!(!wrapped_command(GitAction::Pull, "claude-opus-5", false).contains("claude"));
+        assert!(!wrapped_command(GitAction::Commit, "a; rm -rf /", false).contains("codex"));
+    }
+
+    #[test]
+    fn commit_generator_argv_uses_each_agents_noninteractive_read_only_mode() {
+        let programs = GitActionPrograms::default();
+        assert_eq!(
+            commit_generator_argv("claude-opus-5", &programs).expect("Claude generator"),
+            [
+                "claude",
+                "-p",
+                "--model",
+                "claude-opus-5",
+                "--tools",
+                "",
+                "--permission-prompts",
+                "none",
+                "--no-session-persistence",
+                "--output-format",
+                "text",
+                COMMIT_MESSAGE_INSTRUCTION,
+            ]
+        );
+        assert_eq!(
+            commit_generator_argv("gpt-5.6-codex", &programs).expect("Codex generator"),
+            [
+                "codex",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--model",
+                "gpt-5.6-codex",
+                COMMIT_MESSAGE_INSTRUCTION,
+            ]
+        );
+        assert!(commit_generator_argv("bad model;", &programs).is_none());
+    }
+
+    #[cfg(unix)]
+    fn executable_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, format!("#!/bin/sh\n{body}")).expect("write fake program");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake program metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make fake program executable");
+    }
+
+    #[cfg(unix)]
+    fn generator_fixture(label: &str) -> (std::path::PathBuf, GitActionPrograms) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("herdr-{label}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("fixture directory");
+        let git = root.join("fake git");
+        let claude = root.join("fake claude");
+        let codex = root.join("fake codex");
+        let gh = root.join("fake gh");
+        executable_script(
+            &git,
+            r#"printf '%s\n' "$*" >> "$HERDR_TEST_GIT_LOG"
+case "$1" in
+  add) exit "${HERDR_TEST_ADD_STATUS:-0}" ;;
+  diff)
+    if [ "$2" = "--cached" ]; then
+      printf '%s' "$HERDR_TEST_CACHED_DIFF"
+    else
+      printf '%s' "$HERDR_TEST_UNSTAGED_DIFF"
+    fi
+    ;;
+  commit)
+    if [ "$2" = "-F" ]; then
+      cp "$3" "$HERDR_TEST_COMMIT_MESSAGE"
+    fi
+    ;;
+esac
+"#,
+        );
+        let generator = r#"printf '%s\n' "$@" > "$HERDR_TEST_GENERATOR_ARGS"
+cat > "$HERDR_TEST_GENERATOR_STDIN"
+printf '%s' "$HERDR_TEST_GENERATOR_OUTPUT"
+exit "$HERDR_TEST_GENERATOR_STATUS"
+"#;
+        executable_script(&claude, generator);
+        executable_script(&codex, generator);
+        executable_script(
+            &gh,
+            "printf '%s\\n' \"$@\" > \"$HERDR_TEST_GH_ARGS\"\nprintf '%s\\n' \"$HERDR_TEST_GH_OUTPUT\"\nexit \"$HERDR_TEST_GH_STATUS\"\n",
+        );
+        (
+            root,
+            GitActionPrograms {
+                git,
+                gh,
+                claude,
+                codex,
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    fn run_fixture_command(
+        command: &str,
+        root: &std::path::Path,
+        cached_diff: &str,
+        unstaged_diff: &str,
+        generator_output: &str,
+        generator_status: i32,
+    ) -> std::process::Output {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("HERDR_TEST_GIT_LOG", root.join("git.log"))
+            .env("HERDR_TEST_CACHED_DIFF", cached_diff)
+            .env("HERDR_TEST_UNSTAGED_DIFF", unstaged_diff)
+            .env("HERDR_TEST_COMMIT_MESSAGE", root.join("commit-message"))
+            .env("HERDR_TEST_GENERATOR_ARGS", root.join("generator-args"))
+            .env("HERDR_TEST_GENERATOR_STDIN", root.join("generator-stdin"))
+            .env("HERDR_TEST_GENERATOR_OUTPUT", generator_output)
+            .env("HERDR_TEST_GENERATOR_STATUS", generator_status.to_string())
+            .env("HERDR_TEST_GH_ARGS", root.join("gh-args"))
+            .env("HERDR_TEST_GH_OUTPUT", "")
+            .env("HERDR_TEST_GH_STATUS", "0")
+            .output()
+            .expect("run wrapped action")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_commit_uses_cached_diff_without_staging_and_commits_the_message() {
+        let (root, programs) = generator_fixture("generated-commit");
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n+new line\n";
+        let command =
+            wrapped_command_with_programs(GitAction::Commit, "claude-opus-5", false, &programs);
+        let output = run_fixture_command(
+            &command,
+            &root,
+            diff,
+            "unused",
+            "fix: keep generated commits bounded\n\nexplain the change\n",
+            0,
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+        let git_log = std::fs::read_to_string(root.join("git.log")).expect("git log");
+
+        assert!(stdout.contains("Generated commit message:"), "{stdout:?}");
+        assert!(stdout.contains("__t3_exit=0"), "{stdout:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("generator-stdin")).expect("generator stdin"),
+            diff
+        );
+        let args = std::fs::read_to_string(root.join("generator-args")).expect("generator args");
+        assert!(args.starts_with("-p\n--model\nclaude-opus-5\n"), "{args:?}");
+        assert!(args.contains(COMMIT_MESSAGE_INSTRUCTION));
+        assert!(git_log.contains("diff --cached"), "{git_log:?}");
+        assert!(!git_log.lines().any(|line| line == "add -A"), "{git_log:?}");
+        assert!(git_log.lines().any(|line| line.starts_with("commit -F ")));
+        assert_eq!(
+            std::fs::read_to_string(root.join("commit-message")).expect("commit message"),
+            "fix: keep generated commits bounded\n\nexplain the change\n"
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_stages_only_when_enabled_and_falls_back_to_editor() {
+        for (label, output, status) in [
+            ("generator-failure", "ignored", 7),
+            ("generator-empty", "  \n", 0),
+        ] {
+            let (root, programs) = generator_fixture(label);
+            let command =
+                wrapped_command_with_programs(GitAction::Commit, "gpt-5.6-codex", true, &programs);
+            let result = run_fixture_command(
+                &command,
+                &root,
+                "",
+                "diff --git a/a b/a\n+unstaged\n",
+                output,
+                status,
+            );
+            let stdout = String::from_utf8(result.stdout).expect("UTF-8 output");
+            let git_log = std::fs::read_to_string(root.join("git.log")).expect("git log");
+            let generator_stdin =
+                std::fs::read_to_string(root.join("generator-stdin")).expect("generator stdin");
+            let args =
+                std::fs::read_to_string(root.join("generator-args")).expect("generator args");
+
+            assert!(stdout.contains("opening editor"), "{stdout:?}");
+            assert!(git_log.lines().any(|line| line == "add -A"), "{git_log:?}");
+            assert!(git_log.contains("diff --cached\ndiff"), "{git_log:?}");
+            assert!(git_log.lines().any(|line| line == "commit"), "{git_log:?}");
+            assert!(generator_stdin.contains("+unstaged"));
+            assert!(args.starts_with("exec\n--sandbox\nread-only\n"), "{args:?}");
+            std::fs::remove_dir_all(root).expect("remove fixture");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_pr_wrapper_prints_an_explicit_url_summary() {
+        let (root, programs) = generator_fixture("create-pr-summary");
+        let command = wrapped_command_with_programs(GitAction::CreatePr, "", false, &programs);
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("HERDR_TEST_GH_ARGS", root.join("gh-args"))
+            .env(
+                "HERDR_TEST_GH_OUTPUT",
+                "Creating pull request\nhttps://github.com/acme/widgets/pull/42",
+            )
+            .env("HERDR_TEST_GH_STATUS", "0")
+            .output()
+            .expect("run Create PR wrapper");
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+
+        assert!(stdout.contains("Pull request created: https://github.com/acme/widgets/pull/42"));
+        assert!(stdout.contains("__t3_exit=0"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("gh-args")).expect("gh args"),
+            "pr\ncreate\n--fill\n"
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
@@ -529,6 +1005,39 @@ mod tests {
         assert!(command.contains("status=$code"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn clone_command_runs_the_injected_git_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("herdr-clone-command-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("fixture directory");
+        let git = root.join("git fixture");
+        std::fs::write(&git, "#!/bin/sh\nprintf 'arg=%s\\n' \"$@\"\n").expect("fake git");
+        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("executable");
+
+        let command = wrapped_clone_command(
+            &git,
+            "https://github.com/acme/project.git",
+            &root.join("project with spaces"),
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .expect("run wrapped clone");
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 output");
+
+        assert!(output.status.success());
+        assert!(stdout.contains("arg=clone\narg=--\n"));
+        assert!(stdout.contains("arg=https://github.com/acme/project.git\n"));
+        assert!(stdout.contains("arg="));
+        assert!(stdout.contains("project with spaces"));
+        assert!(stdout.contains("__t3_exit=0"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn focused_shell_user_action_writes_command_and_enter() {
         let mut app = App::new(
@@ -563,24 +1072,30 @@ mod tests {
     }
 
     #[test]
-    fn land_command_is_bound_to_confirmed_head() {
-        let request = crate::app::state::PrLandConfirmation {
+    fn merge_commands_use_the_injected_gh_and_selected_method() {
+        for method in crate::config::MergeMethodConfig::ALL {
+            let request = crate::app::state::PrCommandRequest {
+                repo: "owner/repo".into(),
+                number: 42,
+                action: crate::app::state::PrCommandAction::Merge(method),
+            };
+            assert_eq!(
+                pr_command_argv(std::path::Path::new("/test/gh"), &request),
+                ["/test/gh", "pr", "merge", "42", method.flag()]
+            );
+        }
+    }
+
+    #[test]
+    fn open_on_github_uses_the_injected_gh() {
+        let request = crate::app::state::PrCommandRequest {
             repo: "owner/repo".into(),
             number: 42,
-            head_sha: "abc123".into(),
-            approval_signal: "approved review".into(),
+            action: crate::app::state::PrCommandAction::OpenOnGithub,
         };
         assert_eq!(
-            pr_land_argv(&request),
-            [
-                "gh",
-                "pr",
-                "merge",
-                "42",
-                "--squash",
-                "--match-head-commit",
-                "abc123"
-            ]
+            pr_command_argv(std::path::Path::new("/test/gh"), &request),
+            ["/test/gh", "pr", "view", "42", "--web"]
         );
     }
 
@@ -598,7 +1113,8 @@ mod tests {
             .expect("seed work context");
         let fixture = "Creating pull request for topic into main\nhttps://github.com/acme/repo/pull/42\n\n__t3_exit=0\n$ ";
 
-        assert!(apply_pr_url_from_screen(&mut terminal, fixture).expect("valid PR URL"));
+        let url = pr_url_from_screen(fixture).expect("valid PR URL");
+        assert!(apply_pr_url(&mut terminal, &url).expect("valid PR URL"));
         assert_eq!(
             terminal.effective_work_context().pr_urls,
             vec![
@@ -606,5 +1122,45 @@ mod tests {
                 "https://github.com/acme/repo/pull/42"
             ]
         );
+    }
+
+    #[test]
+    fn created_pr_url_updates_context_notifies_and_requests_copy() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("pr")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let url = "https://github.com/acme/widgets/pull/42";
+
+        assert_eq!(
+            app.apply_created_pr_url(pane_id, &format!("Pull request created: {url}")),
+            Some(url.to_string())
+        );
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("pane terminal");
+        assert_eq!(
+            app.state.terminals[terminal_id]
+                .effective_work_context()
+                .pr_urls,
+            [url]
+        );
+        let toast = app.state.toast.as_ref().expect("PR notification");
+        assert_eq!(toast.title, "pull request created");
+        assert_eq!(toast.context, url);
+        assert!(app.toast_deadline.is_some());
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, url.as_bytes())
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 }

@@ -15,12 +15,13 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "experimental",
     "files",
     "keys",
-    "land",
     "missive",
     "onboarding",
+    "panel",
     "remote",
     "server",
     "session",
+    "source_control",
     "terminal",
     "theme",
     "ui",
@@ -378,11 +379,11 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
-        "land",
-        "land config",
+        "source_control",
+        "source control config",
         &mut diagnostics,
         &mut invalid_sections,
-        |section| config.land = section,
+        |section| config.source_control = section,
     );
     load_live_section(
         table,
@@ -391,6 +392,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.files = section,
+    );
+    load_live_section(
+        table,
+        "panel",
+        "panel config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.panel = section,
     );
     load_live_section(
         table,

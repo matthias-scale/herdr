@@ -1015,9 +1015,12 @@ pub struct TabCardArea {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct SidebarWorkFilter {
+    /// Persisted row-search query shared by every sidebar view.
+    pub(crate) query: String,
     /// Legacy field names preserve existing 2b presentation files.
     pub(crate) team: Option<String>,
     pub(crate) assignee: Option<String>,
+    pub(crate) linear_ownership: WorkOwnershipFilter,
     pub(crate) linear_statuses: std::collections::BTreeSet<LinearStatusFilter>,
     pub(crate) github: GithubSidebarFilter,
     pub(crate) missive: MissiveSidebarFilter,
@@ -1073,12 +1076,36 @@ impl SidebarWorkFilter {
                 return false;
             }
         }
-        if !assignee_filter_matches(
-            self.assignee.as_deref(),
-            ticket.assignee.as_deref(),
-            session.linear.viewer.as_deref(),
-        ) {
-            return false;
+        if let Some(selected) = self.assignee.as_deref() {
+            let identities = if selected == "me" {
+                [
+                    session.linear.viewer.as_deref(),
+                    session.linear_viewer_identity(),
+                ]
+            } else {
+                [Some(selected), None]
+            };
+            let assigned = identities.iter().flatten().any(|identity| {
+                ticket
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|assignee| assignee.eq_ignore_ascii_case(identity))
+            });
+            let authored = identities.iter().flatten().any(|identity| {
+                ticket.creator.as_ref().is_some_and(|creator| {
+                    creator.id.eq_ignore_ascii_case(identity)
+                        || creator.name.eq_ignore_ascii_case(identity)
+                })
+            });
+            let matches_ownership = identities.iter().all(Option::is_none)
+                || match self.linear_ownership {
+                    WorkOwnershipFilter::Assigned => assigned,
+                    WorkOwnershipFilter::Authored => authored,
+                    WorkOwnershipFilter::Both => assigned || authored,
+                };
+            if !matches_ownership {
+                return false;
+            }
         }
         ticket
             .state
@@ -1117,9 +1144,19 @@ impl SidebarWorkFilter {
         } else {
             selected.unwrap_or_default()
         };
-        item.assignees
+        let assigned = item
+            .assignees
             .iter()
-            .any(|assignee| assignee.eq_ignore_ascii_case(resolved))
+            .any(|assignee| assignee.eq_ignore_ascii_case(resolved));
+        let authored = item
+            .author
+            .as_deref()
+            .is_some_and(|author| author.eq_ignore_ascii_case(resolved));
+        match self.github.ownership {
+            WorkOwnershipFilter::Assigned => assigned,
+            WorkOwnershipFilter::Authored => authored,
+            WorkOwnershipFilter::Both => assigned || authored,
+        }
     }
 
     pub(crate) fn matches_missive_conversation(
@@ -1154,8 +1191,10 @@ impl SidebarWorkFilter {
 impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
+            query: String::new(),
             team: Some("SCA".into()),
             assignee: Some("me".into()),
+            linear_ownership: WorkOwnershipFilter::Both,
             linear_statuses: default_linear_statuses(),
             github: GithubSidebarFilter::default(),
             missive: MissiveSidebarFilter::default(),
@@ -1165,25 +1204,6 @@ impl Default for SidebarWorkFilter {
 
 fn assignee_filter_label(value: Option<&str>) -> &str {
     value.unwrap_or("all")
-}
-
-fn assignee_filter_matches(
-    selected: Option<&str>,
-    actual: Option<&str>,
-    viewer: Option<&str>,
-) -> bool {
-    let Some(selected) = selected else {
-        return true;
-    };
-    let selected = if selected == "me" {
-        let Some(viewer) = viewer else {
-            return true;
-        };
-        viewer
-    } else {
-        selected
-    };
-    actual.is_some_and(|actual| actual.eq_ignore_ascii_case(selected))
 }
 
 #[derive(
@@ -1255,6 +1275,7 @@ fn default_linear_statuses() -> std::collections::BTreeSet<LinearStatusFilter> {
 #[serde(default)]
 pub(crate) struct GithubSidebarFilter {
     pub(crate) assignee: Option<String>,
+    pub(crate) ownership: WorkOwnershipFilter,
     pub(crate) show_drafts: bool,
     pub(crate) state: GithubStateFilter,
 }
@@ -1263,8 +1284,30 @@ impl Default for GithubSidebarFilter {
     fn default() -> Self {
         Self {
             assignee: Some("me".into()),
+            ownership: WorkOwnershipFilter::Both,
             show_drafts: false,
             state: GithubStateFilter::Open,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkOwnershipFilter {
+    Assigned,
+    Authored,
+    #[default]
+    Both,
+}
+
+impl WorkOwnershipFilter {
+    pub(crate) const ALL: [Self; 3] = [Self::Assigned, Self::Authored, Self::Both];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Authored => "authored",
+            Self::Both => "both",
         }
     }
 }
@@ -1385,11 +1428,40 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) work_filter: SidebarWorkFilter,
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
+    pub(crate) search_active: bool,
+    pub(crate) new_thread: Option<SidebarNewThreadState>,
     pub(crate) selected_work_group: Option<String>,
+    pub(crate) object_menu: Option<SidebarObjectMenuState>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
+}
+
+/// Attach-local project picker opened from the sidebar header.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SidebarNewThreadState {
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
+/// Attach-local state for the action menu anchored to a sidebar work object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarObjectMenuState {
+    pub(crate) target: String,
+    /// Exact clicked row when mouse-opened. Keyboard-opened menus resolve the
+    /// first visible row for the selected object.
+    pub(crate) anchor_row: Option<u16>,
+    pub(crate) page: SidebarObjectMenuPage,
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SidebarObjectMenuPage {
+    #[default]
+    Actions,
+    TicketTransitions,
+    TicketPriorities,
+    Confirmation,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -1403,12 +1475,22 @@ pub(crate) struct DockPresentationState {
     /// Active surface. `None` while the dock is a chooser with nothing open.
     pub(crate) tab: Option<DockSurface>,
     pub(crate) open_surfaces: Vec<DockSurface>,
+    pub(crate) tab_bindings: Vec<Option<DockTabBinding>>,
+    pub(crate) active_tab_index: Option<usize>,
+    pub(crate) hovered_tab_index: Option<usize>,
+    pub(crate) pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
+    pub(crate) followed_pane: Option<PaneFocusTarget>,
+    pub(crate) context_objects: Vec<DockObjectRef>,
+    pub(crate) suppressed_context: std::collections::HashSet<DockObjectRef>,
     pub(crate) maximized: bool,
     pub(crate) surface_menu: Option<DockSurfaceMenu>,
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
     pub(crate) editor_focused: bool,
     pub(crate) diff_focused: bool,
+    pub(crate) pr_focused: bool,
+    pub(crate) pr_checkout_menu: Option<PrCheckoutChoice>,
+    pub(crate) pr_action_menu: Option<PrActionMenuState>,
     pub(crate) diff_ignore_whitespace: bool,
     pub(crate) diff_selected: usize,
     pub(crate) diff_collapsed: std::collections::HashSet<String>,
@@ -1418,6 +1500,14 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_selection: Option<std::path::PathBuf>,
     pub(crate) files_filter: String,
     pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) files_sort: crate::files::FileSort,
+    pub(crate) files_search_active: bool,
+    pub(crate) agents_focused: bool,
+    pub(crate) agents_selection: Option<String>,
+    pub(crate) linear_focused: bool,
+    pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
+    pub(crate) ticket_comment_draft: Option<String>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -1438,14 +1528,24 @@ impl Default for DockPresentationState {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
             surface_override: false,
-            tab: Some(DockSurface::Home),
-            open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            tab: None,
+            open_surfaces: Vec::new(),
+            tab_bindings: Vec::new(),
+            active_tab_index: None,
+            hovered_tab_index: None,
+            pane_tabs: std::collections::HashMap::new(),
+            followed_pane: None,
+            context_objects: Vec::new(),
+            suppressed_context: std::collections::HashSet::new(),
             maximized: false,
             surface_menu: None,
             chooser_focused: false,
             scroll: 0,
             editor_focused: false,
             diff_focused: false,
+            pr_focused: false,
+            pr_checkout_menu: None,
+            pr_action_menu: None,
             diff_ignore_whitespace: false,
             diff_selected: 0,
             diff_collapsed: std::collections::HashSet::new(),
@@ -1455,6 +1555,14 @@ impl Default for DockPresentationState {
             files_selection: None,
             files_filter: String::new(),
             files_collapsed: std::collections::HashSet::new(),
+            files_sort: crate::files::FileSort::Name,
+            files_search_active: false,
+            agents_focused: false,
+            agents_selection: None,
+            linear_focused: false,
+            ticket_start_menu: None,
+            ticket_action_menu: None,
+            ticket_comment_draft: None,
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -1617,7 +1725,7 @@ pub enum ViewLayout {
     Mobile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DockSurface {
     Home,
     Terminal,
@@ -1631,6 +1739,36 @@ pub enum DockSurface {
     Shortcuts,
     Context,
     Scratchpad,
+}
+
+/// Stable identity of one work object shown by a compact dock tab.
+/// This is client presentation state. The referenced object remains owned by
+/// the pane work context and work-index snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DockObjectRef {
+    pub(crate) surface: DockSurface,
+    pub(crate) key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockTabOrigin {
+    Context,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockTabBinding {
+    pub(crate) object: DockObjectRef,
+    pub(crate) origin: DockTabOrigin,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PaneDockTabs {
+    pub(crate) open_surfaces: Vec<DockSurface>,
+    pub(crate) bindings: Vec<Option<DockTabBinding>>,
+    pub(crate) active_index: Option<usize>,
+    pub(crate) context_objects: Vec<DockObjectRef>,
+    pub(crate) suppressed_context: std::collections::HashSet<DockObjectRef>,
 }
 
 impl DockSurface {
@@ -1651,19 +1789,14 @@ impl DockSurface {
     ];
 
     /// The card grid of the empty dock, each with its single-key shortcut.
-    pub const CARDS: [Self; 6] = [
+    pub const CARDS: [Self; 12] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
         Self::Pr,
         Self::Linear,
+        Self::Missive,
         Self::Agents,
-    ];
-
-    /// Surfaces a dock opens with. Keeping the pre-chooser tab strip as the
-    /// default set makes the rename behaviour-neutral: the same five tabs are
-    /// there, in the same order, until the user closes one.
-    pub const DEFAULT_OPEN: [Self; 5] = [
         Self::Home,
         Self::Editor,
         Self::Shortcuts,
@@ -1706,23 +1839,6 @@ impl DockSurface {
         }
     }
 
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Home => "work index",
-            Self::Editor => "edit files",
-            Self::Shortcuts => "keybinds",
-            Self::Context => "pane facts",
-            Self::Scratchpad => "notes",
-            Self::Terminal => "shell here",
-            Self::Files => "browse",
-            Self::Diff => "vs base",
-            Self::Pr => "this branch",
-            Self::Linear => "ticket",
-            Self::Missive => "conversation",
-            Self::Agents => "subagents",
-        }
-    }
-
     /// Single-key shortcut of the empty-dock card grid.
     pub fn shortcut(self) -> Option<char> {
         match self {
@@ -1737,6 +1853,31 @@ impl DockSurface {
         }
     }
 
+    /// Shortcut shown by and dispatched from the empty-panel card grid.
+    pub fn card_shortcut(self) -> char {
+        match self {
+            Self::Terminal => 'T',
+            Self::Files => 'F',
+            Self::Diff => 'D',
+            Self::Pr => 'P',
+            Self::Linear => 'L',
+            Self::Missive => 'M',
+            Self::Agents => 'A',
+            Self::Home => 'H',
+            Self::Editor => 'E',
+            Self::Shortcuts => 'K',
+            Self::Context => 'X',
+            Self::Scratchpad => 'N',
+        }
+    }
+
+    pub fn from_card_shortcut(key: char) -> Option<Self> {
+        let key = key.to_ascii_uppercase();
+        Self::CARDS
+            .into_iter()
+            .find(|surface| surface.card_shortcut() == key)
+    }
+
     pub fn from_shortcut(key: char) -> Option<Self> {
         let key = key.to_ascii_uppercase();
         Self::CARDS
@@ -1746,7 +1887,7 @@ impl DockSurface {
 
     /// Placeholder body until the surface gets its implementation slice.
     pub fn placeholder(self) -> Option<String> {
-        matches!(self, Self::Terminal | Self::Files | Self::Agents)
+        matches!(self, Self::Terminal | Self::Files)
             .then(|| format!("{}: coming in a later slice", self.title()))
     }
 }
@@ -1793,6 +1934,12 @@ pub(crate) struct DockFileRowHitArea {
     pub(crate) rect: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockAgentRowHitArea {
+    pub(crate) id: String,
+    pub(crate) rect: Rect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeHitTarget {
     QueueRow(usize),
@@ -1803,6 +1950,7 @@ pub(crate) enum HomeHitTarget {
     Agent,
     Model,
     Effort,
+    Access,
     Context,
     Directory,
     Workspace,
@@ -1865,6 +2013,8 @@ pub struct ViewState {
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
     pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
+    /// Sidebar-footer entry for the settings screen.
+    pub(crate) sidebar_footer_settings_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
     /// Sidebar-footer entry for the client-local historical usage view.
@@ -1875,6 +2025,8 @@ pub struct ViewState {
     pub(crate) sidebar_footer_ticket_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen Missive conversation view.
     pub(crate) sidebar_footer_missive_hit_area: Rect,
+    /// Sidebar-footer entry for refreshing work and Git metadata.
+    pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -1883,12 +2035,14 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub repo_editor_button_hit_area: Rect,
     pub add_action_button_hit_area: Rect,
     pub user_action_hit_areas: Vec<(usize, Rect)>,
     pub add_action_close_hit_area: Rect,
     pub add_action_field_hit_areas: Vec<(AddActionField, Rect)>,
     pub add_action_cancel_hit_area: Rect,
     pub add_action_save_hit_area: Rect,
+    pub(crate) add_project_layout: crate::ui::add_project::AddProjectLayout,
     pub git_menu_button_hit_area: Rect,
     pub git_menu_popup_rect: Rect,
     pub git_menu_first_visible: usize,
@@ -1927,6 +2081,9 @@ pub struct ViewState {
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_home_detail_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
+    pub(crate) dock_files_refresh_rect: Rect,
+    pub(crate) dock_files_sort_rect: Rect,
+    pub(crate) dock_agent_row_hit_areas: Vec<DockAgentRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -2109,6 +2266,7 @@ impl GitAction {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn argv(self) -> &'static [&'static str] {
         match self {
             Self::Pull => &["git", "pull", "--rebase"],
@@ -2678,7 +2836,7 @@ pub enum SidebarWidthSource {
     Manual,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PaneFocusTarget {
     pub workspace_id: String,
     pub pane_id: PaneId,
@@ -2714,6 +2872,9 @@ pub struct AppState {
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
+    /// Defaults and hover state owned by the TUI client.
+    pub(crate) linear_default_layout: LinearViewLayout,
+    pub(crate) sidebar_footer_hover: Option<SidebarFooterItem>,
     /// Client-local historical usage view and its scan result.
     pub(crate) usage_view: Option<UsageViewState>,
     /// Cached local usage loaded before the first background rescan.
@@ -2728,6 +2889,8 @@ pub struct AppState {
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
+    /// Client-local provider choices retained when Home closes.
+    pub(crate) home_agent_choices: Vec<crate::app::home::HomeAgentChoice>,
     /// Provider choices resolved outside `HomeState`, ready for the next Home open.
     pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
     /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
@@ -2757,6 +2920,8 @@ pub struct AppState {
     /// without touching the filesystem.
     pub(crate) git_root_for_cwd:
         std::collections::HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+    /// Vim-family command resolved outside the pure render path.
+    pub(crate) repo_editor_argv: Option<Vec<String>>,
     /// Pane whose most recent mouse event was forwarded to its terminal.
     pub(crate) forwarded_pane_input: Option<PaneId>,
     /// Whether the full-width top status row is enabled by configuration.
@@ -2802,11 +2967,13 @@ pub struct AppState {
     /// Set by a click on a tab-row pane toggle, drained by the runtime loop
     /// into the same split/close calls the keybindings use.
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
+    /// The top-bar repository editor button was activated.
+    pub(crate) request_open_repo_editor: bool,
     /// Git action chosen from the tab-row menu, drained by the runtime loop.
     pub(crate) request_git_action: Option<GitAction>,
     pub(crate) request_user_action: Option<usize>,
     pub(crate) request_save_add_action: bool,
-    pub(crate) request_pr_land: Option<PrLandConfirmation>,
+    pub(crate) request_pr_command: Option<PrCommandRequest>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
     pub request_pin_toggle: Option<(usize, usize)>,
@@ -2848,9 +3015,21 @@ pub struct AppState {
     pub(crate) sidebar_work_filter: SidebarWorkFilter,
     pub(crate) sidebar_filter_menu_open: bool,
     pub(crate) sidebar_filter_menu_selected: usize,
+    /// Typed input goes to the persisted sidebar row query while this is set.
+    pub(crate) sidebar_search_active: bool,
+    /// Downward recent-project picker. Project paths are derived at render time.
+    pub(crate) sidebar_new_thread: Option<SidebarNewThreadState>,
+    /// Server-owned request and busy state for the sidebar refresh operation.
+    /// These fields deliberately stay outside `SidebarPresentationState` so
+    /// input from an attached client is visible to the runtime work loop.
+    pub(crate) sidebar_refresh_requested: bool,
+    pub(crate) sidebar_refreshing: bool,
     /// Dim work-item header the operator selected with the mouse. Enter on it
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
+    /// Downward action menu for a Linear, GitHub, or Missive sidebar object.
+    /// This is client-local presentation; writes remain in `dock_pending_write`.
+    pub(crate) sidebar_object_menu: Option<SidebarObjectMenuState>,
     /// Views whose Unassigned section has expanded past its ten newest rows.
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
@@ -2916,6 +3095,8 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub dock_width: u16,
     pub dock_collapsed: bool,
+    /// Configured tabs for a fresh attach. TUI-only state; never enters the API.
+    pub(crate) dock_default_surfaces: Vec<DockSurface>,
     /// Set by an explicit dock pick and cleared by `follow_view`.
     /// Attach-local TUI state; it never enters server state or the JSON API.
     pub(crate) dock_surface_override: bool,
@@ -2924,6 +3105,19 @@ pub struct AppState {
     pub dock_tab: Option<DockSurface>,
     /// Surfaces open as tabs, in strip order. TUI presentation state.
     pub dock_open_surfaces: Vec<DockSurface>,
+    /// Optional work-object binding for each entry in `dock_open_surfaces`.
+    /// Parallel storage keeps existing surface input paths small while allowing
+    /// several PR, Linear, or Missive tabs at once.
+    pub(crate) dock_tab_bindings: Vec<Option<DockTabBinding>>,
+    pub(crate) dock_active_tab_index: Option<usize>,
+    /// Tab under the client pointer, used only to expose an object's full title.
+    pub(crate) dock_hovered_tab_index: Option<usize>,
+    /// Per-pane tab memory and context suppression. This is swapped per client
+    /// and never enters server or protocol state.
+    pub(crate) dock_pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
+    pub(crate) dock_followed_pane: Option<PaneFocusTarget>,
+    pub(crate) dock_context_objects: Vec<DockObjectRef>,
+    pub(crate) dock_suppressed_context: std::collections::HashSet<DockObjectRef>,
     /// Dock takes the whole main area. TUI presentation state.
     pub dock_maximized: bool,
     /// Open `+` chooser dropdown. TUI presentation state.
@@ -2940,7 +3134,7 @@ pub struct AppState {
     /// staged confirmation are not.
     pub(crate) dock_pr_focused: bool,
     pub(crate) dock_pr_checkout_menu: Option<PrCheckoutChoice>,
-    pub(crate) dock_pr_pending_land: Option<PrLandConfirmation>,
+    pub(crate) dock_pr_action_menu: Option<PrActionMenuState>,
     /// `git diff -w` for the Diff surface. Initialised from
     /// `ui.hide_whitespace_in_diff` and written by both the dock's own
     /// whitespace toggle and the General settings row, so the two never drift.
@@ -2956,6 +3150,16 @@ pub struct AppState {
     pub(crate) dock_files_selection: Option<std::path::PathBuf>,
     pub(crate) dock_files_filter: String,
     pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) dock_files_sort: crate::files::FileSort,
+    pub(crate) dock_files_search_active: bool,
+    /// Selection and keyboard ownership for the focus-following Agents tree.
+    /// Both fields are attach-local TUI presentation state.
+    pub(crate) dock_agents_focused: bool,
+    pub(crate) dock_agents_selection: Option<String>,
+    pub(crate) dock_linear_focused: bool,
+    pub(crate) dock_ticket_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) dock_ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
+    pub(crate) dock_ticket_comment_draft: Option<String>,
     /// Cached client-side file snapshots, keyed by repository root.
     pub(crate) dock_file_cache:
         std::collections::HashMap<std::path::PathBuf, crate::files::FileTreeSnapshot>,
@@ -2979,6 +3183,9 @@ pub struct AppState {
     /// A write staged by a button but not yet confirmed. Nothing leaves herdr
     /// until the user presses the confirm key with this set.
     pub(crate) dock_pending_write: Option<crate::work_index::WorkItemWrite>,
+    /// Shared modal gate for PR writes opened by the full view, dock, or sidebar.
+    /// This is client-local TUI state; pull-request facts stay in the work index.
+    pub(crate) pr_action_confirmation: Option<PrActionConfirmation>,
     /// The outcome of the last write, shown until the next one is staged.
     pub(crate) dock_write_notice: Option<String>,
     pub(crate) dock_home_section: DockHomeSection,
@@ -2990,6 +3197,10 @@ pub struct AppState {
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Missive config facts copied into client state for the Settings view.
+    /// The token value is never retained, only whether its named variable exists.
+    pub(crate) settings_missive_team: Option<String>,
+    pub(crate) settings_missive_token_present: bool,
     /// Provider viewers and assignee directories resolved by the work-index
     /// runtime once for this app session.
     pub(crate) work_index_session: crate::work_index::WorkIndexSession,
@@ -3004,14 +3215,17 @@ pub struct AppState {
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
     pub(crate) work_index_enabled: bool,
-    /// Client-local approval label used by the PR landing gate.
-    pub(crate) land_approval_label: String,
+    /// Merge method behind the primary PR action, applied on live config reload.
+    pub(crate) pr_merge_method: crate::config::MergeMethodConfig,
     /// `source_control.branch_prefix`: the prefix Herdr puts in front of a
     /// branch name derived from a ticket.
     pub(crate) branch_prefix: String,
-    /// `source_control.commit_message_model`: exported to the Commit action so
-    /// a hook can draft the message. Empty leaves `git commit` unchanged.
+    /// `source_control.commit_message_model`: passed to the non-interactive
+    /// commit-message generator. Empty leaves `git commit` on its editor path.
     pub(crate) commit_message_model: String,
+    /// `source_control.commit_stage_all`: opt-in staging before commit-message
+    /// generation. False preserves the caller's staged set exactly.
+    pub(crate) commit_stage_all: bool,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
@@ -3299,16 +3513,49 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_open_only: bool,
     pub(crate) detail_tab: PrDetailTab,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
-    pub(crate) pending_land: Option<PrLandConfirmation>,
+    pub(crate) pr_action_menu: Option<PrActionMenuState>,
+    pub(crate) reviewer_picker: Option<ReviewerPickerState>,
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
-    pub(crate) ticket_more_menu: Option<TicketMoreChoice>,
+    pub(crate) ticket_more_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
     pub(crate) missive_start_menu: Option<PrCheckoutChoice>,
     pub(crate) selected_missive: Option<String>,
     pub(crate) missive_detail_scroll: u16,
     pub(crate) ticket_comment_draft: Option<String>,
     pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
     pub(crate) refreshing: bool,
+    pub(crate) ticket_layout: LinearViewLayout,
+    pub(crate) board_column: usize,
+    pub(crate) board_rows: [usize; 5],
+    pub(crate) board_scroll: [usize; 5],
+    pub(crate) board_detail_open: bool,
+    pub(crate) board_last_click: Option<(WorkItemKey, std::time::Instant)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LinearViewLayout {
+    #[default]
+    List,
+    Board,
+}
+
+impl From<crate::config::LinearLayoutConfig> for LinearViewLayout {
+    fn from(value: crate::config::LinearLayoutConfig) -> Self {
+        match value {
+            crate::config::LinearLayoutConfig::List => Self::List,
+            crate::config::LinearLayoutConfig::Board => Self::Board,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarFooterItem {
+    Settings,
+    PullRequests,
+    Usage,
+    Linear,
+    Missive,
+    Refresh,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3398,34 +3645,6 @@ impl TicketTransitionChoice {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum TicketMoreChoice {
-    #[default]
-    Open,
-    CopyIdentifier,
-    Comment,
-}
-
-impl TicketMoreChoice {
-    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::CopyIdentifier, Self::Comment];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Open => "Open in browser",
-            Self::CopyIdentifier => "Copy identifier",
-            Self::Comment => "Comment",
-        }
-    }
-
-    pub(crate) fn move_by(self, delta: i8) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|choice| *choice == self)
-            .unwrap_or(0) as i8;
-        Self::ALL[(index + delta).clamp(0, 2) as usize]
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PrDetailTab {
     #[default]
     Summary,
@@ -3450,12 +3669,82 @@ pub(crate) enum PrCheckoutChoice {
     NewWorktree,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PrActionMenuState {
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ReviewerPickerState {
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrLandConfirmation {
+pub(crate) struct PrActionConfirmation {
+    pub(crate) key: WorkItemKey,
+    pub(crate) action: crate::ui::work_list_detail::PrActionKind,
+}
+
+impl PrActionConfirmation {
+    pub(crate) fn title(&self) -> &'static str {
+        use crate::ui::work_list_detail::PrActionKind;
+        match self.action {
+            PrActionKind::Merge(_) => "Merge pull request?",
+            PrActionKind::ConvertToDraft => "Convert pull request to draft?",
+            PrActionKind::MarkReady => "Mark pull request ready?",
+            PrActionKind::EnableAutoMerge(_) => "Enable auto-merge?",
+            PrActionKind::DisableAutoMerge => "Disable auto-merge?",
+            PrActionKind::Close => "Close pull request?",
+            _ => "Confirm pull request action?",
+        }
+    }
+
+    pub(crate) fn body(&self) -> String {
+        use crate::ui::work_list_detail::PrActionKind;
+        let number = self.key.pr_number.unwrap_or_default();
+        match self.action {
+            PrActionKind::Merge(method) => {
+                format!("This merges #{number} using {}.", method.label())
+            }
+            PrActionKind::ConvertToDraft => format!("This converts #{number} to a draft."),
+            PrActionKind::MarkReady => format!("This marks #{number} ready for review."),
+            PrActionKind::EnableAutoMerge(method) => format!(
+                "This enables auto-merge for #{number} using {}.",
+                method.label()
+            ),
+            PrActionKind::DisableAutoMerge => {
+                format!("This disables auto-merge for #{number}.")
+            }
+            PrActionKind::Close => format!("This closes #{number}."),
+            _ => format!("This changes #{number}."),
+        }
+    }
+
+    pub(crate) fn confirm_label(&self) -> &'static str {
+        use crate::ui::work_list_detail::PrActionKind;
+        match self.action {
+            PrActionKind::Merge(_) => "Merge",
+            PrActionKind::ConvertToDraft => "Convert",
+            PrActionKind::MarkReady => "Mark ready",
+            PrActionKind::EnableAutoMerge(_) => "Enable",
+            PrActionKind::DisableAutoMerge => "Disable",
+            PrActionKind::Close => "Close",
+            _ => "Confirm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrCommandRequest {
     pub(crate) repo: String,
     pub(crate) number: u64,
-    pub(crate) head_sha: String,
-    pub(crate) approval_signal: String,
+    pub(crate) action: PrCommandAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrCommandAction {
+    Merge(crate::config::MergeMethodConfig),
+    OpenOnGithub,
 }
 
 impl WorkViewState {
@@ -3475,7 +3764,8 @@ impl WorkViewState {
             ticket_open_only: false,
             detail_tab: PrDetailTab::Summary,
             checkout_menu: None,
-            pending_land: None,
+            pr_action_menu: None,
+            reviewer_picker: None,
             ticket_start_menu: None,
             ticket_transition_menu: None,
             ticket_more_menu: None,
@@ -3485,6 +3775,12 @@ impl WorkViewState {
             ticket_comment_draft: None,
             pending_write: None,
             refreshing: false,
+            ticket_layout: LinearViewLayout::List,
+            board_column: 0,
+            board_rows: [0; 5],
+            board_scroll: [0; 5],
+            board_detail_open: false,
+            board_last_click: None,
         }
     }
 }
@@ -3570,6 +3866,7 @@ impl AppState {
         self.dock_editor_focused = false;
         self.dock_diff_focused = false;
         self.dock_files_focused = false;
+        self.dock_agents_focused = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
@@ -3611,6 +3908,7 @@ impl AppState {
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
         self.sidebar_selected_work_group = None;
+        self.sidebar_object_menu = None;
         self.sidebar_selected_settled = None;
         self.sidebar_settled_menu_target = None;
         self.sidebar_settled_menu_delete_armed = false;
@@ -3637,6 +3935,7 @@ impl AppState {
         self.sidebar_work_filter = filter.clone();
         self.sidebar_work_filter_persistence_request = Some(filter);
         self.sidebar_selected_work_group = None;
+        self.sidebar_object_menu = None;
         self.workspace_scroll = 0;
         self.mark_sidebar_projection_changed();
     }
@@ -3645,6 +3944,15 @@ impl AppState {
         &mut self,
     ) -> Option<SidebarWorkFilter> {
         self.sidebar_work_filter_persistence_request.take()
+    }
+
+    pub(crate) fn request_sidebar_refresh(&mut self) -> bool {
+        if self.sidebar_refreshing {
+            return false;
+        }
+        self.sidebar_refresh_requested = true;
+        self.sidebar_refreshing = true;
+        true
     }
 
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
@@ -3687,10 +3995,13 @@ impl AppState {
             &mut self.sidebar_filter_menu_selected,
             &mut other.filter_menu_selected,
         );
+        std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
+        std::mem::swap(&mut self.sidebar_new_thread, &mut other.new_thread);
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
             &mut other.selected_work_group,
         );
+        std::mem::swap(&mut self.sidebar_object_menu, &mut other.object_menu);
         std::mem::swap(
             &mut self.sidebar_unassigned_expanded_views,
             &mut other.unassigned_expanded_views,
@@ -3713,13 +4024,76 @@ impl AppState {
     /// only reactivated, so the strip order never shuffles under the user.
     pub(crate) fn open_dock_surface(&mut self, surface: DockSurface) {
         self.dock_surface_override = true;
-        self.select_dock_surface(surface);
+        let object = match surface {
+            DockSurface::Pr | DockSurface::Linear | DockSurface::Missive => self
+                .dock_context_objects
+                .iter()
+                .find(|object| object.surface == surface)
+                .cloned(),
+            _ => None,
+        };
+        if let Some(object) = object {
+            self.open_dock_object(object, DockTabOrigin::User);
+        } else {
+            self.select_dock_surface(surface);
+        }
     }
 
     fn select_dock_surface(&mut self, surface: DockSurface) {
-        if !self.dock_open_surfaces.contains(&surface) {
-            self.dock_open_surfaces.push(surface);
+        self.align_dock_tab_bindings();
+        let index = self
+            .dock_open_surfaces
+            .iter()
+            .zip(&self.dock_tab_bindings)
+            .position(|(open, binding)| *open == surface && binding.is_none())
+            .unwrap_or_else(|| {
+                let index = self.dock_open_surfaces.len();
+                self.dock_open_surfaces.push(surface);
+                self.dock_tab_bindings.push(None);
+                index
+            });
+        self.select_dock_tab_index(index);
+    }
+
+    pub(crate) fn open_dock_object(&mut self, object: DockObjectRef, origin: DockTabOrigin) {
+        self.align_dock_tab_bindings();
+        let existing = self.dock_tab_bindings.iter().position(|binding| {
+            binding
+                .as_ref()
+                .is_some_and(|binding| binding.object == object)
+        });
+        let index = existing.unwrap_or_else(|| {
+            let index = self.dock_open_surfaces.len();
+            self.dock_open_surfaces.push(object.surface);
+            self.dock_tab_bindings
+                .push(Some(DockTabBinding { object, origin }));
+            index
+        });
+        if origin == DockTabOrigin::User {
+            if let Some(binding) = self
+                .dock_tab_bindings
+                .get_mut(index)
+                .and_then(Option::as_mut)
+            {
+                binding.origin = DockTabOrigin::User;
+            }
         }
+        self.select_dock_tab_index(index);
+    }
+
+    fn align_dock_tab_bindings(&mut self) {
+        self.dock_tab_bindings
+            .resize(self.dock_open_surfaces.len(), None);
+        self.dock_tab_bindings
+            .truncate(self.dock_open_surfaces.len());
+    }
+
+    pub(crate) fn select_dock_tab_index(&mut self, index: usize) {
+        self.align_dock_tab_bindings();
+        let Some(surface) = self.dock_open_surfaces.get(index).copied() else {
+            return;
+        };
+        self.dock_active_tab_index = Some(index);
         self.dock_tab = Some(surface);
         self.dock_surface_menu = None;
         self.dock_chooser_focused = false;
@@ -3728,16 +4102,292 @@ impl AppState {
         }
     }
 
+    pub(crate) fn active_dock_object(&self, surface: DockSurface) -> Option<&DockObjectRef> {
+        let index = self.active_dock_tab_index()?;
+        let binding = self.dock_tab_bindings.get(index)?.as_ref()?;
+        (binding.object.surface == surface).then_some(&binding.object)
+    }
+
+    pub(crate) fn active_dock_tab_index(&self) -> Option<usize> {
+        if let Some(index) = self.dock_active_tab_index {
+            if self.dock_open_surfaces.get(index).copied() == self.dock_tab {
+                return Some(index);
+            }
+        }
+        let active = self.dock_tab?;
+        self.dock_open_surfaces
+            .iter()
+            .position(|surface| *surface == active)
+    }
+
+    pub(crate) fn dock_tab_label(&self, index: usize) -> String {
+        let Some(surface) = self.dock_open_surfaces.get(index).copied() else {
+            return String::new();
+        };
+        let Some(object) = self
+            .dock_tab_bindings
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|binding| &binding.object)
+        else {
+            return surface.label().to_string();
+        };
+        match surface {
+            DockSurface::Pr => object
+                .key
+                .rsplit('/')
+                .next()
+                .and_then(|number| number.parse::<u64>().ok())
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| "pr".into()),
+            DockSurface::Linear => object.key.clone(),
+            DockSurface::Missive => self
+                .work_index_snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot.conversations.iter().find(|conversation| {
+                        conversation.app_url == object.key
+                            || conversation.web_url == object.key
+                            || object.key.ends_with(&conversation.id)
+                    })
+                })
+                .map(|conversation| crate::ui::text::truncate_end(&conversation.subject, 12))
+                .unwrap_or_else(|| crate::ui::text::truncate_end(&object.key, 12)),
+            _ => surface.label().to_string(),
+        }
+    }
+
+    pub(crate) fn dock_tab_title(&self, index: usize) -> String {
+        let Some(binding) = self.dock_tab_bindings.get(index).and_then(Option::as_ref) else {
+            return self
+                .dock_open_surfaces
+                .get(index)
+                .map(|surface| surface.title().to_string())
+                .unwrap_or_default();
+        };
+        match binding.object.surface {
+            DockSurface::Pr => {
+                self.work_index_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        snapshot.items.iter().find(|item| {
+                            item.pr_url.as_deref() == Some(binding.object.key.as_str())
+                        })
+                    })
+                    .and_then(|item| item.pr_title.clone())
+                    .unwrap_or_else(|| binding.object.key.clone())
+            }
+            DockSurface::Linear => self
+                .work_index_snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|snapshot| snapshot.items.iter())
+                .flat_map(|item| item.ticket_details.iter())
+                .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&binding.object.key))
+                .and_then(|ticket| ticket.title.clone())
+                .unwrap_or_else(|| binding.object.key.clone()),
+            DockSurface::Missive => self
+                .work_index_snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot.conversations.iter().find(|conversation| {
+                        conversation.app_url == binding.object.key
+                            || conversation.web_url == binding.object.key
+                            || binding.object.key.ends_with(&conversation.id)
+                    })
+                })
+                .map(|conversation| conversation.subject.clone())
+                .unwrap_or_else(|| binding.object.key.clone()),
+            surface => surface.title().to_string(),
+        }
+    }
+
+    fn focused_dock_context_objects(&self) -> Vec<DockObjectRef> {
+        let Some(workspace) = self.active.and_then(|index| self.workspaces.get(index)) else {
+            return Vec::new();
+        };
+        let Some(context) = workspace
+            .focused_pane_id()
+            .and_then(|pane_id| workspace.terminal_id(pane_id))
+            .and_then(|terminal_id| self.terminals.get(terminal_id))
+            .map(crate::terminal::TerminalState::effective_work_context)
+        else {
+            return Vec::new();
+        };
+        let mut objects = Vec::new();
+        if let Some(primary) = crate::ui::dock::pr::primary_pr_url(context) {
+            objects.push(DockObjectRef {
+                surface: DockSurface::Pr,
+                key: primary.to_string(),
+            });
+        }
+        objects.extend(
+            context
+                .pr_urls
+                .iter()
+                .filter(|url| Some(url.as_str()) != crate::ui::dock::pr::primary_pr_url(context))
+                .cloned()
+                .map(|key| DockObjectRef {
+                    surface: DockSurface::Pr,
+                    key,
+                }),
+        );
+        objects.extend(context.ticket_ids.iter().cloned().map(|key| DockObjectRef {
+            surface: DockSurface::Linear,
+            key,
+        }));
+        objects.extend(
+            context
+                .missive_urls
+                .iter()
+                .cloned()
+                .map(|key| DockObjectRef {
+                    surface: DockSurface::Missive,
+                    key,
+                }),
+        );
+        objects
+    }
+
+    fn save_current_pane_dock_tabs(&mut self) {
+        let Some(target) = self.dock_followed_pane.clone() else {
+            return;
+        };
+        self.align_dock_tab_bindings();
+        self.dock_pane_tabs.insert(
+            target,
+            PaneDockTabs {
+                open_surfaces: self.dock_open_surfaces.clone(),
+                bindings: self.dock_tab_bindings.clone(),
+                active_index: self.active_dock_tab_index(),
+                context_objects: self.dock_context_objects.clone(),
+                suppressed_context: self.dock_suppressed_context.clone(),
+            },
+        );
+    }
+
+    /// Reconcile object tabs at the existing `compute_view()` mutation boundary.
+    /// Focus, inferred-context, and declared-context changes all arrive here
+    /// before geometry or rendering consumes the presentation state.
+    pub(crate) fn reconcile_dock_context_tabs(&mut self) {
+        if let Some(surface) = self.dock_tab {
+            if self.active_dock_tab_index().is_none() {
+                self.dock_open_surfaces.push(surface);
+                self.dock_tab_bindings.push(None);
+                self.dock_active_tab_index = self.dock_open_surfaces.len().checked_sub(1);
+            }
+        }
+        let target = self.current_pane_focus_target();
+        if self.dock_followed_pane.is_none() {
+            self.dock_followed_pane = target.clone();
+        } else if self.dock_followed_pane != target {
+            self.save_current_pane_dock_tabs();
+            let restored = target
+                .as_ref()
+                .and_then(|target| self.dock_pane_tabs.get(target).cloned())
+                .unwrap_or_else(|| PaneDockTabs {
+                    open_surfaces: self.dock_default_surfaces.clone(),
+                    bindings: vec![None; self.dock_default_surfaces.len()],
+                    active_index: (!self.dock_default_surfaces.is_empty()).then_some(0),
+                    ..PaneDockTabs::default()
+                });
+            self.dock_open_surfaces = restored.open_surfaces;
+            self.dock_tab_bindings = restored.bindings;
+            self.dock_active_tab_index = restored.active_index;
+            self.dock_context_objects = restored.context_objects;
+            self.dock_suppressed_context = restored.suppressed_context;
+            self.dock_hovered_tab_index = None;
+            self.dock_followed_pane = target;
+            self.dock_tab = self
+                .dock_active_tab_index
+                .and_then(|index| self.dock_open_surfaces.get(index).copied());
+        }
+
+        let objects = self.focused_dock_context_objects();
+        if objects == self.dock_context_objects {
+            return;
+        }
+        self.align_dock_tab_bindings();
+        self.dock_hovered_tab_index = None;
+        let active = self.active_dock_tab_index().and_then(|index| {
+            self.dock_open_surfaces.get(index).copied().map(|surface| {
+                (
+                    surface,
+                    self.dock_tab_bindings
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map(|binding| binding.object.clone()),
+                )
+            })
+        });
+        self.dock_suppressed_context.clear();
+        let mut index = 0;
+        while index < self.dock_tab_bindings.len() {
+            let remove = self.dock_tab_bindings[index]
+                .as_ref()
+                .is_some_and(|binding| binding.origin == DockTabOrigin::Context);
+            if remove {
+                self.dock_tab_bindings.remove(index);
+                self.dock_open_surfaces.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        self.dock_context_objects = objects.clone();
+        for object in objects {
+            if !self.dock_tab_bindings.iter().any(|binding| {
+                binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.object == object)
+            }) {
+                self.dock_open_surfaces.push(object.surface);
+                self.dock_tab_bindings.push(Some(DockTabBinding {
+                    object,
+                    origin: DockTabOrigin::Context,
+                }));
+            }
+        }
+        let retained_active = active.and_then(|(surface, object)| {
+            self.dock_open_surfaces
+                .iter()
+                .copied()
+                .zip(&self.dock_tab_bindings)
+                .position(|(candidate_surface, binding)| {
+                    candidate_surface == surface
+                        && binding.as_ref().map(|binding| &binding.object) == object.as_ref()
+                })
+        });
+        if let Some(index) = retained_active.or_else(|| {
+            self.dock_tab_bindings
+                .iter()
+                .position(|binding| binding.is_some())
+        }) {
+            self.dock_collapsed = false;
+            self.select_dock_tab_index(index);
+        } else if self.dock_open_surfaces.is_empty() {
+            self.dock_tab = None;
+            self.dock_active_tab_index = None;
+            self.dock_chooser_focused = true;
+        }
+    }
+
     /// Keep the dock on the compact companion for a sidebar or full-screen
     /// work view. A later explicit surface pick remains visible until another
     /// view change calls this function.
     pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
-        self.dock_collapsed = false;
-        match view {
-            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {}
-            SidebarGroupMode::LinearTeam => self.select_dock_surface(DockSurface::Linear),
-            SidebarGroupMode::RepoPr => self.select_dock_surface(DockSurface::Pr),
-            SidebarGroupMode::Missive => self.select_dock_surface(DockSurface::Missive),
+        let surface = match view {
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => None,
+            SidebarGroupMode::LinearTeam => Some(DockSurface::Linear),
+            SidebarGroupMode::RepoPr => Some(DockSurface::Pr),
+            SidebarGroupMode::Missive => Some(DockSurface::Missive),
+        };
+        if let Some(index) = surface.and_then(|surface| {
+            self.dock_open_surfaces
+                .iter()
+                .zip(&self.dock_tab_bindings)
+                .position(|(open, binding)| *open == surface && binding.is_some())
+        }) {
+            self.select_dock_tab_index(index);
         }
         self.dock_surface_override = false;
     }
@@ -3745,28 +4395,42 @@ impl AppState {
     /// Close `surface`. The active surface moves to the neighbour that took its
     /// place, or to `None` when the dock is left empty and becomes a chooser.
     pub(crate) fn close_dock_surface(&mut self, surface: DockSurface) {
+        self.align_dock_tab_bindings();
         let Some(index) = self
-            .dock_open_surfaces
-            .iter()
-            .position(|open| *open == surface)
+            .active_dock_tab_index()
+            .filter(|index| self.dock_open_surfaces.get(*index) == Some(&surface))
+            .or_else(|| {
+                self.dock_open_surfaces
+                    .iter()
+                    .position(|open| *open == surface)
+            })
         else {
             return;
         };
+        let was_active = self.active_dock_tab_index() == Some(index);
+        if let Some(binding) = self.dock_tab_bindings.get(index).and_then(Option::as_ref) {
+            if binding.origin == DockTabOrigin::Context {
+                self.dock_suppressed_context.insert(binding.object.clone());
+            }
+        }
         self.dock_open_surfaces.remove(index);
-        if self.dock_tab != Some(surface) {
+        self.dock_tab_bindings.remove(index);
+        self.dock_hovered_tab_index = None;
+        if !was_active {
             return;
         }
+        self.dock_active_tab_index = (!self.dock_open_surfaces.is_empty())
+            .then(|| index.min(self.dock_open_surfaces.len().saturating_sub(1)));
         self.dock_tab = self
-            .dock_open_surfaces
-            .get(index)
-            .or_else(|| self.dock_open_surfaces.get(index.saturating_sub(1)))
-            .copied();
+            .dock_active_tab_index
+            .and_then(|index| self.dock_open_surfaces.get(index).copied());
         self.dock_scroll = 0;
         if self.dock_tab.is_none() {
             self.dock_editor_focused = false;
             self.dock_home_focused = false;
             self.dock_diff_focused = false;
             self.dock_files_focused = false;
+            self.dock_agents_focused = false;
             self.dock_chooser_focused = true;
         }
     }
@@ -3776,21 +4440,16 @@ impl AppState {
     }
 
     /// Adjacent open surface, wrapping. `None` when nothing is open.
-    pub(crate) fn adjacent_dock_surface(&self, forward: bool) -> Option<DockSurface> {
-        let open = &self.dock_open_surfaces;
-        if open.is_empty() {
+    pub(crate) fn adjacent_dock_tab_index(&self, forward: bool) -> Option<usize> {
+        if self.dock_open_surfaces.is_empty() {
             return None;
         }
-        let current = self
-            .dock_tab
-            .and_then(|tab| open.iter().position(|surface| *surface == tab))
-            .unwrap_or(0);
-        let next = if forward {
-            (current + 1) % open.len()
+        let current = self.active_dock_tab_index().unwrap_or(0);
+        Some(if forward {
+            (current + 1) % self.dock_open_surfaces.len()
         } else {
-            (current + open.len() - 1) % open.len()
-        };
-        open.get(next).copied()
+            (current + self.dock_open_surfaces.len() - 1) % self.dock_open_surfaces.len()
+        })
     }
 
     pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
@@ -3799,12 +4458,28 @@ impl AppState {
         std::mem::swap(&mut self.dock_surface_override, &mut other.surface_override);
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
         std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
+        std::mem::swap(&mut self.dock_tab_bindings, &mut other.tab_bindings);
+        std::mem::swap(&mut self.dock_active_tab_index, &mut other.active_tab_index);
+        std::mem::swap(
+            &mut self.dock_hovered_tab_index,
+            &mut other.hovered_tab_index,
+        );
+        std::mem::swap(&mut self.dock_pane_tabs, &mut other.pane_tabs);
+        std::mem::swap(&mut self.dock_followed_pane, &mut other.followed_pane);
+        std::mem::swap(&mut self.dock_context_objects, &mut other.context_objects);
+        std::mem::swap(
+            &mut self.dock_suppressed_context,
+            &mut other.suppressed_context,
+        );
         std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
         std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
+        std::mem::swap(&mut self.dock_pr_focused, &mut other.pr_focused);
+        std::mem::swap(&mut self.dock_pr_checkout_menu, &mut other.pr_checkout_menu);
+        std::mem::swap(&mut self.dock_pr_action_menu, &mut other.pr_action_menu);
         std::mem::swap(
             &mut self.dock_diff_ignore_whitespace,
             &mut other.diff_ignore_whitespace,
@@ -3817,6 +4492,26 @@ impl AppState {
         std::mem::swap(&mut self.dock_files_selection, &mut other.files_selection);
         std::mem::swap(&mut self.dock_files_filter, &mut other.files_filter);
         std::mem::swap(&mut self.dock_files_collapsed, &mut other.files_collapsed);
+        std::mem::swap(&mut self.dock_files_sort, &mut other.files_sort);
+        std::mem::swap(
+            &mut self.dock_files_search_active,
+            &mut other.files_search_active,
+        );
+        std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
+        std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
+        std::mem::swap(&mut self.dock_linear_focused, &mut other.linear_focused);
+        std::mem::swap(
+            &mut self.dock_ticket_start_menu,
+            &mut other.ticket_start_menu,
+        );
+        std::mem::swap(
+            &mut self.dock_ticket_action_menu,
+            &mut other.ticket_action_menu,
+        );
+        std::mem::swap(
+            &mut self.dock_ticket_comment_draft,
+            &mut other.ticket_comment_draft,
+        );
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -4170,12 +4865,15 @@ impl AppState {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            linear_default_layout: LinearViewLayout::List,
+            sidebar_footer_hover: None,
             usage_view: None,
             usage_snapshot: None,
             usage_pricing: crate::config::UsageConfig::default(),
             request_usage_scan: false,
             inbox: None,
             home: None,
+            home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
@@ -4191,6 +4889,7 @@ impl AppState {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             git_root_for_cwd: std::collections::HashMap::new(),
+            repo_editor_argv: None,
             forwarded_pane_input: None,
             status_bar_enabled: true,
             status_now_unix: None,
@@ -4223,10 +4922,11 @@ impl AppState {
             request_new_workspace: false,
             request_new_tab: false,
             request_pane_toggle: None,
+            request_open_repo_editor: false,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
-            request_pr_land: None,
+            request_pr_command: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -4257,7 +4957,12 @@ impl AppState {
             sidebar_work_filter: SidebarWorkFilter::default(),
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
+            sidebar_search_active: false,
+            sidebar_new_thread: None,
+            sidebar_refresh_requested: false,
+            sidebar_refreshing: false,
             sidebar_selected_work_group: None,
+            sidebar_object_menu: None,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
@@ -4286,11 +4991,13 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_settings_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
+                sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -4299,12 +5006,14 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                repo_editor_button_hit_area: Rect::default(),
                 add_action_button_hit_area: Rect::default(),
                 user_action_hit_areas: Vec::new(),
                 add_action_close_hit_area: Rect::default(),
                 add_action_field_hit_areas: Vec::new(),
                 add_action_cancel_hit_area: Rect::default(),
                 add_action_save_hit_area: Rect::default(),
+                add_project_layout: crate::ui::add_project::AddProjectLayout::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,
@@ -4336,6 +5045,9 @@ impl AppState {
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_file_row_hit_areas: Vec::new(),
+                dock_files_refresh_rect: Rect::default(),
+                dock_files_sort_rect: Rect::default(),
+                dock_agent_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -4369,8 +5081,16 @@ impl AppState {
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
             dock_surface_override: false,
-            dock_tab: Some(DockSurface::Home),
-            dock_open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_default_surfaces: Vec::new(),
+            dock_tab: None,
+            dock_open_surfaces: Vec::new(),
+            dock_tab_bindings: Vec::new(),
+            dock_active_tab_index: None,
+            dock_hovered_tab_index: None,
+            dock_pane_tabs: std::collections::HashMap::new(),
+            dock_followed_pane: None,
+            dock_context_objects: Vec::new(),
+            dock_suppressed_context: std::collections::HashSet::new(),
             dock_maximized: false,
             dock_surface_menu: None,
             dock_chooser_focused: false,
@@ -4379,7 +5099,7 @@ impl AppState {
             dock_diff_focused: false,
             dock_pr_focused: false,
             dock_pr_checkout_menu: None,
-            dock_pr_pending_land: None,
+            dock_pr_action_menu: None,
             dock_diff_ignore_whitespace: false,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
@@ -4391,6 +5111,14 @@ impl AppState {
             dock_files_selection: None,
             dock_files_filter: String::new(),
             dock_files_collapsed: std::collections::HashSet::new(),
+            dock_files_sort: crate::files::FileSort::Name,
+            dock_files_search_active: false,
+            dock_agents_focused: false,
+            dock_agents_selection: None,
+            dock_linear_focused: false,
+            dock_ticket_start_menu: None,
+            dock_ticket_action_menu: None,
+            dock_ticket_comment_draft: None,
             dock_file_cache: std::collections::HashMap::new(),
             dock_files_root: None,
             dock_files_cwd: None,
@@ -4402,19 +5130,23 @@ impl AppState {
             dock_home_focus_unbound: false,
             dock_comment_draft: None,
             dock_pending_write: None,
+            pr_action_confirmation: None,
             dock_write_notice: None,
             dock_home_section: DockHomeSection::Prs,
             dock_home_detail_tab: DockHomeDetailTab::Overview,
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: None,
+            settings_missive_team: None,
+            settings_missive_token_present: false,
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
-            land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
+            pr_merge_method: crate::config::MergeMethodConfig::Merge,
             branch_prefix: crate::config::DEFAULT_BRANCH_PREFIX.into(),
             commit_message_model: String::new(),
+            commit_stage_all: false,
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
@@ -4877,6 +5609,76 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
 
+    fn linear_ownership_ticket(
+        identifier: &str,
+        assignee: Option<&str>,
+        creator: Option<(&str, &str)>,
+    ) -> crate::work_index::WorkTicket {
+        crate::work_index::WorkTicket {
+            identifier: identifier.into(),
+            title: None,
+            description: None,
+            state: Some("In Progress".into()),
+            assignee: assignee.map(str::to_string),
+            creator: creator.map(|(id, name)| crate::work_index::WorkPerson {
+                id: id.into(),
+                name: name.into(),
+            }),
+            priority: None,
+            cycle: None,
+            group: crate::work_index::TicketGroup::Assigned,
+            created_at: None,
+            updated_at: None,
+            branch: None,
+            labels: Vec::new(),
+            url: None,
+            parent: None,
+            relations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn linear_ownership_matches_assigned_authored_and_both_for_me() {
+        let creator_only =
+            linear_ownership_ticket("SCA-1", Some("Ada"), Some(("viewer-id", "Matthias")));
+        let assignee_only = linear_ownership_ticket("SCA-2", Some("Matthias"), None);
+        let foreign = linear_ownership_ticket("SCA-3", Some("Ada"), Some(("ada-id", "Ada")));
+        let mut session = crate::work_index::WorkIndexSession::default();
+        session.linear.viewer = Some("Matthias".into());
+        session.set_linear_viewer_identity_for_test("viewer-id");
+        let mut filter = SidebarWorkFilter::default();
+
+        for (ownership, expected) in [
+            (WorkOwnershipFilter::Assigned, [false, true, false]),
+            (WorkOwnershipFilter::Authored, [true, false, false]),
+            (WorkOwnershipFilter::Both, [true, true, false]),
+        ] {
+            filter.linear_ownership = ownership;
+            assert_eq!(
+                [
+                    filter.matches_linear(&creator_only, &session),
+                    filter.matches_linear(&assignee_only, &session),
+                    filter.matches_linear(&foreign, &session),
+                ],
+                expected,
+                "{} ownership",
+                ownership.label()
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_refresh_request_remains_server_owned_during_presentation_swaps() {
+        let mut app = AppState::test_new();
+        let mut presentation = SidebarPresentationState::default();
+
+        assert!(app.request_sidebar_refresh());
+        app.swap_sidebar_presentation(&mut presentation);
+
+        assert!(app.sidebar_refresh_requested);
+        assert!(app.sidebar_refreshing);
+    }
+
     #[test]
     fn work_projection_rotation_includes_missive_in_both_directions() {
         assert_eq!(
@@ -5303,5 +6105,203 @@ mod tests {
                 "Collapse"
             ]
         );
+    }
+
+    #[test]
+    fn dock_file_sort_and_search_are_swapped_with_client_presentation() {
+        let mut state = AppState::test_new();
+        let mut client = DockPresentationState {
+            files_sort: crate::files::FileSort::GitStatus,
+            files_search_active: true,
+            ..DockPresentationState::default()
+        };
+
+        state.swap_dock_presentation(&mut client);
+
+        assert_eq!(state.dock_files_sort, crate::files::FileSort::GitStatus);
+        assert!(state.dock_files_search_active);
+        assert_eq!(client.files_sort, crate::files::FileSort::Name);
+        assert!(!client.files_search_active);
+    }
+
+    fn app_with_object_and_bare_panes() -> (AppState, PaneId, PaneId) {
+        let mut state = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("objects");
+        let object_pane = workspace.tabs[0].root_pane;
+        workspace.test_add_tab(Some("bare"));
+        let bare_pane = workspace.tabs[1].root_pane;
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0]
+            .terminal_id(object_pane)
+            .expect("object terminal")
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("object terminal state")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                pr_urls: vec![
+                    "https://github.com/scalable-so/herdr/pull/159".into(),
+                    "https://github.com/scalable-so/herdr/pull/206".into(),
+                ],
+                ticket_ids: vec!["SCA-3165".into()],
+                ..Default::default()
+            });
+        (state, object_pane, bare_pane)
+    }
+
+    #[test]
+    fn f20_context_tabs_follow_objects_and_bare_panes_stay_empty() {
+        let (mut state, object_pane, bare_pane) = app_with_object_and_bare_panes();
+        state.reconcile_dock_context_tabs();
+        assert_eq!(
+            (0..state.dock_open_surfaces.len())
+                .map(|index| state.dock_tab_label(index))
+                .collect::<Vec<_>>(),
+            ["#159", "#206", "SCA-3165"]
+        );
+        assert!(state.dock_tab_bindings.iter().all(|binding| {
+            binding
+                .as_ref()
+                .is_some_and(|binding| binding.origin == DockTabOrigin::Context)
+        }));
+        assert!(!state.dock_collapsed);
+        state.open_dock_surface(DockSurface::Files);
+
+        assert!(state.focus_pane_in_workspace(0, bare_pane));
+        state.reconcile_dock_context_tabs();
+        assert!(state.dock_open_surfaces.is_empty());
+        assert_eq!(state.dock_tab, None);
+
+        assert!(state.focus_pane_in_workspace(0, object_pane));
+        state.reconcile_dock_context_tabs();
+        assert_eq!(state.dock_open_surfaces.len(), 4);
+        assert!(state.dock_open_surfaces.contains(&DockSurface::Files));
+    }
+
+    #[test]
+    fn f20_closed_context_tab_waits_for_an_object_set_change() {
+        let (mut state, object_pane, _) = app_with_object_and_bare_panes();
+        state.reconcile_dock_context_tabs();
+        state.close_dock_surface(DockSurface::Pr);
+        assert_eq!(state.dock_tab_label(0), "#206");
+
+        state.reconcile_dock_context_tabs();
+        assert_eq!(
+            (0..state.dock_open_surfaces.len())
+                .map(|index| state.dock_tab_label(index))
+                .collect::<Vec<_>>(),
+            ["#206", "SCA-3165"]
+        );
+
+        let terminal_id = state.workspaces[0]
+            .terminal_id(object_pane)
+            .expect("object terminal")
+            .clone();
+        let mut context = state.terminals[&terminal_id]
+            .effective_work_context()
+            .clone();
+        context.ticket_ids.push("SCA-4000".into());
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("object terminal state")
+            .replace_prevalidated_manual_work_context(context);
+        state.reconcile_dock_context_tabs();
+        assert_eq!(
+            (0..state.dock_open_surfaces.len())
+                .map(|index| state.dock_tab_label(index))
+                .collect::<Vec<_>>(),
+            ["#159", "#206", "SCA-3165", "SCA-4000"]
+        );
+    }
+
+    #[test]
+    fn f20_user_opened_object_tab_persists_when_context_changes() {
+        let (mut state, object_pane, _) = app_with_object_and_bare_panes();
+        state.reconcile_dock_context_tabs();
+        let first = state.dock_tab_bindings[0]
+            .as_ref()
+            .expect("context binding")
+            .object
+            .clone();
+        state.open_dock_object(first, DockTabOrigin::User);
+
+        let terminal_id = state.workspaces[0]
+            .terminal_id(object_pane)
+            .expect("object terminal")
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("object terminal state")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/scalable-so/herdr/pull/206".into()],
+                ticket_ids: vec!["SCA-4000".into()],
+                ..Default::default()
+            });
+        state.reconcile_dock_context_tabs();
+
+        assert!(state.dock_tab_bindings.iter().any(|binding| binding
+            .as_ref()
+            .is_some_and(|binding| binding.object.key.ends_with("/159")
+                && binding.origin == DockTabOrigin::User)));
+    }
+
+    #[test]
+    fn f20_view_switch_focuses_an_existing_object_without_creating_a_list_tab() {
+        let (mut state, _, _) = app_with_object_and_bare_panes();
+        state.reconcile_dock_context_tabs();
+        state.open_dock_surface(DockSurface::Files);
+        let before = state.dock_open_surfaces.len();
+
+        state.set_sidebar_group_mode(SidebarGroupMode::LinearTeam);
+
+        assert_eq!(state.dock_tab, Some(DockSurface::Linear));
+        assert_eq!(state.dock_open_surfaces.len(), before);
+        assert!(state.active_dock_object(DockSurface::Linear).is_some());
+    }
+
+    #[test]
+    fn f20_object_labels_include_missive_cell_truncation_and_full_title() {
+        let mut state = AppState::test_new();
+        let object = DockObjectRef {
+            surface: DockSurface::Missive,
+            key: "https://mail.missiveapp.com/#inbox/conversations/abc".into(),
+        };
+        state.dock_open_surfaces = vec![DockSurface::Missive];
+        state.dock_tab_bindings = vec![Some(DockTabBinding {
+            object,
+            origin: DockTabOrigin::Context,
+        })];
+        state.dock_tab = Some(DockSurface::Missive);
+        state.dock_active_tab_index = Some(0);
+        state.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: vec![crate::work_index::MissiveConversation {
+                id: "abc".into(),
+                subject: "提交 attachment review".into(),
+                app_url: "https://mail.missiveapp.com/#inbox/conversations/abc".into(),
+                web_url: String::new(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                labels: Vec::new(),
+                pane_bound: true,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            }],
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        });
+
+        assert!(crate::ui::text::display_width(&state.dock_tab_label(0)) <= 12);
+        assert_eq!(state.dock_tab_title(0), "提交 attachment review");
     }
 }

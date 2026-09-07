@@ -329,6 +329,7 @@ mod tests {
             labels: Vec::new(),
             check_state: Default::default(),
             audience: Default::default(),
+            cached_pr_detail: None,
             ticket_ids: Vec::new(),
             ticket_title: None,
             ticket_state: None,

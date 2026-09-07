@@ -51,7 +51,15 @@ impl App {
             }
         }
 
-        match self.state.handle_sidebar_work_group_key(key.as_key_event()) {
+        let key_event = key.as_key_event();
+        if self.state.handle_sidebar_new_thread_key(key_event) {
+            return None;
+        }
+        if self.state.handle_sidebar_search_key(key_event) {
+            return None;
+        }
+
+        match self.state.handle_sidebar_work_group_key(key_event) {
             super::sidebar::SidebarWorkGroupKeyAction::Ignored => {}
             super::sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
             super::sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
@@ -586,6 +594,25 @@ mod tests {
         let home = app.state.home.as_ref().expect("composer stays open");
         assert_eq!(home.prompt, "fix1: restore Enter composer");
         assert!(home.pending_dispatch.is_none());
+    }
+
+    #[test]
+    fn attached_client_keys_are_consumed_by_sidebar_header_inputs() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_search_active = true;
+
+        let target = app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+
+        assert!(target.is_none());
+        assert_eq!(app.state.sidebar_work_filter.query, "x");
+        app.state.open_sidebar_new_thread();
+        let target =
+            app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(target.is_none());
+        assert!(app.state.sidebar_new_thread.is_none());
     }
 
     #[tokio::test]

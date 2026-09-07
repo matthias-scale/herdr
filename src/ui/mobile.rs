@@ -643,7 +643,12 @@ fn render_mobile_switcher_content(
     });
     for row in &rows {
         match row {
-            SidebarRow::Workspace { ws_idx, .. } => {
+            SidebarRow::Workspace {
+                ws_idx,
+                title,
+                count,
+                ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -660,15 +665,19 @@ fn render_mobile_switcher_content(
                     Style::default().fg(p.accent).bg(bg),
                 ));
                 title_spans.push(Span::styled(" ", Style::default().bg(bg)));
-                let (name, is_derived) = sidebar_workspace_labels(app, terminal_runtimes)
-                    .get(ws_idx)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        (
-                            ws.display_name_from(&app.terminals, terminal_runtimes),
-                            true,
-                        )
-                    });
+                let (name, is_derived) = if title.is_empty() {
+                    sidebar_workspace_labels(app, terminal_runtimes)
+                        .get(ws_idx)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            (
+                                ws.display_name_from(&app.terminals, terminal_runtimes),
+                                true,
+                            )
+                        })
+                } else {
+                    (title.clone(), false)
+                };
                 let window_count = member_indices
                     .iter()
                     .filter_map(|member| app.workspaces.get(*member))
@@ -678,7 +687,10 @@ fn render_mobile_switcher_content(
                     .into_iter()
                     .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
                     .count();
-                let count_label = format!(" ({agent_count}/{window_count})");
+                let count_label = count.map_or_else(
+                    || format!(" ({agent_count}/{window_count})"),
+                    |count| format!(" ({count})"),
+                );
                 let fixed_width = 4u16.saturating_add(display_width_u16(&count_label));
                 let name_width = content.width.saturating_sub(fixed_width);
                 title_spans.push(Span::styled(
@@ -1344,6 +1356,7 @@ mod tests {
             tab_idx: 0,
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
+            space_label: String::new(),
             primary_tab_label: primary_tab_label.map(str::to_string),
             tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
@@ -2204,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_activity_deadlines_follow_visible_age_fields() {
+    fn mobile_space_suffix_preserves_visible_age_deadlines() {
         let started = std::time::Instant::now() - std::time::Duration::from_secs(65);
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");

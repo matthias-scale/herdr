@@ -6,16 +6,59 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::schema::{AgentInfo, AgentStatus};
+use crate::api::schema::AgentStatus;
 use crate::config::{MissiveConfig, WorkIndexConfig};
 use crate::work_context::{
     linear_ticket_url, normalize_repo_slug, normalize_ticket_id, repo_slug_from_pr_url,
-    repo_slugs_match, PaneWorkRole,
+    repo_slugs_match, PaneWorkContext, PaneWorkRole,
 };
 
-pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(5);
+mod cache;
+
+use cache::{CachePolicy, Provider, ProviderCache, ProviderOutput};
+
+pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const WORK_ITEM_DETAIL_CACHE_CAPACITY: usize = 16;
+const LINEAR_LIST_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const LINEAR_FULL_LIST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const LINEAR_CYCLE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const VIEWER_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const GITHUB_LIST_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const GITHUB_PR_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const MISSIVE_LIST_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkIndexCacheBypass {
+    pub(crate) github: bool,
+    pub(crate) linear: bool,
+    pub(crate) missive: bool,
+}
+pub(crate) const PR_DETAIL_FOCUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkIndexPane {
+    pub(crate) work_context: PaneWorkContext,
+    pub(crate) name: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) display_agent: Option<String>,
+    pub(crate) agent_status: AgentStatus,
+    pub(crate) workspace_id: String,
+    pub(crate) tab_id: String,
+    pub(crate) pane_id: String,
+}
+
+pub(crate) type WorkIndexContextFingerprint = Vec<(String, String, String, PaneWorkContext)>;
+
+impl WorkIndexPane {
+    pub(crate) fn has_indexable_context(&self) -> bool {
+        self.work_context.repo.is_some()
+            || !self.work_context.pr_urls.is_empty()
+            || !self.work_context.ticket_ids.is_empty()
+            || !self.work_context.missive_urls.is_empty()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkIndexRefreshInFlight {
@@ -30,39 +73,61 @@ pub(crate) struct WorkItemDetailRefreshInFlight {
     pub(crate) deadline: Instant,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemCheckSummary {
     pub(crate) failing: usize,
     pub(crate) total: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemComment {
     pub(crate) author: Option<String>,
     pub(crate) body: String,
     pub(crate) created_at: Option<SystemTime>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemAction {
     pub(crate) name: String,
     pub(crate) state: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemFile {
     pub(crate) path: String,
     pub(crate) additions: u64,
     pub(crate) deletions: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemCommit {
     pub(crate) short_id: String,
     pub(crate) subject: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkItemTimelineEvent {
+    pub(crate) kind: String,
+    pub(crate) actor: Option<String>,
+    pub(crate) summary: String,
+    pub(crate) created_at: Option<SystemTime>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewThreadComment {
+    pub(crate) path: String,
+    pub(crate) line: Option<u64>,
+    pub(crate) body: String,
+    pub(crate) author: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnresolvedReviewThreads {
+    pub(crate) count: usize,
+    pub(crate) comments: Vec<ReviewThreadComment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemDetail {
     pub(crate) number: Option<u64>,
     pub(crate) title: Option<String>,
@@ -79,12 +144,22 @@ pub(crate) struct WorkItemDetail {
     pub(crate) reviewers: Vec<String>,
     pub(crate) mergeable: Option<String>,
     pub(crate) merge_state_status: Option<String>,
+    #[serde(default)]
+    pub(crate) auto_merge_enabled: bool,
     pub(crate) head_sha: Option<String>,
     pub(crate) checks: Option<WorkItemCheckSummary>,
     pub(crate) comments: Vec<WorkItemComment>,
     pub(crate) actions: Vec<WorkItemAction>,
     pub(crate) files: Vec<WorkItemFile>,
     pub(crate) commits: Vec<WorkItemCommit>,
+    #[serde(default)]
+    pub(crate) timeline: Vec<WorkItemTimelineEvent>,
+    #[serde(default)]
+    pub(crate) timeline_unavailable: Option<String>,
+    #[serde(default)]
+    pub(crate) collaborators: Vec<String>,
+    #[serde(default)]
+    pub(crate) collaborators_unavailable: Option<String>,
     /// GitHub's `gh pr view --json` payload does not expose review threads.
     /// Keep the absence explicit rather than substituting review count data.
     pub(crate) unresolved_review_threads: Option<usize>,
@@ -117,12 +192,17 @@ impl WorkItemDetail {
             reviewers: Vec::new(),
             mergeable: None,
             merge_state_status: None,
+            auto_merge_enabled: false,
             head_sha: None,
             checks: None,
             comments: Vec::new(),
             actions: Vec::new(),
             files: Vec::new(),
             commits: Vec::new(),
+            timeline: Vec::new(),
+            timeline_unavailable: None,
+            collaborators: Vec::new(),
+            collaborators_unavailable: None,
             unresolved_review_threads: None,
             unavailable: Some(message.into()),
             observed_at: SystemTime::now(),
@@ -139,10 +219,30 @@ pub(crate) struct WorkItemDetailCache {
 #[derive(Clone, Debug)]
 struct CachedWorkItemDetail {
     detail: WorkItemDetail,
-    refreshed_at: Instant,
+    refreshed_at: Option<Instant>,
 }
 
 impl WorkItemDetailCache {
+    pub(crate) fn from_snapshot(snapshot: Option<&Snapshot>) -> Self {
+        let mut cache = Self::default();
+        for item in snapshot.into_iter().flat_map(|snapshot| &snapshot.items) {
+            let (Some(number), Some(detail)) = (item.pr_number, item.cached_pr_detail.clone())
+            else {
+                continue;
+            };
+            cache.insert_stale(
+                crate::app::state::WorkItemKey {
+                    repo: item.repo.clone(),
+                    pr_number: Some(number),
+                    pr_url: item.pr_url.clone(),
+                    ticket_id: None,
+                },
+                detail,
+            );
+        }
+        cache
+    }
+
     pub(crate) fn get(&self, key: &crate::app::state::WorkItemKey) -> Option<&WorkItemDetail> {
         self.entries.get(key).map(|cached| &cached.detail)
     }
@@ -156,6 +256,14 @@ impl WorkItemDetailCache {
 
     pub(crate) fn insert(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
         self.insert_at(key, detail, Instant::now());
+    }
+
+    fn insert_stale(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
+        let lookup = key.clone();
+        self.insert_at(key, detail, Instant::now());
+        if let Some(cached) = self.entries.get_mut(&lookup) {
+            cached.refreshed_at = None;
+        }
     }
 
     pub(crate) fn clear(&mut self) {
@@ -175,7 +283,7 @@ impl WorkItemDetailCache {
             key,
             CachedWorkItemDetail {
                 detail,
-                refreshed_at,
+                refreshed_at: Some(refreshed_at),
             },
         );
         while self.entries.len() > WORK_ITEM_DETAIL_CACHE_CAPACITY {
@@ -192,8 +300,10 @@ impl WorkItemDetailCache {
         interval: Duration,
     ) -> bool {
         self.entries.get(key).is_some_and(|cached| {
-            now.checked_duration_since(cached.refreshed_at)
-                .is_some_and(|age| age < interval)
+            cached.refreshed_at.is_some_and(|refreshed_at| {
+                now.checked_duration_since(refreshed_at)
+                    .is_some_and(|age| age < interval)
+            })
         })
     }
 
@@ -251,6 +361,8 @@ pub(crate) struct WorkItem {
     pub check_state: PrCheckState,
     #[serde(default)]
     pub audience: PrAudience,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cached_pr_detail: Option<WorkItemDetail>,
     pub ticket_ids: Vec<String>,
     pub ticket_title: Option<String>,
     pub ticket_state: Option<String>,
@@ -282,12 +394,20 @@ pub(crate) enum PrAudience {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkPerson {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkTicket {
     pub(crate) identifier: String,
     pub(crate) title: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) state: Option<String>,
     pub(crate) assignee: Option<String>,
+    #[serde(default)]
+    pub(crate) creator: Option<WorkPerson>,
     #[serde(default)]
     pub(crate) priority: Option<u8>,
     #[serde(default)]
@@ -330,6 +450,10 @@ pub(crate) struct MissiveConversation {
     pub(crate) last_activity_at: Option<SystemTime>,
     pub(crate) closed: bool,
     #[serde(default)]
+    pub(crate) labels: Vec<String>,
+    #[serde(default)]
+    pub(crate) pane_bound: bool,
+    #[serde(default)]
     pub(crate) messages: Vec<MissiveEntry>,
     #[serde(default)]
     pub(crate) notes: Vec<MissiveEntry>,
@@ -339,6 +463,165 @@ pub(crate) struct MissiveConversation {
     pub(crate) posts: Vec<MissiveEntry>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkIndexSource {
+    Github,
+    Linear,
+    Missive,
+}
+
+impl WorkIndexSource {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Github => "GitHub",
+            Self::Linear => "Linear",
+            Self::Missive => "Missive",
+        }
+    }
+
+    const fn provider(self) -> Provider {
+        match self {
+            Self::Github => Provider::Github,
+            Self::Linear => Provider::Linear,
+            Self::Missive => Provider::Missive,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkIndexUnavailable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linear: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    missive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_rate_limited_until: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linear_rate_limited_until: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    missive_rate_limited_until: Option<SystemTime>,
+}
+
+impl WorkIndexUnavailable {
+    pub(crate) fn only(source: WorkIndexSource, reason: impl Into<String>) -> Self {
+        let mut unavailable = Self::default();
+        let reason = Self::normalized_reason(source, reason.into());
+        match source {
+            WorkIndexSource::Github => unavailable.github = Some(reason),
+            WorkIndexSource::Linear => unavailable.linear = Some(reason),
+            WorkIndexSource::Missive => unavailable.missive = Some(reason),
+        }
+        unavailable
+    }
+
+    fn record(&mut self, source: WorkIndexSource, reason: impl Into<String>) {
+        if self.is_empty() {
+            *self = Self::only(source, reason);
+            return;
+        }
+        let destination = match source {
+            WorkIndexSource::Github => &mut self.github,
+            WorkIndexSource::Linear => &mut self.linear,
+            WorkIndexSource::Missive => &mut self.missive,
+        };
+        if destination.is_none() {
+            *destination = Some(Self::normalized_reason(source, reason.into()));
+        }
+    }
+
+    fn replace_reason(&mut self, source: WorkIndexSource, reason: String) {
+        match source {
+            WorkIndexSource::Github => self.github = Some(reason),
+            WorkIndexSource::Linear => self.linear = Some(reason),
+            WorkIndexSource::Missive => self.missive = Some(reason),
+        }
+    }
+
+    fn normalized_reason(source: WorkIndexSource, reason: String) -> String {
+        reason
+            .strip_prefix(source.label())
+            .map(|reason| reason.trim_start_matches([' ', ':']).to_string())
+            .unwrap_or(reason)
+    }
+
+    pub(crate) fn reason(&self, source: WorkIndexSource) -> Option<&str> {
+        match source {
+            WorkIndexSource::Github => self.github.as_deref(),
+            WorkIndexSource::Linear => self.linear.as_deref(),
+            WorkIndexSource::Missive => self.missive.as_deref(),
+        }
+    }
+
+    fn record_rate_limit_until(&mut self, source: WorkIndexSource, until: SystemTime) {
+        match source {
+            WorkIndexSource::Github => self.github_rate_limited_until = Some(until),
+            WorkIndexSource::Linear => self.linear_rate_limited_until = Some(until),
+            WorkIndexSource::Missive => self.missive_rate_limited_until = Some(until),
+        }
+    }
+
+    fn rate_limited_until(&self, source: WorkIndexSource) -> Option<SystemTime> {
+        match source {
+            WorkIndexSource::Github => self.github_rate_limited_until,
+            WorkIndexSource::Linear => self.linear_rate_limited_until,
+            WorkIndexSource::Missive => self.missive_rate_limited_until,
+        }
+    }
+
+    pub(crate) fn short_reason(&self, source: WorkIndexSource, now: SystemTime) -> Option<String> {
+        let reason = self.reason(source)?;
+        let lower = reason.to_ascii_lowercase();
+        if lower.contains("rate limit") || lower.contains("http 429") {
+            let retry = self.rate_limited_until(source).and_then(|until| {
+                until.duration_since(now).ok().map(|duration| {
+                    let minutes = duration.as_secs().saturating_add(59) / 60;
+                    format!(" · retry in {}m", minutes.max(1))
+                })
+            });
+            return Some(format!("rate limited{}", retry.unwrap_or_default()));
+        }
+        if lower.contains("timed out") {
+            return Some(format!(
+                "timed out ({}s)",
+                WORK_INDEX_TARGET_TIMEOUT.as_secs()
+            ));
+        }
+        if source == WorkIndexSource::Missive
+            && (lower.contains("team not configured") || lower.contains("team is not configured"))
+        {
+            return Some("team not configured".to_string());
+        }
+        if let Some(group) = ["Triage", "Assigned", "DoneThisCycle"]
+            .into_iter()
+            .find(|group| reason.starts_with(group))
+        {
+            return Some(format!("{group} query failed (see log)"));
+        }
+        Some("query failed (see log)".to_string())
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        [
+            WorkIndexSource::Github,
+            WorkIndexSource::Linear,
+            WorkIndexSource::Missive,
+        ]
+        .into_iter()
+        .filter_map(|source| {
+            self.reason(source)
+                .map(|reason| format!("{}: {reason}", source.label()))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+    }
+
+    fn is_empty(&self) -> bool {
+        self.github.is_none() && self.linear.is_none() && self.missive.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TicketGroup {
@@ -346,6 +629,16 @@ pub(crate) enum TicketGroup {
     Assigned,
     Triage,
     DoneThisCycle,
+}
+
+impl TicketGroup {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Assigned => "Assigned",
+            Self::Triage => "Triage",
+            Self::DoneThisCycle => "DoneThisCycle",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,8 +651,52 @@ pub(crate) struct Snapshot {
     /// identity in a later session.
     #[serde(skip)]
     pub missive_users: Vec<MissiveUser>,
-    pub unavailable: Option<String>,
+    pub unavailable: Option<WorkIndexUnavailable>,
     pub observed_at: SystemTime,
+}
+
+impl Snapshot {
+    fn cache_pr_detail(
+        &mut self,
+        key: &crate::app::state::WorkItemKey,
+        detail: &WorkItemDetail,
+    ) -> bool {
+        let Some(number) = key.pr_number else {
+            return false;
+        };
+        let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.pr_number == Some(number) && repo_slugs_match(&item.repo, &key.repo))
+        else {
+            return false;
+        };
+        item.cached_pr_detail = Some(detail.clone());
+        true
+    }
+
+    pub(crate) fn unavailable_reason(&self, source: WorkIndexSource) -> Option<&str> {
+        self.unavailable
+            .as_ref()
+            .and_then(|unavailable| unavailable.reason(source))
+    }
+
+    pub(crate) fn unavailable_summary(&self) -> Option<String> {
+        self.unavailable
+            .as_ref()
+            .map(WorkIndexUnavailable::summary)
+            .filter(|summary| !summary.is_empty())
+    }
+
+    pub(crate) fn short_unavailable_reason(
+        &self,
+        source: WorkIndexSource,
+        now: SystemTime,
+    ) -> Option<String> {
+        self.unavailable
+            .as_ref()
+            .and_then(|unavailable| unavailable.short_reason(source, now))
+    }
 }
 
 /// Provider identities and assignable users observed by the work-index job.
@@ -369,6 +706,7 @@ pub(crate) struct WorkIndexSession {
     pub(crate) linear: ProviderDirectory,
     pub(crate) github: ProviderDirectory,
     pub(crate) missive: ProviderDirectory,
+    linear_query_identity: Option<String>,
     missive_users: Vec<MissiveUser>,
 }
 
@@ -377,6 +715,17 @@ pub(crate) struct ProviderDirectory {
     pub(crate) viewer: Option<String>,
     pub(crate) assignees: Vec<String>,
     resolved: bool,
+}
+
+impl WorkIndexSession {
+    pub(crate) fn linear_viewer_identity(&self) -> Option<&str> {
+        self.linear_query_identity.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_linear_viewer_identity_for_test(&mut self, identity: impl Into<String>) {
+        self.linear_query_identity = Some(identity.into());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +769,37 @@ struct Attachment {
 enum RefreshError {
     TimedOut,
     Failed(String),
+}
+
+fn run_provider_command(
+    cache: Option<&ProviderCache>,
+    source: WorkIndexSource,
+    command: std::process::Command,
+    ttl: Duration,
+    bypass: bool,
+    deadline: Instant,
+) -> io::Result<ProviderOutput> {
+    if let Some(cache) = cache {
+        let program = Path::new(command.get_program()).to_path_buf();
+        let argv = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        return cache.run(
+            source.provider(),
+            &program,
+            &argv,
+            CachePolicy { ttl, bypass },
+            deadline,
+        );
+    }
+    crate::noninteractive_process::output_with_deadline(command, deadline).map(|output| {
+        ProviderOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    })
 }
 
 const MISSIVE_API_BASE: &str = "https://public.missiveapp.com/v1";
@@ -515,6 +895,8 @@ fn run_missive_get(
     config: &MissiveConfig,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Value, RefreshError> {
     let token = std::env::var(&config.token_env).map_err(|_| {
         RefreshError::Failed(format!(
@@ -539,15 +921,21 @@ fn run_missive_get(
         &format!("Authorization: Bearer {token}"),
         &request.url(),
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Missive {} GET could not run", request.label()))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Missive,
+        command,
+        MISSIVE_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Missive {} GET could not run", request.label()))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(format!(
             "Missive {} GET failed with status {}",
@@ -692,6 +1080,16 @@ fn parse_missive_conversation_for_user(
                     .is_some_and(|closed| !closed.is_null())
             })
             || closed_for_user,
+        labels: value_array(value.get("labels").unwrap_or(&Value::Null), "labels")
+            .iter()
+            .filter_map(|label| {
+                label
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value_text(label.get("name")))
+            })
+            .collect(),
+        pane_bound: false,
         id,
         app_url,
         web_url,
@@ -735,6 +1133,8 @@ fn fetch_missive_conversation_detail(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<MissiveConversation, RefreshError> {
     let get = |request| {
         run_missive_get(
@@ -742,6 +1142,8 @@ fn fetch_missive_conversation_detail(
             config,
             program,
             target_deadline(batch_deadline, target_timeout),
+            cache,
+            bypass,
         )
     };
     let value = get(MissiveRequest::Conversation { id: id.into() })?;
@@ -779,19 +1181,37 @@ fn fetch_missive_conversation_detail(
 
 fn fetch_missive_snapshot(
     config: &MissiveConfig,
-    panes: &[AgentInfo],
+    panes: &[WorkIndexPane],
     selected_conversation: Option<&str>,
     session_users: Option<&[MissiveUser]>,
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<(Vec<MissiveConversation>, Vec<MissiveUser>), RefreshError> {
+    let pane_ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.missive_urls.iter())
+        .filter_map(|url| missive_conversation_id(url).map(str::to_string))
+        .collect::<HashSet<_>>();
     let configured = config
         .team
         .as_deref()
         .is_some_and(|team| !team.trim().is_empty());
     let token_available =
         std::env::var_os(&config.token_env).is_some_and(|value| !value.is_empty());
+    if !configured && !pane_ids.is_empty() {
+        return Err(RefreshError::Failed(
+            "Missive team is not configured".into(),
+        ));
+    }
+    if !token_available && !pane_ids.is_empty() {
+        return Err(RefreshError::Failed(format!(
+            "Missive token environment variable {} is not set",
+            config.token_env
+        )));
+    }
     if !configured || !token_available {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -806,6 +1226,8 @@ fn fetch_missive_snapshot(
                 config,
                 program,
                 target_deadline(batch_deadline, target_timeout),
+                cache,
+                bypass,
             )?;
             value_array(&users_value, "users")
                 .iter()
@@ -822,30 +1244,37 @@ fn fetch_missive_snapshot(
         config,
         program,
         target_deadline(batch_deadline, target_timeout),
+        cache,
+        bypass,
     )?;
     let mut conversations =
         parse_missive_conversations_for_user(&conversations_value, current_user_id);
-    let mut detail_ids = panes
-        .iter()
-        .flat_map(|pane| pane.work_context.missive_urls.iter())
-        .filter_map(|url| missive_conversation_id(url).map(str::to_string))
-        .collect::<HashSet<_>>();
+    for conversation in &mut conversations {
+        conversation.pane_bound = pane_ids.contains(&conversation.id);
+    }
+    let mut detail_ids = pane_ids.clone();
     if let Some(selected) = selected_conversation {
         detail_ids.insert(selected.to_string());
     } else if let Some(first) = conversations.first() {
         detail_ids.insert(first.id.clone());
     }
     for id in detail_ids {
-        let Ok(detail) = fetch_missive_conversation_detail(
+        let detail = fetch_missive_conversation_detail(
             &id,
             current_user_id,
             config,
             program,
             batch_deadline,
             target_timeout,
-        ) else {
-            continue;
+            cache,
+            bypass,
+        );
+        let mut detail = match detail {
+            Ok(detail) => detail,
+            Err(error) if pane_ids.contains(&id) => return Err(error),
+            Err(_) => continue,
         };
+        detail.pane_bound = pane_ids.contains(&id);
         if let Some(index) = conversations
             .iter()
             .position(|conversation| conversation.id == detail.id)
@@ -859,10 +1288,164 @@ fn fetch_missive_snapshot(
     Ok((conversations, users))
 }
 
+fn work_index_repos(config: &WorkIndexConfig, panes: &[WorkIndexPane]) -> Vec<String> {
+    let mut repos: Vec<String> = Vec::new();
+    let candidates = config
+        .repos
+        .iter()
+        .filter_map(|repo| normalize_repo_slug(repo).ok())
+        .chain(
+            panes
+                .iter()
+                .filter_map(|pane| pane.work_context.repo.as_deref())
+                .filter_map(|repo| normalize_repo_slug(repo).ok()),
+        )
+        .chain(
+            panes
+                .iter()
+                .flat_map(|pane| pane.work_context.pr_urls.iter())
+                .filter_map(|url| repo_slug_from_pr_url(url)),
+        );
+    for candidate in candidates {
+        if !repos.iter().any(|repo| repo_slugs_match(repo, &candidate)) {
+            repos.push(candidate);
+        }
+    }
+    repos
+}
+
+fn pane_pr_urls(panes: &[WorkIndexPane]) -> Vec<String> {
+    let mut urls = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.pr_urls.iter().cloned())
+        .collect::<Vec<_>>();
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn pane_pr_target(url: &str) -> Option<(String, u64)> {
+    let repo = repo_slug_from_pr_url(url)?;
+    let number = url.trim_end_matches('/').rsplit('/').next()?.parse().ok()?;
+    Some((repo, number))
+}
+
+fn upsert_github(pull_requests: &mut Vec<GithubPullRequest>, pull_request: GithubPullRequest) {
+    if let Some(index) = pull_requests
+        .iter()
+        .position(|existing| existing.url == pull_request.url)
+    {
+        pull_requests[index] = pull_request;
+    } else {
+        pull_requests.push(pull_request);
+    }
+}
+
+fn pane_ticket_ids(panes: &[WorkIndexPane]) -> Vec<String> {
+    let mut ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.ticket_ids.iter())
+        .filter_map(|id| normalize_ticket_id(id).ok())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn previous_github(previous: Option<&Snapshot>) -> Vec<GithubPullRequest> {
+    previous
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .filter(|item| item.source.github)
+        .filter_map(|item| {
+            Some(GithubPullRequest {
+                repo: item.repo.clone(),
+                number: item.pr_number?,
+                url: item.pr_url.clone()?,
+                title: item.pr_title.clone()?,
+                body: item.ticket_ids.join(" "),
+                branch: item.branch.clone().unwrap_or_default(),
+                draft: item.draft,
+                state: item.pr_state.clone().unwrap_or_else(|| "open".into()),
+                review_decision: item.review_decision.clone(),
+                created_at: item.created_at,
+                updated_at: item.updated_at,
+                additions: item.additions,
+                deletions: item.deletions,
+                author: item.author.clone(),
+                assignees: item.assignees.clone(),
+                labels: item.labels.clone(),
+                check_state: item.check_state,
+                audience: item.audience,
+            })
+        })
+        .collect()
+}
+
+fn previous_linear(previous: Option<&Snapshot>) -> Vec<LinearTicket> {
+    let mut tickets = Vec::new();
+    for ticket in previous
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .filter(|item| item.source.linear)
+        .flat_map(|item| item.ticket_details.iter())
+    {
+        if !tickets
+            .iter()
+            .any(|existing: &LinearTicket| existing.identifier == ticket.identifier)
+        {
+            tickets.push(ticket.clone());
+        }
+    }
+    tickets
+}
+
+fn previous_missive(
+    previous: Option<&Snapshot>,
+    panes: &[WorkIndexPane],
+) -> Vec<MissiveConversation> {
+    let pane_ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.missive_urls.iter())
+        .filter_map(|url| missive_conversation_id(url))
+        .collect::<HashSet<_>>();
+    previous
+        .map(|snapshot| {
+            snapshot
+                .conversations
+                .iter()
+                .cloned()
+                .map(|mut conversation| {
+                    conversation.pane_bound = pane_ids.contains(conversation.id.as_str());
+                    conversation
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn carry_cached_pr_details(items: &mut [WorkItem], previous: Option<&Snapshot>) {
+    let Some(previous) = previous else {
+        return;
+    };
+    for item in items {
+        let Some(number) = item.pr_number else {
+            continue;
+        };
+        item.cached_pr_detail = previous
+            .items
+            .iter()
+            .find(|previous| {
+                previous.pr_number == Some(number) && repo_slugs_match(&previous.repo, &item.repo)
+            })
+            .and_then(|previous| previous.cached_pr_detail.clone());
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn refresh_work_index(
     config: &WorkIndexConfig,
-    panes: &[AgentInfo],
+    panes: &[WorkIndexPane],
     now: Instant,
     batch_deadline: Instant,
     target_timeout: Duration,
@@ -873,8 +1456,7 @@ pub(crate) fn refresh_work_index(
         config,
         &MissiveConfig::default(),
         panes,
-        None,
-        None,
+        WorkIndexRefreshContext::default(),
         now,
         batch_deadline,
         target_timeout,
@@ -884,12 +1466,22 @@ pub(crate) fn refresh_work_index(
     )
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorkIndexRefreshContext<'a> {
+    pub(crate) selected_missive: Option<&'a str>,
+    pub(crate) session_missive_users: Option<&'a [MissiveUser]>,
+    pub(crate) previous: Option<&'a Snapshot>,
+    pub(crate) linear_assignee: Option<&'a str>,
+    pub(crate) selected_ticket: Option<&'a str>,
+    provider_cache: Option<&'a ProviderCache>,
+    pub(crate) cache_bypass: WorkIndexCacheBypass,
+}
+
 pub(crate) fn refresh_work_index_with_missive(
     config: &WorkIndexConfig,
     missive: &MissiveConfig,
-    panes: &[AgentInfo],
-    selected_missive: Option<&str>,
-    session_missive_users: Option<&[MissiveUser]>,
+    panes: &[WorkIndexPane],
+    context: WorkIndexRefreshContext<'_>,
     now: Instant,
     batch_deadline: Instant,
     target_timeout: Duration,
@@ -897,38 +1489,111 @@ pub(crate) fn refresh_work_index_with_missive(
     linearis_program: &Path,
     curl_program: &Path,
 ) -> Snapshot {
+    let WorkIndexRefreshContext {
+        selected_missive,
+        session_missive_users,
+        previous,
+        linear_assignee,
+        selected_ticket,
+        provider_cache,
+        cache_bypass,
+    } = context;
     if !config.enabled {
-        return unavailable_snapshot("work index disabled");
+        return Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::now(),
+        };
     }
 
-    let repos = config
-        .repos
-        .iter()
-        .filter_map(|repo| normalize_repo_slug(repo).ok())
-        .collect::<Vec<_>>();
-    let mut degraded: Option<String> = None;
+    let repos = work_index_repos(config, panes);
+    let mut degraded = WorkIndexUnavailable::default();
+    let previous_github = previous_github(previous);
     let mut github = Vec::new();
-    for repo in repos {
-        match fetch_github_pull_requests(
+    for url in pane_pr_urls(panes) {
+        let Some((repo, number)) = pane_pr_target(&url) else {
+            degraded.record(WorkIndexSource::Github, "pane pull request URL is invalid");
+            continue;
+        };
+        match fetch_github_pull_request(
             &repo,
+            number,
             gh_program,
             target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.github,
+        ) {
+            Ok(pull_request) => upsert_github(&mut github, pull_request),
+            Err(RefreshError::TimedOut) => {
+                degraded.record(
+                    WorkIndexSource::Github,
+                    "pull request observation timed out",
+                );
+                if let Some(pull_request) = previous_github
+                    .iter()
+                    .find(|pull_request| pull_request.url == url)
+                {
+                    upsert_github(&mut github, pull_request.clone());
+                }
+            }
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Github, message);
+                if let Some(pull_request) = previous_github
+                    .iter()
+                    .find(|pull_request| pull_request.url == url)
+                {
+                    upsert_github(&mut github, pull_request.clone());
+                }
+            }
+        }
+    }
+    for repo in &repos {
+        match fetch_github_pull_requests(
+            repo,
+            gh_program,
+            target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.github,
         ) {
             Ok(mut values) => {
-                let authored = fetch_github_pr_numbers(
-                    &repo,
+                let authored = match fetch_github_pr_numbers(
+                    repo,
                     gh_program,
                     &["--author", "@me"],
                     target_deadline(batch_deadline, target_timeout),
-                )
-                .unwrap_or_default();
-                let others = fetch_github_pr_numbers(
-                    &repo,
+                    provider_cache,
+                    cache_bypass.github,
+                ) {
+                    Ok(numbers) => numbers,
+                    Err(RefreshError::TimedOut) => {
+                        degraded.record(WorkIndexSource::Github, "audience observation timed out");
+                        HashSet::new()
+                    }
+                    Err(RefreshError::Failed(message)) => {
+                        degraded.record(WorkIndexSource::Github, message);
+                        HashSet::new()
+                    }
+                };
+                let others = match fetch_github_pr_numbers(
+                    repo,
                     gh_program,
                     &["--search", "review-requested:@me OR mentions:@me"],
                     target_deadline(batch_deadline, target_timeout),
-                )
-                .unwrap_or_default();
+                    provider_cache,
+                    cache_bypass.github,
+                ) {
+                    Ok(numbers) => numbers,
+                    Err(RefreshError::TimedOut) => {
+                        degraded.record(WorkIndexSource::Github, "audience observation timed out");
+                        HashSet::new()
+                    }
+                    Err(RefreshError::Failed(message)) => {
+                        degraded.record(WorkIndexSource::Github, message);
+                        HashSet::new()
+                    }
+                };
                 for value in &mut values {
                     value.audience = if authored.contains(&value.number) {
                         PrAudience::Authored
@@ -938,37 +1603,155 @@ pub(crate) fn refresh_work_index_with_missive(
                         PrAudience::Unclassified
                     };
                 }
-                github.append(&mut values)
+                for value in values {
+                    upsert_github(&mut github, value);
+                }
             }
             Err(RefreshError::TimedOut) => {
-                return unavailable_snapshot("GitHub observation timed out")
+                degraded.record(WorkIndexSource::Github, "list observation timed out");
+                for pull_request in previous_github
+                    .iter()
+                    .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
+                    .cloned()
+                {
+                    upsert_github(&mut github, pull_request);
+                }
             }
-            Err(RefreshError::Failed(message)) => return unavailable_snapshot(message),
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Github, message);
+                for pull_request in previous_github
+                    .iter()
+                    .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
+                    .cloned()
+                {
+                    upsert_github(&mut github, pull_request);
+                }
+            }
         }
     }
 
-    let tickets = match config.linear_team.as_deref() {
+    let previous_tickets = previous_linear(previous);
+    let mut listed_ticket_ids = HashSet::new();
+    let mut tickets = match config.linear_team.as_deref() {
         Some(team) if !team.trim().is_empty() => match fetch_linear_tickets(
             team,
+            linear_assignee,
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.linear,
         ) {
-            Ok(tickets) => tickets,
+            Ok(observation) => {
+                let mut tickets = observation.tickets;
+                for failure in &observation.group_failures {
+                    for ticket in previous_tickets
+                        .iter()
+                        .filter(|ticket| ticket.group == failure.group)
+                    {
+                        if !tickets
+                            .iter()
+                            .any(|current| current.identifier == ticket.identifier)
+                        {
+                            tickets.push(ticket.clone());
+                        }
+                    }
+                }
+                if !observation.group_failures.is_empty() {
+                    degraded.record(
+                        WorkIndexSource::Linear,
+                        observation
+                            .group_failures
+                            .iter()
+                            .map(LinearGroupFailure::summary)
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    );
+                }
+                listed_ticket_ids.extend(
+                    tickets
+                        .iter()
+                        .map(|ticket| ticket.identifier.to_ascii_uppercase()),
+                );
+                tickets
+            }
             // Neither a timeout nor a failure may throw away a live GitHub
             // half: 74 pull requests with no ticket edge still beat an empty
             // index. Degrade and name the cause instead.
             Err(RefreshError::TimedOut) => {
-                degraded = Some("Linear observation timed out".to_string());
-                Vec::new()
+                degraded.record(WorkIndexSource::Linear, "observation timed out");
+                previous_tickets.clone()
             }
             Err(RefreshError::Failed(message)) => {
-                degraded = Some(message);
-                Vec::new()
+                degraded.record(WorkIndexSource::Linear, message);
+                previous_tickets.clone()
             }
         },
         _ => Vec::new(),
     };
-    let attachments = fetch_attachments(&tickets, linearis_program, batch_deadline, target_timeout);
+    let mut directly_observed_tickets = pane_ticket_ids(panes);
+    if let Some(selected) = selected_ticket.and_then(|ticket| normalize_ticket_id(ticket).ok()) {
+        if !directly_observed_tickets
+            .iter()
+            .any(|ticket| ticket.eq_ignore_ascii_case(&selected))
+        {
+            directly_observed_tickets.push(selected);
+        }
+    }
+    for identifier in directly_observed_tickets {
+        match fetch_linear_ticket(
+            &identifier,
+            linearis_program,
+            target_deadline(batch_deadline, target_timeout),
+            provider_cache,
+            cache_bypass.linear,
+        ) {
+            Ok(ticket) => {
+                if let Some(index) = tickets.iter().position(|existing| {
+                    existing.identifier.eq_ignore_ascii_case(&ticket.identifier)
+                }) {
+                    tickets[index] = ticket;
+                } else {
+                    tickets.push(ticket);
+                }
+            }
+            Err(RefreshError::TimedOut) => {
+                degraded.record(WorkIndexSource::Linear, "ticket observation timed out");
+                if !tickets
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                {
+                    if let Some(ticket) = previous_tickets
+                        .iter()
+                        .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                    {
+                        tickets.push(ticket.clone());
+                    }
+                }
+            }
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Linear, message);
+                if !tickets
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                {
+                    if let Some(ticket) = previous_tickets
+                        .iter()
+                        .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                    {
+                        tickets.push(ticket.clone());
+                    }
+                }
+            }
+        }
+    }
+    let attachments = fetch_attachments(
+        &tickets,
+        linearis_program,
+        batch_deadline,
+        target_timeout,
+        provider_cache,
+        cache_bypass.linear,
+    );
     let (conversations, missive_users) = match fetch_missive_snapshot(
         missive,
         panes,
@@ -977,15 +1760,17 @@ pub(crate) fn refresh_work_index_with_missive(
         curl_program,
         batch_deadline,
         target_timeout,
+        provider_cache,
+        cache_bypass.missive,
     ) {
         Ok(snapshot) => snapshot,
         Err(RefreshError::TimedOut) => {
-            degraded = degraded.or_else(|| Some("Missive observation timed out".into()));
-            (Vec::new(), Vec::new())
+            degraded.record(WorkIndexSource::Missive, "observation timed out");
+            (previous_missive(previous, panes), Vec::new())
         }
         Err(RefreshError::Failed(message)) => {
-            degraded = degraded.or(Some(message));
-            (Vec::new(), Vec::new())
+            degraded.record(WorkIndexSource::Missive, message);
+            (previous_missive(previous, panes), Vec::new())
         }
     };
 
@@ -1015,6 +1800,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 labels: pr.labels,
                 check_state: pr.check_state,
                 audience: pr.audience,
+                cached_pr_detail: None,
                 ticket_ids,
                 ticket_title: None,
                 ticket_state: None,
@@ -1060,6 +1846,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
@@ -1124,6 +1911,7 @@ pub(crate) fn refresh_work_index_with_missive(
             labels: Vec::new(),
             check_state: PrCheckState::Unknown,
             audience: PrAudience::Unclassified,
+            cached_pr_detail: None,
             ticket_ids: vec![ticket.identifier.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
@@ -1139,6 +1927,7 @@ pub(crate) fn refresh_work_index_with_missive(
     }
 
     join_panes(&mut items, panes);
+    carry_cached_pr_details(&mut items, previous);
     items.sort_by(|left, right| {
         left.repo
             .cmp(&right.repo)
@@ -1146,16 +1935,74 @@ pub(crate) fn refresh_work_index_with_missive(
             .then_with(|| left.ticket_ids.cmp(&right.ticket_ids))
     });
     let _ = now;
+    preserve_previous_rate_limit_reasons(&mut degraded, previous);
+    if let Some(cache) = provider_cache {
+        cache.finish_refresh();
+        record_provider_backoff(&mut degraded, cache);
+    }
+
     Snapshot {
         items,
         conversations,
         missive_users,
-        unavailable: degraded,
+        unavailable: (!degraded.is_empty()).then_some(degraded),
         observed_at: SystemTime::now(),
     }
 }
 
-fn exit_detail(label: &str, output: &std::process::Output) -> String {
+fn preserve_previous_rate_limit_reasons(
+    unavailable: &mut WorkIndexUnavailable,
+    previous: Option<&Snapshot>,
+) {
+    let Some(previous) = previous.and_then(|snapshot| snapshot.unavailable.as_ref()) else {
+        return;
+    };
+    for source in [
+        WorkIndexSource::Github,
+        WorkIndexSource::Linear,
+        WorkIndexSource::Missive,
+    ] {
+        let Some(current) = unavailable.reason(source) else {
+            continue;
+        };
+        let Some(prior) = previous.reason(source) else {
+            continue;
+        };
+        if is_rate_limit_reason(current) && is_rate_limit_reason(prior) {
+            unavailable.replace_reason(source, prior.to_string());
+        }
+    }
+}
+
+fn is_rate_limit_reason(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("rate limit") || reason.contains("http 429")
+}
+
+fn record_provider_backoff(unavailable: &mut WorkIndexUnavailable, cache: &ProviderCache) {
+    for source in [
+        WorkIndexSource::Github,
+        WorkIndexSource::Linear,
+        WorkIndexSource::Missive,
+    ] {
+        if let Some(rate_limit) = cache.rate_limit(source.provider()) {
+            if rate_limit.until > SystemTime::now() {
+                unavailable.record(source, rate_limit.reason);
+                unavailable.record_rate_limit_until(source, rate_limit.until);
+            }
+        }
+    }
+}
+
+fn finalize_provider_refresh(snapshot: &mut Snapshot, cache: &ProviderCache) {
+    cache.finish_refresh();
+    let mut unavailable = snapshot.unavailable.take().unwrap_or_default();
+    record_provider_backoff(&mut unavailable, cache);
+    snapshot.unavailable = (!unavailable.is_empty()).then_some(unavailable);
+    cache.log_summary();
+}
+
+fn exit_detail(label: &str, output: &ProviderOutput) -> String {
     // Keep the child's own words: a bare "exited unsuccessfully" is
     // undiagnosable in the field, which is exactly where these tools fail.
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1176,23 +2023,13 @@ fn exit_detail(label: &str, output: &std::process::Output) -> String {
     }
 }
 
-fn unavailable_snapshot(message: impl Into<String>) -> Snapshot {
-    Snapshot {
-        items: Vec::new(),
-        conversations: Vec::new(),
-        missive_users: Vec::new(),
-        unavailable: Some(message.into()),
-        observed_at: SystemTime::now(),
-    }
-}
-
 fn target_deadline(batch_deadline: Instant, target_timeout: Duration) -> Instant {
     (Instant::now() + target_timeout).min(batch_deadline)
 }
 
 /// Resolve provider-local "me" identities and assignee directories once per
 /// app session. Callers retain the returned value across index refreshes.
-pub(crate) fn resolve_work_index_session(
+fn resolve_work_index_session(
     config: &WorkIndexConfig,
     mut session: WorkIndexSession,
     missive_users: &[MissiveUser],
@@ -1200,17 +2037,27 @@ pub(crate) fn resolve_work_index_session(
     target_timeout: Duration,
     gh_program: &Path,
     linearis_program: &Path,
+    cache: Option<&ProviderCache>,
+    bypass: WorkIndexCacheBypass,
 ) -> WorkIndexSession {
     if !session.linear.resolved {
-        session.linear = fetch_linear_directory(
+        (session.linear, session.linear_query_identity) = fetch_linear_directory(
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
+            cache,
+            bypass.linear,
         );
         session.linear.resolved = true;
     }
     if !session.github.resolved {
-        session.github =
-            fetch_github_directory(&config.repos, gh_program, batch_deadline, target_timeout);
+        session.github = fetch_github_directory(
+            &config.repos,
+            gh_program,
+            batch_deadline,
+            target_timeout,
+            cache,
+            bypass.github,
+        );
         session.github.resolved = true;
     }
     if !session.missive.resolved && !missive_users.is_empty() {
@@ -1220,35 +2067,63 @@ pub(crate) fn resolve_work_index_session(
     session
 }
 
-fn fetch_linear_directory(program: &Path, deadline: Instant) -> ProviderDirectory {
-    let viewer = {
+fn fetch_linear_directory(
+    program: &Path,
+    deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> (ProviderDirectory, Option<String>) {
+    let (viewer, query_identity) = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["auth", "status", "--compact"]);
-        crate::noninteractive_process::output_with_deadline(command, deadline)
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-            .and_then(|value| nested_text(value.get("user"), "name"))
+        run_provider_command(
+            cache,
+            WorkIndexSource::Linear,
+            command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
+            deadline,
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|value| {
+            let user = value.get("user")?;
+            let name = nested_text(Some(user), "name");
+            let identity = nested_text(Some(user), "id").or_else(|| name.clone());
+            Some((name, identity))
+        })
+        .unwrap_or_default()
     };
     let mut assignees = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["users", "list", "--active", "-l", "250", "--compact"]);
-        crate::noninteractive_process::output_with_deadline(command, deadline)
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-            .and_then(|value| value.get("nodes").and_then(Value::as_array).cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|user| nested_text(Some(&user), "name"))
-            .collect::<Vec<_>>()
+        run_provider_command(
+            cache,
+            WorkIndexSource::Linear,
+            command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
+            deadline,
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|value| value.get("nodes").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|user| nested_text(Some(&user), "name"))
+        .collect::<Vec<_>>()
     };
     include_viewer(&mut assignees, viewer.as_deref());
-    ProviderDirectory {
-        viewer,
-        assignees,
-        resolved: true,
-    }
+    (
+        ProviderDirectory {
+            viewer,
+            assignees,
+            resolved: true,
+        },
+        query_identity,
+    )
 }
 
 fn fetch_github_directory(
@@ -1256,12 +2131,18 @@ fn fetch_github_directory(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> ProviderDirectory {
     let viewer = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["api", "user"]);
-        crate::noninteractive_process::output_with_deadline(
+        run_provider_command(
+            cache,
+            WorkIndexSource::Github,
             command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
             target_deadline(batch_deadline, target_timeout),
         )
         .ok()
@@ -1281,8 +2162,12 @@ fn fetch_github_directory(
             "--paginate",
             "--slurp",
         ]);
-        let Some(value) = crate::noninteractive_process::output_with_deadline(
+        let Some(value) = run_provider_command(
+            cache,
+            WorkIndexSource::Github,
             command,
+            VIEWER_IDENTITY_CACHE_TTL,
+            bypass,
             target_deadline(batch_deadline, target_timeout),
         )
         .ok()
@@ -1338,10 +2223,71 @@ pub(crate) fn resolve_missive_assignees(users: &[MissiveUser]) -> ProviderDirect
     }
 }
 
+const GITHUB_PULL_REQUEST_SUMMARY_FIELDS: &str = "number,title,author,assignees,state,updatedAt,createdAt,reviewDecision,labels,isDraft,headRefName,url";
+
+fn parse_github_pull_request(value: Value, fallback_repo: &str) -> Option<GithubPullRequest> {
+    let url = value.get("url")?.as_str()?.to_string();
+    Some(GithubPullRequest {
+        repo: repo_slug_from_pr_url(&url).unwrap_or_else(|| fallback_repo.to_string()),
+        number: value.get("number")?.as_u64()?,
+        url,
+        title: value.get("title")?.as_str()?.to_string(),
+        body: String::new(),
+        branch: value.get("headRefName")?.as_str()?.to_string(),
+        draft: value
+            .get("isDraft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        state: value
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("OPEN")
+            .to_ascii_lowercase(),
+        review_decision: value
+            .get("reviewDecision")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        created_at: value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        updated_at: value
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        additions: value.get("additions").and_then(Value::as_u64).unwrap_or(0),
+        deletions: value.get("deletions").and_then(Value::as_u64).unwrap_or(0),
+        author: value
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        assignees: value
+            .get("assignees")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|assignee| nested_text(Some(assignee), "login"))
+            .collect(),
+        labels: value
+            .get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| value_text(Some(label)))
+            .collect(),
+        check_state: pr_check_state(value.get("statusCheckRollup")),
+        audience: PrAudience::Unclassified,
+    })
+}
+
 fn fetch_github_pull_requests(
     repo: &str,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<GithubPullRequest>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args([
@@ -1350,21 +2296,27 @@ fn fetch_github_pull_requests(
         "--repo",
         repo,
         "--state",
-        "all",
+        "open",
         "--limit",
         "200",
         "--json",
-        "number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
+        GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        GITHUB_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub observation",
@@ -1375,63 +2327,56 @@ fn fetch_github_pull_requests(
         .map_err(|_| RefreshError::Failed("GitHub observation returned invalid JSON".into()))?;
     Ok(values
         .into_iter()
-        .filter_map(|value| {
-            let url = value.get("url")?.as_str()?.to_string();
-            Some(GithubPullRequest {
-                repo: repo_slug_from_pr_url(&url).unwrap_or_else(|| repo.to_string()),
-                number: value.get("number")?.as_u64()?,
-                url,
-                title: value.get("title")?.as_str()?.to_string(),
-                body: value_text(value.get("body")).unwrap_or_default(),
-                branch: value.get("headRefName")?.as_str()?.to_string(),
-                draft: value
-                    .get("isDraft")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                state: value
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("OPEN")
-                    .to_ascii_lowercase(),
-                review_decision: value
-                    .get("reviewDecision")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string),
-                created_at: value
-                    .get("createdAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                updated_at: value
-                    .get("updatedAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                additions: value.get("additions").and_then(Value::as_u64).unwrap_or(0),
-                deletions: value.get("deletions").and_then(Value::as_u64).unwrap_or(0),
-                author: value
-                    .get("author")
-                    .and_then(|author| author.get("login"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                assignees: value
-                    .get("assignees")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|assignee| nested_text(Some(assignee), "login"))
-                    .collect(),
-                labels: value
-                    .get("labels")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|label| value_text(Some(label)))
-                    .collect(),
-                check_state: pr_check_state(value.get("statusCheckRollup")),
-                audience: PrAudience::Unclassified,
-            })
-        })
+        .filter_map(|value| parse_github_pull_request(value, repo))
         .collect())
+}
+
+fn fetch_github_pull_request(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> Result<GithubPullRequest, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    let number_arg = number.to_string();
+    command.args([
+        "pr",
+        "view",
+        &number_arg,
+        "--repo",
+        repo,
+        "--json",
+        GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
+    ]);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        GITHUB_PR_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub pull request observation failed: {error}"))
+        }
+    })?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub pull request observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub pull request observation returned invalid JSON".into())
+    })?;
+    parse_github_pull_request(value, repo).ok_or_else(|| {
+        RefreshError::Failed("GitHub pull request observation returned an invalid item".into())
+    })
 }
 
 fn fetch_github_pr_numbers(
@@ -1439,20 +2384,28 @@ fn fetch_github_pr_numbers(
     program: &Path,
     filter: &[&str],
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<HashSet<u64>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args(["pr", "list", "--repo", repo, "--state", "open"]);
     command.args(filter);
     command.args(["--limit", "200", "--json", "number"]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub PR audience observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        GITHUB_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub PR audience observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub PR audience observation",
@@ -1496,13 +2449,204 @@ fn pr_check_state(value: Option<&Value>) -> PrCheckState {
 }
 
 const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
-    "number,title,body,author,baseRefName,headRefName,headRefOid,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,reviews,comments,files,commits,mergeable,mergeStateStatus";
+    "number,title,body,author,baseRefName,headRefName,headRefOid,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,reviews,comments,files,commits,mergeable,mergeStateStatus,autoMergeRequest";
+
+const GITHUB_TIMELINE_JQ: &str =
+    ".[] | {event,created_at,submitted_at,authored_at,committed_at,author_date:.author.date,sha,message,state,body,actor:.actor.login,user:.user.login,author:(.author.login//.author.name),requested_reviewer:.requested_reviewer.login,label:.label.name,commit_id} | @json";
+
+fn github_api_values(value: Value) -> Vec<Value> {
+    fn flatten(value: Value, values: &mut Vec<Value>) {
+        if let Value::Array(nested) = value {
+            for value in nested {
+                flatten(value, values);
+            }
+        } else {
+            values.push(value);
+        }
+    }
+    let mut values = Vec::new();
+    flatten(value, &mut values);
+    values
+}
+
+fn parse_github_json_lines(bytes: &[u8]) -> Result<Value, ()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ())?;
+    let values = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()
+        .map_err(|_| ())?;
+    Ok(Value::Array(values))
+}
+
+fn github_identity(value: &Value, key: &str) -> Option<String> {
+    value_text(value.get(key))
+        .or_else(|| nested_text(value.get(key), "login"))
+        .or_else(|| nested_text(value.get(key), "name"))
+}
+
+fn github_login(value: &Value) -> Option<String> {
+    ["actor", "user", "author"]
+        .into_iter()
+        .find_map(|key| github_identity(value, key))
+}
+
+fn first_line(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .and_then(|text| text.lines().next())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn short_hash(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(|hash| hash.chars().take(7).collect())
+}
+
+pub(crate) fn parse_github_timeline(value: Value) -> Vec<WorkItemTimelineEvent> {
+    let mut events = github_api_values(value)
+        .into_iter()
+        .filter_map(|value| {
+            let kind = value.get("event")?.as_str()?.to_string();
+            let summary = match kind.as_str() {
+                "committed" => first_line(value.get("message"))
+                    .or_else(|| short_hash(value.get("sha")))
+                    .unwrap_or_else(|| "commit".into()),
+                "reviewed" => value
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(|state| format!("review {state}"))
+                    .unwrap_or_else(|| "review".into()),
+                "review_requested" => github_identity(&value, "requested_reviewer")
+                    .map(|login| format!("review requested from {login}"))
+                    .unwrap_or_else(|| "review requested".into()),
+                "labeled" | "unlabeled" => value_text(value.get("label"))
+                    .or_else(|| nested_text(value.get("label"), "name"))
+                    .map(|label| format!("{kind} {label}"))
+                    .unwrap_or_else(|| kind.clone()),
+                "merged" => short_hash(value.get("commit_id"))
+                    .map(|hash| format!("merged {hash}"))
+                    .unwrap_or_else(|| "merged".into()),
+                "closed" | "reopened" => kind.clone(),
+                "commented" => first_line(value.get("body")).unwrap_or_else(|| "commented".into()),
+                _ => return None,
+            };
+            let created_at = [
+                "created_at",
+                "submitted_at",
+                "authored_at",
+                "committed_at",
+                "author_date",
+            ]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned))
+            .or_else(|| nested_text(value.get("author"), "date"))
+            .as_deref()
+            .and_then(parse_rfc3339_system_time);
+            Some(WorkItemTimelineEvent {
+                kind,
+                actor: github_login(&value),
+                summary,
+                created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
+    events
+}
+
+fn fetch_github_timeline(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> Result<Vec<WorkItemTimelineEvent>, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    let endpoint = format!("repos/{repo}/issues/{number}/timeline");
+    command.args(["api", &endpoint, "--paginate", "--jq", GITHUB_TIMELINE_JQ]);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub timeline observation failed: {error}"))
+        }
+    })?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub timeline observation",
+            &output,
+        )));
+    }
+    let value = parse_github_json_lines(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub timeline observation returned invalid JSON".into())
+    })?;
+    Ok(parse_github_timeline(value))
+}
+
+pub(crate) fn fetch_github_collaborators(
+    repo: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<Vec<String>, String> {
+    let mut command = crate::noninteractive_process::command(program);
+    let endpoint = format!("repos/{repo}/collaborators");
+    command.args([
+        "api",
+        &endpoint,
+        "--paginate",
+        "--jq",
+        ".[] | {login} | @json",
+    ]);
+    let output = run_provider_command(
+        None,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        true,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            "GitHub collaborators observation timed out".to_string()
+        } else {
+            format!("GitHub collaborators observation failed: {error}")
+        }
+    })?;
+    if !output.status.success() {
+        return Err(exit_detail("GitHub collaborators observation", &output));
+    }
+    let value = parse_github_json_lines(&output.stdout)
+        .map_err(|_| "GitHub collaborators observation returned invalid JSON".to_string())?;
+    let mut collaborators = github_api_values(value)
+        .iter()
+        .filter_map(|value| value_text(value.get("login")))
+        .collect::<Vec<_>>();
+    collaborators.sort_by_key(|login| login.to_ascii_lowercase());
+    collaborators.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(collaborators)
+}
 
 fn fetch_github_pull_request_detail(
     repo: &str,
     number: u64,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<WorkItemDetail, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     let number_arg = number.to_string();
@@ -1515,15 +2659,21 @@ fn fetch_github_pull_request_detail(
         "--json",
         GITHUB_PULL_REQUEST_DETAIL_FIELDS,
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("GitHub PR detail observation failed: {error}"))
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("GitHub PR detail observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "GitHub PR detail observation",
@@ -1533,6 +2683,15 @@ fn fetch_github_pull_request_detail(
     let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
         RefreshError::Failed("GitHub PR detail observation returned invalid JSON".into())
     })?;
+    let (timeline, timeline_unavailable) =
+        match fetch_github_timeline(repo, number, program, deadline, cache, bypass) {
+            Ok(timeline) => (timeline, None),
+            Err(RefreshError::TimedOut) => (
+                Vec::new(),
+                Some("GitHub timeline observation timed out".into()),
+            ),
+            Err(RefreshError::Failed(message)) => (Vec::new(), Some(message)),
+        };
     Ok(WorkItemDetail {
         number: value.get("number").and_then(Value::as_u64),
         title: value_text(value.get("title")),
@@ -1582,25 +2741,31 @@ fn fetch_github_pull_request_detail(
             }),
         mergeable: value_text(value.get("mergeable")),
         merge_state_status: value_text(value.get("mergeStateStatus")),
+        auto_merge_enabled: value
+            .get("autoMergeRequest")
+            .is_some_and(|request| !request.is_null()),
         head_sha: value_text(value.get("headRefOid")),
         checks: status_check_summary(value.get("statusCheckRollup")),
         comments: github_comments(value.get("comments")),
         actions: github_actions(value.get("statusCheckRollup")),
         files: github_files(value.get("files")),
         commits: github_commits(value.get("commits")),
+        timeline,
+        timeline_unavailable,
+        collaborators: Vec::new(),
+        collaborators_unavailable: None,
         unresolved_review_threads: fetch_unresolved_review_thread_count(
-            repo, number, program, deadline,
+            repo, number, program, deadline, cache, bypass,
         ),
         unavailable: None,
         observed_at: SystemTime::now(),
     })
 }
 
-/// GraphQL query for a PR's review-thread resolution state. `gh pr view --json`
-/// does not expose this, so it takes a second call, kept small (thread
-/// resolution only) and best-effort: a failure here must never fail or delay
-/// the PR detail it's attached to.
-const UNRESOLVED_REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }";
+/// GraphQL query for a PR's review threads. `gh pr view --json` does not expose
+/// these, so the detail path makes a second best-effort call and the fix action
+/// can reuse it on demand.
+const UNRESOLVED_REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved comments(first: 20) { nodes { path line body author { login } } } } } } } }";
 
 /// Count a pull request's unresolved review threads via `gh api graphql`.
 /// Degrades to `None` on any failure (bad repo slug, non-zero exit, timeout,
@@ -1610,7 +2775,32 @@ fn fetch_unresolved_review_thread_count(
     number: u64,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Option<usize> {
+    fetch_unresolved_review_threads_with_cache(repo, number, program, deadline, cache, bypass)
+        .map(|threads| threads.count)
+}
+
+/// On-demand entry for the `Fix findings` action: no host cache, always fresh,
+/// so the prompt reflects the current thread state.
+pub(crate) fn fetch_unresolved_review_threads(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Option<UnresolvedReviewThreads> {
+    fetch_unresolved_review_threads_with_cache(repo, number, program, deadline, None, true)
+}
+
+fn fetch_unresolved_review_threads_with_cache(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> Option<UnresolvedReviewThreads> {
     let (owner, name) = repo.split_once('/')?;
     let mut command = crate::noninteractive_process::command(program);
     command.args([
@@ -1625,18 +2815,23 @@ fn fetch_unresolved_review_thread_count(
         "-F",
         &format!("number={number}"),
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Github,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
     let value = serde_json::from_slice::<Value>(&output.stdout).ok()?;
-    parse_unresolved_review_thread_count(&value)
+    parse_unresolved_review_threads(&value)
 }
 
-/// Pure parse of the `unresolvedReviewThreadsQuery` GraphQL response. Kept
-/// separate from the `gh` shellout so it can be exercised with a fixture
-/// instead of a live network call.
-fn parse_unresolved_review_thread_count(value: &Value) -> Option<usize> {
+fn parse_unresolved_review_threads(value: &Value) -> Option<UnresolvedReviewThreads> {
     let nodes = value
         .get("data")?
         .get("repository")?
@@ -1644,12 +2839,38 @@ fn parse_unresolved_review_thread_count(value: &Value) -> Option<usize> {
         .get("reviewThreads")?
         .get("nodes")?
         .as_array()?;
-    Some(
-        nodes
-            .iter()
-            .filter(|node| node.get("isResolved").and_then(Value::as_bool) == Some(false))
-            .count(),
-    )
+    let unresolved = nodes
+        .iter()
+        .filter(|node| node.get("isResolved").and_then(Value::as_bool) == Some(false))
+        .collect::<Vec<_>>();
+    let comments = unresolved
+        .iter()
+        .flat_map(|thread| {
+            thread
+                .get("comments")
+                .and_then(|comments| comments.get("nodes"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|comment| {
+            Some(ReviewThreadComment {
+                path: comment.get("path")?.as_str()?.to_string(),
+                line: comment.get("line").and_then(Value::as_u64),
+                body: comment.get("body")?.as_str()?.to_string(),
+                author: comment
+                    .get("author")
+                    .and_then(|author| author.get("login"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect();
+    Some(UnresolvedReviewThreads {
+        count: unresolved.len(),
+        comments,
+    })
 }
 
 /// Read one Linear issue with its comment threads.
@@ -1660,11 +2881,21 @@ fn fetch_linear_ticket_detail(
     identifier: &str,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<WorkItemDetail, RefreshError> {
     let run = |args: &[&str]| {
         let mut command = crate::noninteractive_process::command(program);
         command.args(args);
-        crate::noninteractive_process::output_with_deadline(command, deadline).map_err(|error| {
+        run_provider_command(
+            cache,
+            WorkIndexSource::Linear,
+            command,
+            WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+            bypass,
+            deadline,
+        )
+        .map_err(|error| {
             if error.kind() == std::io::ErrorKind::TimedOut {
                 RefreshError::TimedOut
             } else {
@@ -1840,7 +3071,7 @@ fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
     })
 }
 
-fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
+pub(crate) fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
     let bytes = value.as_bytes();
     if bytes.len() < 20
         || bytes[4] != b'-'
@@ -1938,34 +3169,104 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> u64 {
     (era * 146_097 + day_of_era - 719_468) as u64
 }
 
+#[derive(Debug)]
+struct LinearTicketObservation {
+    tickets: Vec<LinearTicket>,
+    group_failures: Vec<LinearGroupFailure>,
+}
+
+#[derive(Debug)]
+struct LinearGroupFailure {
+    group: TicketGroup,
+    error: RefreshError,
+}
+
+impl LinearGroupFailure {
+    fn summary(&self) -> String {
+        let reason = match &self.error {
+            RefreshError::TimedOut => "observation timed out",
+            RefreshError::Failed(reason) => reason,
+        };
+        format!("{}: {reason}", self.group.label())
+    }
+}
+
+#[derive(Debug)]
+struct ActiveLinearCycle {
+    id: String,
+    name: String,
+}
+
+const LINEAR_LIST_FIELDS: &str = "nodes.identifier,nodes.title,nodes.state.name,nodes.priority,nodes.assignee.name,nodes.creator.id,nodes.creator.name,nodes.labels.nodes.name,nodes.cycle.name,nodes.updatedAt,nodes.url";
+const LINEAR_ITEM_FIELDS: &str =
+    "identifier,title,description,state.name,priority,assignee.name,creator.id,creator.name,labels.nodes.name,cycle.name,updatedAt,url";
+
 fn fetch_linear_tickets(
     team: &str,
+    assignee: Option<&str>,
     program: &Path,
     deadline: Instant,
-) -> Result<Vec<LinearTicket>, RefreshError> {
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> Result<LinearTicketObservation, RefreshError> {
     let mut tickets = Vec::new();
+    let mut group_failures = Vec::new();
+    let assignee_filter = assignee
+        .map(|assignee| vec!["--assignee", assignee])
+        .unwrap_or_default();
     tickets.extend(fetch_linear_ticket_group(
         team,
         program,
         deadline,
         TicketGroup::Assigned,
-        &["--assignee", "me"],
+        &assignee_filter,
+        true,
+        cache,
+        bypass,
     )?);
-    tickets.extend(fetch_linear_ticket_group(
+    match fetch_linear_ticket_group(
         team,
         program,
         deadline,
         TicketGroup::Triage,
         &["--status", "Triage"],
-    )?);
-    if let Some(cycle) = fetch_active_linear_cycle(team, program, deadline)? {
-        tickets.extend(fetch_linear_ticket_group(
+        true,
+        cache,
+        bypass,
+    ) {
+        Ok(group) => tickets.extend(group),
+        Err(error) => group_failures.push(LinearGroupFailure {
+            group: TicketGroup::Triage,
+            error,
+        }),
+    }
+    match fetch_active_linear_cycle(team, program, deadline, cache, bypass) {
+        Ok(Some(cycle)) => match fetch_linear_ticket_group(
             team,
             program,
             deadline,
             TicketGroup::DoneThisCycle,
-            &["--cycle", &cycle, "--status", "Done"],
-        )?);
+            &["--cycle", &cycle.id, "--status", "Done"],
+            false,
+            cache,
+            bypass,
+        ) {
+            Ok(mut group) => {
+                for ticket in &mut group {
+                    ticket.cycle.get_or_insert_with(|| cycle.name.clone());
+                }
+                tickets.extend(group);
+            }
+            Err(error) => group_failures.push(LinearGroupFailure {
+                group: TicketGroup::DoneThisCycle,
+                error,
+            }),
+        },
+        Ok(None) => {}
+        Err(error) => group_failures.push(LinearGroupFailure {
+            group: TicketGroup::DoneThisCycle,
+            error,
+        }),
     }
 
     let mut deduplicated: Vec<LinearTicket> = Vec::new();
@@ -1981,7 +3282,98 @@ fn fetch_linear_tickets(
             deduplicated.push(ticket);
         }
     }
-    Ok(deduplicated)
+    Ok(LinearTicketObservation {
+        tickets: deduplicated,
+        group_failures,
+    })
+}
+
+fn parse_linear_ticket(value: &Value, group: TicketGroup) -> Option<LinearTicket> {
+    let identifier = normalize_ticket_id(value.get("identifier")?.as_str()?).ok()?;
+    Some(WorkTicket {
+        url: value_text(value.get("url")).or_else(|| linear_ticket_url(&identifier)),
+        identifier,
+        title: value_text(value.get("title")),
+        description: value_text(value.get("description")),
+        state: nested_text(value.get("state"), "name"),
+        assignee: nested_text(value.get("assignee"), "name"),
+        creator: value.get("creator").and_then(|creator| {
+            Some(WorkPerson {
+                id: nested_text(Some(creator), "id")?,
+                name: nested_text(Some(creator), "name")?,
+            })
+        }),
+        priority: value
+            .get("priority")
+            .and_then(Value::as_u64)
+            .and_then(|priority| u8::try_from(priority).ok()),
+        cycle: nested_text(value.get("cycle"), "name"),
+        group,
+        created_at: value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        updated_at: value
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        branch: value_text(value.get("branchName")),
+        labels: value
+            .get("labels")
+            .and_then(|labels| labels.get("nodes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| nested_text(Some(label), "name"))
+            .collect(),
+        parent: value.get("parent").and_then(format_linear_reference),
+        relations: format_linear_relations(value),
+    })
+}
+
+fn fetch_linear_ticket(
+    identifier: &str,
+    program: &Path,
+    deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> Result<LinearTicket, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "--compact",
+        "--fields",
+        LINEAR_ITEM_FIELDS,
+        "issues",
+        "read",
+        identifier,
+    ]);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        WORK_ITEM_DETAIL_PROVIDER_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Linear ticket observation failed: {error}"))
+        }
+    })?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "Linear ticket observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("Linear ticket observation returned invalid JSON".into())
+    })?;
+    parse_linear_ticket(&value, TicketGroup::Assigned).ok_or_else(|| {
+        RefreshError::Failed("Linear ticket observation returned an invalid item".into())
+    })
 }
 
 fn ticket_group_rank(group: TicketGroup) -> u8 {
@@ -1996,18 +3388,35 @@ fn fetch_active_linear_cycle(
     team: &str,
     program: &Path,
     deadline: Instant,
-) -> Result<Option<String>, RefreshError> {
+    cache: Option<&ProviderCache>,
+    bypass: bool,
+) -> Result<Option<ActiveLinearCycle>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
-    command.args(["cycles", "list", "--team", team, "--active", "--compact"]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Linear cycle observation failed: {error}"))
-            }
-        },
-    )?;
+    command.args([
+        "--compact",
+        "--fields",
+        "nodes.id,nodes.name",
+        "cycles",
+        "list",
+        "--team",
+        team,
+        "--active",
+    ]);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        LINEAR_CYCLE_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Linear cycle observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "Linear cycle observation",
@@ -2017,11 +3426,20 @@ fn fetch_active_linear_cycle(
     let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
         RefreshError::Failed("Linear cycle observation returned invalid JSON".into())
     })?;
-    Ok(value
+    let Some(cycle) = value
         .get("nodes")
         .and_then(Value::as_array)
         .and_then(|nodes| nodes.first())
-        .and_then(|cycle| value_text(cycle.get("name"))))
+    else {
+        return Ok(None);
+    };
+    let id = value_text(cycle.get("id")).ok_or_else(|| {
+        RefreshError::Failed("Linear cycle observation returned no cycle id".into())
+    })?;
+    let name = value_text(cycle.get("name")).ok_or_else(|| {
+        RefreshError::Failed("Linear cycle observation returned no cycle name".into())
+    })?;
+    Ok(Some(ActiveLinearCycle { id, name }))
 }
 
 fn fetch_linear_ticket_group(
@@ -2030,27 +3448,78 @@ fn fetch_linear_ticket_group(
     deadline: Instant,
     group: TicketGroup,
     filters: &[&str],
+    incremental: bool,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<LinearTicket>, RefreshError> {
-    let mut command = crate::noninteractive_process::command(program);
-    command.args(["issues", "list", "--team", team]);
-    command.args(filters);
-    command.args(["-l", "100", "--compact"]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(format!("Linear observation failed: {error}"))
+    let mut argv = vec![
+        "--compact".to_string(),
+        "--fields".to_string(),
+        LINEAR_LIST_FIELDS.to_string(),
+        "issues".to_string(),
+        "list".to_string(),
+        "--team".to_string(),
+        team.to_string(),
+    ];
+    argv.extend(filters.iter().map(|filter| (*filter).to_string()));
+    argv.extend(["-l".to_string(), "100".to_string()]);
+
+    let mut baseline = Vec::new();
+    let mut request_argv = argv.clone();
+    if incremental && !bypass {
+        if let Some(cached) = cache.and_then(|cache| cache.cached(Provider::Linear, &argv)) {
+            let observed_now = cache.map_or_else(SystemTime::now, ProviderCache::current_time);
+            let age = observed_now.duration_since(cached.fetched_at).ok();
+            if age.is_some_and(|age| age < LINEAR_FULL_LIST_INTERVAL) {
+                baseline = parse_linear_ticket_group_output(&cached.stdout, group)?;
+                request_argv.push("--created-after".to_string());
+                request_argv.push(utc_date(cached.fetched_at));
             }
-        },
-    )?;
+        }
+    }
+
+    let mut command = crate::noninteractive_process::command(program);
+    command.args(&request_argv);
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        LINEAR_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(format!("Linear observation failed: {error}"))
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "Linear observation",
             &output,
         )));
     }
-    let value = serde_json::from_slice::<Value>(&output.stdout)
+    let incremental = parse_linear_ticket_group_output(&output.stdout, group)?;
+    for ticket in incremental {
+        if let Some(existing) = baseline
+            .iter_mut()
+            .find(|existing| existing.identifier == ticket.identifier)
+        {
+            *existing = ticket;
+        } else {
+            baseline.push(ticket);
+        }
+    }
+    Ok(baseline)
+}
+
+fn parse_linear_ticket_group_output(
+    stdout: &[u8],
+    group: TicketGroup,
+) -> Result<Vec<LinearTicket>, RefreshError> {
+    let value = serde_json::from_slice::<Value>(stdout)
         .map_err(|_| RefreshError::Failed("Linear observation returned invalid JSON".into()))?;
     let Some(nodes) = value.get("nodes").and_then(Value::as_array) else {
         return Err(RefreshError::Failed(
@@ -2059,43 +3528,30 @@ fn fetch_linear_ticket_group(
     };
     Ok(nodes
         .iter()
-        .filter_map(|node| {
-            let identifier = normalize_ticket_id(node.get("identifier")?.as_str()?).ok()?;
-            Some(WorkTicket {
-                url: linear_ticket_url(&identifier),
-                identifier,
-                title: value_text(node.get("title")),
-                description: value_text(node.get("description")),
-                state: nested_text(node.get("state"), "name"),
-                assignee: nested_text(node.get("assignee"), "name"),
-                priority: node
-                    .get("priority")
-                    .and_then(Value::as_u64)
-                    .and_then(|priority| u8::try_from(priority).ok()),
-                cycle: nested_text(node.get("cycle"), "name"),
-                group,
-                created_at: node
-                    .get("createdAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                updated_at: node
-                    .get("updatedAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                branch: value_text(node.get("branchName")),
-                labels: node
-                    .get("labels")
-                    .and_then(|labels| labels.get("nodes"))
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|label| nested_text(Some(label), "name"))
-                    .collect(),
-                parent: node.get("parent").and_then(format_linear_reference),
-                relations: format_linear_relations(node),
-            })
-        })
+        .filter_map(|node| parse_linear_ticket(node, group))
         .collect())
+}
+
+fn utc_date(time: SystemTime) -> String {
+    let days = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    let z = i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_add(719_468);
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn nested_text(value: Option<&Value>, field: &str) -> Option<String> {
@@ -2156,6 +3612,8 @@ fn fetch_attachments(
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Vec<Attachment> {
     let mut results = Vec::new();
     for chunk in tickets.chunks(8) {
@@ -2169,6 +3627,8 @@ fn fetch_attachments(
                             ticket,
                             &program,
                             target_deadline(batch_deadline, target_timeout),
+                            cache,
+                            bypass,
                         )
                     })
                 })
@@ -2190,6 +3650,8 @@ fn fetch_ticket_attachments(
     ticket: &LinearTicket,
     program: &Path,
     deadline: Instant,
+    cache: Option<&ProviderCache>,
+    bypass: bool,
 ) -> Result<Vec<Attachment>, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
     command.args([
@@ -2200,15 +3662,21 @@ fn fetch_ticket_attachments(
         "github",
         "--compact",
     ]);
-    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
-        |error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                RefreshError::TimedOut
-            } else {
-                RefreshError::Failed(error.to_string())
-            }
-        },
-    )?;
+    let output = run_provider_command(
+        cache,
+        WorkIndexSource::Linear,
+        command,
+        LINEAR_LIST_CACHE_TTL,
+        bypass,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            RefreshError::TimedOut
+        } else {
+            RefreshError::Failed(error.to_string())
+        }
+    })?;
     if !output.status.success() {
         return Err(RefreshError::Failed(exit_detail(
             "attachment observation",
@@ -2279,7 +3747,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
+fn join_panes(items: &mut Vec<WorkItem>, panes: &[WorkIndexPane]) {
     for pane in panes {
         let pane_ticket_ids = pane
             .work_context
@@ -2345,6 +3813,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
                 ticket_ids: {
                     // Sorted so the snapshot is byte-stable across refreshes:
                     // it is consumed as JSON by ghx and diffed by hand.
@@ -2385,8 +3854,28 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
     }
 }
 
+fn work_index_snapshot_path_for(
+    state_dir: &Path,
+    session_name: Option<&str>,
+) -> std::path::PathBuf {
+    state_dir.join("work-index").join(format!(
+        "{}.json",
+        session_name.unwrap_or(crate::session::DEFAULT_SESSION_NAME)
+    ))
+}
+
 pub(crate) fn work_index_snapshot_path() -> std::path::PathBuf {
-    crate::config::state_dir().join("work-index.json")
+    let session_name = crate::session::active_name();
+    work_index_snapshot_path_for(&crate::config::state_dir(), session_name.as_deref())
+}
+
+pub(crate) fn remove_session_snapshot(session_name: &str) -> io::Result<()> {
+    let path = work_index_snapshot_path_for(&crate::config::state_dir(), Some(session_name));
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
@@ -2453,12 +3942,42 @@ fn resolve_program(name: &str) -> std::path::PathBuf {
 }
 
 impl crate::app::App {
+    fn note_work_index_contexts(&mut self, panes: &[WorkIndexPane], now: Instant) -> bool {
+        let fingerprint = panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.workspace_id.clone(),
+                    pane.tab_id.clone(),
+                    pane.pane_id.clone(),
+                    pane.work_context.clone(),
+                )
+            })
+            .collect::<WorkIndexContextFingerprint>();
+        if fingerprint == self.work_index_context_fingerprint {
+            return false;
+        }
+        self.work_index_context_fingerprint = fingerprint;
+        self.next_work_index_refresh = now;
+        true
+    }
+
     pub(crate) fn work_index_gh_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_gh_program_override.as_ref() {
             return program.clone();
         }
         resolve_program("gh")
+    }
+
+    /// Provider cache rooted at the state dir. Tests point it at a fixture
+    /// directory so cached fixture output never leaks between tests.
+    fn work_index_provider_cache(&self) -> ProviderCache {
+        #[cfg(test)]
+        if let Some(root) = self.work_index_provider_cache_root_override.as_ref() {
+            return ProviderCache::new(root);
+        }
+        ProviderCache::new(&crate::config::state_dir())
     }
 
     pub(crate) fn work_index_linearis_program(&self) -> std::path::PathBuf {
@@ -2495,6 +4014,8 @@ impl crate::app::App {
         if !self.work_index_config.enabled {
             return;
         }
+        let panes = self.collect_work_index_panes();
+        self.note_work_index_contexts(&panes, now);
         if self
             .work_index_refresh_in_flight
             .as_ref()
@@ -2519,7 +4040,8 @@ impl crate::app::App {
             view.refreshing = true;
         }
         let config = self.work_index_config.clone();
-        let panes = self.collect_agent_infos();
+        let mut session_config = config.clone();
+        session_config.repos = work_index_repos(&config, &panes);
         let selected_missive = self
             .state
             .work_view
@@ -2528,20 +4050,49 @@ impl crate::app::App {
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
-        let session = self.work_index_session.clone();
+        let mut session = self.work_index_session.clone();
         let curl_program = self.work_index_curl_program();
         let missive = self.missive_config.clone();
         let session_missive_users =
             (!session.missive_users.is_empty()).then(|| session.missive_users.clone());
+        let previous_snapshot = self.work_index_snapshot.clone();
+        let selected_ticket = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.as_ref())
+            .and_then(|key| key.ticket_id.clone())
+            .or_else(|| {
+                crate::ui::dock::linear::focused_ticket_key(&self.state)
+                    .and_then(|key| key.ticket_id)
+            });
+        let cache_bypass = std::mem::take(&mut self.work_index_cache_bypass);
+        let provider_cache = self.work_index_provider_cache();
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
-                let snapshot = refresh_work_index_with_missive(
+                if !session.linear.resolved {
+                    (session.linear, session.linear_query_identity) = fetch_linear_directory(
+                        &linearis_program,
+                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
+                        Some(&provider_cache),
+                        cache_bypass.linear,
+                    );
+                    session.linear.resolved = true;
+                }
+                let mut snapshot = refresh_work_index_with_missive(
                     &config,
                     &missive,
                     &panes,
-                    selected_missive.as_deref(),
-                    session_missive_users.as_deref(),
+                    WorkIndexRefreshContext {
+                        selected_missive: selected_missive.as_deref(),
+                        session_missive_users: session_missive_users.as_deref(),
+                        previous: previous_snapshot.as_ref(),
+                        linear_assignee: session.linear_query_identity.as_deref(),
+                        selected_ticket: selected_ticket.as_deref(),
+                        provider_cache: Some(&provider_cache),
+                        cache_bypass,
+                    },
                     Instant::now(),
                     deadline,
                     WORK_INDEX_TARGET_TIMEOUT,
@@ -2550,14 +4101,17 @@ impl crate::app::App {
                     &curl_program,
                 );
                 let session = resolve_work_index_session(
-                    &config,
+                    &session_config,
                     session,
                     &snapshot.missive_users,
                     deadline,
                     WORK_INDEX_TARGET_TIMEOUT,
                     &gh_program,
                     &linearis_program,
+                    Some(&provider_cache),
+                    cache_bypass,
                 );
+                finalize_provider_refresh(&mut snapshot, &provider_cache);
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkIndexRefreshed {
                     generation,
                     snapshot: Box::new(snapshot),
@@ -2592,6 +4146,9 @@ impl crate::app::App {
         self.work_index_snapshot = Some(snapshot);
         self.refresh_pane_settlement_at(Instant::now());
         self.invalidate_work_item_details();
+        self.state.work_item_detail_cache =
+            WorkItemDetailCache::from_snapshot(self.work_index_snapshot.as_ref());
+        self.finish_sidebar_refresh_if_idle();
         true
     }
 
@@ -2640,18 +4197,25 @@ impl crate::app::App {
                 keys.insert(0, selection.clone());
             }
         }
-        keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
-        let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
+        if section == crate::app::state::DockHomeSection::Prs {
+            keys.truncate(1);
+        } else {
+            keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
+        }
+        let configured_interval =
+            Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         keys.retain(|key| {
-            // Pull requests are prefetched across the whole section: one `gh`
-            // call each, and the tab strip gets walked often. A ticket costs a
-            // separate `linearis` read, so only the one actually being looked
-            // at is worth fetching - prefetching the section would mean a
-            // process per ticket for detail nobody has asked to see.
+            // Detail follows the selected object. The list refresh stays lean,
+            // and opening a large PR section never starts one process per row.
             let fetchable = if key.pr_number.is_some() {
                 !key.repo.is_empty()
             } else {
                 key.ticket_id.is_some() && selection.as_ref() == Some(key)
+            };
+            let interval = if key.pr_number.is_some() {
+                PR_DETAIL_FOCUS_REFRESH_INTERVAL
+            } else {
+                configured_interval
             };
             fetchable
                 && !self
@@ -2679,6 +4243,11 @@ impl crate::app::App {
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
+        let provider_cache = self.work_index_provider_cache();
+        // The selected PR is an explicit surface refresh (F18-2): its focus
+        // fetch, already debounced to PR_DETAIL_FOCUS_REFRESH_INTERVAL,
+        // bypasses the provider cache so CI and review state stay live.
+        let bypass_key = selection.filter(|key| key.pr_number.is_some());
         let _ = std::thread::Builder::new()
             .name("herdr-work-item-details".into())
             .spawn(move || {
@@ -2691,6 +4260,8 @@ impl crate::app::App {
                                 let key = key.clone();
                                 let gh_program = gh_program.clone();
                                 let linearis_program = linearis_program.clone();
+                                let provider_cache = provider_cache.clone();
+                                let bypass = bypass_key.as_ref() == Some(&key);
                                 scope.spawn(move || {
                                     let target =
                                         target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT);
@@ -2701,6 +4272,8 @@ impl crate::app::App {
                                                 number,
                                                 &gh_program,
                                                 target,
+                                                Some(&provider_cache),
+                                                bypass,
                                             ),
                                             "GitHub PR detail",
                                         ),
@@ -2709,6 +4282,8 @@ impl crate::app::App {
                                                 ticket,
                                                 &linearis_program,
                                                 target,
+                                                Some(&provider_cache),
+                                                false,
                                             ),
                                             "Linear ticket detail",
                                         ),
@@ -2743,6 +4318,7 @@ impl crate::app::App {
                         break;
                     }
                 }
+                provider_cache.finish_refresh();
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkItemDetailRefreshed {
                     generation,
                     details,
@@ -2780,8 +4356,32 @@ impl crate::app::App {
                 self.state.work_item_detail_loading.remove(&key);
             }
         }
+        let mut snapshot_changed = false;
         for (key, detail) in details {
+            if detail.unavailable.is_none() {
+                if let Some(snapshot) = self.work_index_snapshot.as_mut() {
+                    snapshot_changed |= snapshot.cache_pr_detail(&key, &detail);
+                }
+                if let Some(snapshot) = self.state.work_index_snapshot.as_mut() {
+                    snapshot.cache_pr_detail(&key, &detail);
+                }
+                if let Some(snapshot) = self
+                    .state
+                    .work_view
+                    .as_mut()
+                    .and_then(|view| view.snapshot.as_mut())
+                {
+                    snapshot.cache_pr_detail(&key, &detail);
+                }
+            }
             self.state.work_item_detail_cache.insert(key, detail);
+        }
+        if snapshot_changed {
+            if let Some(snapshot) = self.work_index_snapshot.as_ref() {
+                if let Err(error) = write_snapshot(&work_index_snapshot_path(), snapshot) {
+                    tracing::warn!(error = %error, "failed to persist work item detail");
+                }
+            }
         }
         true
     }
@@ -2828,7 +4428,10 @@ mod tests {
         )
         .expect("valid fixture");
 
-        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(2));
+        assert_eq!(
+            super::parse_unresolved_review_threads(&value).map(|threads| threads.count),
+            Some(2)
+        );
     }
 
     #[test]
@@ -2840,7 +4443,10 @@ mod tests {
         )
         .expect("valid fixture");
 
-        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(0));
+        assert_eq!(
+            super::parse_unresolved_review_threads(&value).map(|threads| threads.count),
+            Some(0)
+        );
     }
 
     #[test]
@@ -2848,7 +4454,7 @@ mod tests {
         let value: Value = serde_json::from_str(r#"{"data":null,"errors":[{"message":"boom"}]}"#)
             .expect("valid fixture");
 
-        assert_eq!(super::parse_unresolved_review_thread_count(&value), None);
+        assert_eq!(super::parse_unresolved_review_threads(&value), None);
     }
 
     #[test]
@@ -2948,6 +4554,7 @@ mod tests {
         let parsed = parse_missive_conversations_for_user(&conversations, Some("user-1"));
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].subject, "Billing question from fixture");
+        assert_eq!(parsed[0].labels, ["billing", "customer"]);
         assert_eq!(parsed[0].assignees[0].name, "Ada Example");
         assert!(!parsed[0].assignees[0].is_me);
         assert_eq!(
@@ -3038,6 +4645,8 @@ esac
             &curl,
             Instant::now() + Duration::from_secs(5),
             Duration::from_secs(2),
+            None,
+            false,
         )
         .expect("Missive snapshot");
 
@@ -3055,6 +4664,99 @@ esac
             .iter()
             .find(|conversation| conversation.id == "first")
             .is_some_and(|conversation| conversation.messages.is_empty()));
+    }
+
+    #[test]
+    fn pane_conversation_missing_from_list_is_fetched_and_marked_bound() {
+        let dir = fixture_dir("missive-pane-fallback");
+        let curl = dir.join("curl");
+        let log = dir.join("curl-argv.log");
+        write_executable(
+            &curl,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+for argument do url="$argument"; done
+case "$url" in
+  *"/users") printf '%s' '{{"users":[{{"id":"me","name":"Ada","me":true}}]}}' ;;
+  *"/conversations?team_all=team") printf '%s' '{{"conversations":[]}}' ;;
+  *"/conversations/pane-only/messages") printf '%s' '{{"messages":[]}}' ;;
+  *"/conversations/pane-only/drafts") printf '%s' '{{"drafts":[]}}' ;;
+  *"/conversations/pane-only/posts") printf '%s' '{{"posts":[]}}' ;;
+  *"/conversations/pane-only/comments") printf '%s' '{{"comments":[]}}' ;;
+  *"/conversations/pane-only") printf '%s' '{{"conversations":[{{"id":"pane-only","subject":"Pane conversation","web_url":"https://mail.missiveapp.com/#inbox/conversations/pane-only"}}]}}' ;;
+  *) exit 65 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let token_env = format!(
+            "HERDR_TEST_MISSIVE_TOKEN_{}",
+            crate::config::test_unique_suffix().replace('-', "_")
+        );
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(&token_env, "test-token");
+        let config = MissiveConfig {
+            token_env,
+            team: Some("team".into()),
+            organization: None,
+        };
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/pane-only".into()],
+            ..Default::default()
+        });
+
+        let (conversations, _) = fetch_missive_snapshot(
+            &config,
+            &panes,
+            None,
+            None,
+            &curl,
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(2),
+            None,
+            false,
+        )
+        .expect("Missive pane fallback");
+
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].subject, "Pane conversation");
+        assert!(conversations[0].pane_bound);
+        let argv = std::fs::read_to_string(log).expect("curl argv");
+        assert!(argv.contains("/conversations/pane-only"));
+    }
+
+    #[test]
+    fn retained_missive_conversations_recompute_pane_binding() {
+        let previous = Snapshot {
+            items: Vec::new(),
+            conversations: vec![MissiveConversation {
+                id: "previous".into(),
+                subject: "Previous".into(),
+                app_url: "missive://previous".into(),
+                web_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                labels: Vec::new(),
+                pane_bound: true,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            }],
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        assert!(!previous_missive(Some(&previous), &[])[0].pane_bound);
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/previous".into()],
+            ..Default::default()
+        });
+        assert!(previous_missive(Some(&previous), &panes)[0].pane_bound);
     }
 
     #[test]
@@ -3116,6 +4818,8 @@ esac
             &curl,
             Instant::now() + Duration::from_secs(2),
             Duration::from_secs(1),
+            None,
+            false,
         )
         .expect("cached session identity should avoid /users");
 
@@ -3191,6 +4895,37 @@ esac
         }
     }
 
+    fn panes_with_context(context: crate::work_context::PaneWorkContext) -> Vec<WorkIndexPane> {
+        vec![WorkIndexPane {
+            work_context: context,
+            name: Some("fixture".into()),
+            agent: Some("codex".into()),
+            display_agent: Some("cx".into()),
+            agent_status: AgentStatus::Idle,
+            workspace_id: "workspace".into(),
+            tab_id: "tab".into(),
+            pane_id: "pane".into(),
+        }]
+    }
+
+    #[test]
+    fn pane_declaration_change_makes_work_index_refresh_immediately_due() {
+        let mut app = test_app_with_work_index();
+        let later = Instant::now() + Duration::from_secs(300);
+        app.next_work_index_refresh = later;
+        let mut context = PaneWorkContext::default();
+        context.ticket_ids.push("SCA-18".into());
+        let panes = panes_with_context(context);
+
+        let now = Instant::now();
+        assert!(app.note_work_index_contexts(&panes, now));
+        assert_eq!(app.next_work_index_refresh, now);
+
+        app.next_work_index_refresh = later;
+        assert!(!app.note_work_index_contexts(&panes, now));
+        assert_eq!(app.next_work_index_refresh, later);
+    }
+
     fn fake_programs(
         dir: &Path,
         gh: &str,
@@ -3201,6 +4936,353 @@ esac
         write_executable(&gh_path, gh);
         write_executable(&linearis_path, linearis);
         (gh_path, linearis_path)
+    }
+
+    #[test]
+    fn shell_pane_declared_pull_request_enters_the_snapshot() {
+        let dir = fixture_dir("shell-pane-pr");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 159 --repo owner/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":159,"title":"Shell pane PR","state":"OPEN","headRefName":"t3/f16","url":"https://github.com/owner/repo/pull/159"}}' ;;
+  *"pr list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#
+            ),
+            "#!/bin/sh\nexit 42\n",
+        );
+        let mut app = test_app_with_work_index();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("shell")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("shell terminal")
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("shell terminal state");
+        assert!(!terminal.is_agent_terminal());
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/owner/repo/pull/159".into()]),
+                ..Default::default()
+            })
+            .expect("shell work context");
+        assert!(app.collect_agent_infos().is_empty());
+
+        let panes = app.collect_work_index_panes();
+        assert_eq!(panes.len(), 1);
+        let mut config = config();
+        config.repos.clear();
+        config.linear_team = None;
+        let snapshot = refresh_work_index(
+            &config,
+            &panes,
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        let pull_request = snapshot
+            .items
+            .iter()
+            .find(|item| item.pr_number == Some(159))
+            .expect("shell pane pull request");
+        assert_eq!(pull_request.pr_title.as_deref(), Some("Shell pane PR"));
+        assert!(pull_request.source.github && pull_request.source.pane);
+        assert_eq!(pull_request.panes[0].pane_id, panes[0].pane_id);
+    }
+
+    #[test]
+    fn pane_declared_objects_are_fetched_with_empty_repo_config() {
+        let dir = fixture_dir("pane-fallback");
+        let gh_log = dir.join("gh-argv.log");
+        let linear_log = dir.join("linear-argv.log");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "pr list --repo pane/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[]' ;;
+  "pr list --repo pane/repo --state open"*) printf '%s' '[]' ;;
+  "pr view 77 --repo pane/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":77,"title":"Merged pane PR","state":"MERGED","headRefName":"issue/out-9","url":"https://github.com/pane/repo/pull/77"}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                gh_log.display()
+            ),
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "issues list"*) printf '%s' '{{"nodes":[]}}' ;;
+  "cycles list"*) printf '%s' '{{"nodes":[]}}' ;;
+  *"issues read SCA-9999") printf '%s' '{{"identifier":"SCA-9999","title":"Outside filter","description":"full summary","state":{{"name":"Canceled"}},"assignee":{{"name":"other"}},"priority":1,"branchName":"issue/sca-9999"}}' ;;
+  "attachments list SCA-9999"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+                linear_log.display()
+            ),
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            repo: Some("pane/repo".into()),
+            pr_urls: vec!["https://github.com/pane/repo/pull/77".into()],
+            ticket_ids: vec!["SCA-9999".into()],
+            ..Default::default()
+        });
+        let mut config = config();
+        config.repos.clear();
+
+        let snapshot = refresh_work_index(
+            &config,
+            &panes,
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        let pull_request = snapshot
+            .items
+            .iter()
+            .find(|item| item.pr_url.as_deref() == Some("https://github.com/pane/repo/pull/77"))
+            .expect("pane pull request");
+        assert_eq!(pull_request.pr_title.as_deref(), Some("Merged pane PR"));
+        assert_eq!(pull_request.pr_state.as_deref(), Some("merged"));
+        assert!(pull_request.source.github && pull_request.source.pane);
+        let ticket = snapshot
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .find(|ticket| ticket.identifier == "SCA-9999")
+            .expect("pane ticket");
+        assert_eq!(ticket.title.as_deref(), Some("Outside filter"));
+        assert_eq!(ticket.description.as_deref(), Some("full summary"));
+        assert!(snapshot.items.iter().any(|item| {
+            item.source.linear && item.source.pane && item.ticket_ids == ["SCA-9999"]
+        }));
+        let gh_argv = std::fs::read_to_string(gh_log).expect("GitHub argv");
+        assert!(gh_argv.contains("pr list --repo pane/repo --state open"));
+        assert!(gh_argv.contains(&format!(
+            "pr view 77 --repo pane/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}"
+        )));
+        let linear_argv = std::fs::read_to_string(linear_log).expect("Linear argv");
+        assert!(linear_argv
+            .lines()
+            .any(|line| line.ends_with("issues read SCA-9999")));
+    }
+
+    #[test]
+    fn observation_budgets_cover_real_provider_latency() {
+        assert!(WORK_INDEX_TARGET_TIMEOUT >= Duration::from_secs(20));
+        assert!(WORK_INDEX_BATCH_TIMEOUT >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn pane_pull_request_finishes_before_slow_list_and_previous_list_items_survive() {
+        let dir = fixture_dir("pane-before-slow-list");
+        let argv_log = dir.join("gh-argv.log");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "pr view 159 --repo owner/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":159,"title":"Pane first","state":"MERGED","headRefName":"t3/f15","url":"https://github.com/owner/repo/pull/159"}}' ;;
+  "pr list --repo owner/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") exec sleep 1 ;;
+  *) exit 42 ;;
+esac
+"#,
+                argv_log.display()
+            ),
+            "#!/bin/sh\ncase \"$*\" in *\"issues list\"*) printf '%s' '{\"nodes\":[]}' ;; *\"cycles list\"*) printf '%s' '{\"nodes\":[]}' ;; *) printf '%s' '[]' ;; esac\n",
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            repo: Some("owner/repo".into()),
+            pr_urls: vec!["https://github.com/owner/repo/pull/159".into()],
+            ..Default::default()
+        });
+        let previous = Snapshot {
+            items: vec![WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(7),
+                pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+                pr_title: Some("Previous list item".into()),
+                pr_state: Some("open".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: PrCheckState::Unknown,
+                audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: Some("previous".into()),
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: WorkItemSource {
+                    github: true,
+                    ..WorkItemSource::default()
+                },
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        let snapshot = refresh_work_index_with_missive(
+            &config(),
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                previous: Some(&previous),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_millis(100),
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        assert!(snapshot.items.iter().any(|item| {
+            item.pr_number == Some(159)
+                && item.pr_title.as_deref() == Some("Pane first")
+                && item.source.pane
+        }));
+        assert!(snapshot.items.iter().any(|item| item.pr_number == Some(7)));
+        assert_eq!(
+            snapshot.unavailable_reason(WorkIndexSource::Github),
+            Some("list observation timed out")
+        );
+        let argv = std::fs::read_to_string(argv_log).expect("GitHub argv");
+        let mut calls = argv.lines();
+        assert!(calls
+            .next()
+            .is_some_and(|call| call.starts_with("pr view 159 --repo owner/repo")));
+        assert!(calls
+            .next()
+            .is_some_and(|call| call.starts_with("pr list --repo owner/repo")));
+    }
+
+    #[test]
+    fn repo_union_deduplicates_config_pane_and_pull_request_repositories() {
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            repo: Some("owner/repo".into()),
+            pr_urls: vec![
+                "https://github.com/OWNER/repo/pull/1".into(),
+                "https://github.com/pane/other/pull/2".into(),
+            ],
+            ..Default::default()
+        });
+        let mut config = config();
+        config.repos = vec!["owner/repo".into(), "configured/only".into()];
+
+        assert_eq!(
+            work_index_repos(&config, &panes),
+            ["owner/repo", "configured/only", "pane/other"]
+        );
+    }
+
+    #[test]
+    fn failed_repository_does_not_discard_a_successful_pane_pull_request() {
+        let dir = fixture_dir("partial-repo-failure");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 77 --repo good/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":77,"title":"Fresh pane PR","state":"MERGED","headRefName":"issue/77","url":"https://github.com/good/repo/pull/77"}}' ;;
+  "pr list --repo good/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[]' ;;
+  "pr list --repo bad/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' 'rate limited' >&2; exit 42 ;;
+  *"--state open"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#
+            ),
+            "#!/bin/sh\nprintf '%s' '{\"nodes\":[]}'\n",
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec!["https://github.com/good/repo/pull/77".into()],
+            ..Default::default()
+        });
+        let mut config = config();
+        config.repos = vec!["good/repo".into(), "bad/repo".into()];
+
+        let snapshot = refresh_work_index(
+            &config,
+            &panes,
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        assert!(snapshot.items.iter().any(|item| {
+            item.pr_number == Some(77)
+                && item.pr_title.as_deref() == Some("Fresh pane PR")
+                && item.source.github
+                && item.source.pane
+        }));
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Github)
+            .is_some_and(|reason| reason.contains("rate limited")));
+    }
+
+    #[test]
+    fn github_audience_failure_is_named_without_discarding_pull_requests() {
+        let dir = fixture_dir("github-audience-failure");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr list --repo owner/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[{{"number":7,"title":"Visible PR","state":"OPEN","headRefName":"issue/7","url":"https://github.com/owner/repo/pull/7"}}]' ;;
+  *"--state open"*) printf '%s' 'audience unavailable' >&2; exit 42 ;;
+  *) exit 43 ;;
+esac
+"#
+            ),
+            "#!/bin/sh\nprintf '%s' '{\"nodes\":[]}'\n",
+        );
+
+        let snapshot = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        assert!(snapshot.items.iter().any(|item| item.pr_number == Some(7)));
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Github)
+            .is_some_and(|reason| reason.contains("audience unavailable")));
     }
 
     #[test]
@@ -3261,7 +5343,7 @@ esac
 "#,
             r#"#!/bin/sh
 case "$*" in
-  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"name":"Matthias"}}' ;;
+  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"id":"linear-user-1","name":"Matthias"}}' ;;
   "users list --active -l 250 --compact") printf '%s' '{"nodes":[{"name":"Ada"},{"name":"Matthias"}]}' ;;
   *) exit 42 ;;
 esac
@@ -3282,9 +5364,15 @@ esac
             WORK_INDEX_TARGET_TIMEOUT,
             &gh,
             &linearis,
+            None,
+            WorkIndexCacheBypass::default(),
         );
 
         assert_eq!(session.linear.viewer.as_deref(), Some("Matthias"));
+        assert_eq!(
+            session.linear_query_identity.as_deref(),
+            Some("linear-user-1")
+        );
         assert_eq!(session.linear.assignees, ["Ada", "Matthias"]);
         assert_eq!(session.github.viewer.as_deref(), Some("matthias"));
         assert_eq!(session.github.assignees, ["grace", "matthias"]);
@@ -3299,6 +5387,8 @@ esac
             WORK_INDEX_TARGET_TIMEOUT,
             Path::new("/usr/bin/false"),
             Path::new("/usr/bin/false"),
+            None,
+            WorkIndexCacheBypass::default(),
         );
         assert_eq!(
             unchanged, session,
@@ -3308,13 +5398,86 @@ esac
     }
 
     #[test]
-    fn github_pull_request_fetch_requests_created_at() {
+    fn linear_viewer_name_fallback_and_unresolved_query_omission() {
+        let fallback_dir = fixture_dir("linear-viewer-name-fallback");
+        let (_, fallback_linearis) = fake_programs(
+            &fallback_dir,
+            "#!/bin/sh\nexit 42\n",
+            r#"#!/bin/sh
+case "$*" in
+  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"name":"Matthias"}}' ;;
+  "users list --active -l 250 --compact") printf '%s' '{"nodes":[]}' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let (fallback, fallback_identity) = fetch_linear_directory(
+            &fallback_linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
+        );
+        assert_eq!(fallback.viewer.as_deref(), Some("Matthias"));
+        assert_eq!(fallback_identity.as_deref(), Some("Matthias"));
+
+        let unresolved_dir = fixture_dir("linear-viewer-unresolved");
+        let argv_log = unresolved_dir.join("linearis-argv.log");
+        let (_, unresolved_linearis) = fake_programs(
+            &unresolved_dir,
+            "#!/bin/sh\nexit 42\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "auth status --compact") printf '%s' '{{"authenticated":true}}' ;;
+  "users list --active -l 250 --compact") printf '%s' '{{"nodes":[]}}' ;;
+  *"issues list --team SCA -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"unfiltered","state":{{"name":"In Progress"}},"assignee":{{"name":"Ada"}}}}]}}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{{"nodes":[]}}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{{"nodes":[]}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                argv_log.display()
+            ),
+        );
+        let (unresolved, unresolved_identity) = fetch_linear_directory(
+            &unresolved_linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
+        );
+        assert!(unresolved.viewer.is_none());
+        assert!(unresolved_identity.is_none());
+        let observation = fetch_linear_tickets(
+            "SCA",
+            unresolved_identity.as_deref(),
+            &unresolved_linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
+        )
+        .expect("unfiltered Linear tickets");
+        let tickets = observation.tickets;
+        assert_eq!(tickets.len(), 1);
+        let session = WorkIndexSession::default();
+        assert!(
+            crate::app::state::SidebarWorkFilter::default().matches_linear(&tickets[0], &session)
+        );
+        let argv = std::fs::read_to_string(argv_log).expect("Linear argv");
+        assert!(argv
+            .lines()
+            .any(|call| call.ends_with("issues list --team SCA -l 100")));
+        assert!(!argv.split_whitespace().any(|argument| argument == "me"));
+    }
+
+    #[test]
+    fn github_pull_request_list_uses_lean_open_query() {
         let dir = fixture_dir("github-created-at");
         let (gh, _linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-test "$*" = "pr list --repo owner/repo --state all --limit 200 --json number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
-printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"login":"grace"}],"state":"MERGED","headRefName":"branch","baseRefName":"main","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","additions":12,"deletions":3,"labels":[{"name":"bug"}],"statusCheckRollup":[{"name":"test","conclusion":"SUCCESS"}]}]'
+test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,author,assignees,state,updatedAt,createdAt,reviewDecision,labels,isDraft,headRefName,url" || exit 42
+printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"login":"grace"}],"state":"OPEN","headRefName":"branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","labels":[{"name":"bug"}]}]'
 "#,
             "#!/bin/sh\nprintf '%s' '[]'\n",
         );
@@ -3323,6 +5486,8 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"l
             "owner/repo",
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .unwrap_or_else(|_| panic!("GitHub pull request fetch failed"));
 
@@ -3333,13 +5498,13 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"l
         );
         assert_eq!(pull_requests[0].author.as_deref(), Some("ada"));
         assert_eq!(pull_requests[0].assignees, vec!["grace"]);
-        assert_eq!(pull_requests[0].state, "merged");
+        assert_eq!(pull_requests[0].state, "open");
         assert_eq!(
             (pull_requests[0].additions, pull_requests[0].deletions),
-            (12, 3)
+            (0, 0)
         );
         assert_eq!(pull_requests[0].labels, vec!["bug"]);
-        assert_eq!(pull_requests[0].check_state, PrCheckState::Passing);
+        assert_eq!(pull_requests[0].check_state, PrCheckState::Unknown);
     }
 
     #[test]
@@ -3350,7 +5515,7 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"l
             &format!(
                 r#"#!/bin/sh
 test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
-printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"reviews":[{{"author":{{"login":"grace"}}}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}}'
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"reviews":[{{"author":{{"login":"grace"}}}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","autoMergeRequest":{{"enabledAt":"2026-08-30T12:30:00Z"}}}}'
 "#
             ),
             "#!/bin/sh\nprintf '%s' '[]'\n",
@@ -3361,6 +5526,8 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
             7,
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .unwrap_or_else(|_| panic!("GitHub pull request detail fetch failed"));
 
@@ -3369,6 +5536,7 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         assert_eq!(detail.reviewers, vec!["grace"]);
         assert_eq!(detail.head_sha.as_deref(), Some("abcdef012345"));
         assert_eq!(detail.merge_state_status.as_deref(), Some("CLEAN"));
+        assert!(detail.auto_merge_enabled);
         assert_eq!(detail.labels, vec!["high-risk"]);
         assert_eq!(detail.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
         assert_eq!(
@@ -3392,6 +5560,173 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
     }
 
     #[test]
+    fn github_timeline_maps_real_shape_fixture_newest_first() {
+        let fixture = include_str!("../tests/fixtures/work-index/github-pr-timeline.json");
+        let events = parse_github_timeline(
+            serde_json::from_str(fixture).expect("real-shape GitHub timeline fixture"),
+        );
+
+        assert_eq!(events.len(), 7);
+        assert_eq!(events[0].kind, "commented");
+        assert_eq!(events[0].actor.as_deref(), Some("reviewer"));
+        assert_eq!(events[0].summary, "First line of the comment");
+        assert_eq!(events[1].summary, "merged 1234567");
+        assert_eq!(events[2].summary, "labeled approved");
+        assert_eq!(events[3].summary, "review requested from reviewer");
+        assert_eq!(events[4].summary, "review approved");
+        assert_eq!(events[5].summary, "fix: map timeline events");
+        assert_eq!(events[6].summary, "closed");
+    }
+
+    #[test]
+    fn github_timeline_uses_paginated_lean_api_argv() {
+        let dir = fixture_dir("github-timeline-argv");
+        let log = dir.join("argv.log");
+        let gh = dir.join("gh");
+        write_executable(
+            &gh,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s' '[]'\n",
+                log.display()
+            ),
+        );
+
+        assert!(fetch_github_timeline(
+            "owner/repo",
+            42,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            true,
+        )
+        .expect("GitHub timeline")
+        .is_empty());
+        let argv = std::fs::read_to_string(log).expect("timeline argv");
+        assert!(
+            argv.starts_with("api repos/owner/repo/issues/42/timeline --paginate --jq "),
+            "{argv}"
+        );
+        assert!(argv.contains("{event,created_at"), "{argv}");
+        assert!(argv.contains("| @json"), "{argv}");
+    }
+
+    #[test]
+    fn github_collaborators_use_paginated_lean_api_argv() {
+        let dir = fixture_dir("github-collaborators");
+        let log = dir.join("argv.log");
+        let gh = dir.join("gh");
+        write_executable(
+            &gh,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s' '[[{{\"login\":\"Zed\"}},{{\"login\":\"ada\"}},{{\"login\":\"Ada\"}}]]'\n",
+                log.display()
+            ),
+        );
+
+        let collaborators = fetch_github_collaborators(
+            "owner/repo",
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("GitHub collaborators");
+
+        assert_eq!(collaborators, ["ada", "Zed"]);
+        assert_eq!(
+            std::fs::read_to_string(log).expect("collaborator argv"),
+            "api repos/owner/repo/collaborators --paginate --jq .[] | {login} | @json\n"
+        );
+    }
+
+    #[test]
+    fn on_demand_github_detail_is_cached_in_snapshot_item_and_round_trips() {
+        let dir = fixture_dir("github-detail-snapshot-cache");
+        let (gh, _linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
+printf '%s' '{{"number":7,"title":"Detail","body":"Fetched on demand","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","url":"https://github.com/owner/repo/pull/7","statusCheckRollup":[{{"name":"test","conclusion":"SUCCESS"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}]}}'
+"#
+            ),
+            "#!/bin/sh\nexit 42\n",
+        );
+        let detail = fetch_github_pull_request_detail(
+            "owner/repo",
+            7,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
+        )
+        .expect("on-demand GitHub detail");
+        let key = work_item_key(7);
+        let mut snapshot = Snapshot {
+            items: vec![WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(7),
+                pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+                pr_title: Some("Lean summary".into()),
+                pr_state: Some("open".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: PrCheckState::Unknown,
+                audience: PrAudience::Unclassified,
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: Some("feat/detail".into()),
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: WorkItemSource {
+                    github: true,
+                    ..WorkItemSource::default()
+                },
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        assert!(snapshot.cache_pr_detail(&key, &detail));
+        let path = dir.join("snapshot.json");
+        write_snapshot(&path, &snapshot).expect("persist snapshot detail");
+
+        let loaded = load_snapshot(&path).expect("load snapshot detail");
+        let cached = loaded.items[0]
+            .cached_pr_detail
+            .as_ref()
+            .expect("cached PR detail");
+        assert_eq!(cached.body.as_deref(), Some("Fetched on demand"));
+        assert_eq!(cached.checks.as_ref().map(|checks| checks.total), Some(1));
+        assert_eq!(cached.files[0].additions, 4);
+        let cache = WorkItemDetailCache::from_snapshot(Some(&loaded));
+        assert_eq!(
+            cache.get(&key).and_then(|detail| detail.body.as_deref()),
+            Some("Fetched on demand")
+        );
+        assert!(!cache.is_fresh(&key, Instant::now(), Duration::from_secs(300)));
+        let mut refreshed_items = loaded.items.clone();
+        refreshed_items[0].cached_pr_detail = None;
+        carry_cached_pr_details(&mut refreshed_items, Some(&loaded));
+        assert_eq!(
+            refreshed_items[0]
+                .cached_pr_detail
+                .as_ref()
+                .and_then(|detail| detail.body.as_deref()),
+            Some("Fetched on demand")
+        );
+    }
+
+    #[test]
     fn github_pull_request_detail_maps_the_real_cli_shape() {
         let dir = fixture_dir("github-detail-real-shape");
         let fixture = include_str!("../tests/fixtures/work-index/github-pr-view.json");
@@ -3405,6 +5740,8 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
             125,
             &gh,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("GitHub pull request detail from captured CLI fixture");
 
@@ -3452,9 +5789,16 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
 "#,
         );
 
-        let tickets =
-            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
-                .expect("Linear ticket fetch");
+        let observation = fetch_linear_tickets(
+            "SCA",
+            None,
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
+        )
+        .expect("Linear ticket fetch");
+        let tickets = observation.tickets;
 
         assert_eq!(
             tickets[0].relations,
@@ -3467,7 +5811,7 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
     }
 
     #[test]
-    fn linear_ticket_sets_use_assignee_triage_and_active_cycle_queries() {
+    fn linear_cycle_query_uses_id_and_keeps_the_cycle_name() {
         let dir = fixture_dir("linear-ticket-sets");
         let log = dir.join("argv.log");
         let (_gh, linearis) = fake_programs(
@@ -3477,10 +5821,10 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 case "$*" in
-  "issues list --team SCA --assignee me -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
-  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
-  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[{{"name":"cycle 34"}}]}}' ;;
-  "issues list --team SCA --cycle cycle 34 --status Done -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4,"cycle":{{"name":"cycle 34"}}}}]}}' ;;
+  *"issues list --team SCA --assignee linear-user-1 -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{{"nodes":[{{"id":"cycle-id-34","name":"cycle 34"}}]}}' ;;
+  *"issues list --team SCA --cycle cycle-id-34 --status Done -l 100") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4}}]}}' ;;
   *) exit 42 ;;
 esac
 "#,
@@ -3488,9 +5832,17 @@ esac
             ),
         );
 
-        let tickets =
-            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
-                .expect("Linear ticket sets");
+        let observation = fetch_linear_tickets(
+            "SCA",
+            Some("linear-user-1"),
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
+        )
+        .expect("Linear ticket sets");
+        assert!(observation.group_failures.is_empty());
+        let tickets = observation.tickets;
 
         assert_eq!(tickets.len(), 3);
         assert_eq!(tickets[0].group, TicketGroup::Assigned);
@@ -3499,9 +5851,137 @@ esac
         assert_eq!(tickets[0].priority, Some(2));
         assert_eq!(tickets[2].cycle.as_deref(), Some("cycle 34"));
         let argv = std::fs::read_to_string(log).expect("read argv log");
-        assert!(argv.contains("--assignee me"));
+        assert!(argv.contains("--assignee linear-user-1"));
+        assert!(!argv.split_whitespace().any(|argument| argument == "me"));
         assert!(argv.contains("--status Triage"));
-        assert!(argv.contains("--cycle cycle 34 --status Done"));
+        assert!(argv.contains("--cycle cycle-id-34 --status Done"));
+        assert!(!argv.contains("--cycle cycle 34 --status Done"));
+    }
+
+    #[test]
+    fn triage_failure_keeps_other_groups_and_the_previous_triage_group() {
+        let dir = fixture_dir("linear-triage-degraded");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+case "$*" in
+  *"issues list --team SCA -l 100") printf '%s' '{"nodes":[]}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous triage","state":{"name":"Triage"}}]}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{"nodes":[]}' ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let mut linear_only = config();
+        linear_only.repos.clear();
+        let previous = refresh_work_index(
+            &linear_only,
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+        write_executable(
+            &linearis,
+            r#"#!/bin/sh
+case "$*" in
+  *"issues list --team SCA -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' 'triage unavailable' >&2; exit 42 ;;
+  *"cycles list --team SCA --active") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
+  *"issues list --team SCA --cycle cycle-id-34 --status Done -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-3","title":"Done","state":{"name":"Done"}}]}' ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+        );
+
+        let snapshot = refresh_work_index_with_missive(
+            &linear_only,
+            &MissiveConfig::default(),
+            &[],
+            WorkIndexRefreshContext {
+                previous: Some(&previous),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        let tickets = snapshot
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .collect::<Vec<_>>();
+        assert!(tickets
+            .iter()
+            .any(|ticket| ticket.identifier == "SCA-1" && ticket.group == TicketGroup::Assigned));
+        assert!(tickets
+            .iter()
+            .any(|ticket| { ticket.identifier == "SCA-2" && ticket.group == TicketGroup::Triage }));
+        assert!(tickets.iter().any(|ticket| {
+            ticket.identifier == "SCA-3" && ticket.group == TicketGroup::DoneThisCycle
+        }));
+        let reason = snapshot
+            .unavailable_reason(WorkIndexSource::Linear)
+            .expect("Triage degradation");
+        assert!(reason.contains("Triage"), "{reason}");
+        assert!(reason.contains("triage unavailable"), "{reason}");
+    }
+
+    #[test]
+    fn done_group_failure_keeps_assigned_and_triage_groups() {
+        let dir = fixture_dir("linear-done-degraded");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+case "$*" in
+  *"issues list --team SCA -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-1","title":"Assigned","state":{"name":"In Progress"}}]}' ;;
+  *"issues list --team SCA --status Triage -l 100") printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Triage","state":{"name":"Triage"}}]}' ;;
+  *"cycles list --team SCA --active") printf '%s' '{"nodes":[{"id":"cycle-id-34","name":"cycle 34"}]}' ;;
+  *"issues list --team SCA --cycle cycle-id-34 --status Done -l 100") printf '%s' 'done unavailable' >&2; exit 42 ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+        );
+        let mut linear_only = config();
+        linear_only.repos.clear();
+
+        let snapshot = refresh_work_index(
+            &linear_only,
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        let tickets = snapshot
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .collect::<Vec<_>>();
+        assert!(tickets
+            .iter()
+            .any(|ticket| ticket.identifier == "SCA-1" && ticket.group == TicketGroup::Assigned));
+        assert!(tickets
+            .iter()
+            .any(|ticket| { ticket.identifier == "SCA-2" && ticket.group == TicketGroup::Triage }));
+        let reason = snapshot
+            .unavailable_reason(WorkIndexSource::Linear)
+            .expect("DoneThisCycle degradation");
+        assert!(reason.contains("DoneThisCycle"), "{reason}");
+        assert!(reason.contains("done unavailable"), "{reason}");
     }
 
     #[test]
@@ -3520,6 +6000,8 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
             "SCA-7",
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("Linear ticket detail");
         assert_eq!(detail.title.as_deref(), Some("ticket"));
@@ -3540,6 +6022,8 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
             "SCA-3165",
             &linearis,
             Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            None,
+            false,
         )
         .expect("Linear ticket detail from captured CLI fixture");
 
@@ -3561,14 +6045,45 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
     }
 
     #[test]
-    fn branch_and_body_mentions_join_pull_requests_to_tickets() {
+    fn linear_ticket_fixture_round_trips_creator() {
+        let fixture = include_str!("../tests/fixtures/work-index/linear-issue-read.json");
+        let value = serde_json::from_str(fixture).expect("Linear ticket fixture");
+        let ticket = parse_linear_ticket(&value, TicketGroup::Assigned)
+            .expect("ticket parsed from captured CLI fixture");
+
+        assert_eq!(
+            ticket.creator.as_ref(),
+            Some(&WorkPerson {
+                id: "creator_redacted".into(),
+                name: "Example Creator".into(),
+            })
+        );
+        let encoded = serde_json::to_string(&ticket).expect("serialize ticket");
+        let decoded = serde_json::from_str::<WorkTicket>(&encoded).expect("deserialize ticket");
+        assert_eq!(decoded, ticket);
+    }
+
+    #[test]
+    fn linear_ticket_without_creator_parses_with_none() {
+        let value = serde_json::json!({
+            "identifier": "SCA-1",
+            "title": "No creator in compact output"
+        });
+        let ticket =
+            parse_linear_ticket(&value, TicketGroup::Assigned).expect("ticket without creator");
+
+        assert_eq!(ticket.creator, None);
+    }
+
+    #[test]
+    fn lean_pull_request_summaries_join_tickets_from_branch_only() {
         let dir = fixture_dir("ticket-pr-join");
         let (gh, linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
 case "$*" in
   *"--author @me"*|*"review-requested:@me"*) printf '%s' '[]' ;;
-  *) printf '%s' '[{"number":7,"title":"branch match","body":"","headRefName":"issue/sca-7-fix","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"body match","body":"Tracks SCA-7.","headRefName":"plain","url":"https://github.com/owner/repo/pull/8"}]' ;;
+  *) printf '%s' '[{"number":7,"title":"branch match","headRefName":"issue/sca-7-fix","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"body unavailable in list","headRefName":"plain","url":"https://github.com/owner/repo/pull/8"}]' ;;
 esac
 "#,
             r#"#!/bin/sh
@@ -3594,7 +6109,8 @@ esac
             .filter(|item| item.pr_number.is_some())
             .collect::<Vec<_>>();
         assert_eq!(linked.len(), 2);
-        assert!(linked.iter().all(|item| item.ticket_ids == ["SCA-7"]));
+        assert_eq!(linked[0].ticket_ids, ["SCA-7"]);
+        assert!(linked[1].ticket_ids.is_empty());
     }
 
     #[test]
@@ -3720,7 +6236,7 @@ esac
     }
 
     #[test]
-    fn one_bounded_batch_prefetches_the_active_pr_section_selected_first() {
+    fn one_bounded_batch_fetches_only_the_selected_pr_detail() {
         let mut app = test_app_with_work_index();
         app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
         app.state.workspaces = vec![
@@ -3775,7 +6291,7 @@ esac
             .as_ref()
             .expect("detail batch");
         assert_eq!(refresh.generation, 1, "second call must not start a batch");
-        assert_eq!(refresh.keys.len(), 2);
+        assert_eq!(refresh.keys.len(), 1);
         assert_eq!(refresh.keys.first(), Some(&key));
         assert!(refresh
             .keys
@@ -3784,7 +6300,7 @@ esac
     }
 
     #[test]
-    fn detail_prefetch_batch_is_capped_at_cache_capacity() {
+    fn pr_detail_refresh_does_not_prefetch_the_visible_list() {
         let mut app = test_app_with_work_index();
         app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
         app.state.workspaces = (1_u64..=20)
@@ -3822,7 +6338,84 @@ esac
                 .expect("detail batch")
                 .keys
                 .len(),
-            WORK_ITEM_DETAIL_CACHE_CAPACITY
+            1
+        );
+    }
+
+    #[test]
+    fn focused_pr_detail_refresh_is_debounced_for_thirty_seconds() {
+        let dir = fixture_dir("focused-pr-detail-debounce");
+        let log = dir.join("detail.log");
+        let gh = dir.join("gh");
+        write_executable(
+            &gh,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}")
+    printf '%s\n' detail >> '{}'
+    printf '%s' '{{"number":7,"title":"Detail","url":"https://github.com/owner/repo/pull/7"}}'
+    ;;
+  "api repos/owner/repo/issues/7/timeline"*) printf '%s' '[]' ;;
+  "api graphql"*) printf '%s' '{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[]}}}}}}}}}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(gh);
+        app.work_index_provider_cache_root_override = Some(dir.clone());
+        let key = work_item_key(7);
+        let now = Instant::now();
+
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        let event = app.event_rx.blocking_recv().expect("first detail result");
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(app.handle_work_item_detail_refreshed(generation, details));
+
+        app.start_work_item_detail_refresh_if_due(
+            now + Duration::from_secs(29),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("first count"),
+            "detail\n"
+        );
+
+        app.start_work_item_detail_refresh_if_due(
+            now + Duration::from_secs(31),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key),
+            true,
+        );
+        let event = app.event_rx.blocking_recv().expect("second detail result");
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(app.handle_work_item_detail_refreshed(generation, details));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("second count"),
+            "detail\ndetail\n"
         );
     }
 
@@ -4023,9 +6616,341 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
         assert_eq!(snapshot.items.len(), 1);
         assert_eq!(snapshot.items[0].pr_number, Some(7));
         let unavailable = snapshot.unavailable.expect("degraded message");
+        let unavailable = unavailable.summary();
         // Collapsed to one line, so the cause is legible rather than "{".
         assert!(unavailable.contains("No API token found"), "{unavailable}");
         assert!(!unavailable.contains('\n'));
+    }
+
+    #[test]
+    fn provider_failures_keep_previous_source_items_and_name_every_reason() {
+        let dir = fixture_dir("all-sources-degraded");
+        let (good_gh, good_linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+case "$*" in
+  *"--author @me"*|*"review-requested:@me"*) printf '%s' '[]' ;;
+  *) printf '%s' '[{"number":7,"title":"Previous PR","body":"","state":"OPEN","headRefName":"old","url":"https://github.com/owner/repo/pull/7"}]' ;;
+esac
+"#,
+            r#"#!/bin/sh
+case "$*" in
+  *"issues list"*) printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous ticket","state":{"name":"In Progress"}}]}' ;;
+  *"cycles list"*) printf '%s' '{"nodes":[]}' ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let mut previous = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &good_gh,
+            &good_linearis,
+        );
+        previous.conversations.push(MissiveConversation {
+            id: "previous".into(),
+            subject: "Previous conversation".into(),
+            app_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+            assignees: Vec::new(),
+            last_activity_at: None,
+            closed: false,
+            labels: Vec::new(),
+            pane_bound: true,
+            messages: Vec::new(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        });
+        let (failed_gh, failed_linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' 'github rate limited' >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s' 'linear rate limited' >&2\nexit 1\n",
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/previous".into()],
+            ..Default::default()
+        });
+
+        let snapshot = refresh_work_index_with_missive(
+            &config(),
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                previous: Some(&previous),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &failed_gh,
+            &failed_linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        assert!(snapshot
+            .items
+            .iter()
+            .any(|item| item.pr_title.as_deref() == Some("Previous PR")));
+        assert!(snapshot.items.iter().any(|item| {
+            item.ticket_details
+                .iter()
+                .any(|ticket| ticket.title.as_deref() == Some("Previous ticket"))
+        }));
+        assert_eq!(snapshot.conversations[0].subject, "Previous conversation");
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Github)
+            .is_some_and(|reason| reason.contains("github rate limited")));
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Linear)
+            .is_some_and(|reason| reason.contains("linear rate limited")));
+        assert_eq!(
+            snapshot.unavailable_reason(WorkIndexSource::Missive),
+            Some("team is not configured")
+        );
+    }
+
+    #[test]
+    fn linear_lists_use_compact_fields_and_increment_after_the_ten_minute_ttl() {
+        let dir = fixture_dir("linear-incremental");
+        let log = dir.join("argv.log");
+        let (_gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *"--created-after 2026-09-07") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"new","state":{{"name":"Triage"}}}}]}}' ;;
+  *) printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"full","state":{{"name":"Triage"}}}}]}}' ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let base = parse_rfc3339_system_time("2026-09-07T08:00:00Z").expect("base time");
+        let first_cache = ProviderCache::at_time(&dir, base);
+        let first = fetch_linear_ticket_group(
+            "SCA",
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            TicketGroup::Triage,
+            &["--status", "Triage"],
+            true,
+            Some(&first_cache),
+            false,
+        )
+        .expect("full query");
+        assert_eq!(first.len(), 1);
+
+        let incremental_cache = ProviderCache::at_time(&dir, base + Duration::from_secs(10 * 60));
+        let merged = fetch_linear_ticket_group(
+            "SCA",
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+            TicketGroup::Triage,
+            &["--status", "Triage"],
+            true,
+            Some(&incremental_cache),
+            false,
+        )
+        .expect("incremental query");
+        assert_eq!(
+            merged
+                .iter()
+                .map(|ticket| ticket.identifier.as_str())
+                .collect::<Vec<_>>(),
+            ["SCA-1", "SCA-2"]
+        );
+        let calls = std::fs::read_to_string(log).expect("argv log");
+        assert_eq!(calls.lines().count(), 2);
+        assert!(calls.lines().all(|call| call.contains(LINEAR_LIST_FIELDS)));
+        assert!(calls.contains("--created-after 2026-09-07"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn selected_ticket_is_read_even_when_lists_do_not_contain_it() {
+        let dir = fixture_dir("selected-ticket-refresh");
+        let log = dir.join("argv.log");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *"issues read SCA-77") printf '%s' '{{"identifier":"SCA-77","title":"selected","state":{{"name":"In Progress"}}}}' ;;
+  *"issues list"*|*"cycles list"*) printf '%s' '{{"nodes":[]}}' ;;
+  *"attachments list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let mut config = config();
+        config.repos.clear();
+        let snapshot = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &[],
+            WorkIndexRefreshContext {
+                selected_ticket: Some("SCA-77"),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+        assert!(snapshot.items.iter().any(|item| {
+            item.ticket_details
+                .iter()
+                .any(|ticket| ticket.identifier == "SCA-77")
+        }));
+        let calls = std::fs::read_to_string(log).expect("argv log");
+        assert!(calls.lines().any(|call| {
+            call.contains(LINEAR_ITEM_FIELDS) && call.ends_with("issues read SCA-77")
+        }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn declared_ticket_already_listed_is_still_refetched() {
+        let dir = fixture_dir("declared-ticket-already-listed");
+        let log = dir.join("linear-argv.log");
+        let linearis_script = r##"#!/bin/sh
+printf '%s\n' "$*" >> "{linear_log}"
+if echo "$*" | grep -q 'issues read SCA-77'; then
+  printf '%s' '{{"identifier":"SCA-77","title":"detailed","state":{"name":"In Progress"}}}'
+elif echo "$*" | grep -q 'issues list'; then
+  printf '%s' '{{"nodes":[{"identifier":"SCA-77","title":"listed","state":{"name":"Triage"}}]}}'
+elif echo "$*" | grep -q 'cycles list'; then
+  printf '%s' '{{"nodes":[]}}'
+elif echo "$*" | grep -q 'attachments list'; then
+  printf '%s' '[]'
+else
+  exit 42
+fi
+"##
+        .replace("{linear_log}", &log.display().to_string());
+        let (gh, linearis) = fake_programs(&dir, "#!/bin/sh\nprintf '%s' '[]'\n", &linearis_script);
+        let mut config = config();
+        config.repos.clear();
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["SCA-77".into()],
+            ..Default::default()
+        });
+        let first_cache = ProviderCache::at_time(
+            &dir,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        let first = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                provider_cache: Some(&first_cache),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+        let second_cache = ProviderCache::at_time(
+            &dir,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 10 * 60 + 1),
+        );
+        let _ = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                previous: Some(&first),
+                provider_cache: Some(&second_cache),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        let calls = std::fs::read_to_string(log).expect("Linear argv");
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|call| call.contains("issues read SCA-77"))
+                .count(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn degradation_text_is_short_but_keeps_the_raw_reason() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let raw = r#"{"error":"Rate limit exceeded. Only 2500 requests are allowed per 1 hour"}"#;
+        let mut unavailable = WorkIndexUnavailable::only(WorkIndexSource::Linear, raw);
+        unavailable
+            .record_rate_limit_until(WorkIndexSource::Linear, now + Duration::from_secs(12 * 60));
+        assert_eq!(
+            unavailable
+                .short_reason(WorkIndexSource::Linear, now)
+                .as_deref(),
+            Some("rate limited · retry in 12m")
+        );
+        assert_eq!(unavailable.reason(WorkIndexSource::Linear), Some(raw));
+
+        let previous = Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(unavailable.clone()),
+            observed_at: now,
+        };
+        let mut next = WorkIndexUnavailable::only(WorkIndexSource::Linear, "rate limited");
+        preserve_previous_rate_limit_reasons(&mut next, Some(&previous));
+        assert_eq!(next.reason(WorkIndexSource::Linear), Some(raw));
+
+        let timeout = WorkIndexUnavailable::only(
+            WorkIndexSource::Github,
+            "pull request observation timed out",
+        );
+        assert_eq!(
+            timeout
+                .short_reason(WorkIndexSource::Github, now)
+                .as_deref(),
+            Some("timed out (30s)")
+        );
+        let missive =
+            WorkIndexUnavailable::only(WorkIndexSource::Missive, "Missive team is not configured");
+        assert_eq!(
+            missive
+                .short_reason(WorkIndexSource::Missive, now)
+                .as_deref(),
+            Some("team not configured")
+        );
+        let group = WorkIndexUnavailable::only(
+            WorkIndexSource::Linear,
+            "Triage: Linear observation failed: opaque provider JSON",
+        );
+        assert_eq!(
+            group.short_reason(WorkIndexSource::Linear, now).as_deref(),
+            Some("Triage query failed (see log)")
+        );
     }
 
     #[test]
@@ -4068,8 +6993,8 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
         );
         assert!(snapshot.items.is_empty());
         assert_eq!(
-            snapshot.unavailable.as_deref(),
-            Some("GitHub observation timed out")
+            snapshot.unavailable_reason(WorkIndexSource::Github),
+            Some("list observation timed out")
         );
     }
 
@@ -4095,8 +7020,8 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
 
         assert!(snapshot.items.is_empty());
         assert_eq!(
-            snapshot.unavailable.as_deref(),
-            Some("Linear observation timed out")
+            snapshot.unavailable_reason(WorkIndexSource::Linear),
+            Some("observation timed out")
         );
     }
 
@@ -4119,6 +7044,51 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
     }
 
     #[test]
+    fn snapshot_path_is_scoped_to_session_name_including_default() {
+        let state_dir = Path::new("/tmp/herdr-state");
+        assert_eq!(
+            work_index_snapshot_path_for(state_dir, None),
+            state_dir.join("work-index/default.json")
+        );
+        assert_eq!(
+            work_index_snapshot_path_for(state_dir, Some("customer-support")),
+            state_dir.join("work-index/customer-support.json")
+        );
+    }
+
+    #[test]
+    fn cold_load_reads_only_its_session_snapshot_and_ignores_legacy_file() {
+        let dir = fixture_dir("session-snapshot-isolation");
+        let alpha_path = work_index_snapshot_path_for(&dir, Some("alpha"));
+        let beta_path = work_index_snapshot_path_for(&dir, Some("beta"));
+        let legacy_path = dir.join("work-index.json");
+        let snapshot = |reason| Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(WorkIndexUnavailable::only(WorkIndexSource::Github, reason)),
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        write_snapshot(&alpha_path, &snapshot("alpha")).expect("alpha snapshot");
+        write_snapshot(&beta_path, &snapshot("beta")).expect("beta snapshot");
+        write_snapshot(&legacy_path, &snapshot("legacy")).expect("legacy snapshot");
+
+        assert_eq!(
+            load_snapshot(&alpha_path)
+                .and_then(|snapshot| snapshot.unavailable_summary())
+                .as_deref(),
+            Some("GitHub: alpha")
+        );
+        assert_eq!(
+            load_snapshot(&beta_path)
+                .and_then(|snapshot| snapshot.unavailable_summary())
+                .as_deref(),
+            Some("GitHub: beta")
+        );
+        assert!(load_snapshot(&work_index_snapshot_path_for(&dir, None)).is_none());
+    }
+
+    #[test]
     fn load_snapshot_round_trips_a_written_snapshot() {
         let dir = fixture_dir("load-round-trip");
         let path = dir.join("work-index.json");
@@ -4126,7 +7096,10 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("Linear observation timed out".to_string()),
+            unavailable: Some(WorkIndexUnavailable::only(
+                WorkIndexSource::Linear,
+                "observation timed out",
+            )),
             observed_at: SystemTime::now(),
         };
         write_snapshot(&path, &snapshot).expect("write snapshot");
@@ -4174,6 +7147,14 @@ pub(crate) enum WorkItemWrite {
         identifier: String,
         state: String,
     },
+    AssignTicket {
+        identifier: String,
+        assignee: String,
+    },
+    SetTicketPriority {
+        identifier: String,
+        priority: u8,
+    },
     LinkTicketPullRequest {
         identifier: String,
         title: String,
@@ -4199,6 +7180,17 @@ pub(crate) enum WorkItemWrite {
         repo: String,
         number: u64,
     },
+    AddPullRequestReviewer {
+        repo: String,
+        number: u64,
+        login: String,
+    },
+    SetPullRequestAutoMerge {
+        repo: String,
+        number: u64,
+        enabled: bool,
+        method: crate::config::MergeMethodConfig,
+    },
 }
 
 impl WorkItemWrite {
@@ -4213,6 +7205,14 @@ impl WorkItemWrite {
             Self::TransitionTicket { identifier, state } => {
                 format!("move {identifier} to {state}")
             }
+            Self::AssignTicket {
+                identifier,
+                assignee,
+            } => format!("assign {identifier} to {assignee}"),
+            Self::SetTicketPriority {
+                identifier,
+                priority,
+            } => format!("set {identifier} priority to P{priority}"),
             Self::LinkTicketPullRequest { identifier, .. } => {
                 format!("link pull request to {identifier}")
             }
@@ -4227,6 +7227,20 @@ impl WorkItemWrite {
             Self::MarkPullRequestReady { repo, number } => {
                 format!("mark {repo}#{number} ready")
             }
+            Self::AddPullRequestReviewer {
+                repo,
+                number,
+                login,
+            } => format!("request review from {login} on {repo}#{number}"),
+            Self::SetPullRequestAutoMerge {
+                repo,
+                number,
+                enabled,
+                ..
+            } => format!(
+                "{} auto-merge for {repo}#{number}",
+                if *enabled { "enable" } else { "disable" }
+            ),
         }
     }
 
@@ -4239,14 +7253,20 @@ impl WorkItemWrite {
             | Self::MergePullRequest { repo, number }
             | Self::ClosePullRequest { repo, number }
             | Self::MarkPullRequestDraft { repo, number }
-            | Self::MarkPullRequestReady { repo, number } => Some(crate::app::state::WorkItemKey {
-                repo: repo.clone(),
-                pr_number: Some(*number),
-                pr_url: None,
-                ticket_id: None,
-            }),
+            | Self::MarkPullRequestReady { repo, number }
+            | Self::AddPullRequestReviewer { repo, number, .. }
+            | Self::SetPullRequestAutoMerge { repo, number, .. } => {
+                Some(crate::app::state::WorkItemKey {
+                    repo: repo.clone(),
+                    pr_number: Some(*number),
+                    pr_url: None,
+                    ticket_id: None,
+                })
+            }
             Self::CommentOnTicket { identifier, .. }
             | Self::TransitionTicket { identifier, .. }
+            | Self::AssignTicket { identifier, .. }
+            | Self::SetTicketPriority { identifier, .. }
             | Self::LinkTicketPullRequest { identifier, .. } => {
                 Some(crate::app::state::WorkItemKey {
                     repo: String::new(),
@@ -4292,6 +7312,28 @@ pub(crate) fn run_work_item_write(
             command.args(["issues", "update", identifier, "--status", state]);
             (command, None)
         }
+        WorkItemWrite::AssignTicket {
+            identifier,
+            assignee,
+        } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args(["issues", "update", identifier, "--assignee", assignee]);
+            (command, None)
+        }
+        WorkItemWrite::SetTicketPriority {
+            identifier,
+            priority,
+        } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args([
+                "issues",
+                "update",
+                identifier,
+                "--priority",
+                &priority.to_string(),
+            ]);
+            (command, None)
+        }
         WorkItemWrite::LinkTicketPullRequest {
             identifier,
             title,
@@ -4332,6 +7374,52 @@ pub(crate) fn run_work_item_write(
         WorkItemWrite::MarkPullRequestReady { repo, number } => {
             let mut command = crate::noninteractive_process::command(gh_program);
             command.args(["pr", "ready", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+        WorkItemWrite::AddPullRequestReviewer {
+            repo,
+            number,
+            login,
+        } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args([
+                "pr",
+                "edit",
+                &number.to_string(),
+                "--add-reviewer",
+                login,
+                "-R",
+                repo,
+            ]);
+            (command, None)
+        }
+        WorkItemWrite::SetPullRequestAutoMerge {
+            repo,
+            number,
+            enabled,
+            method,
+        } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            if *enabled {
+                command.args([
+                    "pr",
+                    "merge",
+                    &number.to_string(),
+                    "--auto",
+                    method.flag(),
+                    "-R",
+                    repo,
+                ]);
+            } else {
+                command.args([
+                    "pr",
+                    "merge",
+                    &number.to_string(),
+                    "--disable-auto",
+                    "-R",
+                    repo,
+                ]);
+            }
             (command, None)
         }
     };
@@ -4419,12 +7507,56 @@ mod work_item_write_tests {
             deadline,
         )
         .expect("link command");
+        run_work_item_write(
+            &WorkItemWrite::AssignTicket {
+                identifier: "SCA-7".into(),
+                assignee: "viewer-id".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("assign command");
+        run_work_item_write(
+            &WorkItemWrite::SetTicketPriority {
+                identifier: "SCA-7".into(),
+                priority: 1,
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("priority command");
+        run_work_item_write(
+            &WorkItemWrite::CommentOnTicket {
+                identifier: "SCA-7".into(),
+                body: "ship it".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("comment command");
+        run_work_item_write(
+            &WorkItemWrite::TransitionTicket {
+                identifier: "SCA-7".into(),
+                state: "Canceled".into(),
+            },
+            Path::new("/usr/bin/false"),
+            &linearis,
+            deadline,
+        )
+        .expect("cancel command");
 
         let argv = std::fs::read_to_string(log).expect("read recorder log");
         assert!(argv.contains("issues update SCA-7 --status In Review"));
         assert!(argv.contains(
             "attachments create SCA-7 --title owner/repo#42 --url https://github.com/owner/repo/pull/42"
         ));
+        assert!(argv.contains("issues update SCA-7 --assignee viewer-id"));
+        assert!(argv.contains("issues update SCA-7 --priority 1"));
+        assert!(argv.contains("issues discuss SCA-7 --body ship it"));
+        assert!(argv.contains("issues update SCA-7 --status Canceled"));
     }
 
     #[test]
@@ -4444,6 +7576,23 @@ mod work_item_write_tests {
                 repo: "owner/repo".into(),
                 number: 42,
             },
+            WorkItemWrite::AddPullRequestReviewer {
+                repo: "owner/repo".into(),
+                number: 42,
+                login: "grace".into(),
+            },
+            WorkItemWrite::SetPullRequestAutoMerge {
+                repo: "owner/repo".into(),
+                number: 42,
+                enabled: true,
+                method: crate::config::MergeMethodConfig::Rebase,
+            },
+            WorkItemWrite::SetPullRequestAutoMerge {
+                repo: "owner/repo".into(),
+                number: 42,
+                enabled: false,
+                method: crate::config::MergeMethodConfig::Merge,
+            },
         ] {
             run_work_item_write(&write, &gh, Path::new("/usr/bin/false"), deadline)
                 .expect("pull request state command");
@@ -4455,6 +7604,9 @@ mod work_item_write_tests {
                 "pr close 42 -R owner/repo",
                 "pr ready --undo 42 -R owner/repo",
                 "pr ready 42 -R owner/repo",
+                "pr edit 42 --add-reviewer grace -R owner/repo",
+                "pr merge 42 --auto --rebase -R owner/repo",
+                "pr merge 42 --disable-auto -R owner/repo",
                 "",
             ]
             .join("\n")

@@ -18,15 +18,17 @@ use crate::{
 };
 
 const BAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-const COMPACT_HEADER_CONTROLS: [(UsageHitTarget, u16); 7] = [
+const HEADER_CONTROLS: [(UsageHitTarget, u16); 7] = [
     (UsageHitTarget::Cost, 6),
     (UsageHitTarget::Tokens, 8),
-    (UsageHitTarget::Hours24, 5),
-    (UsageHitTarget::Days7, 4),
-    (UsageHitTarget::Days30, 5),
-    (UsageHitTarget::Days90, 5),
+    (UsageHitTarget::Hours24, 10),
+    (UsageHitTarget::Days7, 8),
+    (UsageHitTarget::Days30, 9),
+    (UsageHitTarget::Days90, 9),
     (UsageHitTarget::Rescan, 1),
 ];
+const HEADER_CONTROLS_WIDTH: u16 = 57;
+const HEADER_SAME_ROW_MIN_WIDTH: u16 = 90;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Totals {
@@ -81,6 +83,7 @@ struct UsageProjection {
     providers: BTreeMap<UsageProvider, (Totals, usize)>,
     breakdown: Vec<(String, Totals)>,
     bars: Vec<f64>,
+    provider_bars: BTreeMap<UsageProvider, Vec<f64>>,
     cache_savings: f64,
 }
 
@@ -99,7 +102,7 @@ pub(crate) fn layout(area: Rect) -> UsageLayout {
     let narrow = outer.width < 80;
     let rows = Layout::vertical([
         Constraint::Length(header_rows(outer.width)),
-        Constraint::Length(if narrow { 10 } else { 9 }),
+        Constraint::Length(if narrow { 11 } else { 9 }),
         Constraint::Length(if narrow { 3 } else { 2 }),
         Constraint::Min(3),
         Constraint::Length(if narrow { 2 } else { 1 }),
@@ -124,12 +127,12 @@ pub(crate) fn layout(area: Rect) -> UsageLayout {
 }
 
 fn header_rows(width: u16) -> u16 {
-    if width >= 49 {
+    if width >= HEADER_CONTROLS_WIDTH {
         return 2;
     }
     let mut control_rows = 1u16;
     let mut used = 0u16;
-    for (_, control_width) in COMPACT_HEADER_CONTROLS {
+    for (_, control_width) in HEADER_CONTROLS {
         let needed = control_width.saturating_add(u16::from(used > 0));
         if used > 0 && used.saturating_add(needed) > width {
             control_rows = control_rows.saturating_add(1);
@@ -149,33 +152,23 @@ pub(crate) fn hit_areas(area: Rect) -> Vec<UsageHitArea> {
 }
 
 fn header_hit_areas(header: Rect) -> Vec<UsageHitArea> {
-    let compact = header.width < 49;
-    let controls = if compact {
-        COMPACT_HEADER_CONTROLS
-    } else {
-        [
-            (UsageHitTarget::Cost, 6),
-            (UsageHitTarget::Tokens, 8),
-            (UsageHitTarget::Hours24, 6),
-            (UsageHitTarget::Days7, 5),
-            (UsageHitTarget::Days30, 6),
-            (UsageHitTarget::Days90, 6),
-            (UsageHitTarget::Rescan, 3),
-        ]
-    };
-    let mut x = if compact {
+    let wraps = header.width < HEADER_CONTROLS_WIDTH;
+    let mut x = if wraps {
         header.x
     } else {
-        header.right().saturating_sub(49).max(header.x)
+        header
+            .right()
+            .saturating_sub(HEADER_CONTROLS_WIDTH)
+            .max(header.x)
     };
-    let mut y = if header.width < 80 {
+    let mut y = if header.width < HEADER_SAME_ROW_MIN_WIDTH {
         header.y.saturating_add(1)
     } else {
         header.y
     };
     let mut areas = Vec::new();
-    for (target, width) in controls {
-        if compact && x > header.x && x.saturating_add(width) > header.right() {
+    for (target, width) in HEADER_CONTROLS {
+        if wraps && x > header.x && x.saturating_add(width) > header.right() {
             x = header.x;
             y = y.saturating_add(1);
         }
@@ -288,6 +281,7 @@ fn project(
     let mut provider_sessions: BTreeMap<UsageProvider, BTreeSet<String>> = BTreeMap::new();
     let mut breakdown: BTreeMap<String, Totals> = BTreeMap::new();
     let mut bars = vec![0.0_f64; bucket_count];
+    let mut provider_bars: BTreeMap<UsageProvider, Vec<f64>> = BTreeMap::new();
     let mut cache_savings = 0.0;
     for sample in snapshot.samples_between(start, end) {
         let model_pricing = pricing_for(&sample.model, pricing);
@@ -309,10 +303,14 @@ fn project(
         let bucket = usize::try_from((sample.timestamp - start) / bucket_seconds)
             .unwrap_or_default()
             .min(bucket_count.saturating_sub(1));
-        bars[bucket] += match state.metric {
+        let bucket_value = match state.metric {
             UsageMetric::Cost => model_pricing.map_or(0.0, |price| sample_cost(sample, price)),
             UsageMetric::Tokens => sample.processed_tokens() as f64,
         };
+        bars[bucket] += bucket_value;
+        provider_bars
+            .entry(sample.provider)
+            .or_insert_with(|| vec![0.0; bucket_count])[bucket] += bucket_value;
         if let Some(price) = model_pricing {
             cache_savings +=
                 sample.cache_read_tokens as f64 * (price.input - price.cache_read) / 1_000_000.0;
@@ -341,6 +339,7 @@ fn project(
         providers,
         breakdown,
         bars,
+        provider_bars,
         cache_savings,
     }
 }
@@ -371,12 +370,7 @@ fn render_header(
     palette: &Palette,
     frame: &mut Frame,
 ) {
-    let start = now.saturating_sub(state.range.seconds());
-    let title = if state.range == UsageRange::Hours24 {
-        format!("Usage / {} - {}", format_hour(start), format_hour(now))
-    } else {
-        format!("Usage / {} - {}", format_day(start), format_day(now))
-    };
+    let title = usage_header_title(state.range, now);
     frame.render_widget(
         Paragraph::new(title).style(
             Style::default()
@@ -389,11 +383,11 @@ fn render_header(
         let (label, active) = match hit.target {
             UsageHitTarget::Cost => ("[Cost]", state.metric == UsageMetric::Cost),
             UsageHitTarget::Tokens => ("[Tokens]", state.metric == UsageMetric::Tokens),
-            UsageHitTarget::Hours24 => ("[24h]", state.range == UsageRange::Hours24),
-            UsageHitTarget::Days7 => ("[7d]", state.range == UsageRange::Days7),
-            UsageHitTarget::Days30 => ("[30d]", state.range == UsageRange::Days30),
-            UsageHitTarget::Days90 => ("[90d]", state.range == UsageRange::Days90),
-            UsageHitTarget::Rescan => (if state.scanning { "…" } else { "⟳" }, state.scanning),
+            UsageHitTarget::Hours24 => ("[Past 24h]", state.range == UsageRange::Hours24),
+            UsageHitTarget::Days7 => ("[7 days]", state.range == UsageRange::Days7),
+            UsageHitTarget::Days30 => ("[30 days]", state.range == UsageRange::Days30),
+            UsageHitTarget::Days90 => ("[90 days]", state.range == UsageRange::Days90),
+            UsageHitTarget::Rescan => ("⟳", state.scanning),
             UsageHitTarget::Model | UsageHitTarget::Day => continue,
         };
         let style = if active {
@@ -404,6 +398,15 @@ fn render_header(
             Style::default().fg(palette.subtext0)
         };
         frame.render_widget(Paragraph::new(label).style(style), hit.rect);
+    }
+}
+
+fn usage_header_title(range: UsageRange, now: i64) -> String {
+    let start = now.saturating_sub(range.seconds());
+    if range == UsageRange::Hours24 {
+        format!("Usage / {} to {}", format_hour(start), format_hour(now))
+    } else {
+        format!("Usage / {} to {}", format_day(start), format_day(now))
     }
 }
 
@@ -430,44 +433,41 @@ fn render_summary(
             Style::default().fg(palette.subtext0),
         ),
     ];
-    for provider in [UsageProvider::Codex, UsageProvider::ClaudeCode] {
+    for provider in [UsageProvider::ClaudeCode, UsageProvider::Codex] {
         let (totals, sessions) = projection
             .providers
             .get(&provider)
             .copied()
             .unwrap_or_default();
-        let share_base = match metric {
-            UsageMetric::Cost => projection.total.known_cost,
-            UsageMetric::Tokens => projection.total.tokens() as f64,
-        };
-        let provider_value = match metric {
-            UsageMetric::Cost => totals.known_cost,
-            UsageMetric::Tokens => totals.tokens() as f64,
-        };
-        let share = if metric == UsageMetric::Cost && totals.priced_samples == 0 {
+        let share = if totals.priced_samples == 0 {
             "—".to_string()
-        } else if share_base > 0.0 {
-            let prefix = if metric == UsageMetric::Cost && totals.priced_samples < totals.samples {
+        } else if projection.total.known_cost > 0.0 {
+            let prefix = if totals.priced_samples < totals.samples {
                 "~"
             } else {
                 ""
             };
-            format!("{prefix}{:.0}%", provider_value * 100.0 / share_base)
+            format!(
+                "{prefix}{:.0}%",
+                totals.known_cost * 100.0 / projection.total.known_cost
+            )
         } else {
             "0%".to_string()
         };
-        let value = match metric {
-            UsageMetric::Cost => totals.cost_label(),
-            UsageMetric::Tokens => format_tokens(totals.tokens()),
-        };
         lines.push(Line::from(vec![
             Span::styled("● ", Style::default().fg(provider_color(provider, palette))),
-            Span::styled(provider_label(provider), Style::default().fg(palette.text)),
-            Span::styled(format!("  {value}"), Style::default().fg(palette.text)),
+            Span::styled(
+                format!(
+                    "{} {sessions} sessions   {}",
+                    provider_label(provider),
+                    totals.cost_label()
+                ),
+                Style::default().fg(palette.text),
+            ),
         ]));
         lines.push(Line::styled(
             format!(
-                "  {sessions} sess · {share} · {}",
+                "{share} of cost · {} tokens",
                 format_tokens(totals.tokens())
             ),
             Style::default().fg(palette.subtext0),
@@ -494,6 +494,14 @@ fn render_chart(
         (UsageMetric::Cost, false) => "Daily cost",
         (UsageMetric::Tokens, false) => "Daily tokens",
     };
+    if projection.provider_bars.len() > 1
+        && area.height
+            >= u16::try_from(projection.provider_bars.len().saturating_add(3)).unwrap_or(u16::MAX)
+    {
+        render_provider_chart(projection, hourly, title, area, palette, frame);
+        return;
+    }
+
     let max_columns = usize::from(area.width);
     let visible = chart_values(&projection.bars, max_columns);
     let tallest = visible.iter().copied().fold(0.0_f64, f64::max);
@@ -547,6 +555,93 @@ fn render_chart(
         ]),
         area,
     );
+}
+
+fn render_provider_chart(
+    projection: &UsageProjection,
+    hourly: bool,
+    title: &str,
+    area: Rect,
+    palette: &Palette,
+    frame: &mut Frame,
+) {
+    let chart_width = usize::from(area.width.saturating_sub(2));
+    let visible = projection
+        .provider_bars
+        .iter()
+        .map(|(provider, values)| (*provider, chart_values(values, chart_width)))
+        .collect::<Vec<_>>();
+    let tallest = visible
+        .iter()
+        .flat_map(|(_, values)| values.iter().copied())
+        .fold(0.0_f64, f64::max);
+    let legend = visible
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (provider, _))| {
+            let separator = (index > 0).then(|| Span::raw("  "));
+            separator.into_iter().chain(std::iter::once(Span::styled(
+                format!(
+                    "{} {}",
+                    provider_series_marker(*provider),
+                    provider_label(*provider)
+                ),
+                Style::default().fg(provider_color(*provider, palette)),
+            )))
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        Line::styled(
+            title,
+            Style::default()
+                .fg(palette.subtext0)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(legend),
+    ];
+    for (provider, values) in visible {
+        let bars = values
+            .iter()
+            .map(|value| {
+                if tallest <= 0.0 {
+                    BAR_GLYPHS[0]
+                } else {
+                    let index = ((value / tallest) * 7.0).round().clamp(0.0, 7.0) as usize;
+                    BAR_GLYPHS[index]
+                }
+            })
+            .collect::<String>();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", provider_series_marker(provider)),
+                Style::default().fg(provider_color(provider, palette)),
+            ),
+            Span::styled(bars, Style::default().fg(provider_color(provider, palette))),
+        ]));
+    }
+    let middle = projection
+        .start
+        .saturating_add((projection.now - projection.start) / 2);
+    let labels = if hourly {
+        axis_labels(
+            &format_hour(projection.start),
+            &format_hour(middle),
+            &format_hour(projection.now),
+            u16::try_from(chart_width).unwrap_or(area.width),
+        )
+    } else {
+        axis_labels(
+            &format_day(projection.start),
+            &format_day(middle),
+            &format_day(projection.now),
+            u16::try_from(chart_width).unwrap_or(area.width),
+        )
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(labels, Style::default().fg(palette.subtext0)),
+    ]));
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_totals(projection: &UsageProjection, area: Rect, palette: &Palette, frame: &mut Frame) {
@@ -714,17 +809,17 @@ fn toggle_style(active: bool, palette: &Palette) -> Style {
 }
 
 fn provider_label(provider: UsageProvider) -> &'static str {
-    match provider {
-        UsageProvider::ClaudeCode => "Claude Code",
-        UsageProvider::Codex => "Codex",
-    }
+    provider.label()
 }
 
 fn provider_color(provider: UsageProvider, palette: &Palette) -> ratatui::style::Color {
-    match provider {
-        UsageProvider::ClaudeCode => palette.peach,
-        UsageProvider::Codex => palette.blue,
-    }
+    let colors = [palette.peach, palette.blue, palette.green, palette.mauve];
+    colors[provider.series_index() % colors.len()]
+}
+
+fn provider_series_marker(provider: UsageProvider) -> char {
+    const MARKERS: [char; 4] = ['◆', '●', '▲', '■'];
+    MARKERS[provider.series_index() % MARKERS.len()]
 }
 
 fn format_cost(value: Option<f64>) -> String {
@@ -844,9 +939,13 @@ mod tests {
     }
 
     fn render_at(width: u16, height: u16) -> String {
+        render_snapshot_at(width, height, fixture())
+    }
+
+    fn render_snapshot_at(width: u16, height: u16, snapshot: UsageSnapshot) -> String {
         let mut app = AppState::test_new();
         app.status_now_unix = Some(1_787_992_841);
-        app.usage_snapshot = Some(fixture());
+        app.usage_snapshot = Some(snapshot);
         app.usage_view = Some(UsageViewState::new(app.usage_snapshot.clone()));
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -883,6 +982,128 @@ mod tests {
             assert!(text.contains("unknown-local-model"));
             assert!(text.contains('—'));
         }
+    }
+
+    #[test]
+    fn injected_records_render_t3_usage_header_at_both_sizes() {
+        for (width, height) in [(120, 40), (80, 24)] {
+            let text = render_at(width, height);
+            assert!(
+                text.contains("Usage / 2026-07-30 to 2026-08-29"),
+                "missing date breadcrumb at {width}x{height}\n{text}"
+            );
+            for control in [
+                "[Cost]",
+                "[Tokens]",
+                "[Past 24h]",
+                "[7 days]",
+                "[30 days]",
+                "[90 days]",
+                "⟳",
+            ] {
+                assert!(
+                    text.contains(control),
+                    "missing {control:?} at {width}x{height}\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn injected_provider_records_render_t3_legend_lines() {
+        let mut snapshot = fixture();
+        snapshot.samples[1].model = "gpt-5.6-sol".into();
+        let text = render_snapshot_at(120, 40, snapshot);
+        for line in [
+            "● Claude Code 1 sessions   $6.15",
+            "83% of cost · 4.30M tokens",
+            "● Codex 1 sessions   $1.25",
+            "17% of cost · 1.55M tokens",
+        ] {
+            assert!(text.contains(line), "missing legend line {line:?}\n{text}");
+        }
+        let lines = text.lines().collect::<Vec<_>>();
+        let claude = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("│● Claude Code"))
+            .expect("Claude legend");
+        let codex = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("│● Codex"))
+            .expect("Codex legend");
+        assert!(claude < codex, "provider order\n{text}");
+    }
+
+    #[test]
+    fn usage_header_title_names_each_selected_range() {
+        for (range, expected) in [
+            (UsageRange::Hours24, "Usage / 08:00 to 08:00"),
+            (UsageRange::Days7, "Usage / 2026-08-22 to 2026-08-29"),
+            (UsageRange::Days30, "Usage / 2026-07-30 to 2026-08-29"),
+            (UsageRange::Days90, "Usage / 2026-05-31 to 2026-08-29"),
+        ] {
+            assert_eq!(usage_header_title(range, 1_787_992_841), expected);
+        }
+    }
+
+    #[test]
+    fn two_provider_records_render_stacked_series_with_legend_without_a_pty() {
+        for (width, height) in [(120, 40), (80, 24)] {
+            let text = render_at(width, height);
+            assert!(
+                text.contains("◆ Claude Code  ● Codex"),
+                "missing provider legend at {width}x{height}\n{text}"
+            );
+            assert!(
+                text.lines().any(|line| line.contains("◆ ▁")),
+                "missing Claude series at {width}x{height}\n{text}"
+            );
+            assert!(
+                text.lines().any(|line| line.contains("● ▁")),
+                "missing Codex series at {width}x{height}\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn newly_collected_provider_record_gets_its_own_chart_series_without_a_pty() {
+        let mut snapshot = fixture();
+        snapshot.samples.push(UsageSample {
+            provider: UsageProvider::TestCollected,
+            session_id: "test-collected-session".into(),
+            timestamp: 1_787_820_000,
+            model: "test-collected-model".into(),
+            input_tokens: 250_000,
+            output_tokens: 25_000,
+            cache_write_tokens: 0,
+            cache_read_tokens: 500_000,
+        });
+
+        let text = render_snapshot_at(120, 40, snapshot);
+        assert!(
+            text.contains("◆ Claude Code  ● Codex  ▲ Test Collected"),
+            "missing dynamic provider legend\n{text}"
+        );
+        assert!(
+            text.lines().any(|line| line.contains("▲ ▁")),
+            "missing new provider series\n{text}"
+        );
+    }
+
+    #[test]
+    fn one_provider_record_keeps_aggregate_chart_fallback_without_a_pty() {
+        let mut snapshot = fixture();
+        snapshot
+            .samples
+            .retain(|sample| sample.provider == UsageProvider::ClaudeCode);
+        let text = render_snapshot_at(120, 40, snapshot);
+        assert!(text.contains("Daily cost"), "{text}");
+        assert!(
+            BAR_GLYPHS.iter().any(|glyph| text.contains(*glyph)),
+            "{text}"
+        );
+        assert!(!text.contains("◆ Claude Code  ● Codex"), "{text}");
+        assert!(text.matches("2026-").count() >= 3, "{text}");
     }
 
     #[test]
@@ -1012,5 +1233,6 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("scanning…"));
+        assert!(text.contains('⟳'));
     }
 }

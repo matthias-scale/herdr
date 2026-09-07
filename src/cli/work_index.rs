@@ -50,8 +50,7 @@ fn list_work_index(args: &[String]) -> io::Result<i32> {
         &config.work_index,
         &config.missive,
         &[],
-        None,
-        None,
+        crate::work_index::WorkIndexRefreshContext::default(),
         Instant::now(),
         Instant::now() + crate::work_index::WORK_INDEX_BATCH_TIMEOUT,
         crate::work_index::WORK_INDEX_TARGET_TIMEOUT,
@@ -59,7 +58,7 @@ fn list_work_index(args: &[String]) -> io::Result<i32> {
         std::path::Path::new("linearis"),
         std::path::Path::new("curl"),
     );
-    if let Some(unavailable) = snapshot.unavailable.as_deref() {
+    if let Some(unavailable) = snapshot.unavailable_summary() {
         eprintln!("work index unavailable: {unavailable}");
     }
     let rows = snapshot.items;

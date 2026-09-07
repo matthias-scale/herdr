@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::app::state::{AppState, ViewLayout};
@@ -22,6 +22,121 @@ pub(crate) enum SidebarWorkGroupKeyAction {
 }
 
 impl AppState {
+    pub(crate) fn open_sidebar_new_thread(&mut self) {
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_object_menu = None;
+        self.sidebar_search_active = false;
+        self.sidebar_new_thread = Some(Default::default());
+    }
+
+    pub(crate) fn sidebar_new_thread_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_new_thread_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn accept_sidebar_new_thread(&mut self, position: usize) -> bool {
+        let Some((path_index, _)) = crate::ui::sidebar_new_thread_matches(self)
+            .get(position)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(directory) = self.home_directory_options().get(path_index).cloned() else {
+            return false;
+        };
+        self.sidebar_new_thread = None;
+        self.open_home_composer_in_directory(directory, self.default_home_workspace());
+        true
+    }
+
+    pub(crate) fn handle_sidebar_new_thread_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut picker) = self.sidebar_new_thread.take() else {
+            return false;
+        };
+        let match_count = {
+            self.sidebar_new_thread = Some(picker.clone());
+            let count = crate::ui::sidebar_new_thread_matches(self).len();
+            self.sidebar_new_thread = None;
+            count
+        };
+        match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Up => picker.filter.move_selection(-1, match_count),
+            KeyCode::Down => picker.filter.move_selection(1, match_count),
+            KeyCode::Backspace => picker.filter.pop(),
+            KeyCode::Enter => {
+                let selected = picker.filter.selected;
+                self.sidebar_new_thread = Some(picker);
+                self.accept_sidebar_new_thread(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() && ('1'..='9').contains(&character) =>
+            {
+                let selected = character.to_digit(10).unwrap_or(1) as usize - 1;
+                self.sidebar_new_thread = Some(picker);
+                self.accept_sidebar_new_thread(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                picker.filter.push(character);
+            }
+            _ => {}
+        }
+        self.sidebar_new_thread = Some(picker);
+        true
+    }
+
+    pub(crate) fn handle_sidebar_search_key(&mut self, key: KeyEvent) -> bool {
+        if !self.sidebar_search_active {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => self.sidebar_search_active = false,
+            KeyCode::Backspace => {
+                let mut filter = self.sidebar_work_filter.clone();
+                filter.query.pop();
+                self.set_sidebar_work_filter(filter);
+                self.sidebar_search_active = true;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut filter = self.sidebar_work_filter.clone();
+                filter.query.clear();
+                self.set_sidebar_work_filter(filter);
+                self.sidebar_search_active = true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                let mut filter = self.sidebar_work_filter.clone();
+                filter.query.push(character);
+                self.set_sidebar_work_filter(filter);
+                self.sidebar_search_active = true;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn open_sidebar_object_menu(&mut self, target: String) {
+        if self.dock_pending_write.is_some() {
+            return;
+        }
+        self.sidebar_selected_work_group = Some(target.clone());
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_settled_menu_target = None;
+        self.sidebar_object_menu = Some(crate::app::state::SidebarObjectMenuState {
+            target,
+            anchor_row: None,
+            page: crate::app::state::SidebarObjectMenuPage::Actions,
+            selected: 0,
+        });
+    }
+
     pub(crate) fn sidebar_settled_target_at(
         &self,
         row: u16,
@@ -129,6 +244,9 @@ impl AppState {
         let mut keep_open = false;
         match option {
             crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
+            crate::ui::SidebarFilterOption::LinearOwnership(ownership) => {
+                filter.linear_ownership = ownership;
+            }
             crate::ui::SidebarFilterOption::LinearAssignee(assignee) => {
                 filter.assignee = assignee;
             }
@@ -142,6 +260,9 @@ impl AppState {
             }
             crate::ui::SidebarFilterOption::GithubAssignee(assignee) => {
                 filter.github.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::GithubOwnership(ownership) => {
+                filter.github.ownership = ownership;
             }
             crate::ui::SidebarFilterOption::GithubDrafts(shown) => {
                 filter.github.show_drafts = !shown;
@@ -703,6 +824,310 @@ impl AppState {
 }
 
 impl super::super::App {
+    pub(crate) fn handle_sidebar_object_menu_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.sidebar_object_menu.is_none() {
+            if key.code != KeyCode::Char('m') || !key.modifiers.is_empty() {
+                return false;
+            }
+            let Some(target) = self.state.sidebar_selected_work_group.clone() else {
+                return false;
+            };
+            self.state.open_sidebar_object_menu(target);
+            if crate::ui::sidebar_object_menu_items(&self.state).is_empty() {
+                self.state.sidebar_object_menu = None;
+                return false;
+            }
+            return true;
+        }
+
+        let page = self
+            .state
+            .sidebar_object_menu
+            .as_ref()
+            .map(|menu| menu.page)
+            .unwrap_or_default();
+        if page == crate::app::state::SidebarObjectMenuPage::Confirmation {
+            match key.code {
+                KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
+                    self.handle_pending_dock_write_key(key);
+                    self.state.sidebar_object_menu = None;
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') if key.modifiers.is_empty() => {
+                    self.handle_pending_dock_write_key(key);
+                    self.state.sidebar_object_menu = None;
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        let count = crate::ui::sidebar_object_menu_items(&self.state).len();
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => self.state.sidebar_object_menu = None,
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                if let Some(menu) = self.state.sidebar_object_menu.as_mut() {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                if let Some(menu) = self.state.sidebar_object_menu.as_mut() {
+                    menu.selected = menu.selected.saturating_add(1).min(count.saturating_sub(1));
+                }
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                let index = self
+                    .state
+                    .sidebar_object_menu
+                    .as_ref()
+                    .map_or(0, |menu| menu.selected);
+                self.apply_sidebar_object_menu_action(index);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn apply_sidebar_object_menu_action(&mut self, index: usize) {
+        let Some(item) = crate::ui::sidebar_object_menu_items(&self.state)
+            .get(index)
+            .copied()
+        else {
+            return;
+        };
+        if let crate::ui::SidebarObjectMenuItem::Ticket(action) = item {
+            let enabled = crate::ui::sidebar_ticket_action_entries(&self.state)
+                .into_iter()
+                .find(|entry| entry.action == action)
+                .is_some_and(|entry| entry.enabled());
+            if enabled {
+                self.apply_sidebar_ticket_action(action);
+            }
+            return;
+        }
+        match item {
+            crate::ui::SidebarObjectMenuItem::PullRequest(action) => {
+                let action_enabled = crate::ui::sidebar_pull_request_actions(&self.state)
+                    .get(index)
+                    .is_some_and(|action| action.enabled());
+                if !action_enabled {
+                    return;
+                }
+                let Some(key) = crate::ui::sidebar_pull_request_key(&self.state) else {
+                    self.state.config_diagnostic =
+                        Some("pull request is no longer available".to_string());
+                    self.state.sidebar_object_menu = None;
+                    return;
+                };
+                self.state.sidebar_object_menu = None;
+                self.activate_pr_action(key, action);
+            }
+            crate::ui::SidebarObjectMenuItem::StartThread => {
+                let target = self
+                    .state
+                    .sidebar_object_menu
+                    .as_ref()
+                    .map(|menu| menu.target.clone());
+                self.state.sidebar_object_menu = None;
+                let Some(target) = target else { return };
+                match self.state.sidebar_unassigned_dispatch_plan(&target) {
+                    Ok(plan) => self.dispatch_sidebar_work_group_plan(plan),
+                    Err(error) => self.state.config_diagnostic = Some(error),
+                }
+            }
+            crate::ui::SidebarObjectMenuItem::CopyMissiveUrl => {
+                let url = crate::ui::sidebar_missive_copy_url(&self.state);
+                self.state.sidebar_object_menu = None;
+                if let Some(url) = url {
+                    self.state.request_clipboard_write = Some(url.into_bytes());
+                } else {
+                    self.state.config_diagnostic =
+                        Some("conversation is no longer available".to_string());
+                }
+            }
+            crate::ui::SidebarObjectMenuItem::Ticket(_) => {}
+        }
+    }
+
+    fn sidebar_ticket_parts(
+        &self,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        crate::work_index::WorkTicket,
+        String,
+    )> {
+        let identifier = crate::ui::sidebar_ticket_target(&self.state)?;
+        let source = self
+            .state
+            .work_index_snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| {
+                item.ticket_details
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+            })?;
+        let ticket = source
+            .ticket_details
+            .iter()
+            .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))?
+            .clone();
+        Some((
+            crate::app::state::WorkItemKey {
+                repo: String::new(),
+                pr_number: None,
+                pr_url: None,
+                ticket_id: Some(identifier),
+            },
+            ticket,
+            source.repo.clone(),
+        ))
+    }
+
+    fn stage_sidebar_ticket_write(&mut self, write: crate::work_index::WorkItemWrite) {
+        self.state.dock_pending_write = Some(write);
+        self.state.dock_write_notice = None;
+        if let Some(menu) = self.state.sidebar_object_menu.as_mut() {
+            menu.page = crate::app::state::SidebarObjectMenuPage::Confirmation;
+            menu.selected = 0;
+        }
+    }
+
+    fn apply_sidebar_ticket_action(&mut self, action: crate::ui::ticket_actions::TicketAction) {
+        use crate::ui::ticket_actions::TicketAction;
+        let Some((key, ticket, repo)) = self.sidebar_ticket_parts() else {
+            self.state.config_diagnostic = Some("ticket is no longer available".into());
+            self.state.sidebar_object_menu = None;
+            return;
+        };
+        let context = crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            &ticket,
+            self.state.work_item_detail_cache.get(&key),
+            self.state.work_index_session.linear.viewer.as_deref(),
+            self.state.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(&self.state).is_some(),
+        );
+        match action {
+            TicketAction::TransitionMenu | TicketAction::PriorityMenu => {
+                if let Some(menu) = self.state.sidebar_object_menu.as_mut() {
+                    menu.page = if action == TicketAction::TransitionMenu {
+                        crate::app::state::SidebarObjectMenuPage::TicketTransitions
+                    } else {
+                        crate::app::state::SidebarObjectMenuPage::TicketPriorities
+                    };
+                    menu.selected = 0;
+                }
+            }
+            TicketAction::Refresh => {
+                self.next_work_index_refresh = std::time::Instant::now();
+                self.state.sidebar_object_menu = None;
+            }
+            TicketAction::AskQuestion => {
+                self.state.sidebar_object_menu = None;
+                self.open_ticket_home(
+                    ticket,
+                    repo,
+                    format!("About {} ({}): ", context.identifier, context.title),
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                );
+            }
+            TicketAction::Explain => {
+                self.state.sidebar_object_menu = None;
+                self.open_ticket_home(
+                    ticket,
+                    repo,
+                    format!(
+                        "Summarise {} ({}). Include the ticket, linked pull requests, and the acceptance criteria block.",
+                        context.identifier, context.title
+                    ),
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                );
+            }
+            TicketAction::WorkInThread => {
+                let prompt = Self::ticket_work_prompt(&ticket);
+                self.state.sidebar_object_menu = None;
+                self.open_ticket_home(
+                    ticket,
+                    repo,
+                    prompt,
+                    crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                );
+            }
+            TicketAction::Transition(choice) => self.stage_sidebar_ticket_write(
+                crate::work_index::WorkItemWrite::TransitionTicket {
+                    identifier: ticket.identifier,
+                    state: choice.label().to_string(),
+                },
+            ),
+            TicketAction::AssignToMe => {
+                let Some(viewer) = context.viewer_id else {
+                    return;
+                };
+                self.stage_sidebar_ticket_write(crate::work_index::WorkItemWrite::AssignTicket {
+                    identifier: ticket.identifier,
+                    assignee: viewer,
+                });
+            }
+            TicketAction::SetPriority(priority) => self.stage_sidebar_ticket_write(
+                crate::work_index::WorkItemWrite::SetTicketPriority {
+                    identifier: ticket.identifier,
+                    priority,
+                },
+            ),
+            TicketAction::LinkPr => {
+                let Some(pr) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+                    return;
+                };
+                let (Some(number), Some(url)) = (pr.pr_number, pr.pr_url) else {
+                    return;
+                };
+                self.stage_sidebar_ticket_write(
+                    crate::work_index::WorkItemWrite::LinkTicketPullRequest {
+                        identifier: ticket.identifier,
+                        title: format!("{}#{number}", pr.repo),
+                        url,
+                    },
+                );
+            }
+            TicketAction::Comment => {
+                let mut view = crate::app::state::WorkViewState::new(
+                    true,
+                    self.state.work_index_snapshot.clone(),
+                );
+                view.projection = crate::app::state::WorkProjection::Tickets;
+                view.selected = Some(key);
+                view.ticket_comment_draft = Some(String::new());
+                self.state.sidebar_object_menu = None;
+                self.state.work_view = Some(view);
+            }
+            TicketAction::OpenInLinear => {
+                self.state.sidebar_object_menu = None;
+                if let Some(url) = context.url {
+                    if let Err(error) = crate::platform::open_url(&url) {
+                        self.state.config_diagnostic =
+                            Some(format!("could not open ticket: {error}"));
+                    }
+                }
+            }
+            TicketAction::CopyLink => {
+                self.state.sidebar_object_menu = None;
+                if let Some(url) = context.url {
+                    self.state.request_clipboard_write = Some(url.into_bytes());
+                }
+            }
+            TicketAction::CopyIdentifier => {
+                self.state.sidebar_object_menu = None;
+                self.state.request_clipboard_write = Some(ticket.identifier.into_bytes());
+            }
+            TicketAction::Cancel => self.stage_sidebar_ticket_write(
+                crate::work_index::WorkItemWrite::TransitionTicket {
+                    identifier: ticket.identifier,
+                    state: "Canceled".into(),
+                },
+            ),
+        }
+    }
+
     pub(crate) fn handle_sidebar_settled_key(&mut self, key: KeyEvent) -> bool {
         if self.state.sidebar_settled_menu_target.is_some() {
             match key.code {
@@ -797,7 +1222,7 @@ impl super::super::App {
 mod tests {
     use std::fs;
 
-    use crossterm::event::{MouseButton, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::{Direction, Rect};
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
@@ -867,7 +1292,9 @@ mod tests {
         crate::ui::sidebar_rows(app)
             .into_iter()
             .map(|row| match row {
-                crate::ui::SidebarRow::Workspace { ws_idx, indented } => {
+                crate::ui::SidebarRow::Workspace {
+                    ws_idx, indented, ..
+                } => {
                     format!("workspace:{ws_idx}:{indented}")
                 }
                 crate::ui::SidebarRow::Tab { entry, .. } => {
@@ -964,6 +1391,161 @@ mod tests {
             workspace_id: app.state.workspaces[0].id.clone(),
             pane_id,
         }
+    }
+
+    #[test]
+    fn sidebar_object_menu_keyboard_opens_and_escape_closes() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
+
+        assert!(app.handle_sidebar_object_menu_key(KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::empty(),
+        )));
+        assert_eq!(
+            app.state
+                .sidebar_object_menu
+                .as_ref()
+                .map(|menu| menu.target.as_str()),
+            Some("linear:SCA-3102")
+        );
+        assert!(
+            app.handle_sidebar_object_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
+        );
+        assert!(app.state.sidebar_object_menu.is_none());
+    }
+
+    #[test]
+    fn sidebar_ellipsis_click_anchors_the_object_menu_to_that_row() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+        let (col, row) = (app.state.view.sidebar_rect.y..app.state.view.sidebar_rect.bottom())
+            .find_map(|row| {
+                (app.state.view.sidebar_rect.x..app.state.view.sidebar_rect.right())
+                    .find(|col| {
+                        crate::ui::sidebar_object_action_at(&app.state, *col, row).is_some()
+                    })
+                    .map(|col| (col, row))
+            })
+            .expect("Linear object action row");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert_eq!(
+            app.state
+                .sidebar_object_menu
+                .as_ref()
+                .and_then(|menu| menu.anchor_row),
+            Some(row)
+        );
+        let layout =
+            crate::ui::sidebar_object_menu_layout_for_test(&app.state, Rect::new(0, 0, 80, 24))
+                .expect("sidebar action menu");
+        assert_eq!(layout.rect.y, row + 1);
+    }
+
+    #[test]
+    fn sidebar_pr_writes_use_the_shared_modal_confirmation_gate() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.work_index_gh_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
+        app.state.open_sidebar_object_menu(
+            "github:https://github.com/scalable-so/herdr/pull/159".into(),
+        );
+
+        app.apply_sidebar_object_menu_action(11);
+        assert!(matches!(
+            app.state.pr_action_confirmation,
+            Some(crate::app::state::PrActionConfirmation {
+                ref key,
+                action: crate::ui::work_list_detail::PrActionKind::Close,
+            }) if key.repo == "scalable-so/herdr" && key.pr_number == Some(159)
+        ));
+        assert!(app.state.sidebar_object_menu.is_none());
+        assert!(app.state.dock_pending_write.is_none());
+        assert!(app.state.dock_write_notice.is_none());
+
+        assert!(app.handle_pr_action_confirmation_key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::empty(),
+        )));
+        assert!(app.state.dock_pending_write.is_none());
+        assert!(app.state.sidebar_object_menu.is_none());
+        assert!(app
+            .state
+            .dock_write_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("failed")));
+    }
+
+    #[test]
+    fn sidebar_ticket_transition_stages_without_running() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.work_index_linearis_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
+        app.state.open_sidebar_object_menu("linear:SCA-3102".into());
+
+        app.apply_sidebar_object_menu_action(4);
+        assert_eq!(
+            app.state.sidebar_object_menu.as_ref().map(|menu| menu.page),
+            Some(crate::app::state::SidebarObjectMenuPage::TicketTransitions)
+        );
+        app.apply_sidebar_object_menu_action(3);
+        assert_eq!(
+            app.state.dock_pending_write,
+            Some(crate::work_index::WorkItemWrite::TransitionTicket {
+                identifier: "SCA-3102".into(),
+                state: "Done".into(),
+            })
+        );
+        assert!(app.state.dock_write_notice.is_none());
+        assert!(
+            app.handle_sidebar_object_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
+        );
+        assert!(app.state.dock_pending_write.is_none());
+    }
+
+    #[test]
+    fn sidebar_missive_action_only_requests_a_clipboard_copy() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        let web_url = "https://mail.missiveapp.com/#inbox/conversations/sample";
+        let app_url = "missive://mail.missiveapp.com/#inbox/conversations/sample";
+        app.state
+            .work_index_snapshot
+            .as_mut()
+            .expect("work snapshot")
+            .conversations
+            .push(crate::work_index::MissiveConversation {
+                id: "sample".into(),
+                subject: "Billing question".into(),
+                app_url: app_url.into(),
+                web_url: web_url.into(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                labels: Vec::new(),
+                pane_bound: false,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            });
+        app.state
+            .open_sidebar_object_menu(format!("missive:{web_url}"));
+
+        app.apply_sidebar_object_menu_action(0);
+
+        assert_eq!(
+            app.state.request_clipboard_write,
+            Some(app_url.as_bytes().to_vec())
+        );
+        assert!(app.state.sidebar_object_menu.is_none());
+        assert!(app.state.dock_pending_write.is_none());
     }
 
     #[test]

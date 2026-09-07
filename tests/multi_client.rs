@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -808,6 +809,16 @@ fn tab_bar_starts_after(frame: &FrameWire, visible_label: &str, hidden_label: &s
         .is_some_and(|line| line.contains(visible_label) && !line.contains(hidden_label))
 }
 
+fn frame_row_symbol_column(frame: &FrameWire, row: usize, symbol: &str) -> Option<u16> {
+    frame
+        .cells
+        .chunks(frame.width.max(1) as usize)
+        .nth(row)?
+        .iter()
+        .position(|cell| cell.symbol == symbol)
+        .and_then(|column| u16::try_from(column).ok())
+}
+
 #[test]
 fn multi_client_allows_multiple_simultaneous_connections() {
     let _lock = test_lock();
@@ -927,9 +938,14 @@ fn non_foreground_render_preserves_interactive_tab_scroll() {
     let mut wide_background = connect_raw_client(&client_socket, 240, 40);
     assert!(wait_for_frame(&mut wide_background, Duration::from_secs(2)));
     let mut interactive = connect_raw_client(&client_socket, 80, 40);
+    let scroll_right_column = Cell::new(None);
     let (started_at_first_tab, initial_frames) =
         wait_for_frame_matching_with_snapshots(&mut interactive, Duration::from_secs(3), |frame| {
-            tab_bar_starts_after(frame, "tab-01", "tab-12")
+            let matched = tab_bar_starts_after(frame, "tab-01", "tab-12");
+            if matched {
+                scroll_right_column.set(frame_row_symbol_column(frame, 1, ">"));
+            }
+            matched
         })
         .expect("initial tab frame decoding should succeed");
     assert!(
@@ -938,10 +954,11 @@ fn non_foreground_render_preserves_interactive_tab_scroll() {
         initial_frames.join("\n--- frame ---\n")
     );
 
-    // The collapsed dock owns the final column; Add action, git, and pane toggles
-    // own the twenty-six before it, so the tab bar's right scroll button is
-    // x=47..49, y=1 (zero-based) at an 80-column client.
-    send_client_input(&mut interactive, b"\x1b[<0;49;2M");
+    let scroll_right_column = scroll_right_column
+        .get()
+        .expect("initial frame should expose the right tab-scroll control");
+    let click = format!("\x1b[<0;{};2M", scroll_right_column + 1);
+    send_client_input(&mut interactive, click.as_bytes());
     let (scrolled, interactive_frames) =
         wait_for_frame_matching_with_snapshots(&mut interactive, Duration::from_secs(3), |frame| {
             tab_bar_starts_after(frame, "tab-02", "tab-01")

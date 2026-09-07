@@ -294,7 +294,7 @@ impl App {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
-        changed
+        changed | self.finish_sidebar_refresh_if_idle()
     }
 
     fn git_work_context_targets(&self) -> Vec<GitWorkContextTarget> {

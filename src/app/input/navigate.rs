@@ -293,6 +293,7 @@ impl App {
                     self.state.dock_home_focused = false;
                     self.state.dock_diff_focused = false;
                     self.state.dock_files_focused = false;
+                    self.state.dock_agents_focused = false;
                 }
                 leave_navigate_mode(&mut self.state);
             }
@@ -486,6 +487,10 @@ impl App {
                 self.state.cycle_sidebar_group_mode();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::RefreshSidebar => {
+                self.request_sidebar_refresh();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::ToggleStatusDetail => {
                 self.state.status_bar_expanded = !self.state.status_bar_expanded;
                 leave_navigate_mode(&mut self.state);
@@ -500,6 +505,7 @@ impl App {
                     self.state.dock_editor_focused = false;
                     self.state.dock_diff_focused = false;
                     self.state.dock_files_focused = false;
+                    self.state.dock_agents_focused = false;
                 } else {
                     sync_dock_tab_focus(&mut self.state);
                 }
@@ -511,8 +517,8 @@ impl App {
                     previous_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(previous);
-                } else if let Some(previous) = self.state.adjacent_dock_surface(false) {
-                    self.state.dock_tab = Some(previous);
+                } else if let Some(previous) = self.state.adjacent_dock_tab_index(false) {
+                    self.state.select_dock_tab_index(previous);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -523,10 +529,14 @@ impl App {
                     next_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(next);
-                } else if let Some(next) = self.state.adjacent_dock_surface(true) {
-                    self.state.dock_tab = Some(next);
+                } else if let Some(next) = self.state.adjacent_dock_tab_index(true) {
+                    self.state.select_dock_tab_index(next);
                 }
                 sync_dock_tab_focus(&mut self.state);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::OpenRepoEditor => {
+                self.open_repo_editor();
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::EditScratchpad => {
@@ -1973,10 +1983,12 @@ pub(crate) enum NavigateAction {
     ResizePaneRight,
     ToggleSidebar,
     CycleSidebarGroupMode,
+    RefreshSidebar,
     ToggleStatusDetail,
     ToggleDock,
     PreviousDockTab,
     NextDockTab,
+    OpenRepoEditor,
     OpenInbox,
     OpenHome,
     EditScratchpad,
@@ -2070,6 +2082,12 @@ fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_editor_focused = state.dock_tab == Some(crate::app::DockSurface::Editor);
     state.dock_diff_focused = state.dock_tab == Some(crate::app::DockSurface::Diff);
     state.dock_files_focused = state.dock_tab == Some(crate::app::DockSurface::Files);
+    state.dock_agents_focused = state.dock_tab == Some(crate::app::DockSurface::Agents);
+    state.dock_pr_focused = state.dock_tab == Some(crate::app::DockSurface::Pr);
+    state.dock_linear_focused = state.dock_tab == Some(crate::app::DockSurface::Linear);
+    if state.dock_agents_focused {
+        state.reconcile_dock_agents_selection();
+    }
     state.dock_chooser_focused = state.dock_tab.is_none();
     if state.dock_editor_focused {
         state.retry_dock_editor();
@@ -2209,10 +2227,12 @@ fn non_indexed_action_for_key(
             &kb.sidebar_cycle_group_mode,
             NavigateAction::CycleSidebarGroupMode,
         ),
+        (&kb.sidebar_refresh, NavigateAction::RefreshSidebar),
         (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
+        (&kb.editor_open_repo, NavigateAction::OpenRepoEditor),
         (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
         (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
@@ -2393,6 +2413,8 @@ pub(super) fn execute_navigate_action_in_context(
                 state.dock_home_focused = false;
                 state.dock_diff_focused = false;
                 state.dock_files_focused = false;
+                state.dock_agents_focused = false;
+                state.dock_linear_focused = false;
             }
             leave_navigate_mode(state);
         }
@@ -2573,6 +2595,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.cycle_sidebar_group_mode();
             leave_navigate_mode(state);
         }
+        NavigateAction::RefreshSidebar => {
+            state.request_sidebar_refresh();
+            leave_navigate_mode(state);
+        }
         NavigateAction::ToggleStatusDetail => {
             state.status_bar_expanded = !state.status_bar_expanded;
             leave_navigate_mode(state);
@@ -2585,6 +2611,7 @@ pub(super) fn execute_navigate_action_in_context(
                 state.dock_editor_focused = false;
                 state.dock_diff_focused = false;
                 state.dock_files_focused = false;
+                state.dock_agents_focused = false;
             } else {
                 sync_dock_tab_focus(state);
             }
@@ -2596,8 +2623,8 @@ pub(super) fn execute_navigate_action_in_context(
                 previous_home_section(state.dock_home_section),
             ) {
                 state.set_dock_home_section(previous);
-            } else if let Some(previous) = state.adjacent_dock_surface(false) {
-                state.dock_tab = Some(previous);
+            } else if let Some(previous) = state.adjacent_dock_tab_index(false) {
+                state.select_dock_tab_index(previous);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
@@ -2607,10 +2634,14 @@ pub(super) fn execute_navigate_action_in_context(
                 (state.dock_tab, next_home_section(state.dock_home_section))
             {
                 state.set_dock_home_section(next);
-            } else if let Some(next) = state.adjacent_dock_surface(true) {
-                state.dock_tab = Some(next);
+            } else if let Some(next) = state.adjacent_dock_tab_index(true) {
+                state.select_dock_tab_index(next);
             }
             sync_dock_tab_focus(state);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenRepoEditor => {
+            state.request_open_repo_editor = true;
             leave_navigate_mode(state);
         }
         // Spawning the editor needs an `App`; the state-only mirror cannot do it.
@@ -3247,6 +3278,24 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_refresh_binding_dispatches_and_sets_the_request() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.sidebar_refresh = crate::config::ActionKeybinds::prefix("u");
+
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('u'), KeyModifiers::empty()),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::RefreshSidebar)
+        );
+        execute_navigate_action(&mut state, NavigateAction::RefreshSidebar);
+        assert!(state.sidebar_refreshing);
+        assert!(state.sidebar_refresh_requested);
+    }
+
+    #[test]
     fn next_blocked_window_handles_no_match_and_nonblocked_current() {
         let mut app = app_with_global_window_fixture();
         app.state.switch_tab(1);
@@ -3554,6 +3603,11 @@ mod tests {
         state
             .dock_editor_errors
             .insert(agent_pane_id, "editor exited".to_string());
+        state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+        ];
+        state.dock_tab = Some(crate::app::DockSurface::Home);
 
         for _ in 0..8 {
             if state.dock_tab == Some(crate::app::DockSurface::Editor) {
@@ -3577,6 +3631,11 @@ mod tests {
         let mut state = app_with_test_workspaces(&["one"]).state;
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         state.mode = Mode::Prefix;
+        state.dock_open_surfaces = vec![
+            crate::app::DockSurface::Home,
+            crate::app::DockSurface::Editor,
+        ];
+        state.dock_tab = Some(crate::app::DockSurface::Home);
 
         execute_navigate_action_in_context(
             &mut state,
@@ -5197,6 +5256,24 @@ split_horizontal = 'prefix+\'
             ),
             Some(NavigateAction::SplitVertical)
         );
+    }
+
+    #[test]
+    fn repository_editor_shortcut_maps_to_open_repo_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.editor_open_repo = crate::config::ActionKeybinds::direct("ctrl+alt+v");
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        );
+
+        assert_eq!(action, Some(NavigateAction::OpenRepoEditor));
+        execute_navigate_action(&mut state, action.expect("repository editor action"));
+        assert!(state.request_open_repo_editor);
     }
 
     #[test]
