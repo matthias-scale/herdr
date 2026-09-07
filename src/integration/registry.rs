@@ -77,7 +77,13 @@ pub(crate) fn integration_target_supported(target: crate::api::schema::Integrati
                 | crate::api::schema::IntegrationTarget::Droid
                 | crate::api::schema::IntegrationTarget::Kimi
                 | crate::api::schema::IntegrationTarget::Qodercli
+                | crate::api::schema::IntegrationTarget::Qwen
                 | crate::api::schema::IntegrationTarget::AntigravityCli
+                | crate::api::schema::IntegrationTarget::Devin
+                | crate::api::schema::IntegrationTarget::Hermes
+                | crate::api::schema::IntegrationTarget::Cursor
+                | crate::api::schema::IntegrationTarget::Mastracode
+                | crate::api::schema::IntegrationTarget::Grok
         )
     }
 
