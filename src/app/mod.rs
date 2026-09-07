@@ -669,6 +669,8 @@ impl App {
             crate::work_index::load_snapshot(&crate::work_index::work_index_snapshot_path());
         #[cfg(test)]
         let work_index_snapshot: Option<crate::work_index::Snapshot> = None;
+        let work_item_detail_cache =
+            crate::work_index::WorkItemDetailCache::from_snapshot(work_index_snapshot.as_ref());
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
@@ -971,7 +973,7 @@ impl App {
             dock_home_followed_pane: None,
             work_index_snapshot: work_index_snapshot.clone(),
             work_index_session: crate::work_index::WorkIndexSession::default(),
-            work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
+            work_item_detail_cache,
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
             land_approval_label: config.land.approval_label.clone(),

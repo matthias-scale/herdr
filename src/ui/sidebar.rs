@@ -9436,6 +9436,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Unclassified,
+            cached_pr_detail: None,
             ticket_ids: tickets
                 .iter()
                 .map(|ticket| ticket.identifier.clone())
