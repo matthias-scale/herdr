@@ -139,6 +139,43 @@ fn work_item_detail_request(
         return Some((crate::app::state::DockHomeSection::Prs, selection, true));
     }
     let presentation = &client.dock_presentation;
+    if !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Pr) {
+        let selection = presentation
+            .active_tab_index
+            .or_else(|| {
+                presentation
+                    .open_surfaces
+                    .iter()
+                    .position(|surface| *surface == crate::app::DockSurface::Pr)
+            })
+            .and_then(|index| presentation.tab_bindings.get(index))
+            .and_then(Option::as_ref)
+            .map(|binding| &binding.object)
+            .filter(|object| object.surface == crate::app::DockSurface::Pr)
+            .or_else(|| {
+                presentation
+                    .context_objects
+                    .iter()
+                    .find(|object| object.surface == crate::app::DockSurface::Pr)
+            })
+            .and_then(|object| {
+                let repo = crate::work_context::repo_slug_from_pr_url(&object.key)?;
+                let number = object
+                    .key
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()?
+                    .parse()
+                    .ok()?;
+                Some(crate::app::state::WorkItemKey {
+                    repo,
+                    pr_number: Some(number),
+                    pr_url: Some(object.key.clone()),
+                    ticket_id: None,
+                })
+            });
+        return Some((crate::app::state::DockHomeSection::Prs, selection, true));
+    }
     let selection = match presentation.home_section {
         crate::app::state::DockHomeSection::Prs => presentation.home_selection.clone(),
         crate::app::state::DockHomeSection::Tickets => presentation.home_ticket_selection.clone(),
@@ -5902,6 +5939,101 @@ mod tests {
             work_item_detail_request(&client),
             Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn focused_headless_pr_dock_refreshes_bound_pr_detail() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut server = test_headless_server();
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "herdr-headless-pr-refresh-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture directory");
+        let log = fixture_dir.join("detail.log");
+        let gh = fixture_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 42 --repo owner/repo --json "*)
+    printf '%s\n' detail >> '{}'
+    printf '%s' '{{"number":42,"title":"Detail","url":"https://github.com/owner/repo/pull/42"}}'
+    ;;
+  "api repos/owner/repo/issues/42/timeline"*) printf '%s' '[]' ;;
+  "api graphql"*) printf '%s' '{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[]}}}}}}}}}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                log.display()
+            ),
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(&gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("make fake gh executable");
+        server.app.work_index_gh_program_override = Some(gh);
+        server.app.work_index_provider_cache_root_override = Some(fixture_dir.clone());
+
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Pr);
+        client.dock_presentation.open_surfaces = vec![crate::app::DockSurface::Pr];
+        client.dock_presentation.active_tab_index = Some(0);
+        client.dock_presentation.tab_bindings = vec![Some(crate::app::state::DockTabBinding {
+            object: crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Pr,
+                key: "https://github.com/owner/repo/pull/42".into(),
+            },
+            origin: crate::app::state::DockTabOrigin::Context,
+        })];
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            ticket_id: None,
+        };
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Prs,
+                Some(key.clone()),
+                true
+            ))
+        );
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        client.writer = Some(writer);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        let event = server
+            .app
+            .event_rx
+            .blocking_recv()
+            .expect("headless detail refresh result");
+        let crate::events::AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = event
+        else {
+            panic!("expected detail refresh event");
+        };
+        assert!(server
+            .app
+            .handle_work_item_detail_refreshed(generation, details));
+        assert_eq!(
+            std::fs::read_to_string(log).expect("read detail counter"),
+            "detail\n"
+        );
+        assert!(server.app.state.work_item_detail_cache.get(&key).is_some());
+        let _ = std::fs::remove_dir_all(fixture_dir);
     }
 
     #[tokio::test]
