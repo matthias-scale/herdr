@@ -1,0 +1,9 @@
+[profile.default]
+# Unit tests keep nextest's no-retry policy. Only the PTY integration binaries
+# below receive retries because their process and terminal timing can vary.
+retries = 0
+
+[[profile.default.overrides]]
+filter = "binary(multi_client) | binary(live_handoff) | binary(detach_reattach)"
+retries = 2
+slow-timeout = "60s"

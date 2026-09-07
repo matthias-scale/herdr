@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class Check:
     name: str
     command: tuple[str, ...]
+    additional_commands: tuple[tuple[str, ...], ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 CHECKS = (
@@ -42,7 +44,22 @@ CHECKS = (
             "never",
         ),
     ),
-    Check("windows", ("just", "windows-lint")),
+    Check(
+        "windows",
+        ("just", "windows-lint"),
+        (
+            (
+                "cargo",
+                "check",
+                "--bin",
+                "herdr",
+                "--tests",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ),
+        ),
+        (("LIBGHOSTTY_VT_SIMD", "false"),),
+    ),
     Check(
         "maintenance",
         (
@@ -107,16 +124,23 @@ def run_check(
 ) -> tuple[Check, int, float, Path]:
     log_path = log_dir / f"{check.name}.log"
     started = time.monotonic()
+    check_env = env.copy()
+    check_env.update(check.environment)
+    returncode = 0
     with log_path.open("wb") as log:
-        result = subprocess.run(
-            check.command,
-            cwd=ROOT,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=env,
-            check=False,
-        )
-    return check, result.returncode, time.monotonic() - started, log_path
+        for command in (check.command, *check.additional_commands):
+            result = subprocess.run(
+                command,
+                cwd=ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=check_env,
+                check=False,
+            )
+            returncode = result.returncode
+            if returncode:
+                break
+    return check, returncode, time.monotonic() - started, log_path
 
 
 def platform_filter(value: str) -> str:
