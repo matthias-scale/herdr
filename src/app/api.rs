@@ -155,6 +155,11 @@ impl App {
                 observations,
                 stats,
             } => self.handle_claude_subagents_refreshed(generation, observations, stats),
+            AppEvent::TabBarCommandFinished {
+                generation,
+                segment_index,
+                result,
+            } => self.handle_tab_bar_command_finished(generation, segment_index, result),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -219,6 +224,35 @@ impl App {
             self.render_notify.notify_one();
         }
         changed
+    }
+
+    pub(crate) fn handle_internal_event_with_pane_updates(
+        &mut self,
+        ev: AppEvent,
+    ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        if matches!(
+            ev,
+            AppEvent::StateChanged { .. }
+                | AppEvent::AgentProcessDetected { .. }
+                | AppEvent::PaneProcessStateChanged { .. }
+                | AppEvent::HookStateReported { .. }
+                | AppEvent::AgentSessionReported { .. }
+                | AppEvent::HookMetadataReported { .. }
+                | AppEvent::HookAuthorityCleared { .. }
+                | AppEvent::HookAuthorityRetired { .. }
+                | AppEvent::HookAgentReleased { .. }
+                | AppEvent::TerminalCwdReported { .. }
+        ) {
+            let previous_toast = self.state.toast.clone();
+            let (updates, _) = self.state.handle_app_event_with_hook_report_status(ev);
+            for update in &updates {
+                self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
+                self.emit_pane_state_update(update);
+            }
+            return updates;
+        }
+        let _ = self.handle_internal_event(ev);
+        Vec::new()
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
@@ -392,6 +426,16 @@ impl App {
         } = ev
         {
             self.handle_claude_subagents_refreshed(generation, observations, stats);
+            return None;
+        }
+
+        if let AppEvent::TabBarCommandFinished {
+            generation,
+            segment_index,
+            result,
+        } = ev
+        {
+            self.handle_tab_bar_command_finished(generation, segment_index, result);
             return None;
         }
 
@@ -1520,6 +1564,7 @@ impl App {
                 return self.handle_pane_settlement(request.id, target, false)
             }
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
+            Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneWorkContextSet(params) => {
                 return self.handle_pane_work_context_set(request.id, params);
@@ -1543,6 +1588,9 @@ impl App {
             }
             Method::PaneGraphicsStreamSet(params) => {
                 return self.handle_pane_graphics_stream_set(request.id, params);
+            }
+            Method::PaneGraphicsStreamDirect(params) => {
+                return self.handle_pane_graphics_stream_direct(request.id, params);
             }
             Method::PaneGraphicsStreamOpen(params) => {
                 return self.handle_pane_graphics_stream_open(request.id, params);

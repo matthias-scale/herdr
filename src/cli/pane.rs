@@ -1,12 +1,12 @@
 use crate::api::schema::{
     Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
-    PaneFocusDirectionParams, PaneLayoutParams, PaneListParams, PaneMoveDestination,
-    PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
+    PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
+    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
-    PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+    PaneWaitForOutputParams, PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, ReadFormat,
+    ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -30,6 +30,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "zoom" => pane_zoom(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
+        "input" => pane_input(&args[1..]),
         "work-context" => pane_work_context(&args[1..]),
         "split" => pane_split(&args[1..]),
         "swap" => pane_swap(&args[1..]),
@@ -729,6 +730,78 @@ fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
     })
 }
 
+fn pane_input(args: &[String]) -> std::io::Result<i32> {
+    let env_pane_id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let params = match parse_pane_input_args(args, env_pane_id.as_deref()) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    super::runtime::pane_input_set(params)
+}
+
+fn parse_pane_input_args(
+    args: &[String],
+    env_pane_id: Option<&str>,
+) -> Result<PaneInputSetParams, String> {
+    const USAGE: &str =
+        "usage: herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane";
+
+    let args = super::expand_equals_args(args, &["--pane", "--right-click"]);
+    let mut pane_id = None;
+    let mut right_click = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                if pane_id.is_some() {
+                    return Err("provide only one pane selector".into());
+                }
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                if pane_id.is_some() {
+                    return Err("provide only one pane selector".into());
+                }
+                pane_id = Some(
+                    env_pane_id
+                        .map(super::normalize_pane_id)
+                        .ok_or("--current requires HERDR_PANE_ID")?,
+                );
+                index += 1;
+            }
+            "--right-click" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --right-click".into());
+                };
+                right_click = Some(parse_right_click_target(value)?);
+                index += 2;
+            }
+            option if option.starts_with('-') => return Err(format!("unknown option: {option}")),
+            positional => {
+                if pane_id.is_some() {
+                    return Err(format!("unexpected argument: {positional}"));
+                }
+                pane_id = Some(super::normalize_pane_id(positional));
+                index += 1;
+            }
+        }
+    }
+
+    Ok(PaneInputSetParams {
+        pane_id: pane_id.ok_or(USAGE)?,
+        right_click: right_click.ok_or(USAGE)?,
+    })
+}
+
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
     let env_pane_id = std::env::var("HERDR_PANE_ID")
         .ok()
@@ -744,16 +817,26 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
     super::runtime::pane_split(params)
 }
 
+fn parse_right_click_target(value: &str) -> Result<PaneRightClickTarget, String> {
+    match value {
+        "herdr" => Ok(PaneRightClickTarget::Herdr),
+        "pane" => Ok(PaneRightClickTarget::Pane),
+        _ => Err(format!("invalid right-click target: {value}")),
+    }
+}
+
 fn parse_pane_split_args(
     args: &[String],
     env_pane_id: Option<&str>,
 ) -> Result<PaneSplitParams, String> {
+    let args = super::expand_equals_args(args, &["--right-click"]);
     let mut env = std::collections::HashMap::new();
     let mut pane_id = None;
     let mut direction = None;
     let mut ratio = None;
     let mut cwd = None;
     let mut focus = false;
+    let mut right_click = PaneRightClickTarget::Herdr;
     let mut work_context = None;
 
     let mut index = 0;
@@ -774,7 +857,11 @@ fn parse_pane_split_args(
                 index += 2;
             }
             "--current" => {
-                pane_id = env_pane_id.map(super::normalize_pane_id);
+                pane_id = Some(
+                    env_pane_id
+                        .map(super::normalize_pane_id)
+                        .ok_or("--current requires HERDR_PANE_ID")?,
+                );
                 index += 1;
             }
             "--direction" => {
@@ -805,6 +892,13 @@ fn parse_pane_split_args(
                 cwd = Some(value.clone());
                 index += 2;
             }
+            "--right-click" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --right-click".into());
+                };
+                right_click = parse_right_click_target(value)?;
+                index += 2;
+            }
             "--focus" => {
                 focus = true;
                 index += 1;
@@ -821,7 +915,7 @@ fn parse_pane_split_args(
                 env.insert(key, value);
                 index += 2;
             }
-            other => match super::parse_spawn_work_context_arg(args, index, &mut work_context)? {
+            other => match super::parse_spawn_work_context_arg(&args, index, &mut work_context)? {
                 Some(next) => index = next,
                 None => return Err(format!("unknown option: {other}")),
             },
@@ -842,6 +936,7 @@ fn parse_pane_split_args(
         ratio,
         cwd,
         focus,
+        right_click,
         env,
         work_context,
     })
@@ -1767,6 +1862,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane work-context get <pane_id>");
     eprintln!("  herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+    eprintln!("  herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane");
     eprintln!(
         "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--ticket ID] [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]"
     );
@@ -1805,6 +1901,56 @@ mod tests {
         assert_eq!(params.target_pane_id, Some("issue-1".into()));
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
         assert_eq!(params.ratio, Some(0.333));
+        assert_eq!(params.right_click, PaneRightClickTarget::Herdr);
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_pane_right_click_target() {
+        let params = parse_pane_split_args(
+            &args(&["--direction", "right", "--right-click", "pane"]),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(params.right_click, PaneRightClickTarget::Pane);
+    }
+
+    #[test]
+    fn parse_pane_input_args_requires_and_uses_calling_pane() {
+        let params = parse_pane_input_args(
+            &args(&["--current", "--right-click", "pane"]),
+            Some("issue-1:p1"),
+        )
+        .unwrap();
+
+        assert_eq!(params.pane_id, "issue-1:p1");
+        assert_eq!(params.right_click, PaneRightClickTarget::Pane);
+        assert!(
+            parse_pane_input_args(&args(&["--current", "--right-click", "pane"]), None).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_pane_input_args_rejects_conflicting_selectors() {
+        assert!(parse_pane_input_args(
+            &args(&["pane-a", "--pane", "pane-b", "--right-click", "pane"]),
+            None,
+        )
+        .is_err());
+        assert!(parse_pane_input_args(
+            &args(&["--pane", "pane-a", "--current", "--right-click", "pane",]),
+            Some("pane-b"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_equals_right_click_target() {
+        let params =
+            parse_pane_split_args(&args(&["--direction", "right", "--right-click=pane"]), None)
+                .unwrap();
+
+        assert_eq!(params.right_click, PaneRightClickTarget::Pane);
     }
 
     #[test]
@@ -1941,12 +2087,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_pane_split_args_current_without_env_keeps_focused_fallback() {
-        let params =
-            parse_pane_split_args(&args(&["--direction", "down", "--current"]), None).unwrap();
-
-        assert_eq!(params.target_pane_id, None);
-        assert_eq!(params.direction, crate::api::schema::SplitDirection::Down);
+    fn parse_pane_split_args_current_without_env_is_rejected() {
+        assert!(parse_pane_split_args(&args(&["--direction", "down", "--current"]), None).is_err());
     }
 
     #[test]

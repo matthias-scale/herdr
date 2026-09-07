@@ -2890,7 +2890,9 @@ impl App {
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
-            let action = self.state.handle_mouse(&mut self.terminal_runtimes, mouse);
+            let action = self
+                .state
+                .handle_mouse(&mut self.terminal_runtimes, source_id, mouse);
             self.start_home_ref_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
@@ -3004,15 +3006,17 @@ impl App {
             self.close_popup_pane();
             return;
         };
-        let column = mouse.column.saturating_sub(inner.x);
-        let row = mouse.row.saturating_sub(inner.y);
+        let position = crate::input::mouse::Position::Cell {
+            column: mouse.column.saturating_sub(inner.x),
+            row: mouse.row.saturating_sub(inner.y),
+        };
         let bytes = match mouse.kind {
             MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => match rt.wheel_routing() {
                 Some(crate::pane::WheelRouting::MouseReport) => {
-                    rt.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
+                    rt.encode_mouse_wheel(mouse.kind, position, mouse.modifiers)
                 }
                 Some(crate::pane::WheelRouting::AlternateScroll) => {
                     rt.encode_alternate_scroll(mouse.kind)
@@ -3028,11 +3032,9 @@ impl App {
                 }
             },
             MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
-                rt.encode_mouse_button(mouse.kind, column, row, mouse.modifiers)
+                rt.encode_mouse_button(mouse.kind, position, mouse.modifiers)
             }
-            MouseEventKind::Moved => {
-                rt.encode_mouse_motion(mouse.kind, column, row, mouse.modifiers)
-            }
+            MouseEventKind::Moved => rt.encode_mouse_motion(mouse.kind, position, mouse.modifiers),
         };
         let Some(bytes) = bytes else {
             return;
@@ -3079,6 +3081,24 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.handle_modified_url_click_with(source_id, mouse, |url| {
+                crate::platform::open_url(url).map(|()| None)
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.handle_modified_url_click_with(source_id, mouse, crate::platform::open_url)
+        }
+    }
+
+    fn handle_modified_url_click_with(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+        open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
+    ) -> bool {
         if self.state.mode != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
@@ -3107,8 +3127,12 @@ impl App {
                 tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
             }
         }
-        if let Err(err) = crate::platform::open_url(&url) {
-            tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+        match open_url(&url) {
+            Ok(Some(child)) => self.detached_process_children.push(child),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+            }
         }
         true
     }
@@ -3438,6 +3462,30 @@ fn wait_for_file(path: &std::path::Path) -> String {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     panic!("timed out waiting for {}", path.display());
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+async fn wait_for_detached_process_reap(app: &mut App, pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while crate::platform::process_exists(pid) && tokio::time::Instant::now() < deadline {
+        app.reap_finished_detached_processes();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    app.reap_finished_detached_processes();
+    !crate::platform::process_exists(pid)
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+async fn wait_for_custom_command_reap(app: &mut App, pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while crate::platform::process_exists(pid) && tokio::time::Instant::now() < deadline {
+        app.reap_finished_custom_commands();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    app.reap_finished_custom_commands();
+    !crate::platform::process_exists(pid)
 }
 
 #[cfg(test)]

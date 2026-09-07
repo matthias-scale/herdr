@@ -69,13 +69,14 @@ Process:
    - Compare English next-release website docs against `docs/next/website/src/content/docs/ja/` and `docs/next/website/src/content/docs/zh-cn/`. Flag missing localized files, stale localized files, and heading-outline drift where translated docs do not have the same section structure as English.
    - Compare `docs/next/README.md` and the next website draft against current stable docs. Flag each difference as intended to ship, stale, or needing user decision. Do not require the draft and stable trees to match before release.
    - Also audit example config snippets for release readiness.
+   - Audit `skills/herdr/SKILL.md` against shipped changes to the CLI, public IDs, pane and agent workflows, lifecycle semantics, and safety guidance. Flag stale commands, options, examples, or behavioral claims. The binary bundles this exact file, so review semantic freshness rather than file synchronization.
 
 8. Verify finalization state.
    - Before `just release`, approved README changes must be finalized in `docs/next/README.md`; release CI promotes that tagged file after publication. Do not copy draft website docs into `website/src/content/docs/` or `docs/preview/`.
    - `nix/package.nix` imports `Cargo.lock` through `cargoLock.lockFile`; normal version and lockfile updates do not require a separate cargo hash refresh. If git dependencies are introduced, verify the required `cargoLock.outputHashes` entries.
    - Run or recommend:
      ```bash
-     just release-docs-check
+     just pre-release-check
      ```
    - This check validates the staged draft, localized heading parity, published preview and stable snapshot provenance, and both production and draft website builds.
    - Do not run `just release` unless the working tree is clean and the docs check passes.

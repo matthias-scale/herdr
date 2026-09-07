@@ -1,15 +1,6 @@
-<!doctype html>
-<html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Compare Herdr — terminal-native agent multiplexer</title>
-        <meta
-            name="description"
-            content="Compare Herdr with tmux, Zellij, cmux, Warp, Solo, Conductor, Emdash, and Superset. See where terminal multiplexers, agent terminals, process dashboards, and worktree orchestrators differ."
-        />
-        <meta name="theme-color" content="#f0eee9" />
-        <link rel="canonical" href="https://herdr.dev/compare/" />
+---
+import SiteLayout from '../components/SiteLayout.astro';
+---
 
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="Herdr" />
@@ -322,157 +313,126 @@
             <span class="theme-hint-label" id="theme-hint-label">light</span>
             <span class="theme-hint-key">[/]</span>
         </div>
-
-        <div class="theme-overlay" id="theme-overlay" hidden>
-            <div class="theme-overlay-panel" role="dialog" aria-label="Theme switcher" aria-modal="true">
-                <div class="theme-overlay-title">settings</div>
-                <div class="theme-overlay-tabs"><span class="active">theme</span></div>
-                <div class="theme-overlay-list" id="theme-overlay-list" role="listbox" aria-label="Themes">
-                    <div class="theme-sep"><span>dark</span></div>
-                    <button type="button" role="option" data-value="catppuccin">catppuccin</button>
-                    <button type="button" role="option" data-value="terminal">terminal</button>
-                    <button type="button" role="option" data-value="tokyo-night">tokyo night</button>
-                    <button type="button" role="option" data-value="dracula">dracula</button>
-                    <button type="button" role="option" data-value="nord">nord</button>
-                    <button type="button" role="option" data-value="gruvbox">gruvbox</button>
-                    <button type="button" role="option" data-value="one-dark">one dark</button>
-                    <button type="button" role="option" data-value="solarized">solarized</button>
-                    <button type="button" role="option" data-value="kanagawa">kanagawa</button>
-                    <button type="button" role="option" data-value="rose-pine">rose pine</button>
-                    <button type="button" role="option" data-value="vesper">vesper</button>
-                    <div class="theme-sep"><span>light</span></div>
-                    <button type="button" role="option" data-value="catppuccin-latte">catppuccin latte</button>
-                    <button type="button" role="option" data-value="tokyo-night-day">tokyo day</button>
-                    <button type="button" role="option" data-value="gruvbox-light">gruvbox light</button>
-                    <button type="button" role="option" data-value="one-light">one light</button>
-                    <button type="button" role="option" data-value="solarized-light">solarized light</button>
-                    <button type="button" role="option" data-value="kanagawa-lotus">kanagawa lotus</button>
-                    <button type="button" role="option" data-value="rose-pine-dawn">rose pine dawn</button>
-                </div>
-                <div class="theme-overlay-footer">
-                    <span class="theme-overlay-hints"><span class="key">↑↓</span> select</span>
-                    <span class="theme-overlay-actions"><span class="theme-apply-btn">↵ apply</span><button class="theme-close-btn" type="button" id="theme-close-btn">esc close</button></span>
-                </div>
-            </div>
+        <div class="ev" aria-hidden="true">
+          <div class="ev-row"><span>herdr-server</span><b><i class="beat"></i>up</b></div>
+          <div class="ev-note">4 agents · 0 clients attached · still working</div>
         </div>
+      </div>
+      <div class="cap cap-flat">
+        <div class="n"><span>02</span></div>
+        <div class="cap-in">
+          <h3>Multiplexers persist terminals, not agents.</h3>
+          <p>
+            tmux gave humans persistence, and Herdr keeps that whole
+            inheritance: real PTYs, detach, SSH. What it adds is the part
+            multiplexers never had: knowing which pane is an agent, whether
+            it's blocked, and how to wait on it instead of polling it.
+          </p>
+        </div>
+        <div class="ev" aria-hidden="true">
+          <div class="ev-row"><span>tmux ls</span><b>3 sessions</b></div>
+          <div class="ev-note">which one is waiting on you? no idea</div>
+        </div>
+      </div>
+      <div class="cap cap-flat">
+        <div class="n"><span>03</span></div>
+        <div class="cap-in">
+          <h3>Terminal apps replace your terminal.</h3>
+          <p>
+            cmux and Warp can be genuinely polished, but the deal is that the
+            work moves into their window, with their renderer, on the machines
+            they support. Herdr changes nothing about your terminal. It runs
+            inside it, wherever a terminal and SSH already reach.
+          </p>
+        </div>
+        <div class="ev" aria-hidden="true">
+          <div class="ev-row"><span>ghostty · kitty · iterm · alacritty</span><b>kept</b></div>
+          <div class="ev-note">herdr runs in the one you already chose</div>
+        </div>
+      </div>
+      <div class="cap cap-flat">
+        <div class="n"><span>04</span></div>
+        <div class="cap-in">
+          <h3>Manager apps are clients without a runtime.</h3>
+          <p>
+            Conductor, Emdash and Superset manage a herd from a window:
+            worktrees, diffs, review queues. Useful, and Herdr pairs fine with
+            that flow. But a window that manages agents is not a place agents
+            live: quit the app and the herd goes with it.
+          </p>
+        </div>
+        <div class="ev" aria-hidden="true">
+          <div class="ev-row"><span>their app quits</span><b>agents stop</b></div>
+          <div class="ev-row"><span>every herdr client quits</span><b>agents keep going</b></div>
+        </div>
+      </div>
+      <div class="cap cap-flat">
+        <div class="n"><span>05</span></div>
+        <div class="cap-in">
+          <h3>Dashboards watch processes.</h3>
+          <p>
+            Solo supervises a dev stack: health, restarts, logs. Herdr's job
+            is different: interactive agent terminals that stay open, hold
+            scrollback and state, and stay yours whether or not anything is
+            watching them.
+          </p>
+        </div>
+        <div class="ev" aria-hidden="true">
+          <div class="ev-row"><span>process status</span><b>up / down</b></div>
+          <div class="ev-row"><span>agent state</span><b>blocked · working · idle</b></div>
+        </div>
+      </div>
+    </div>
 
-        <script>
-            (function () {
-                var overlay = document.getElementById("theme-overlay");
-                var list = document.getElementById("theme-overlay-list");
-                var hintLabel = document.getElementById("theme-hint-label");
-                if (!overlay || !list) return;
-                var options = Array.prototype.slice.call(list.querySelectorAll("[role='option']"));
-                var media = window.matchMedia("(prefers-color-scheme: dark)");
-                var saved = localStorage.getItem("herdr-palette") || "";
-                var committed = saved || defaultPalette();
+    <section class="vs">
+      <div class="fighd">
+        <span>one-liners, for deciding fast</span>
+      </div>
+      <div class="vs-list">
+        <article>
+          <b>herdr vs tmux</b>
+          <p>tmux keeps terminals alive; so does Herdr. The difference is Herdr knows which terminals are agents, what state each one is in, and how to wait on them. tmux sees panes.</p>
+        </article>
+        <article>
+          <b>herdr vs zellij</b>
+          <p>Zellij is a friendlier workspace for humans in terminals. Herdr is a runtime for agents in terminals: state, waits, direct attach, and an API.</p>
+        </article>
+        <article>
+          <b>herdr vs cmux</b>
+          <p>cmux is a Mac terminal app built around agents. Herdr isn't an app: it's the runtime underneath, in whatever terminal you already use, reachable over SSH.</p>
+        </article>
+        <article>
+          <b>herdr vs warp</b>
+          <p>Warp wants to be your terminal and your platform. Herdr keeps your terminal and owns what runs inside it.</p>
+        </article>
+        <article>
+          <b>herdr vs opencode web</b>
+          <p>opencode's web mode serves one agent over HTTP. Herdr runs the whole herd: any agent CLI, many at once, from any tty.</p>
+        </article>
+        <article>
+          <b>herdr vs solo</b>
+          <p>Solo is a dashboard that supervises your dev processes. Herdr holds interactive agent terminals open whether or not anything is watching them.</p>
+        </article>
+        <article>
+          <b>herdr vs conductor, emdash, superset</b>
+          <p>Manager apps put worktrees, diffs and review queues in a window. Herdr is the layer under that kind of window: quit their app and the agents stop; detach every Herdr client and they don't.</p>
+        </article>
+      </div>
+    </section>
 
-                function defaultPalette() {
-                    return media.matches ? "tokyo-night" : "tokyo-night-day";
-                }
-
-                function setPalette(value) {
-                    document.documentElement.setAttribute("data-palette", value || defaultPalette());
-                }
-
-                function updateUI(value) {
-                    var activeValue = value || defaultPalette();
-                    options.forEach(function (opt) {
-                        opt.setAttribute("aria-selected", String(opt.dataset.value === activeValue));
-                    });
-                    var active = options.find(function (opt) { return opt.dataset.value === activeValue; });
-                    if (hintLabel && active) hintLabel.textContent = active.textContent.trim();
-                }
-
-                function openOverlay() {
-                    overlay.hidden = false;
-                    document.body.style.overflow = "hidden";
-                    committed = localStorage.getItem("herdr-palette") || defaultPalette();
-                    updateUI(committed);
-                    var active = list.querySelector("[aria-selected='true']") || options[0];
-                    if (active) active.focus();
-                }
-
-                function closeOverlay() {
-                    overlay.hidden = true;
-                    document.body.style.overflow = "";
-                }
-
-                function toggleOverlay() {
-                    if (overlay.hidden) openOverlay();
-                    else closeOverlay();
-                }
-
-                function preview(index) {
-                    if (index < 0 || index >= options.length) return;
-                    setPalette(options[index].dataset.value);
-                    updateUI(options[index].dataset.value);
-                    options[index].focus();
-                }
-
-                function commit(value) {
-                    setPalette(value);
-                    localStorage.setItem("herdr-palette", value);
-                    updateUI(value);
-                    closeOverlay();
-                }
-
-                function revert() {
-                    setPalette(committed);
-                    updateUI(committed);
-                    closeOverlay();
-                }
-
-                media.addEventListener("change", function () {
-                    if (!localStorage.getItem("herdr-palette")) {
-                        setPalette("");
-                        updateUI("");
-                    }
-                });
-
-                options.forEach(function (opt, idx) {
-                    opt.addEventListener("click", function () { commit(opt.dataset.value); });
-                    opt.addEventListener("mouseenter", function () { preview(idx); });
-                });
-
-                document.addEventListener("keydown", function (e) {
-                    if ((e.key === "t" || e.key === "/") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                        var tag = document.activeElement && document.activeElement.tagName;
-                        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-                        e.preventDefault();
-                        toggleOverlay();
-                        return;
-                    }
-                    if (overlay.hidden) return;
-                    var idx = options.indexOf(document.activeElement);
-                    if (e.key === "ArrowDown") {
-                        e.preventDefault();
-                        preview(idx >= 0 ? Math.min(options.length - 1, idx + 1) : 0);
-                    } else if (e.key === "ArrowUp") {
-                        e.preventDefault();
-                        preview(idx >= 0 ? Math.max(0, idx - 1) : options.length - 1);
-                    } else if (e.key === "Enter" && idx >= 0) {
-                        e.preventDefault();
-                        commit(options[idx].dataset.value);
-                    } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        revert();
-                    }
-                });
-
-                var themeHint = document.getElementById("theme-hint");
-                if (localStorage.getItem("herdr-theme-hint-seen") === "1") {
-                    themeHint.classList.add("is-seen");
-                }
-                themeHint.addEventListener("mouseenter", function () {
-                    localStorage.setItem("herdr-theme-hint-seen", "1");
-                    themeHint.classList.add("is-seen");
-                }, { once: true });
-                themeHint.addEventListener("click", toggleOverlay);
-                document.getElementById("theme-close-btn").addEventListener("click", revert);
-                setPalette(saved);
-                updateUI(saved);
-            })();
-        </script>
-    </body>
-</html>
+    <section class="end">
+      <span class="ram"></span>
+      <div class="in">
+        <h2>A runtime, not another window.</h2>
+        <p>
+          Install it and nothing about your setup changes: same terminal, same
+          agent CLIs. They just stop dying when a window does.
+        </p>
+        <div class="ph-actions">
+          <a class="btn-solid" href="/docs/install/">Install Herdr</a>
+          <a class="btn-ghost" href="/docs/quick-start/">Quick start</a>
+        </div>
+      </div>
+    </section>
+  </main>
+</SiteLayout>
