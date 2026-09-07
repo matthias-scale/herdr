@@ -125,11 +125,18 @@ fn work_item_detail_request(
         return None;
     }
     if let Some(view) = client.work_view.as_ref() {
-        return Some((
-            crate::app::state::DockHomeSection::Prs,
-            view.selected.clone(),
-            true,
-        ));
+        let selection = view.selected.clone().or_else(|| {
+            view.snapshot.as_ref()?.items.iter().find_map(|item| {
+                let number = item.pr_number?;
+                Some(crate::app::state::WorkItemKey {
+                    repo: item.repo.clone(),
+                    pr_number: Some(number),
+                    pr_url: item.pr_url.clone(),
+                    ticket_id: None,
+                })
+            })
+        });
+        return Some((crate::app::state::DockHomeSection::Prs, selection, true));
     }
     let presentation = &client.dock_presentation;
     let selection = match presentation.home_section {
@@ -5853,8 +5860,42 @@ mod tests {
             pr_url: Some("https://github.com/owner/repo/pull/42".into()),
             ticket_id: None,
         };
-        let mut view = crate::app::state::WorkViewState::new(true, None);
-        view.selected = Some(key.clone());
+        let view = crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![crate::work_index::WorkItem {
+                    repo: key.repo.clone(),
+                    pr_number: key.pr_number,
+                    pr_url: key.pr_url.clone(),
+                    pr_title: Some("detail fallback".into()),
+                    pr_state: Some("open".into()),
+                    draft: false,
+                    review_decision: None,
+                    created_at: None,
+                    updated_at: None,
+                    additions: 0,
+                    deletions: 0,
+                    author: None,
+                    assignees: Vec::new(),
+                    labels: Vec::new(),
+                    check_state: crate::work_index::PrCheckState::Unknown,
+                    audience: crate::work_index::PrAudience::Authored,
+                    cached_pr_detail: None,
+                    ticket_ids: Vec::new(),
+                    ticket_title: None,
+                    ticket_state: None,
+                    ticket_details: Vec::new(),
+                    branch: None,
+                    preview_urls: Vec::new(),
+                    panes: Vec::new(),
+                    source: crate::work_index::WorkItemSource::default(),
+                }],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+            }),
+        );
         client.work_view = Some(view);
 
         assert_eq!(
