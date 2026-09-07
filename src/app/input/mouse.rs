@@ -1947,7 +1947,7 @@ impl AppState {
         (rect.width > 1 && col == rect.x).then_some(idx)
     }
 
-    fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {
+    pub(super) fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {
         rect.width > 0
             && rect.height > 0
             && col >= rect.x
@@ -5432,6 +5432,44 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_footer_order_hit_areas_settings_and_hover_are_complete() {
+        use crate::app::state::SidebarFooterItem;
+
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+
+        let areas = [
+            app.state.view.sidebar_footer_settings_hit_area,
+            app.state.view.sidebar_footer_work_hit_area,
+            app.state.view.sidebar_footer_usage_hit_area,
+            app.state.view.sidebar_footer_ticket_hit_area,
+            app.state.view.sidebar_footer_missive_hit_area,
+            app.state.view.sidebar_footer_refresh_hit_area,
+        ];
+        assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
+        assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+
+        let linear = areas[3];
+        app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
+        assert_eq!(
+            app.state.sidebar_footer_hover,
+            Some(SidebarFooterItem::Linear)
+        );
+
+        let settings = areas[0];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            settings.x,
+            settings.y,
+        ));
+        assert_eq!(app.state.mode, Mode::Settings);
+    }
+
+    #[test]
     fn sidebar_footer_ticket_entry_opens_tickets_at_supported_widths() {
         for width in [80, 120] {
             let mut app = app_for_mouse_test();
@@ -5441,13 +5479,13 @@ mod tests {
             app.state.selected = 0;
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
-            let work = app.state.view.sidebar_footer_work_hit_area;
+            let usage = app.state.view.sidebar_footer_usage_hit_area;
             let hit = app.state.view.sidebar_footer_ticket_hit_area;
             assert_eq!(
                 hit.height, 1,
                 "ticket footer must render at {width} columns"
             );
-            assert_eq!(hit.x, work.right(), "ticket entry follows PR entry");
+            assert_eq!(hit.x, usage.right(), "ticket entry follows Usage");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 hit.x + 1,
@@ -5470,10 +5508,10 @@ mod tests {
             app.state.selected = 0;
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
-            let usage = app.state.view.sidebar_footer_usage_hit_area;
+            let tickets = app.state.view.sidebar_footer_ticket_hit_area;
             let hit = app.state.view.sidebar_footer_missive_hit_area;
             assert_eq!(hit.height, 1, "Missive footer renders at {width} columns");
-            assert_eq!(hit.x, usage.right(), "Missive entry follows usage");
+            assert_eq!(hit.x, tickets.right(), "Missive entry follows Linear");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 hit.x + 1,
@@ -5547,10 +5585,10 @@ mod tests {
             app.state.selected = 0;
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
-            let tickets = app.state.view.sidebar_footer_ticket_hit_area;
+            let work = app.state.view.sidebar_footer_work_hit_area;
             let footer = app.state.view.sidebar_footer_usage_hit_area;
             assert!(footer.width > 0);
-            assert_eq!(footer.x, tickets.right(), "usage entry follows tickets");
+            assert_eq!(footer.x, work.right(), "usage entry follows PRs");
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 footer.x,

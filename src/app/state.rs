@@ -1847,6 +1847,8 @@ pub struct ViewState {
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
     pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
+    /// Sidebar-footer entry for the settings screen.
+    pub(crate) sidebar_footer_settings_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
     /// Sidebar-footer entry for the client-local historical usage view.
@@ -2754,6 +2756,9 @@ pub struct AppState {
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
+    /// Defaults and hover state owned by the TUI client.
+    pub(crate) linear_default_layout: LinearViewLayout,
+    pub(crate) sidebar_footer_hover: Option<SidebarFooterItem>,
     /// Client-local historical usage view and its scan result.
     pub(crate) usage_view: Option<UsageViewState>,
     /// Cached local usage loaded before the first background rescan.
@@ -3382,6 +3387,38 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_comment_draft: Option<String>,
     pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
     pub(crate) refreshing: bool,
+    pub(crate) ticket_layout: LinearViewLayout,
+    pub(crate) board_column: usize,
+    pub(crate) board_rows: [usize; 5],
+    pub(crate) board_scroll: [usize; 5],
+    pub(crate) board_detail_open: bool,
+    pub(crate) board_last_click: Option<(WorkItemKey, std::time::Instant)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LinearViewLayout {
+    #[default]
+    List,
+    Board,
+}
+
+impl From<crate::config::LinearLayoutConfig> for LinearViewLayout {
+    fn from(value: crate::config::LinearLayoutConfig) -> Self {
+        match value {
+            crate::config::LinearLayoutConfig::List => Self::List,
+            crate::config::LinearLayoutConfig::Board => Self::Board,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarFooterItem {
+    Settings,
+    PullRequests,
+    Usage,
+    Linear,
+    Missive,
+    Refresh,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3530,6 +3567,12 @@ impl WorkViewState {
             ticket_comment_draft: None,
             pending_write: None,
             refreshing: false,
+            ticket_layout: LinearViewLayout::List,
+            board_column: 0,
+            board_rows: [0; 5],
+            board_scroll: [0; 5],
+            board_detail_open: false,
+            board_last_click: None,
         }
     }
 }
@@ -4232,6 +4275,8 @@ impl AppState {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            linear_default_layout: LinearViewLayout::List,
+            sidebar_footer_hover: None,
             usage_view: None,
             usage_snapshot: None,
             usage_pricing: crate::config::UsageConfig::default(),
@@ -4355,6 +4400,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_settings_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),

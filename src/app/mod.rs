@@ -757,6 +757,8 @@ impl App {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            linear_default_layout: config.linear.default_layout.into(),
+            sidebar_footer_hover: None,
             usage_view: None,
             usage_snapshot: if cfg!(test) {
                 None
@@ -879,6 +881,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_settings_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
@@ -2150,6 +2153,10 @@ impl App {
 
         if !invalid_section("panel") {
             self.state.dock_default_surfaces = dock_surfaces_from_config(&config.panel);
+        }
+
+        if !invalid_section("linear") {
+            self.state.linear_default_layout = config.linear.default_layout.into();
         }
 
         if !invalid_section("ui") {
