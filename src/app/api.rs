@@ -700,8 +700,11 @@ impl App {
     }
 
     fn refresh_symphony_snapshot(&mut self, snapshot: crate::symphony::Snapshot) -> bool {
-        let changed = self.state.symphony_snapshot.workflows != snapshot.workflows
-            || self.state.symphony_snapshot.unavailable != snapshot.unavailable;
+        // Compare the whole snapshot rather than a hand-listed subset of its
+        // fields. Enumerating them silently drops any field added later: the
+        // first successful empty poll changes only `polled`, and that is exactly
+        // the transition that makes the Symphony section appear.
+        let changed = self.state.symphony_snapshot != snapshot;
         self.state.symphony_snapshot = snapshot.clone();
         if let Some(detail) = self.state.symphony_detail.as_mut() {
             detail.replace_snapshot(snapshot);
@@ -1885,6 +1888,39 @@ mod tests {
             .as_bytes(),
         )
         .expect("valid Codex catalog")
+    }
+
+    #[test]
+    fn first_empty_symphony_poll_repaints_so_the_section_can_appear() {
+        // The default snapshot and a reachable-but-empty one differ only in
+        // `polled`. If that is not treated as a change, the Symphony section
+        // stays absent until some unrelated event forces a frame.
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        assert!(!app.state.symphony_snapshot.is_reachable());
+
+        let empty = crate::symphony::Snapshot {
+            workflows: Vec::new(),
+            unavailable: None,
+            polled: true,
+        };
+        assert!(app.handle_internal_event_with_render_impact(
+            AppEvent::SymphonyWorkflowsRefreshed {
+                snapshot: empty.clone(),
+            }
+        ));
+        assert!(app.state.symphony_snapshot.is_reachable());
+
+        // A second identical poll is not a change and must not force a frame.
+        assert!(!app.handle_internal_event_with_render_impact(
+            AppEvent::SymphonyWorkflowsRefreshed { snapshot: empty }
+        ));
     }
 
     #[test]

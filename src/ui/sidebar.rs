@@ -1330,6 +1330,10 @@ pub(crate) enum SidebarRow {
         wait: Option<String>,
         started_at: Option<String>,
     },
+    /// Placeholder shown when the runner answered and has no open jobs. A
+    /// section that disappears when empty cannot be told apart from one that is
+    /// broken, so the reachable-and-empty case says so instead of vanishing.
+    SymphonyEmpty,
 }
 
 /// Agents waiting on a human are the only ones whose wait you can end, so they
@@ -1344,6 +1348,10 @@ pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
 /// Symphony workflows run headless on a Temporal worker, so nothing in the
 /// pane list ever shows them. The section is the only ambient surface they get.
 pub(crate) const SYMPHONY_SECTION_TITLE: &str = "Symphony";
+
+/// Shown under a reachable runner with nothing to list. It states the fact so
+/// an empty section reads as an answer rather than as a missing feature.
+pub(crate) const SYMPHONY_EMPTY_LABEL: &str = "no open jobs";
 
 /// Only the group that demands action is coloured. Pinned and Spaces are
 /// organisation, not urgency, so they stay in the muted chrome tone.
@@ -3229,7 +3237,11 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
 /// a permanent error row in the sidebar would be noise on every frame.
 fn append_symphony_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     let workflows = &app.symphony_snapshot.workflows;
-    if workflows.is_empty() {
+    // An unreachable or not-yet-polled runner stays silent: there is nothing
+    // truthful to say about jobs we could not ask about. A reachable runner
+    // keeps its header even at zero, so an empty Symphony is distinguishable
+    // from a missing one.
+    if workflows.is_empty() && !app.symphony_snapshot.is_reachable() {
         return;
     }
     let collapsed = section_is_collapsed(app, SYMPHONY_SECTION_TITLE);
@@ -3239,6 +3251,10 @@ fn append_symphony_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
         collapsed,
     });
     if collapsed {
+        return;
+    }
+    if workflows.is_empty() {
+        rows.push(SidebarRow::SymphonyEmpty);
         return;
     }
     rows.extend(
@@ -3550,7 +3566,8 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
-        | SidebarRow::SymphonyJob { .. } => 1,
+        | SidebarRow::SymphonyJob { .. }
+        | SidebarRow::SymphonyEmpty => 1,
     }
 }
 
@@ -3601,7 +3618,8 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (_, SidebarRow::SectionHeader { .. }) => app.sidebar_agents.row_gap,
         // Symphony jobs are a dense read-only list, so they hug each other and
         // whatever follows them; the gap before the next header is enough.
-        (SidebarRow::SymphonyJob { .. }, _) | (_, SidebarRow::SymphonyJob { .. }) => 0,
+        (SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty, _)
+        | (_, SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty) => 0,
     }
 }
 
@@ -3663,7 +3681,7 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         SidebarRow::SectionHeader { .. } => false,
         SidebarRow::NestedHeader { .. } => false,
         // A Symphony workflow runs on a worker, not in a workspace.
-        SidebarRow::SymphonyJob { .. } => false,
+        SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => false,
     }
 }
 
@@ -3785,7 +3803,8 @@ pub(crate) fn compute_sidebar_row_areas(
             SidebarRow::Tab { .. }
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::NestedHeader { .. }
-            | SidebarRow::SymphonyJob { .. } => {}
+            | SidebarRow::SymphonyJob { .. }
+            | SidebarRow::SymphonyEmpty => {}
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
@@ -3988,11 +4007,18 @@ struct SymphonyJobArea {
 }
 
 fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea> {
+    compute_symphony_areas(app, area).0
+}
+
+/// Job rows plus the rect of the empty-state placeholder, walked together so
+/// the two can never disagree about where the section sits.
+fn compute_symphony_areas(app: &AppState, area: Rect) -> (Vec<SymphonyJobArea>, Option<Rect>) {
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
+    let mut empty = None;
     let rows = sidebar_rows(app);
     for (idx, row) in rows
         .iter()
@@ -4002,6 +4028,9 @@ fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
             break;
+        }
+        if matches!(row, SidebarRow::SymphonyEmpty) {
+            empty = Some(Rect::new(body.x, y, body.width, height));
         }
         if let SidebarRow::SymphonyJob {
             index,
@@ -4024,7 +4053,7 @@ fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea
             .saturating_add(height)
             .saturating_add(sidebar_row_gap(app, &rows, idx));
     }
-    out
+    (out, empty)
 }
 
 /// Index into the Symphony snapshot for the job row at this screen row, if
@@ -4034,6 +4063,23 @@ pub(crate) fn sidebar_symphony_job_at(app: &AppState, row: u16) -> Option<usize>
         .into_iter()
         .find(|job| row >= job.rect.y && row < job.rect.bottom())
         .map(|job| job.index)
+}
+
+/// The placeholder row. Deliberately dim and dotless: it names no workflow, so
+/// it borrows none of the agent row's state vocabulary.
+fn render_symphony_empty(app: &AppState, frame: &mut Frame, rect: Rect) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let indent = SYMPHONY_ROW_DEPTH * 2;
+    let text = format!("{}{SYMPHONY_EMPTY_LABEL}", " ".repeat(indent));
+    let line = Line::from(Span::styled(
+        crate::ui::text::truncate_end(&text, usize::from(rect.width)),
+        Style::default()
+            .fg(app.palette.overlay0)
+            .add_modifier(Modifier::DIM),
+    ));
+    frame.render_widget(Paragraph::new(line), rect);
 }
 
 fn render_symphony_job(
@@ -4667,7 +4713,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             }
             // Collapsed there is no room for a workflow name; the section rule
             // above already shows that a Symphony run is open.
-            SidebarRow::SymphonyJob { .. } => {}
+            SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {}
         }
     }
 
@@ -5522,7 +5568,11 @@ fn render_workspace_list(
     // One wall clock for the whole section, so two rows drawn in the same
     // frame can never disagree about how old they are.
     let symphony_now = std::time::SystemTime::now();
-    for job in compute_symphony_job_areas(app, sidebar_area) {
+    let (symphony_jobs, symphony_empty) = compute_symphony_areas(app, sidebar_area);
+    if let Some(rect) = symphony_empty {
+        render_symphony_empty(app, frame, rect);
+    }
+    for job in symphony_jobs {
         render_symphony_job(app, frame, &job, symphony_now);
     }
     for card in tab_cards {
@@ -7230,7 +7280,7 @@ pub(crate) mod tests {
                 SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                 SidebarRow::SectionHeader { .. } => ('h', 0),
                 SidebarRow::NestedHeader { .. } => ('h', 0),
-                SidebarRow::SymphonyJob { .. } => ('s', 0),
+                SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => ('s', 0),
             })
             .collect()
     }
@@ -8458,7 +8508,7 @@ pub(crate) mod tests {
                     SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                     SidebarRow::SectionHeader { .. } => ('h', 0),
                     SidebarRow::NestedHeader { .. } => ('h', 0),
-                    SidebarRow::SymphonyJob { .. } => ('s', 0),
+                    SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => ('s', 0),
                 })
                 .collect::<Vec<_>>(),
             vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
@@ -8494,7 +8544,8 @@ pub(crate) mod tests {
                 | SidebarRow::Agent { .. }
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::NestedHeader { .. }
-                | SidebarRow::SymphonyJob { .. } => None,
+                | SidebarRow::SymphonyJob { .. }
+                | SidebarRow::SymphonyEmpty => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(tabs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
@@ -8535,7 +8586,9 @@ pub(crate) mod tests {
                     ),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
-                    SidebarRow::SymphonyJob { .. } => ("symphony", 0, None, None),
+                    SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {
+                        ("symphony", 0, None, None)
+                    }
                 })
                 .collect::<Vec<_>>()
         };
@@ -10492,6 +10545,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::Tab { .. } => ("tab", String::new()),
                 SidebarRow::NestedHeader { title, .. } => ("section", title),
                 SidebarRow::SymphonyJob { name, .. } => ("symphony", name),
+                SidebarRow::SymphonyEmpty => ("symphony", String::new()),
             })
             .collect()
     }
@@ -13434,6 +13488,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
                     SidebarRow::NestedHeader { title, .. } => format!("nested:{title}"),
                     SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
+                    SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
                 })
                 .collect::<Vec<_>>(),
             vec![
@@ -15178,6 +15233,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.symphony_snapshot = crate::symphony::Snapshot {
             workflows: names.iter().copied().map(symphony_workflow).collect(),
             unavailable: None,
+            polled: true,
         };
         app
     }
@@ -15196,10 +15252,56 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         unavailable.symphony_snapshot = crate::symphony::Snapshot {
             workflows: Vec::new(),
             unavailable: Some("Temporal runtime is unreachable".to_string()),
+            polled: true,
         };
-        assert!(!sidebar_rows(&unavailable)
+        let rows = sidebar_rows(&unavailable);
+        assert!(!rows
             .iter()
             .any(|row| matches!(row, SidebarRow::SymphonyJob { .. })));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SymphonyEmpty)));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SectionHeader { title, .. }
+            if *title == SYMPHONY_SECTION_TITLE)));
+    }
+
+    #[test]
+    fn symphony_section_says_it_is_empty_once_the_runner_answers() {
+        // A section that vanishes when empty cannot be told apart from one that
+        // is broken, so a reachable runner keeps its header and says so.
+        let mut app = app_with_agents(&["one"]);
+        app.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: Vec::new(),
+            unavailable: None,
+            polled: true,
+        };
+        let rows = sidebar_rows(&app);
+        let header = rows.iter().position(|row| {
+            matches!(row, SidebarRow::SectionHeader { title, count, .. }
+            if *title == SYMPHONY_SECTION_TITLE && *count == 0)
+        });
+        let header = header.expect("reachable runner keeps its header at zero jobs");
+        assert!(matches!(
+            rows.get(header + 1),
+            Some(SidebarRow::SymphonyEmpty)
+        ));
+
+        // The placeholder owns no pane, so like the headers it must never become
+        // a focusable card.
+        let area = Rect::new(0, 0, 40, 24);
+        assert!(compute_symphony_job_areas(&app, area).is_empty());
+        assert!(compute_symphony_areas(&app, area).1.is_some());
+
+        // Collapsing hides the placeholder with everything else.
+        app.collapsed_sidebar_groups.insert(format!(
+            "{}:{SYMPHONY_SECTION_TITLE}",
+            app.sidebar_group_mode.collapse_namespace()
+        ));
+        assert!(!sidebar_rows(&app)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SymphonyEmpty)));
     }
 
     #[test]

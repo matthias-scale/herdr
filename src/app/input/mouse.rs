@@ -3602,6 +3602,7 @@ mod tests {
         app.state.symphony_snapshot = crate::symphony::Snapshot {
             workflows: vec![workflow("first"), workflow("second")],
             unavailable: None,
+            polled: true,
         };
         let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
@@ -3641,6 +3642,7 @@ mod tests {
                 receipts: None,
             }],
             unavailable: None,
+            polled: true,
         };
         let workflow = app.state.symphony_snapshot.workflows[0].clone();
         app.state.bind_symphony_dock(&workflow);

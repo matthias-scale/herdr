@@ -175,6 +175,7 @@ mod tests {
         app.symphony_snapshot = crate::symphony::Snapshot {
             workflows: vec![workflow()],
             unavailable: None,
+            polled: true,
         };
         app.dock_symphony = Some(SymphonyDockSelection {
             workflow_id: "symphony-MAT-138".to_string(),

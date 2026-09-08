@@ -205,6 +205,7 @@ mod tests {
         let snapshot = Snapshot {
             workflows: vec![workflow()],
             unavailable: None,
+            polled: true,
         };
         let rows = project(
             &snapshot,
