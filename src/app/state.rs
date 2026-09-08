@@ -4148,6 +4148,9 @@ impl AppState {
         self.release_dock_focus_to_pane();
         self.sidebar_selected_work_group = None;
         self.sidebar_object_menu = None;
+        self.sidebar_selected_settled = None;
+        self.sidebar_settled_menu_target = None;
+        self.sidebar_settled_menu_delete_armed = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
