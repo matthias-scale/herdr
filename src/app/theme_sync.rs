@@ -91,6 +91,18 @@ impl App {
         true
     }
 
+    pub(crate) fn set_host_appearance_override(
+        &mut self,
+        appearance: crate::config::HostAppearanceOverride,
+    ) -> bool {
+        if self.state.theme_runtime.host_appearance == appearance {
+            return false;
+        }
+        self.state.theme_runtime.host_appearance = appearance;
+        self.refresh_effective_app_theme();
+        true
+    }
+
     pub(super) fn refresh_effective_app_theme(&mut self) -> bool {
         let (palette, theme_name) = super::resolve_effective_theme(
             &self.state.theme_runtime,
@@ -99,7 +111,11 @@ impl App {
         let mismatch = theme_appearance_mismatch(
             &theme_name,
             palette.appearance(),
-            self.state.host_terminal_appearance,
+            self.state
+                .theme_runtime
+                .host_appearance
+                .appearance()
+                .or(self.state.host_terminal_appearance),
         );
         if self.state.theme_appearance_mismatch != mismatch {
             if let Some(message) = &mismatch {

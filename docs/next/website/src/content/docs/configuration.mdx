@@ -321,11 +321,14 @@ To let Herdr switch its own UI theme when the host terminal reports a light/dark
 name = "catppuccin"
 auto_switch = true
 auto_switch_poll_interval_seconds = 60
+host_appearance = "auto"
 light_name = "catppuccin-latte"
 dark_name = "catppuccin"
 ```
 
 `auto_switch` defaults to `false`, so existing theme configs keep manual behavior. Full clients query the host background on attach, focus gain, resize/resume, and periodically; the default poll interval is 60 seconds, limiting the periodic cost to one short OSC 11 query per minute, and accepted values are clamped to 5–3600 seconds. This keeps terminals without DEC private mode 2031, such as WezTerm, in sync without restarting Herdr. An explicit 2031 color-scheme report remains authoritative over inferred background luminance. If `light_name` or `dark_name` is omitted, Herdr uses the matching built-in sibling for the configured `name` when one exists, such as `tokyo-night`/`tokyo-night-day` or `gruvbox`/`gruvbox-light`. Manual theme selection in Settings disables `auto_switch`.
+
+`host_appearance` defaults to `auto`. Set it to `light` or `dark` when mosh or another terminal relay drops OSC 11 and Mode 2031 replies. The override takes precedence over host reports and applies to Herdr's UI and child panes. Run `herdr server reload-config` after editing it.
 
 You can override individual colors:
 

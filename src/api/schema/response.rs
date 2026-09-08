@@ -287,6 +287,14 @@ pub enum ResponseResult {
         status: crate::config::ConfigReloadStatus,
         diagnostics: Vec<String>,
     },
+    ThemeStatus {
+        #[serde(default)]
+        host_reported: Option<String>,
+        #[serde(rename = "override")]
+        appearance_override: crate::config::HostAppearanceOverride,
+        effective_appearance: String,
+        theme_name: String,
+    },
     Ok {},
 }
 

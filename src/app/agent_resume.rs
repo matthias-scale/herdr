@@ -212,10 +212,10 @@ impl App {
         cols: u16,
         allow_empty_theme: bool,
     ) -> bool {
-        let host_terminal_theme = self.state.pane_terminal_theme();
-        if host_terminal_theme.is_empty() && !allow_empty_theme {
+        if self.state.host_terminal_theme.is_empty() && !allow_empty_theme {
             return false;
         }
+        let host_terminal_theme = self.state.pane_terminal_theme();
 
         let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
             tracing::warn!(

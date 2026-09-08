@@ -47,6 +47,13 @@
           "description": "Follow host terminal light/dark appearance and switch between theme names."
         },
         {
+          "key": "theme.host_appearance",
+          "type": "enum",
+          "default": "auto",
+          "values": ["auto", "light", "dark"],
+          "description": "Override the detected host appearance when a terminal relay drops OSC 11 or Mode 2031 replies."
+        },
+        {
           "key": "theme.auto_switch_poll_interval_seconds",
           "type": "integer",
           "default": "60",

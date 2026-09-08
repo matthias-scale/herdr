@@ -10,4 +10,5 @@ mod protocol;
 mod protocol_guard;
 mod sessions;
 mod surface;
+mod theme;
 mod workspace;

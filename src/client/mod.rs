@@ -67,6 +67,8 @@ struct ClientLoopConfig {
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
     host_terminal_theme_poll_interval: Duration,
+    theme_auto_switch: bool,
+    host_appearance_override: crate::config::HostAppearanceOverride,
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 }
 
@@ -111,6 +113,46 @@ struct HostTerminalAppearanceQuerySchedule {
     enabled: bool,
     interval: Duration,
     next_poll_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MissingHostAppearanceWarning {
+    enabled: bool,
+    deadline: Instant,
+    answered: bool,
+    warned: bool,
+}
+
+impl MissingHostAppearanceWarning {
+    fn new(enabled: bool, interval: Duration, now: Instant) -> Self {
+        Self {
+            enabled,
+            deadline: now + interval,
+            answered: false,
+            warned: false,
+        }
+    }
+
+    #[cfg(any(unix, test))]
+    fn observe(&mut self, events: &[crate::raw_input::RawInputEvent]) {
+        self.answered |= events.iter().any(|event| {
+            matches!(
+                event,
+                crate::raw_input::RawInputEvent::HostDefaultColor {
+                    kind: crate::terminal_theme::DefaultColorKind::Background,
+                    ..
+                }
+            )
+        });
+    }
+
+    fn should_warn(&mut self, now: Instant) -> bool {
+        if !self.enabled || self.answered || self.warned || now < self.deadline {
+            return false;
+        }
+        self.warned = true;
+        true
+    }
 }
 
 impl HostTerminalAppearanceQuerySchedule {
@@ -895,6 +937,20 @@ fn is_ssh_session() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
 }
 
+fn likely_terminal_relay() -> &'static str {
+    if std::env::var_os("MOSH_IP").is_some() || std::env::var_os("MOSH_PORT").is_some() {
+        "mosh"
+    } else if std::env::var_os("TMUX").is_some() {
+        "tmux"
+    } else if std::env::var_os("STY").is_some() {
+        "screen"
+    } else if is_ssh_session() {
+        "ssh"
+    } else {
+        "unknown"
+    }
+}
+
 /// Time to wait for the server's Welcome reply during the handshake.
 ///
 /// A local client talks to an already-connected server, so 5s is plenty. The
@@ -1427,6 +1483,8 @@ fn run_client_with_mode(
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
         host_terminal_theme_poll_interval: loaded_config.config.theme.auto_switch_poll_interval(),
+        theme_auto_switch: loaded_config.config.theme.auto_switch,
+        host_appearance_override: loaded_config.config.theme.host_appearance,
         remote_image_paste_key,
     };
 
@@ -1672,10 +1730,16 @@ async fn run_client_loop(
         );
     });
 
+    let appearance_tracking_started_at = Instant::now();
     let mut appearance_query_schedule = HostTerminalAppearanceQuerySchedule::new(
         will_query_host_terminal_theme,
         config.host_terminal_theme_poll_interval,
-        Instant::now(),
+        appearance_tracking_started_at,
+    );
+    let mut missing_host_appearance_warning = MissingHostAppearanceWarning::new(
+        config.theme_auto_switch && will_query_host_terminal_theme,
+        config.host_terminal_theme_poll_interval,
+        appearance_tracking_started_at,
     );
     let _ = emit_host_terminal_query(
         HostTerminalQuery::Theme,
@@ -1799,6 +1863,7 @@ async fn run_client_loop(
                     }
                 } else {
                     let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                    missing_host_appearance_warning.observe(&events);
                     if crate::raw_input::events_require_host_surface_redraw(
                         &events,
                         state.redraw_on_focus_gained,
@@ -2200,6 +2265,13 @@ async fn run_client_loop(
                     &host_color_query_generation,
                 );
             }
+        }
+        if missing_host_appearance_warning.should_warn(Instant::now()) {
+            warn!(
+                relay = likely_terminal_relay(),
+                host_appearance = config.host_appearance_override.as_str(),
+                "auto_switch received no OSC 11 answer within one poll interval; the terminal relay may be dropping replies; set [theme] host_appearance to light or dark"
+            );
         }
     }
 
@@ -3424,6 +3496,23 @@ mod tests {
         schedule.mark_query_sent(HostTerminalQuery::Appearance, now + interval);
         assert!(!schedule.is_due(now + interval));
         assert!(schedule.is_due(now + interval + interval));
+    }
+
+    #[test]
+    fn missing_host_appearance_warning_fires_once_unless_osc11_arrives() {
+        let start = Instant::now();
+        let interval = Duration::from_secs(60);
+        let mut missing = MissingHostAppearanceWarning::new(true, interval, start);
+        assert!(!missing.should_warn(start + Duration::from_secs(59)));
+        assert!(missing.should_warn(start + interval));
+        assert!(!missing.should_warn(start + interval + interval));
+
+        let mut answered = MissingHostAppearanceWarning::new(true, interval, start);
+        answered.observe(&[crate::raw_input::RawInputEvent::HostDefaultColor {
+            kind: crate::terminal_theme::DefaultColorKind::Background,
+            color: crate::terminal_theme::RgbColor { r: 1, g: 2, b: 3 },
+        }]);
+        assert!(!answered.should_warn(start + interval));
     }
 
     #[test]
