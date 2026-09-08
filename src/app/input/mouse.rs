@@ -1413,6 +1413,11 @@ impl AppState {
                     if self.mode != Mode::Terminal {
                         self.mode = Mode::Terminal;
                     }
+                    // Clicking pane content aims the keyboard at the shell, and
+                    // it reaches here even when that pane already held focus, so
+                    // the surface flags are dropped here rather than only on a
+                    // focus change.
+                    self.release_surface_focus_to_pane();
 
                     if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                         self.selection = None;
@@ -2962,6 +2967,80 @@ mod tests {
         input::TerminalKey,
         workspace::Workspace,
     };
+
+    /// One workspace laid out for real, so a click lands on pane content.
+    fn app_with_clickable_pane() -> (App, crate::layout::PaneId, Rect) {
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("one");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let rect = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("pane laid out")
+            .inner_rect;
+        (app, pane_id, rect)
+    }
+
+    #[test]
+    fn clicking_pane_content_releases_dock_and_sidebar_focus() {
+        let (mut app, _pane_id, rect) = app_with_clickable_pane();
+        app.state.dock_home_focused = true;
+        app.state.dock_pr_focused = true;
+        app.state.dock_chooser_focused = true;
+        app.state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            rect.y + 1,
+        ));
+
+        assert!(!app.state.dock_home_focused, "dock home kept focus");
+        assert!(!app.state.dock_pr_focused, "dock pr kept focus");
+        assert!(!app.state.dock_chooser_focused, "dock chooser kept focus");
+        assert_eq!(app.state.sidebar_selected_work_group, None);
+        assert!(app.state.sidebar_object_menu.is_none());
+
+        // The letters the dock would otherwise answer now belong to the shell.
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
+        for character in ['a', 'm', 'x', 'r'] {
+            let key = TerminalKey::new(KeyCode::Char(character), KeyModifiers::empty());
+            assert!(
+                !app.handle_dock_home_key(&key),
+                "dock home consumed '{character}' after the pane took focus"
+            );
+        }
+    }
+
+    #[test]
+    fn focusing_another_pane_releases_dock_focus() {
+        let (mut app, pane_id, _rect) = app_with_clickable_pane();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(pane_id);
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+        app.state.workspaces.push(second);
+        app.state.dock_pr_focused = true;
+        app.state.dock_linear_focused = true;
+        app.state.dock_agents_focused = true;
+        app.state.dock_files_focused = true;
+        app.state.dock_diff_focused = true;
+
+        assert!(app.state.focus_pane_in_workspace(1, second_pane));
+
+        assert!(!app.state.dock_pr_focused);
+        assert!(!app.state.dock_linear_focused);
+        assert!(!app.state.dock_agents_focused);
+        assert!(!app.state.dock_files_focused);
+        assert!(!app.state.dock_diff_focused);
+    }
 
     #[test]
     fn tab_click_survives_stray_drag_report_off_the_tab_bar() {

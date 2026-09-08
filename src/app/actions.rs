@@ -390,6 +390,7 @@ impl AppState {
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             self.sync_copy_mode_with_focus();
+            self.release_dock_focus_to_pane();
             self.reconcile_dock_home_with_focused_pane();
             return true;
         }
