@@ -2043,7 +2043,7 @@ mod tests {
 
     #[test]
     fn provider_product_title_never_becomes_the_tab_name() {
-        let mut ws = Workspace::test_new("ignored");
+        let ws = Workspace::test_new("ignored");
         let root_pane = ws.tabs[0].root_pane;
         let terminal_id = ws.tabs[0].terminal_id(root_pane).unwrap().clone();
         let mut terminal = TerminalState::new(terminal_id.clone(), PathBuf::from("/repo/herdr"));
