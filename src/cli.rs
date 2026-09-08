@@ -37,6 +37,7 @@ mod server_not_running;
 mod spec;
 mod status;
 mod tab;
+mod theme;
 mod window;
 mod work_index;
 mod workspace;
@@ -187,6 +188,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
+        "theme" => theme::run_theme_command(&args[2..])?,
         "window" => window::run_window_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,

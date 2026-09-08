@@ -1489,6 +1489,8 @@ impl App {
         let new_rows = rows.max(4);
         let new_cols = cols.max(10);
         let (env, _) = self.custom_command_env();
+        let pane_terminal_theme = self.state.pane_terminal_theme();
+        let pane_terminal_appearance = Some(self.state.pane_terminal_appearance());
 
         let ws = self
             .state
@@ -1515,8 +1517,8 @@ impl App {
             command,
             env,
             self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            pane_terminal_theme,
+            pane_terminal_appearance,
         )?;
         let new_pane_id = new_pane.pane_id;
         self.terminal_runtimes
@@ -1587,6 +1589,8 @@ impl App {
             })
         });
 
+        let pane_terminal_theme = self.state.pane_terminal_theme();
+        let pane_terminal_appearance = Some(self.state.pane_terminal_appearance());
         let (tab_idx, new_pane, workspace_id) = {
             let ws = self
                 .state
@@ -1603,8 +1607,8 @@ impl App {
                 argv,
                 extra_env,
                 self.state.pane_scrollback_limit_bytes,
-                self.state.host_terminal_theme,
-                self.state.host_terminal_appearance,
+                pane_terminal_theme,
+                pane_terminal_appearance,
                 true,
             );
             let (tab_idx, new_pane) = match result {

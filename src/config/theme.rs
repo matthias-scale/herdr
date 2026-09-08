@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 pub const THEME_NAMES: &[&str] = &[
@@ -57,6 +57,35 @@ use super::{
     MIN_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
 };
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum HostAppearanceOverride {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl HostAppearanceOverride {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub const fn appearance(self) -> Option<crate::terminal_theme::HostAppearance> {
+        match self {
+            Self::Auto => None,
+            Self::Light => Some(crate::terminal_theme::HostAppearance::Light),
+            Self::Dark => Some(crate::terminal_theme::HostAppearance::Dark),
+        }
+    }
+}
+
 /// Theme configuration: pick a built-in or override individual tokens.
 ///
 /// ```toml
@@ -74,6 +103,8 @@ pub struct ThemeConfig {
     pub name: Option<String>,
     /// Follow host terminal light/dark appearance and switch between theme names.
     pub auto_switch: bool,
+    /// Override the detected host appearance when a relay drops terminal replies.
+    pub host_appearance: HostAppearanceOverride,
     /// Seconds between background-color refreshes used by `auto_switch`.
     /// Values are clamped to a safe 1-hour maximum and 5-second minimum.
     pub auto_switch_poll_interval_seconds: Option<u64>,
@@ -270,6 +301,22 @@ name = "dracula"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.theme.name.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn host_appearance_override_parses_and_defaults_to_auto() {
+        let default: Config = toml::from_str("[theme]\n").unwrap();
+        assert_eq!(default.theme.host_appearance, HostAppearanceOverride::Auto);
+
+        for (value, expected) in [
+            ("light", HostAppearanceOverride::Light),
+            ("dark", HostAppearanceOverride::Dark),
+            ("auto", HostAppearanceOverride::Auto),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[theme]\nhost_appearance = \"{value}\"\n")).unwrap();
+            assert_eq!(config.theme.host_appearance, expected);
+        }
     }
 
     #[test]

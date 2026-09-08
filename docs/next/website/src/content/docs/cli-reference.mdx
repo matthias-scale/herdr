@@ -93,6 +93,15 @@ herdr server reload-agent-manifests
 
 `herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
 
+## Theme appearance
+
+```bash
+herdr theme status [--json]
+herdr theme set light|dark|auto
+```
+
+`theme status` reports the host value, runtime override, effective appearance, and selected theme. `theme set` changes the server-owned override immediately and sends an appearance transition to subscribed child panes. The runtime value lasts until the next config reload or server restart. Set `[theme] host_appearance` for a durable override.
+
 ## Notifications
 
 ```bash

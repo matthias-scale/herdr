@@ -305,6 +305,28 @@ fn request_round_trips_for_server_reload_config() {
 }
 
 #[test]
+fn theme_requests_round_trip() {
+    for method in [
+        Method::ThemeStatus(EmptyParams::default()),
+        Method::ThemeSet(ThemeSetParams {
+            host_appearance: crate::config::HostAppearanceOverride::Light,
+        }),
+    ] {
+        let request = Request {
+            id: "req_theme".into(),
+            method,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(matches!(
+            json["method"].as_str(),
+            Some("theme.status" | "theme.set")
+        ));
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, request);
+    }
+}
+
+#[test]
 fn request_round_trips_for_server_reload_agent_manifests() {
     let request = Request {
         id: "req_reload_agent_manifests".into(),

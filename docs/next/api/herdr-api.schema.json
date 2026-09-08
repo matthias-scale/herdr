@@ -2657,6 +2657,14 @@
           ],
           "type": "object"
         },
+        "HostAppearanceOverride": {
+          "enum": [
+            "auto",
+            "light",
+            "dark"
+          ],
+          "type": "string"
+        },
         "IntegrationInstallParams": {
           "properties": {
             "target": {
@@ -5067,6 +5075,17 @@
           ],
           "type": "object"
         },
+        "ThemeSetParams": {
+          "properties": {
+            "host_appearance": {
+              "$ref": "#/schemas/request/$defs/HostAppearanceOverride"
+            }
+          },
+          "required": [
+            "host_appearance"
+          ],
+          "type": "object"
+        },
         "ToastHerdrPosition": {
           "enum": [
             "top-left",
@@ -5494,6 +5513,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "theme.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "theme.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ThemeSetParams"
             }
           },
           "required": [
@@ -8456,6 +8507,14 @@
             "pane_agent_detected",
             "pane_agent_status_changed",
             "layout_updated"
+          ],
+          "type": "string"
+        },
+        "HostAppearanceOverride": {
+          "enum": [
+            "auto",
+            "light",
+            "dark"
           ],
           "type": "string"
         },
@@ -11624,6 +11683,37 @@
                 "type",
                 "status",
                 "diagnostics"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "effective_appearance": {
+                  "type": "string"
+                },
+                "host_reported": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "override": {
+                  "$ref": "#/schemas/success_response/$defs/HostAppearanceOverride"
+                },
+                "theme_name": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "theme_status",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "override",
+                "effective_appearance",
+                "theme_name"
               ],
               "type": "object"
             },

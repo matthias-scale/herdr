@@ -61,7 +61,6 @@ impl App {
         }
         self.state.host_terminal_appearance = Some(appearance);
         self.state.host_terminal_appearance_explicit = explicit;
-        self.apply_host_terminal_appearance_to_panes();
         self.refresh_effective_app_theme()
     }
 
@@ -77,7 +76,6 @@ impl App {
         }
         self.state.host_terminal_appearance = appearance;
         self.state.host_terminal_appearance_explicit = explicit;
-        self.apply_host_terminal_appearance_to_panes();
         self.refresh_effective_app_theme()
     }
 
@@ -93,6 +91,18 @@ impl App {
         true
     }
 
+    pub(crate) fn set_host_appearance_override(
+        &mut self,
+        appearance: crate::config::HostAppearanceOverride,
+    ) -> bool {
+        if self.state.theme_runtime.host_appearance == appearance {
+            return false;
+        }
+        self.state.theme_runtime.host_appearance = appearance;
+        self.refresh_effective_app_theme();
+        true
+    }
+
     pub(super) fn refresh_effective_app_theme(&mut self) -> bool {
         let (palette, theme_name) = super::resolve_effective_theme(
             &self.state.theme_runtime,
@@ -101,7 +111,11 @@ impl App {
         let mismatch = theme_appearance_mismatch(
             &theme_name,
             palette.appearance(),
-            self.state.host_terminal_appearance,
+            self.state
+                .theme_runtime
+                .host_appearance
+                .appearance()
+                .or(self.state.host_terminal_appearance),
         );
         if self.state.theme_appearance_mismatch != mismatch {
             if let Some(message) = &mismatch {
@@ -109,25 +123,29 @@ impl App {
             }
             self.state.theme_appearance_mismatch = mismatch;
         }
-        if self.state.theme_name == theme_name && self.state.palette == palette {
-            return false;
+        let changed = self.state.theme_name != theme_name || self.state.palette != palette;
+        if changed {
+            self.state.theme_name = theme_name;
+            self.state.palette = palette;
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
         }
-        self.state.theme_name = theme_name;
-        self.state.palette = palette;
-        self.render_dirty.request_generic();
-        self.render_notify.notify_one();
-        true
+        self.apply_host_terminal_theme_to_panes();
+        self.apply_host_terminal_appearance_to_panes();
+        changed
     }
 
     fn apply_host_terminal_appearance_to_panes(&self) {
+        let appearance = Some(self.state.pane_terminal_appearance());
         for runtime in self.terminal_runtimes.values() {
-            runtime.apply_host_terminal_appearance(self.state.host_terminal_appearance);
+            runtime.apply_host_terminal_appearance(appearance);
         }
     }
 
     fn apply_host_terminal_theme_to_panes(&self) {
+        let theme = self.state.pane_terminal_theme();
         for runtime in self.terminal_runtimes.values() {
-            runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
+            runtime.apply_host_terminal_theme(theme);
         }
 
         self.render_dirty.request_generic();
