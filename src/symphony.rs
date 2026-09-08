@@ -38,6 +38,11 @@ pub(crate) struct Workflow {
 pub(crate) struct Snapshot {
     pub(crate) workflows: Vec<Workflow>,
     pub(crate) unavailable: Option<String>,
+    /// False until the poller has answered once. A snapshot that has never been
+    /// polled looks exactly like a reachable runner with no jobs, and the two
+    /// must not render the same: one is "nothing to show yet", the other is a
+    /// fact about the runner.
+    pub(crate) polled: bool,
 }
 
 impl Snapshot {
@@ -45,13 +50,21 @@ impl Snapshot {
         Self {
             workflows,
             unavailable: None,
+            polled: true,
         }
+    }
+
+    /// The runner answered and is usable. Callers use this to tell an empty
+    /// runner apart from an unreachable or not-yet-polled one.
+    pub(crate) fn is_reachable(&self) -> bool {
+        self.polled && self.unavailable.is_none()
     }
 
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
             workflows: Vec::new(),
             unavailable: Some(message.into()),
+            polled: true,
         }
     }
 }

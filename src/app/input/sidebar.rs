@@ -720,7 +720,8 @@ impl AppState {
                 | crate::ui::SidebarRow::Tab { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
-                | crate::ui::SidebarRow::SymphonyJob { .. } => None,
+                | crate::ui::SidebarRow::SymphonyJob { .. }
+                | crate::ui::SidebarRow::SymphonyEmpty => None,
             })
     }
 
@@ -742,7 +743,8 @@ impl AppState {
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
-                | crate::ui::SidebarRow::SymphonyJob { .. } => None,
+                | crate::ui::SidebarRow::SymphonyJob { .. }
+                | crate::ui::SidebarRow::SymphonyEmpty => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -1375,6 +1377,7 @@ mod tests {
                 }
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
                 crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
+                crate::ui::SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
             })
             .collect()
     }

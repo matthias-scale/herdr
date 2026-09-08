@@ -6039,6 +6039,7 @@ mod tests {
             snapshot: crate::symphony::Snapshot {
                 workflows: vec![workflow("first", "run-1"), workflow("selected", "run-2")],
                 unavailable: None,
+                polled: true,
             },
             selected: 1,
             observed_at: std::time::SystemTime::UNIX_EPOCH,
@@ -6047,6 +6048,7 @@ mod tests {
         detail.replace_snapshot(crate::symphony::Snapshot {
             workflows: vec![workflow("selected", "run-2"), workflow("first", "run-1")],
             unavailable: None,
+            polled: true,
         });
 
         assert_eq!(detail.selected, 0);
@@ -6060,6 +6062,7 @@ mod tests {
         detail.replace_snapshot(crate::symphony::Snapshot {
             workflows: vec![workflow("replacement", "run-3")],
             unavailable: None,
+            polled: true,
         });
         assert_eq!(detail.selected, 0);
     }

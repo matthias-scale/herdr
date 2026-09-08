@@ -3390,6 +3390,7 @@ mod tests {
                     receipts: Some("/receipts".to_string()),
                 }],
                 unavailable: None,
+                polled: true,
             },
             selected: 0,
             observed_at: std::time::SystemTime::now(),

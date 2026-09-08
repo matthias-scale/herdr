@@ -146,7 +146,8 @@ fn mobile_switcher_target_for_row(
         },
         SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
-        | SidebarRow::SymphonyJob { .. } => return None,
+        | SidebarRow::SymphonyJob { .. }
+        | SidebarRow::SymphonyEmpty => return None,
     })
 }
 
@@ -167,7 +168,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
-        | SidebarRow::SymphonyJob { .. } => 1,
+        | SidebarRow::SymphonyJob { .. }
+        | SidebarRow::SymphonyEmpty => 1,
         SidebarRow::Agent { .. } => 1,
     }
 }
@@ -789,6 +791,20 @@ fn render_mobile_switcher_content(
                     p.panel_bg,
                     Line::from(Span::styled(
                         label,
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::SymphonyEmpty => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("   {}", crate::ui::sidebar::SYMPHONY_EMPTY_LABEL),
                         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                     )),
                 );
