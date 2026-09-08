@@ -1366,6 +1366,19 @@ impl App {
         runtime.try_send_focus_event(event);
     }
 
+    fn theme_status_result(&self) -> crate::api::schema::ResponseResult {
+        let appearance_name = |appearance: crate::terminal_theme::HostAppearance| match appearance {
+            crate::terminal_theme::HostAppearance::Dark => "dark".to_string(),
+            crate::terminal_theme::HostAppearance::Light => "light".to_string(),
+        };
+        crate::api::schema::ResponseResult::ThemeStatus {
+            host_reported: self.state.host_terminal_appearance.map(appearance_name),
+            appearance_override: self.state.theme_runtime.host_appearance,
+            effective_appearance: appearance_name(self.state.pane_terminal_appearance()),
+            theme_name: self.state.theme_name.clone(),
+        }
+    }
+
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
         self.drain_all_internal_events();
         self.handle_api_request_after_internal_events_drained(request)
@@ -1415,6 +1428,17 @@ impl App {
                         status: report.status,
                         diagnostics: report.diagnostics,
                     },
+                }
+            }
+            Method::ThemeStatus(_) => SuccessResponse {
+                id: request.id,
+                result: self.theme_status_result(),
+            },
+            Method::ThemeSet(params) => {
+                self.set_host_appearance_override(params.host_appearance);
+                SuccessResponse {
+                    id: request.id,
+                    result: self.theme_status_result(),
                 }
             }
             Method::ServerAgentManifests(_) => {
@@ -2312,6 +2336,39 @@ mod tests {
         )
         .await
         .expect("matching agent detection runtime should be reset");
+    }
+
+    #[test]
+    fn theme_api_status_and_set_round_trip_server_owned_appearance() {
+        let mut config = crate::config::Config::default();
+        config.theme.auto_switch = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true);
+
+        let status = app.handle_api_request(crate::api::schema::Request {
+            id: "theme_status".into(),
+            method: crate::api::schema::Method::ThemeStatus(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["result"]["host_reported"], "light");
+        assert_eq!(status["result"]["override"], "auto");
+        assert_eq!(status["result"]["effective_appearance"], "light");
+        assert_eq!(status["result"]["theme_name"], "catppuccin-latte");
+
+        let set = app.handle_api_request(crate::api::schema::Request {
+            id: "theme_set".into(),
+            method: crate::api::schema::Method::ThemeSet(crate::api::schema::ThemeSetParams {
+                host_appearance: crate::config::HostAppearanceOverride::Dark,
+            }),
+        });
+        let set: serde_json::Value = serde_json::from_str(&set).unwrap();
+        assert_eq!(set["result"]["host_reported"], "light");
+        assert_eq!(set["result"]["override"], "dark");
+        assert_eq!(set["result"]["effective_appearance"], "dark");
+        assert_eq!(set["result"]["theme_name"], "catppuccin");
     }
 
     #[tokio::test]

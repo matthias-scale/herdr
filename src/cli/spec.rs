@@ -38,6 +38,7 @@ pub(super) fn command() -> Command {
         .subcommand(workspace_command())
         .subcommand(worktree_command())
         .subcommand(tab_command())
+        .subcommand(theme_command())
         .subcommand(window_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -188,6 +189,26 @@ fn channel_command() -> Command {
                     .required(true)
                     .value_parser(["stable", "preview"]),
             ),
+        )
+}
+
+fn theme_command() -> Command {
+    Command::new("theme")
+        .about("Inspect or override the running theme appearance")
+        .subcommand(
+            Command::new("status")
+                .about("Show the running theme appearance")
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("set")
+                .about("Override the running host appearance")
+                .arg(
+                    Arg::new("appearance")
+                        .value_name("APPEARANCE")
+                        .required(true)
+                        .value_parser(["light", "dark", "auto"]),
+                ),
         )
 }
 

@@ -2683,6 +2683,7 @@ pub struct ThemeRuntimeConfig {
     pub dark_name: String,
     pub light_name: String,
     pub auto_switch: bool,
+    pub host_appearance: crate::config::HostAppearanceOverride,
     pub custom: Option<crate::config::CustomThemeColors>,
     pub legacy_accent: Option<String>,
 }
@@ -3504,7 +3505,10 @@ impl AppState {
     /// Appearance reported to child terminals. Built-in palettes are concrete;
     /// the terminal-inheriting palette falls back to Ghostty's dark default.
     pub(crate) fn pane_terminal_appearance(&self) -> HostAppearance {
-        self.host_terminal_appearance
+        self.theme_runtime
+            .host_appearance
+            .appearance()
+            .or(self.host_terminal_appearance)
             .or_else(|| self.palette.appearance())
             .unwrap_or(HostAppearance::Dark)
     }
@@ -5530,6 +5534,7 @@ impl AppState {
                 dark_name: "catppuccin".to_string(),
                 light_name: "catppuccin-latte".to_string(),
                 auto_switch: false,
+                host_appearance: crate::config::HostAppearanceOverride::Auto,
                 custom: None,
                 legacy_accent: None,
             },

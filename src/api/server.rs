@@ -385,6 +385,8 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
+        Method::ThemeStatus(_) => "theme.status",
+        Method::ThemeSet(_) => "theme.set",
         Method::ServerAgentManifests(_) => "server.agent_manifests",
         Method::ServerReloadAgentManifests(_) => "server.reload_agent_manifests",
         Method::NotificationShow(_) => "notification.show",

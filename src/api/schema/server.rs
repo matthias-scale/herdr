@@ -19,3 +19,8 @@ pub struct ServerCapabilities {
     #[serde(default)]
     pub detached_server_daemon: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ThemeSetParams {
+    pub host_appearance: crate::config::HostAppearanceOverride,
+}

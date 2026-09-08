@@ -485,6 +485,7 @@ fn theme_runtime_config(
         dark_name: config.theme.dark_name.clone().unwrap_or(default_dark),
         light_name: config.theme.light_name.clone().unwrap_or(default_light),
         auto_switch: config.theme.auto_switch,
+        host_appearance: config.theme.host_appearance,
         custom: config.theme.custom.clone(),
         legacy_accent: (use_legacy_ui_accent
             && config.ui.accent != "cyan"
@@ -530,6 +531,7 @@ fn resolve_effective_theme(
     runtime: &state::ThemeRuntimeConfig,
     appearance: Option<crate::terminal_theme::HostAppearance>,
 ) -> (state::Palette, String) {
+    let appearance = runtime.host_appearance.appearance().or(appearance);
     let (name, fallback, mode_custom) = if runtime.auto_switch {
         match appearance {
             Some(crate::terminal_theme::HostAppearance::Dark) => (
@@ -4374,6 +4376,121 @@ mod tests {
         let pane_theme = app.state.pane_terminal_theme();
         assert_eq!(pane_theme.foreground, Some(reported_foreground));
         assert_eq!(pane_theme.background, Some(reported_background));
+    }
+
+    #[test]
+    fn pane_appearance_precedence_is_override_then_host_then_palette() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(
+            app.state.pane_terminal_appearance(),
+            crate::terminal_theme::HostAppearance::Dark
+        );
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true);
+        assert_eq!(
+            app.state.pane_terminal_appearance(),
+            crate::terminal_theme::HostAppearance::Light
+        );
+        app.set_host_appearance_override(crate::config::HostAppearanceOverride::Dark);
+        assert_eq!(
+            app.state.pane_terminal_appearance(),
+            crate::terminal_theme::HostAppearance::Dark
+        );
+        app.set_host_appearance_override(crate::config::HostAppearanceOverride::Auto);
+        assert_eq!(
+            app.state.pane_terminal_appearance(),
+            crate::terminal_theme::HostAppearance::Light
+        );
+    }
+
+    #[tokio::test]
+    async fn appearance_override_emits_one_transition_per_change_to_each_subscribed_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        let (other_runtime, mut other_rx) = TerminalRuntime::test_with_channel(80, 24);
+        for runtime in [&runtime, &other_runtime] {
+            runtime
+                .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark));
+            runtime.test_process_pty_bytes(b"\x1b[?2031h");
+        }
+        app.terminal_runtimes
+            .insert(crate::terminal::TerminalId::alloc(), runtime);
+        app.terminal_runtimes
+            .insert(crate::terminal::TerminalId::alloc(), other_runtime);
+
+        assert!(app.set_host_appearance_override(crate::config::HostAppearanceOverride::Light));
+        assert_eq!(
+            rx.recv().await,
+            Some(bytes::Bytes::from_static(b"\x1b[?997;2n"))
+        );
+        assert_eq!(
+            other_rx.recv().await,
+            Some(bytes::Bytes::from_static(b"\x1b[?997;2n"))
+        );
+        assert!(!app.set_host_appearance_override(crate::config::HostAppearanceOverride::Light));
+        assert!(rx.try_recv().is_err());
+        assert!(other_rx.try_recv().is_err());
+
+        assert!(app.set_host_appearance_override(crate::config::HostAppearanceOverride::Auto));
+        assert_eq!(
+            rx.recv().await,
+            Some(bytes::Bytes::from_static(b"\x1b[?997;1n"))
+        );
+        assert_eq!(
+            other_rx.recv().await,
+            Some(bytes::Bytes::from_static(b"\x1b[?997;1n"))
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(other_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn reload_config_applies_host_appearance_override_to_ui_and_subscribed_panes() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("reload-host-appearance");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[theme]\nname = \"catppuccin\"\nauto_switch = true\nhost_appearance = \"light\"\n",
+        )
+        .unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        runtime.apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark));
+        runtime.test_process_pty_bytes(b"\x1b[?2031h");
+        app.terminal_runtimes
+            .insert(crate::terminal::TerminalId::alloc(), runtime);
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.theme_name, "catppuccin-latte");
+        assert_eq!(
+            app.state.palette.appearance(),
+            Some(crate::terminal_theme::HostAppearance::Light)
+        );
+        assert_eq!(
+            rx.recv().await,
+            Some(bytes::Bytes::from_static(b"\x1b[?997;2n"))
+        );
+        assert!(rx.try_recv().is_err());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// A pinned palette that contradicts the terminal is legal but nearly

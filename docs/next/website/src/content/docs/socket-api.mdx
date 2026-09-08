@@ -97,6 +97,7 @@ Raw socket method names use dot notation:
 | Area | Methods |
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
+| Theme | `theme.status`, `theme.set` |
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
@@ -967,6 +968,25 @@ Successful responses look like this:
 ```
 
 Fields such as `last_check_unix`, `last_result`, `active_version`, `cached_remote_version`, `remote_update_result`, `remote_update_error`, `remote_last_checked_unix`, and `warning` are omitted when not available. `server.reload_agent_manifests` returns `agent_manifest_reload` with the same `manifests` item shape after reloading the in-memory rule cache.
+
+`theme.status` reads the server-owned appearance state. `theme.set` changes the runtime override to `light`, `dark`, or `auto` and returns the updated status:
+
+```json
+{"id":"theme_1","method":"theme.set","params":{"host_appearance":"light"}}
+```
+
+```json
+{
+  "id": "theme_1",
+  "result": {
+    "type": "theme_status",
+    "host_reported": null,
+    "override": "light",
+    "effective_appearance": "light",
+    "theme_name": "catppuccin-latte"
+  }
+}
+```
 
 `agent.explain` evaluates the target pane's detection snapshot in the running server using the server's active manifest cache:
 
