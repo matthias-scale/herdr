@@ -828,13 +828,7 @@ impl App {
     /// Windows are Herdr tabs. Canonical workspace/vector/tab order is used so
     /// agent lifecycle or cwd changes cannot affect global navigation.
     fn focus_relative_window(&mut self, forward: bool) {
-        let windows = self
-            .state
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(ws_idx, ws)| (0..ws.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx)))
-            .collect::<Vec<_>>();
+        let windows = window_cycle_order(&self.state);
         let Some(active_ws) = self.state.active else {
             return;
         };
@@ -1908,6 +1902,33 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+/// Order `prefix+n` / `prefix+p` walk tabs in.
+///
+/// The sidebar is the projection the operator actually reads, and its row
+/// order already depends on the selected View, so the window cycle follows it
+/// instead of raw workspace/tab indices. Tabs the current View does not
+/// project -- collapsed groups, an active search filter -- are appended in
+/// index order so no tab becomes unreachable from the keyboard.
+pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut order = crate::ui::sidebar_rows(state)
+        .into_iter()
+        .filter_map(|row| match row {
+            crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+            _ => None,
+        })
+        .filter(|window| seen.insert(*window))
+        .collect::<Vec<_>>();
+    for (ws_idx, ws) in state.workspaces.iter().enumerate() {
+        for tab_idx in 0..ws.tabs.len() {
+            if seen.insert((ws_idx, tab_idx)) {
+                order.push((ws_idx, tab_idx));
+            }
+        }
+    }
+    order
+}
+
 fn next_blocked_window_target(state: &AppState) -> Option<(usize, usize)> {
     let windows = state
         .workspaces
@@ -2476,12 +2497,7 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousWindow | NavigateAction::NextWindow => {
-            let windows = state
-                .workspaces
-                .iter()
-                .enumerate()
-                .flat_map(|(ws_idx, ws)| (0..ws.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx)))
-                .collect::<Vec<_>>();
+            let windows = window_cycle_order(state);
             if let Some(active_ws) = state.active {
                 let active_tab = state.workspaces[active_ws].active_tab_index();
                 if let Some(current) = windows
@@ -3143,6 +3159,33 @@ mod tests {
     }
 
     #[test]
+    fn window_cycle_follows_the_selected_view_order() {
+        // ws0 and ws2 share a repo, ws1 does not. The Repo view walks the
+        // worktree group together (0, 2, 1); the Spaces view has no grouping
+        // and walks the Spaces as they are (0, 1, 2).
+        let mut app = app_with_test_workspaces(&["main", "other", "worktree"]);
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 2, "repo-key");
+        app.state.ensure_test_terminals();
+
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Repo);
+        assert_eq!(window_cycle_order(&app.state), vec![(0, 0), (2, 0), (1, 0)],);
+
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Spaces);
+        assert_eq!(window_cycle_order(&app.state), vec![(0, 0), (1, 0), (2, 0)],);
+    }
+
+    #[test]
+    fn window_cycle_order_still_reaches_every_tab() {
+        let app = app_with_global_window_fixture();
+        let mut order = window_cycle_order(&app.state);
+        order.sort_unstable();
+        assert_eq!(order, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+    }
+
+    #[test]
     fn global_window_cycle_ignores_presentation_state() {
         let mut app = app_with_global_window_fixture();
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
@@ -3273,11 +3316,16 @@ mod tests {
         execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
         assert_eq!(
             state.sidebar_group_mode,
-            crate::app::state::SidebarGroupMode::LinearTeam
+            crate::app::state::SidebarGroupMode::Spaces
         );
         assert_eq!(
             state.take_sidebar_group_mode_persistence_request(),
-            Some(crate::app::state::SidebarGroupMode::LinearTeam)
+            Some(crate::app::state::SidebarGroupMode::Spaces)
+        );
+        execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
+        assert_eq!(
+            state.sidebar_group_mode,
+            crate::app::state::SidebarGroupMode::LinearTeam
         );
     }
 

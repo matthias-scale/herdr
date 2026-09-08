@@ -150,6 +150,29 @@ pub fn agent_label(agent: Agent) -> &'static str {
     }
 }
 
+/// Product names an agent paints as its terminal title when it has nothing
+/// specific to say yet.
+///
+/// These identify the provider, never the work, so a row named after one tells
+/// the operator less than the pane's own work title. Kept separate from
+/// `agent_label`, which is the compact identity the sidebar already renders in
+/// its own cell.
+pub fn agent_product_titles(agent: Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::Claude => &["Claude Code", "Claude"],
+        Agent::Codex => &["Codex", "Codex CLI"],
+        Agent::Gemini => &["Gemini", "Gemini CLI"],
+        Agent::Cursor => &["Cursor", "Cursor Agent"],
+        Agent::GithubCopilot => &["GitHub Copilot", "Copilot"],
+        Agent::OpenCode => &["OpenCode"],
+        Agent::Kimi => &["Kimi", "Kimi CLI"],
+        Agent::Amp => &["Amp"],
+        Agent::Grok => &["Grok"],
+        Agent::Droid => &["Droid", "Factory Droid"],
+        _ => &[],
+    }
+}
+
 pub fn interactive_agent_executable(agent: Agent) -> &'static str {
     match agent {
         Agent::Pi => "pi",

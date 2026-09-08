@@ -2010,7 +2010,7 @@ mod tests {
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         let chip_row = row_text(&buffer, composer.frame, composer.chips.y);
         assert!(
-            chip_row.contains("claude ▾ │ default ▾ │ auto ▾ │ default ▾"),
+            chip_row.contains("claude ▾ │ default ▾ │ auto ▾ │ bypass ▾"),
             "the picker row should read agent │ model │ effort │ access: {chip_row:?}"
         );
         assert!(
@@ -2602,7 +2602,7 @@ mod tests {
             let buffer = draw_home(&app, &queue, area);
             let row = row_text(&buffer, composer.frame, composer.chips.y);
 
-            for label in ["Fable 5.1 ▾", "auto ▾", "default ▾", "200k ▾"] {
+            for label in ["Fable 5.1 ▾", "auto ▾", "bypass ▾", "200k ▾"] {
                 assert!(
                     row.contains(label),
                     "picker row at {columns} columns: {row:?}"

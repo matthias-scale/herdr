@@ -1510,7 +1510,7 @@ fn compact_sidebar_rows_inner(
         return rows;
     }
     match app.sidebar_group_mode {
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
             append_repo_group_rows(app, &mut rows, &visible_entries, false);
             append_unassigned_rows(app, &mut rows, &visible_entries);
         }
@@ -1838,7 +1838,7 @@ fn append_settled_rows(
     }
 
     match app.sidebar_group_mode {
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
             append_repo_group_rows(app, rows, &entries, true);
         }
         SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
@@ -2014,7 +2014,10 @@ fn sidebar_tab_groups(
                     );
                 }
             }
-            SidebarGroupMode::Repo | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {}
+            SidebarGroupMode::Repo
+            | SidebarGroupMode::Spaces
+            | SidebarGroupMode::LinearTeam
+            | SidebarGroupMode::Missive => {}
         }
     }
     groups.sort_by_key(|group| group.unlinked);
@@ -2634,7 +2637,7 @@ pub(crate) fn sidebar_work_groups(
                     groups[index].entries.push(entry.clone());
                 }
             }
-            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {}
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {}
         }
     }
     groups.sort_by_key(|group| group.unlinked);
@@ -2798,7 +2801,7 @@ pub(crate) fn sidebar_unassigned_objects(
                 })
             })
             .collect(),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
             let mut by_repo = std::collections::HashMap::<
                 String,
                 (Option<std::time::SystemTime>, String, std::path::PathBuf),
@@ -2912,7 +2915,9 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
         SidebarGroupMode::LinearTeam | SidebarGroupMode::RepoPr | SidebarGroupMode::Missive => {
             NO_AGENT_YET_SECTION_TITLE
         }
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => UNASSIGNED_SECTION_TITLE,
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            UNASSIGNED_SECTION_TITLE
+        }
     };
     let collapsed = section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
@@ -2998,7 +3003,9 @@ pub(crate) fn sidebar_unassigned_dock_object(
             crate::app::DockSurface::Missive,
             object.activation.object_link,
         ),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => return None,
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            return None
+        }
     };
     Some(crate::app::state::DockObjectRef { surface, key })
 }
@@ -3060,7 +3067,9 @@ fn unassigned_empty_text(app: &AppState) -> String {
                     .unwrap_or("anyone")
             ),
         ),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => return String::new(),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            return String::new()
+        }
     };
     app.work_index_snapshot
         .as_ref()
@@ -3208,7 +3217,9 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
             ));
             options
         }
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => Vec::new(),
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+            Vec::new()
+        }
     }
 }
 
@@ -3340,6 +3351,14 @@ fn workspace_list_entries_inner(
     let repo_entries = workspace_list_entries_repo(app, force_expanded);
     match mode {
         SidebarGroupMode::Repo => repo_entries,
+        // Spaces are the top level here: every Space is its own row, with no
+        // repository grouping and no worktree indentation above it.
+        SidebarGroupMode::Spaces => (0..app.workspaces.len())
+            .map(|ws_idx| WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented: false,
+            })
+            .collect(),
         SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
             // Work items cut across repositories, so they are the top level in
             // these modes and the repo tree does not appear at all.
@@ -5731,7 +5750,7 @@ pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
         SidebarGroupMode::LinearTeam => Some(app.sidebar_work_filter.linear_label()),
         SidebarGroupMode::RepoPr => Some(app.sidebar_work_filter.github_label()),
         SidebarGroupMode::Missive => Some(app.sidebar_work_filter.missive_label()),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => None,
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => None,
     };
     match filters {
         Some(filters) => format!("{view} · {filters} ▾"),
@@ -5744,7 +5763,7 @@ pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
 pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
     if matches!(
         app.sidebar_group_mode,
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces
     ) {
         return Rect::default();
     }
@@ -12107,12 +12126,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn the_view_picker_has_only_the_four_f12_labels() {
+    fn the_view_picker_lists_the_f12_labels_and_spaces() {
         let labels = SidebarGroupMode::VIEWS.map(|mode| format!("View: {}", mode.view_label()));
         assert_eq!(
             labels,
             [
                 "View: Repo",
+                "View: Spaces",
                 "View: Linear",
                 "View: GitHub",
                 "View: Missive"
@@ -13169,7 +13189,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .collect::<Vec<_>>();
             match mode {
-                SidebarGroupMode::Repo => assert_eq!(nested, ["unlinked"]),
+                // Neither view adds a work-object level: the only nested header
+                // is the section for panes with no branch of their own. Spaces
+                // differs from Repo in the Space rows above it, not here.
+                SidebarGroupMode::Repo | SidebarGroupMode::Spaces => {
+                    assert_eq!(nested, ["unlinked"])
+                }
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
@@ -13275,6 +13300,47 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             sidebar_group_menu_layout(&app, Rect::new(0, 0, 120, 40)).expect("mode dropdown fits");
         assert_eq!(layout.rect.y, anchor.bottom());
         assert!(layout.rect.bottom() <= 40);
+    }
+
+    #[test]
+    fn spaces_view_lists_every_space_flat_without_repo_grouping() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            workspace_with_worktree_space("review", Some("repo-key"), "/repo/herdr-review"),
+            Workspace::test_new("notes"),
+        ];
+
+        // Repo view keeps the worktree group: one parent row plus indented
+        // members, and the ungrouped Space beside it.
+        let repo = workspace_list_entries_for_mode(&app, false, SidebarGroupMode::Repo);
+        assert!(
+            repo.iter()
+                .any(|entry| matches!(entry, WorkspaceListEntry::Workspace { indented: true, .. })),
+            "{repo:?}"
+        );
+
+        let spaces = workspace_list_entries_for_mode(&app, false, SidebarGroupMode::Spaces);
+        assert_eq!(
+            spaces
+                .iter()
+                .filter_map(|entry| match entry {
+                    WorkspaceListEntry::Workspace { ws_idx, indented } =>
+                        Some((*ws_idx, *indented)),
+                    WorkspaceListEntry::NestedHeader { .. } => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![(0, false), (1, false), (2, false), (3, false)],
+        );
+    }
+
+    #[test]
+    fn spaces_view_is_a_view_entry_but_not_the_default() {
+        assert_eq!(SidebarGroupMode::default(), SidebarGroupMode::Repo);
+        assert!(SidebarGroupMode::VIEWS.contains(&SidebarGroupMode::Spaces));
+        assert_eq!(SidebarGroupMode::Spaces.view_label(), "Spaces");
+        assert_eq!(SidebarGroupMode::Spaces.collapse_namespace(), "spaces");
     }
 
     #[test]
