@@ -5094,6 +5094,7 @@ esac
     fn pane_pull_request_finishes_before_slow_list_and_previous_list_items_survive() {
         let dir = fixture_dir("pane-before-slow-list");
         let argv_log = dir.join("gh-argv.log");
+        let list_budget = crate::platform::test_spawn_budget(Duration::from_millis(100));
         let (gh, linearis) = fake_programs(
             &dir,
             &format!(
@@ -5101,11 +5102,14 @@ esac
 printf '%s\n' "$*" >> '{}'
 case "$*" in
   "pr view 159 --repo owner/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":159,"title":"Pane first","state":"MERGED","headRefName":"t3/f15","url":"https://github.com/owner/repo/pull/159"}}' ;;
-  "pr list --repo owner/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") exec sleep 1 ;;
+  "pr list --repo owner/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") exec sleep {} ;;
   *) exit 42 ;;
 esac
 "#,
-                argv_log.display()
+                argv_log.display(),
+                // The list must still be running when the budget expires, so it
+                // outlives the budget by the same factor on every platform.
+                list_budget.as_secs_f32() * 10.0
             ),
             "#!/bin/sh\ncase \"$*\" in *\"issues list\"*) printf '%s' '{\"nodes\":[]}' ;; *\"cycles list\"*) printf '%s' '{\"nodes\":[]}' ;; *) printf '%s' '[]' ;; esac\n",
         );
@@ -5161,7 +5165,7 @@ esac
             },
             Instant::now(),
             Instant::now() + Duration::from_secs(5),
-            Duration::from_millis(100),
+            list_budget,
             &gh,
             &linearis,
             Path::new("/usr/bin/false"),

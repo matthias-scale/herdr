@@ -452,6 +452,26 @@ impl PrefixInputSource for RealPrefixInputSource {
     }
 }
 
+/// Scale a test's subprocess budget for the host platform.
+///
+/// Several tests give a real spawned process a sub-second window and assert on
+/// what finished inside it. Those windows were calibrated on Linux, where a
+/// spawn returns in single-digit milliseconds. macOS spends materially longer
+/// per spawn, so the same literal expires before the behaviour under test can
+/// happen and the assertion reports a timing artifact as a defect.
+///
+/// Scaling keeps one budget in the source and gives the slower platform the
+/// headroom it needs. This is a pure policy constant -- both branches compile on
+/// every target -- so it uses `cfg!` rather than a compile gate.
+#[cfg(test)]
+pub(crate) fn test_spawn_budget(base: std::time::Duration) -> std::time::Duration {
+    if cfg!(target_os = "macos") {
+        base * 20
+    } else {
+        base
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

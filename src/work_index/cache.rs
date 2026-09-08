@@ -717,7 +717,7 @@ mod tests {
                     ttl: Duration::from_secs(60),
                     bypass: false,
                 },
-                Instant::now() + Duration::from_millis(100),
+                Instant::now() + crate::platform::test_spawn_budget(Duration::from_millis(100)),
             )
             .expect("recover stale lock");
 

@@ -685,10 +685,9 @@ mod tests {
             " ",
         );
         app.handle_tab_bar_status_tasks(std::time::Instant::now());
-        for _ in 0..50 {
-            if descendant_started.exists() {
-                break;
-            }
+        let descendant_deadline = std::time::Instant::now()
+            + crate::platform::test_spawn_budget(Duration::from_millis(500));
+        while !descendant_started.exists() && std::time::Instant::now() < descendant_deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
