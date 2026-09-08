@@ -4930,6 +4930,8 @@ impl AppState {
         ));
 
         let previous_focus = self.current_pane_focus_target();
+        let pane_terminal_theme = self.pane_terminal_theme();
+        let pane_terminal_appearance = Some(self.pane_terminal_appearance());
         if let Some(ws_idx) = self.active {
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
@@ -4942,8 +4944,8 @@ impl AppState {
                     new_cols,
                     cwd,
                     self.pane_scrollback_limit_bytes,
-                    self.host_terminal_theme,
-                    self.host_terminal_appearance,
+                    pane_terminal_theme,
+                    pane_terminal_appearance,
                     crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
                     Vec::new(),
                 )
@@ -4954,8 +4956,8 @@ impl AppState {
                     new_cols,
                     cwd,
                     self.pane_scrollback_limit_bytes,
-                    self.host_terminal_theme,
-                    self.host_terminal_appearance,
+                    pane_terminal_theme,
+                    pane_terminal_appearance,
                     crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
                     Vec::new(),
                 )

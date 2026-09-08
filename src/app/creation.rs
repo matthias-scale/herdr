@@ -260,14 +260,16 @@ impl App {
             return self.create_workspace_with_options(initial_cwd, focus);
         };
         let (rows, cols) = self.state.estimate_pane_size();
+        let host_terminal_theme = self.state.pane_terminal_theme();
+        let host_terminal_appearance = Some(self.state.pane_terminal_appearance());
         let ws = &mut self.state.workspaces[ws_idx];
         let (idx, terminal, runtime) = ws.create_tab(
             rows,
             cols,
             initial_cwd,
             self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             Vec::new(),
         )?;
@@ -303,8 +305,8 @@ impl App {
     ) -> std::io::Result<()> {
         let (rows, cols) = self.state.estimate_pane_size();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
-        let host_terminal_theme = self.state.host_terminal_theme;
-        let host_terminal_appearance = self.state.host_terminal_appearance;
+        let host_terminal_theme = self.state.pane_terminal_theme();
+        let host_terminal_appearance = Some(self.state.pane_terminal_appearance());
 
         match plan.target {
             crate::app::home::HomeTarget::NewSpace => {
@@ -423,8 +425,8 @@ impl App {
             rows,
             cols,
             self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            self.state.pane_terminal_theme(),
+            Some(self.state.pane_terminal_appearance()),
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             self.event_tx.clone(),
             self.render_notify.clone(),

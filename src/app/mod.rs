@@ -1509,8 +1509,8 @@ impl App {
             match crate::terminal::TerminalRuntime::from_handoff_fd(
                 import,
                 config.advanced.scrollback_limit_bytes,
-                self.state.host_terminal_theme,
-                self.state.host_terminal_appearance,
+                self.state.pane_terminal_theme(),
+                Some(self.state.pane_terminal_appearance()),
                 self.event_tx.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
@@ -4306,6 +4306,74 @@ mod tests {
 
         assert!(app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true));
         assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+    }
+
+    #[test]
+    fn unknown_host_uses_effective_palette_for_pane_appearance_and_default_colors() {
+        for (name, appearance, foreground, background) in [
+            (
+                "catppuccin",
+                crate::terminal_theme::HostAppearance::Dark,
+                crate::terminal_theme::RgbColor {
+                    r: 205,
+                    g: 214,
+                    b: 244,
+                },
+                crate::terminal_theme::RgbColor {
+                    r: 24,
+                    g: 24,
+                    b: 37,
+                },
+            ),
+            (
+                "catppuccin-latte",
+                crate::terminal_theme::HostAppearance::Light,
+                crate::terminal_theme::RgbColor {
+                    r: 76,
+                    g: 79,
+                    b: 105,
+                },
+                crate::terminal_theme::RgbColor {
+                    r: 239,
+                    g: 241,
+                    b: 245,
+                },
+            ),
+        ] {
+            let mut config = Config::default();
+            config.theme.name = Some(name.to_string());
+            let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+            assert_eq!(app.state.host_terminal_appearance, None);
+            assert_eq!(app.state.pane_terminal_appearance(), appearance);
+            let pane_theme = app.state.pane_terminal_theme();
+            assert_eq!(pane_theme.foreground, Some(foreground));
+            assert_eq!(pane_theme.background, Some(background));
+        }
+    }
+
+    #[test]
+    fn reported_host_defaults_take_precedence_over_palette_defaults() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let reported_foreground = crate::terminal_theme::RgbColor { r: 1, g: 2, b: 3 };
+        let reported_background = crate::terminal_theme::RgbColor { r: 4, g: 5, b: 6 };
+        app.state.host_terminal_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(reported_foreground),
+            background: Some(reported_background),
+            ..Default::default()
+        };
+
+        let pane_theme = app.state.pane_terminal_theme();
+        assert_eq!(pane_theme.foreground, Some(reported_foreground));
+        assert_eq!(pane_theme.background, Some(reported_background));
     }
 
     /// A pinned palette that contradicts the terminal is legal but nearly
