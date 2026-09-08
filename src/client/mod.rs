@@ -19,6 +19,7 @@ pub(crate) mod presentation;
 
 use std::backtrace::Backtrace;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::IsTerminal as _;
@@ -54,6 +55,85 @@ use crate::protocol::{
 use crate::server::socket_paths::client_socket_path;
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+const HOST_APPEARANCE_ENV_VAR: &str = "HERDR_HOST_APPEARANCE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostAppearanceEnvValue {
+    Unset,
+    Appearance(crate::config::HostAppearanceOverride),
+    Invalid,
+}
+
+fn parse_host_appearance_env(value: Option<&OsStr>) -> HostAppearanceEnvValue {
+    match value.and_then(OsStr::to_str) {
+        None if value.is_none() => HostAppearanceEnvValue::Unset,
+        Some("light") => {
+            HostAppearanceEnvValue::Appearance(crate::config::HostAppearanceOverride::Light)
+        }
+        Some("dark") => {
+            HostAppearanceEnvValue::Appearance(crate::config::HostAppearanceOverride::Dark)
+        }
+        _ => HostAppearanceEnvValue::Invalid,
+    }
+}
+
+fn resolve_client_host_appearance_override(
+    config: crate::config::HostAppearanceOverride,
+    environment: Option<crate::config::HostAppearanceOverride>,
+) -> crate::config::HostAppearanceOverride {
+    if config == crate::config::HostAppearanceOverride::Auto {
+        environment.unwrap_or(crate::config::HostAppearanceOverride::Auto)
+    } else {
+        config
+    }
+}
+
+fn host_appearance_override_at_attach(
+    config: crate::config::HostAppearanceOverride,
+) -> crate::config::HostAppearanceOverride {
+    let value = std::env::var_os(HOST_APPEARANCE_ENV_VAR);
+    let environment = match parse_host_appearance_env(value.as_deref()) {
+        HostAppearanceEnvValue::Unset => None,
+        HostAppearanceEnvValue::Appearance(appearance) => Some(appearance),
+        HostAppearanceEnvValue::Invalid => {
+            warn!(
+                value = ?value,
+                "invalid HERDR_HOST_APPEARANCE; expected light or dark; ignoring it"
+            );
+            None
+        }
+    };
+    resolve_client_host_appearance_override(config, environment)
+}
+
+fn apply_environment_host_appearance_override(
+    config: crate::config::HostAppearanceOverride,
+    resolved: crate::config::HostAppearanceOverride,
+) {
+    let Some(request) = environment_host_appearance_request(config, resolved) else {
+        return;
+    };
+    if let Err(err) = crate::api::client::ApiClient::local().request(request) {
+        warn!(%err, appearance = resolved.as_str(), "failed to apply HERDR_HOST_APPEARANCE");
+    }
+}
+
+fn environment_host_appearance_request(
+    config: crate::config::HostAppearanceOverride,
+    resolved: crate::config::HostAppearanceOverride,
+) -> Option<crate::api::schema::Request> {
+    if config != crate::config::HostAppearanceOverride::Auto
+        || resolved == crate::config::HostAppearanceOverride::Auto
+    {
+        return None;
+    }
+    Some(crate::api::schema::Request {
+        id: "client:attach:theme".into(),
+        method: crate::api::schema::Method::ThemeSet(crate::api::schema::ThemeSetParams {
+            host_appearance: resolved,
+        }),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Client state
@@ -1475,6 +1555,8 @@ fn run_client_with_mode(
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
+    let configured_host_appearance = loaded_config.config.theme.host_appearance;
+    let host_appearance_override = host_appearance_override_at_attach(configured_host_appearance);
     let loop_config = ClientLoopConfig {
         sound_config: loaded_config.config.ui.sound,
         mouse_scroll_lines,
@@ -1484,7 +1566,7 @@ fn run_client_with_mode(
         mouse_capture_active: mouse_capture,
         host_terminal_theme_poll_interval: loaded_config.config.theme.auto_switch_poll_interval(),
         theme_auto_switch: loaded_config.config.theme.auto_switch,
-        host_appearance_override: loaded_config.config.theme.host_appearance,
+        host_appearance_override,
         remote_image_paste_key,
     };
 
@@ -1525,6 +1607,11 @@ fn run_client_with_mode(
             std::process::exit(1);
         }
     };
+
+    apply_environment_host_appearance_override(
+        configured_host_appearance,
+        host_appearance_override,
+    );
 
     if let Some((terminal_id, takeover)) = attach_request {
         let attach = ClientMessage::AttachTerminal {
@@ -3021,6 +3108,69 @@ mod tests {
     /// its own module and lets a test elsewhere move `XDG_CONFIG_HOME` mid-test.
     fn env_lock() -> &'static Mutex<()> {
         crate::config::test_config_env_lock()
+    }
+
+    #[test]
+    fn host_appearance_env_accepts_light_and_dark_only() {
+        use crate::config::HostAppearanceOverride::{Dark, Light};
+
+        assert_eq!(
+            parse_host_appearance_env(None),
+            HostAppearanceEnvValue::Unset
+        );
+        assert_eq!(
+            parse_host_appearance_env(Some(OsStr::new("light"))),
+            HostAppearanceEnvValue::Appearance(Light)
+        );
+        assert_eq!(
+            parse_host_appearance_env(Some(OsStr::new("dark"))),
+            HostAppearanceEnvValue::Appearance(Dark)
+        );
+        for invalid in ["auto", "LIGHT", "", "dark "] {
+            assert_eq!(
+                parse_host_appearance_env(Some(OsStr::new(invalid))),
+                HostAppearanceEnvValue::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn config_host_appearance_precedes_environment_at_attach() {
+        use crate::config::HostAppearanceOverride::{Auto, Dark, Light};
+
+        assert_eq!(
+            resolve_client_host_appearance_override(Light, Some(Dark)),
+            Light
+        );
+        assert_eq!(
+            resolve_client_host_appearance_override(Dark, Some(Light)),
+            Dark
+        );
+        assert_eq!(
+            resolve_client_host_appearance_override(Auto, Some(Light)),
+            Light
+        );
+        assert_eq!(
+            resolve_client_host_appearance_override(Auto, Some(Dark)),
+            Dark
+        );
+        assert_eq!(resolve_client_host_appearance_override(Auto, None), Auto);
+    }
+
+    #[test]
+    fn environment_host_appearance_builds_attach_override_request() {
+        use crate::config::HostAppearanceOverride::{Auto, Dark, Light};
+
+        let request = environment_host_appearance_request(Auto, Light)
+            .expect("environment override should create an attach request");
+        assert!(matches!(
+            request.method,
+            crate::api::schema::Method::ThemeSet(crate::api::schema::ThemeSetParams {
+                host_appearance: Light
+            })
+        ));
+        assert!(environment_host_appearance_request(Light, Dark).is_none());
+        assert!(environment_host_appearance_request(Auto, Auto).is_none());
     }
 
     #[test]

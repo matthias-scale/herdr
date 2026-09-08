@@ -51,7 +51,7 @@
           "type": "enum",
           "default": "auto",
           "values": ["auto", "light", "dark"],
-          "description": "Override the detected host appearance when a terminal relay drops OSC 11 or Mode 2031 replies."
+          "description": "Override the detected host appearance when a terminal relay drops OSC 11 or Mode 2031 replies. When set to auto, an attached client can use HERDR_HOST_APPEARANCE=light or dark as a lower-precedence override."
         },
         {
           "key": "theme.auto_switch_poll_interval_seconds",

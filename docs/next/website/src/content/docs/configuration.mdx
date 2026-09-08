@@ -330,6 +330,8 @@ dark_name = "catppuccin"
 
 `host_appearance` defaults to `auto`. Set it to `light` or `dark` when mosh or another terminal relay drops OSC 11 and Mode 2031 replies. The override takes precedence over host reports and applies to Herdr's UI and child panes. Run `herdr server reload-config` after editing it.
 
+When `host_appearance` is `auto`, a client can set `HERDR_HOST_APPEARANCE=light` or `HERDR_HOST_APPEARANCE=dark` before it attaches. The config value takes precedence over this environment variable. The environment variable takes precedence over host reports and the active palette. Herdr warns once and ignores any other value.
+
 You can override individual colors:
 
 ```toml
