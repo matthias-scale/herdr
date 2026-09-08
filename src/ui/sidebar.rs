@@ -13189,10 +13189,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .collect::<Vec<_>>();
             match mode {
-                SidebarGroupMode::Repo => assert_eq!(nested, ["unlinked"]),
-                // The Spaces view has no group level at all: every Space is a
-                // top-level row and panes hang directly under it.
-                SidebarGroupMode::Spaces => assert!(nested.is_empty()),
+                // Neither view adds a work-object level: the only nested header
+                // is the section for panes with no branch of their own. Spaces
+                // differs from Repo in the Space rows above it, not here.
+                SidebarGroupMode::Repo | SidebarGroupMode::Spaces => {
+                    assert_eq!(nested, ["unlinked"])
+                }
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
