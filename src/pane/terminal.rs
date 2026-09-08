@@ -3115,11 +3115,13 @@ fn default_color_query_response(
         DefaultColorQuery::Foreground if !core.child_default_foreground_changed => core
             .host_terminal_theme
             .foreground
-            .map(host_theme_color_to_ghostty),
+            .map(host_theme_color_to_ghostty)
+            .or_else(|| effective_foreground_color(core)),
         DefaultColorQuery::Background if !core.child_default_background_changed => core
             .host_terminal_theme
             .background
-            .map(host_theme_color_to_ghostty),
+            .map(host_theme_color_to_ghostty)
+            .or_else(|| effective_background_color(core)),
         DefaultColorQuery::Cursor => cursor_color_query_color(core),
         _ => None,
     }?;
@@ -3129,6 +3131,16 @@ fn default_color_query_response(
         color.g,
         color.b,
     ))
+}
+
+fn effective_background_color(core: &mut GhosttyPaneCore) -> Option<crate::ghostty::RgbColor> {
+    core.render_state.update(&core.terminal).ok()?;
+    Some(core.render_state.colors().ok()?.background)
+}
+
+fn effective_foreground_color(core: &mut GhosttyPaneCore) -> Option<crate::ghostty::RgbColor> {
+    core.render_state.update(&core.terminal).ok()?;
+    Some(core.render_state.colors().ok()?.foreground)
 }
 
 fn cursor_color_query_color(core: &mut GhosttyPaneCore) -> Option<crate::ghostty::RgbColor> {
@@ -6283,6 +6295,23 @@ mod tests {
             result.terminal_responses,
             vec![Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\")]
         );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn default_color_queries_answer_from_effective_terminal_defaults_without_host_colors() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let foreground = pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07", &tx);
+        let background = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+
+        assert_eq!(foreground.terminal_responses.len(), 1);
+        assert_eq!(background.terminal_responses.len(), 1);
+        assert!(foreground.terminal_responses[0].starts_with(b"\x1b]10;rgb:"));
+        assert!(background.terminal_responses[0].starts_with(b"\x1b]11;rgb:"));
         assert!(rx.try_recv().is_err());
     }
 

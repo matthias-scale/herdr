@@ -125,6 +125,8 @@ impl App {
         };
         let (rows, cols) = self.state.estimate_pane_size();
         let previous_focus = self.state.current_pane_focus_target();
+        let pane_terminal_theme = self.state.pane_terminal_theme();
+        let pane_terminal_appearance = Some(self.state.pane_terminal_appearance());
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
@@ -138,8 +140,8 @@ impl App {
             &pane.command,
             extra_env,
             self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            pane_terminal_theme,
+            pane_terminal_appearance,
             params.focus || placement == PluginPanePlacement::Zoomed,
         );
         let (tab_idx, new_pane) = match result {
@@ -205,6 +207,8 @@ impl App {
                 Err((code, message)) => return encode_error(id, &code, message),
             };
         let (rows, cols) = self.state.estimate_pane_size();
+        let pane_terminal_theme = self.state.pane_terminal_theme();
+        let pane_terminal_appearance = Some(self.state.pane_terminal_appearance());
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
@@ -215,8 +219,8 @@ impl App {
             &pane.command,
             extra_env,
             self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
+            pane_terminal_theme,
+            pane_terminal_appearance,
         ) {
             Ok(result) => result,
             Err(err) => return encode_error(id, "plugin_pane_open_failed", err.to_string()),

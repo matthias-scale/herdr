@@ -771,6 +771,17 @@ impl Palette {
         Some(color_rgb(self.panel_bg)?.inferred_appearance())
     }
 
+    /// Default terminal colors for child applications when the outer terminal
+    /// did not answer OSC 10/11. A `Reset` token stays unknown so the terminal
+    /// core can answer with its own effective default.
+    pub fn terminal_theme(&self) -> crate::terminal_theme::TerminalTheme {
+        crate::terminal_theme::TerminalTheme {
+            foreground: color_rgb(self.text),
+            background: color_rgb(self.panel_bg),
+            ..Default::default()
+        }
+    }
+
     /// Resolve a theme by name. Returns None for unknown names.
     /// Status glyph colour for backlog, todo, draft, closed, cancelled and
     /// unassigned work. Defaults to the muted chrome tone (gray).
@@ -3476,6 +3487,27 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+}
+
+impl AppState {
+    /// Theme reported to child terminals. Real host answers take precedence;
+    /// missing defaults follow the palette currently painted by Herdr.
+    pub(crate) fn pane_terminal_theme(&self) -> TerminalTheme {
+        let palette = self.palette.terminal_theme();
+        TerminalTheme {
+            foreground: self.host_terminal_theme.foreground.or(palette.foreground),
+            background: self.host_terminal_theme.background.or(palette.background),
+            palette: self.host_terminal_theme.palette,
+        }
+    }
+
+    /// Appearance reported to child terminals. Built-in palettes are concrete;
+    /// the terminal-inheriting palette falls back to Ghostty's dark default.
+    pub(crate) fn pane_terminal_appearance(&self) -> HostAppearance {
+        self.host_terminal_appearance
+            .or_else(|| self.palette.appearance())
+            .unwrap_or(HostAppearance::Dark)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
