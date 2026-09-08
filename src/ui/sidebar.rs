@@ -4052,7 +4052,7 @@ fn render_symphony_empty(app: &AppState, frame: &mut Frame, rect: Rect) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    let indent = usize::from(SYMPHONY_ROW_DEPTH) * 2;
+    let indent = SYMPHONY_ROW_DEPTH * 2;
     let text = format!("{}{SYMPHONY_EMPTY_LABEL}", " ".repeat(indent));
     let line = Line::from(Span::styled(
         crate::ui::text::truncate_end(&text, usize::from(rect.width)),
