@@ -231,7 +231,10 @@ including its effective `work_context` object. In the TUI, right-clicking a
 pull-request or ticket URL printed in a terminal pane offers **Link PR to this
 window** or **Link ticket to this window**, which applies the same manual
 `--pr` or `--ticket` patch to every pane of that window and confirms it with a
-toast; the entry is hidden when the whole window already carries that link.
+toast. Once every pane declares that link, the same click offers **Unlink PR
+from this window**, which clears the manual binding again. A link only the hook
+or git observation tiers detected offers neither, since a declaration cannot
+remove an observation.
 
 `workspace bind` records the repository a workspace collects work for, so the
 grouping survives new panes instead of having to be rebuilt by hand. A pane is

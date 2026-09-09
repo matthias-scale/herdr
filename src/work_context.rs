@@ -443,6 +443,11 @@ impl PaneWorkContextState {
         &self.effective
     }
 
+    /// The declaration tier, which is the only one a human edit owns.
+    pub fn manual(&self) -> &PaneWorkContext {
+        &self.manual
+    }
+
     pub fn apply_manual_patch(&mut self, patch: PaneWorkContextPatch) -> Result<bool, String> {
         if patch.is_empty() {
             return Err("missing work-context field to set or clear".into());

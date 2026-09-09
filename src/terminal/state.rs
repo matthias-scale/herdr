@@ -699,6 +699,10 @@ impl TerminalState {
         self.work_context.effective()
     }
 
+    pub fn manual_work_context(&self) -> &crate::work_context::PaneWorkContext {
+        self.work_context.manual()
+    }
+
     pub(crate) fn apply_manual_work_context_patch(
         &mut self,
         patch: crate::work_context::PaneWorkContextPatch,
