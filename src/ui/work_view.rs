@@ -283,6 +283,27 @@ fn render_missive_start_menu(
     );
 }
 
+/// The two columns a work-view projection splits its area into: list on the
+/// left, detail on the right, stacked instead when the terminal is narrow.
+///
+/// The input layer resolves the same rectangles to hit-test the detail, so this
+/// is the one place that decides where the detail is drawn.
+fn detail_columns(area: Rect) -> std::rc::Rc<[Rect]> {
+    if area.width >= 72 {
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    }
+}
+
+/// The area inside the detail column's border, which is where a detail layout's
+/// first line lands.
+pub(crate) fn detail_inner_rect(area: Rect) -> Rect {
+    Block::default()
+        .borders(Borders::ALL)
+        .inner(detail_columns(area)[1])
+}
+
 fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
     if state.ticket_layout == crate::app::state::LinearViewLayout::Board && !state.board_detail_open
     {
@@ -313,11 +334,7 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     } else {
         ""
     };
-    let columns = if area.width >= 72 {
-        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
-    } else {
-        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
-    };
+    let columns = detail_columns(area);
     let layout_label = match state.ticket_layout {
         crate::app::state::LinearViewLayout::List => "[List] Board",
         crate::app::state::LinearViewLayout::Board => "List [Board]",
@@ -887,11 +904,7 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
     } else {
         ""
     };
-    let columns = if area.width >= 72 {
-        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
-    } else {
-        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
-    };
+    let columns = detail_columns(area);
     let left = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Pull requests{refresh} "))
@@ -1281,6 +1294,9 @@ pub(crate) fn ticket_detail_layout(
 /// One comment block per comment: a dim header then its body, cut to a
 /// readable head unless the reader expanded it. `decoration` is the glyph and
 /// trailing tag the pull-request host puts around its headers.
+// Eight arguments because both hosts render comments from the same loop and
+// each one is a distinct render input: the two hosts differ only in indent and
+// decoration, so bundling them into a struct would name a type used once.
 #[allow(clippy::too_many_arguments)]
 fn push_comment_lines(
     lines: &mut Vec<Line<'static>>,

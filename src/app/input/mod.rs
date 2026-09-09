@@ -1981,6 +1981,11 @@ impl App {
         let Some(object_key) = self.work_view_detail_object_key() else {
             return;
         };
+        // A closed board card shows no detail, so a digit there would fold a
+        // section the reader cannot see and only meets when they open the card.
+        if !self.work_view_detail_is_visible() {
+            return;
+        }
         let Some(section) = self
             .work_view_detail_layout(&object_key)
             .and_then(|layout| layout.sections.get(index).copied())
@@ -1993,6 +1998,36 @@ impl App {
         }
     }
 
+    /// Fold the section whose header the full work view drew under this point.
+    /// Returns whether a header was there, so the caller can fall through to the
+    /// view's other click targets when it was not.
+    fn fold_work_view_section_at(&mut self, column: u16, row: u16) -> bool {
+        if !self.work_view_detail_is_visible() {
+            return false;
+        }
+        let area = crate::ui::work_view::detail_inner_rect(self.state.view.terminal_area);
+        if !self.state.point_in_rect(area, column, row) {
+            return false;
+        }
+        let Some(object_key) = self.work_view_detail_object_key() else {
+            return false;
+        };
+        let Some(layout) = self.work_view_detail_layout(&object_key) else {
+            return false;
+        };
+        let view = match self.state.work_view.as_ref() {
+            Some(state) => state.object_view(&object_key),
+            None => return false,
+        };
+        let Some(section) = section_at_row(&layout, &view, area, row) else {
+            return false;
+        };
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.object_view_mut(object_key).toggle_section(section);
+        }
+        true
+    }
+
     /// The detail layout the work view is drawing for `object_key`.
     fn work_view_detail_layout(
         &self,
@@ -2000,7 +2035,10 @@ impl App {
     ) -> Option<crate::ui::work_view::DetailLayout> {
         let state = self.state.work_view.as_ref()?;
         let view = state.object_view(object_key);
-        let area = self.state.view.terminal_area;
+        // The render draws the detail inside the right-hand column, and its
+        // width decides where every wrapped line falls, so the layout has to be
+        // rebuilt against that rectangle rather than the whole screen.
+        let area = crate::ui::work_view::detail_inner_rect(self.state.view.terminal_area);
         match state.projection {
             crate::app::state::WorkProjection::PullRequests => {
                 let items = self.work_view_pr_items();
@@ -2073,23 +2111,45 @@ impl App {
         self.work_view_comments_are_visible(&key).then_some(key)
     }
 
-    /// Whether the full work view is showing this object's comment list.
-    /// Pull requests keep comments on the overview sub-tab only, and a ticket
-    /// board shows none until a card is opened.
-    fn work_view_comments_are_visible(&self, object_key: &crate::app::state::WorkItemKey) -> bool {
+    /// Whether the full work view is drawing this object's detail at all. A
+    /// ticket board shows cards until one is opened, and the detail sub-tabs of
+    /// a pull request are all details.
+    fn work_view_detail_is_visible(&self) -> bool {
         self.state
             .work_view
             .as_ref()
             .is_some_and(|state| match state.projection {
-                crate::app::state::WorkProjection::PullRequests => {
-                    state.object_view(object_key).tab == crate::app::state::PrDetailTab::Overview
-                }
+                crate::app::state::WorkProjection::PullRequests => true,
                 crate::app::state::WorkProjection::Tickets => {
                     state.ticket_layout != crate::app::state::LinearViewLayout::Board
                         || state.board_detail_open
                 }
                 _ => false,
             })
+    }
+
+    /// Whether the full work view is showing this object's comment list.
+    /// Pull requests keep comments on the overview sub-tab only, and a ticket
+    /// board shows none until a card is opened.
+    fn work_view_comments_are_visible(&self, object_key: &crate::app::state::WorkItemKey) -> bool {
+        let folded = self.state.work_view.as_ref().is_some_and(|state| {
+            state
+                .object_view(object_key)
+                .section_is_collapsed(crate::app::state::DetailSection::Comments)
+        });
+        !folded
+            && self.work_view_detail_is_visible()
+            && self
+                .state
+                .work_view
+                .as_ref()
+                .is_some_and(|state| match state.projection {
+                    crate::app::state::WorkProjection::PullRequests => {
+                        state.object_view(object_key).tab
+                            == crate::app::state::PrDetailTab::Overview
+                    }
+                    _ => true,
+                })
     }
 
     fn toggle_work_view_comment(
@@ -3357,6 +3417,40 @@ impl App {
             })
     }
 
+    /// Whether the reader folded this object's comment section away in the
+    /// dock. The comment digits address the list by position, so with the list
+    /// off screen they have no subject and belong to the pane again.
+    fn dock_comments_are_folded(&self, object_key: &crate::app::state::WorkItemKey) -> bool {
+        self.state
+            .dock_object_views
+            .get(object_key)
+            .is_some_and(|view| {
+                view.section_is_collapsed(crate::app::state::DetailSection::Comments)
+            })
+    }
+
+    /// Whether a confirmation, menu or picker on the dock pull-request surface
+    /// holds the keyboard, so the detail's own bindings have no turn.
+    fn dock_pr_modal_owns_keyboard(&self) -> bool {
+        self.state.dock_pending_write.is_some()
+            || self.state.dock_pr_checkout_menu.is_some()
+            || self.state.dock_pr_action_menu.is_some()
+            || crate::ui::dock::pr::focused_pr_key(&self.state).is_some_and(|key| {
+                self.state
+                    .dock_object_views
+                    .get(&key)
+                    .is_some_and(|view| view.reviewer_picker.is_some())
+            })
+    }
+
+    /// The same question for the dock Linear surface.
+    fn dock_linear_modal_owns_keyboard(&self) -> bool {
+        self.state.dock_pending_write.is_some()
+            || self.state.dock_ticket_start_menu.is_some()
+            || self.state.dock_ticket_action_menu.is_some()
+            || self.state.dock_ticket_comment_draft.is_some()
+    }
+
     /// Toggle the section the alt digit names in a dock detail. The order comes
     /// from the render itself, so a view that hides a section never leaves a
     /// gap in the numbering.
@@ -3385,6 +3479,9 @@ impl App {
         object_key: crate::app::state::WorkItemKey,
         index: usize,
     ) -> bool {
+        if self.dock_comments_are_folded(&object_key) {
+            return false;
+        }
         let Some(identity) = self
             .state
             .work_item_detail_cache
@@ -3408,6 +3505,9 @@ impl App {
         &mut self,
         object_key: crate::app::state::WorkItemKey,
     ) -> bool {
+        if self.dock_comments_are_folded(&object_key) {
+            return false;
+        }
         let identities = self
             .state
             .work_item_detail_cache
@@ -3456,6 +3556,13 @@ impl App {
             })
             .flatten();
         if let Some(index) = alt_digit {
+            // A confirmation or an open menu owns the keyboard. Folding behind
+            // it would change a detail the reader cannot see, and letting the
+            // key through would reach the pane while a prompt is up, so it is
+            // swallowed instead.
+            if self.dock_pr_modal_owns_keyboard() {
+                return true;
+            }
             let area = dock_detail_area(&self.state);
             let layout = crate::ui::dock::pr::focused_pr_layout(&self.state, area);
             return crate::ui::dock::pr::focused_pr_key(&self.state).is_some_and(|object_key| {
@@ -3775,6 +3882,11 @@ impl App {
             let KeyCode::Char(digit @ '1'..='9') = event.code else {
                 return false;
             };
+            // Same reasoning as the pull-request surface: a modal owning the
+            // keyboard neither folds nor releases the key to the pane.
+            if self.dock_linear_modal_owns_keyboard() {
+                return true;
+            }
             let area = dock_detail_area(&self.state);
             let layout = crate::ui::dock::linear::focused_ticket_layout(&self.state, area);
             let index = digit as usize - '1' as usize;
@@ -4517,6 +4629,11 @@ impl App {
             return;
         }
         if self.state.work_view.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.fold_work_view_section_at(mouse.column, mouse.row)
+            {
+                return;
+            }
             self.handle_ticket_board_mouse(mouse);
             return;
         }
@@ -6094,6 +6211,163 @@ mod tests {
     }
 
     #[test]
+    fn folding_comments_away_gives_their_digits_back_to_the_pane() {
+        let mut app = dock_linear_test_app();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.dock_rect = ratatui::layout::Rect::new(0, 20, 100, 20);
+        app.state.view.dock_body_rect = app.state.view.dock_rect;
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), detail_with_comments(&["first", "second"]));
+        let press = |app: &mut App, code, modifiers| {
+            app.handle_dock_linear_key(&TerminalKey::new(code, modifiers))
+        };
+
+        assert!(press(&mut app, KeyCode::Char('1'), KeyModifiers::empty()));
+        assert_eq!(expanded_bodies(&app, &key), vec!["first".to_string()]);
+
+        // Fold the comment section itself. Its digits address the list by
+        // position, so with the list off screen they are the pane's again.
+        let comments = dock_ticket_sections(&app)
+            .iter()
+            .position(|section| *section == crate::app::state::DetailSection::Comments)
+            .expect("a comments section");
+        let digit = char::from_digit(comments as u32 + 1, 10).expect("a section digit");
+        assert!(press(&mut app, KeyCode::Char(digit), KeyModifiers::ALT));
+
+        assert!(!press(&mut app, KeyCode::Char('2'), KeyModifiers::empty()));
+        assert!(!press(&mut app, KeyCode::Char('a'), KeyModifiers::empty()));
+        assert_eq!(
+            expanded_bodies(&app, &key),
+            vec!["first".to_string()],
+            "and the expansion the reader already made is untouched"
+        );
+    }
+
+    #[test]
+    fn the_pull_request_surface_folds_on_the_same_alt_digits() {
+        let mut app = test_app();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
+        app.state.dock_pr_focused = true;
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.dock_rect = ratatui::layout::Rect::new(0, 20, 100, 20);
+        app.state.view.dock_body_rect = app.state.view.dock_rect;
+        // The sidebar fixture has no pull request, so bind one to the focused
+        // pane and put the matching item in the index the dock reads.
+        let url = "https://github.com/owner/repo/pull/7";
+        for terminal in app.state.terminals.values_mut() {
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext {
+                    pr_urls: vec![url.into()],
+                    repo: Some("owner/repo".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some(snapshot) = app.state.work_index_snapshot.as_mut() {
+            snapshot.items.push(crate::work_index::WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(7),
+                pr_url: Some(url.into()),
+                pr_title: Some("a pull request".into()),
+                pr_state: Some("open".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: crate::work_index::PrCheckState::Unknown,
+                audience: crate::work_index::PrAudience::Other,
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: None,
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: Default::default(),
+            });
+        }
+        let key = crate::ui::dock::pr::focused_pr_key(&app.state).expect("a focused pull request");
+        let area = dock_detail_area(&app.state);
+        let layout = crate::ui::dock::pr::focused_pr_layout(&app.state, area)
+            .expect("a pull-request detail layout");
+        let (_, first) = layout.sections.first().copied().expect("a first section");
+
+        assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::ALT)));
+        assert!(app
+            .state
+            .dock_object_views
+            .get(&key)
+            .is_some_and(|view| view.section_is_collapsed(first)));
+    }
+
+    #[test]
+    fn a_modal_keeps_the_alt_digit_off_the_detail_and_off_the_pane() {
+        let mut app = dock_linear_test_app();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.dock_rect = ratatui::layout::Rect::new(0, 20, 100, 20);
+        app.state.view.dock_body_rect = app.state.view.dock_rect;
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state.dock_ticket_comment_draft = Some("half a comment".into());
+
+        assert!(
+            app.handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::ALT)),
+            "the draft owns the keyboard, so the key must not reach the pane"
+        );
+        assert!(
+            collapsed_sections(&app, &key).is_empty(),
+            "and it must not fold a section behind the draft either"
+        );
+
+        app.state.dock_ticket_comment_draft = None;
+        assert!(
+            app.handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::ALT))
+        );
+        assert_eq!(collapsed_sections(&app, &key).len(), 1);
+    }
+
+    #[test]
+    fn a_collapsed_dock_preview_folds_on_click_like_the_dock_tab_does() {
+        let mut app = dock_linear_test_app();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.terminal_area = area;
+        app.state.dock_collapsed = true;
+        app.state.dock_tab = None;
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state.dock_object_preview = Some(crate::app::state::DockObjectRef {
+            surface: crate::app::DockSurface::Linear,
+            key: key.ticket_id.clone().unwrap_or_default(),
+        });
+        let layout = crate::ui::dock::linear::focused_ticket_layout(&app.state, area)
+            .expect("a ticket detail layout");
+        let (header, section) = layout.sections[0];
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: area.x + 2,
+            row: area.y + u16::try_from(header).expect("a header on screen"),
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert_eq!(collapsed_sections(&app, &key), vec![section]);
+    }
+
+    #[test]
     fn a_digit_attaches_a_ticket_when_the_linear_surface_has_none() {
         let mut app = dock_linear_test_app();
         let terminal_id = app.state.workspaces[0].tabs[0]
@@ -6962,6 +7236,78 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
         view.projection = crate::app::state::WorkProjection::Tickets;
         app.state.work_view = Some(view);
         app
+    }
+
+    fn work_view_collapsed(app: &App, key: &crate::app::state::WorkItemKey) -> Vec<String> {
+        let Some(state) = app.state.work_view.as_ref() else {
+            return Vec::new();
+        };
+        let view = state.object_view(key);
+        let mut collapsed = view
+            .collapsed_sections
+            .iter()
+            .map(|section| format!("{section:?}"))
+            .collect::<Vec<_>>();
+        collapsed.sort();
+        collapsed
+    }
+
+    #[test]
+    fn a_closed_board_card_folds_nothing_it_does_not_show() {
+        let mut app = ticket_view_app();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let key = app
+            .visible_ticket_view_keys()
+            .first()
+            .cloned()
+            .expect("a visible ticket");
+
+        app.state.work_view.as_mut().expect("view").ticket_layout =
+            crate::app::state::LinearViewLayout::Board;
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert!(
+            work_view_collapsed(&app, &key).is_empty(),
+            "the board draws cards, so there is no header on screen to fold"
+        );
+
+        // Opening the card puts the detail back on screen and the digit works.
+        app.state
+            .work_view
+            .as_mut()
+            .expect("view")
+            .board_detail_open = true;
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert_eq!(work_view_collapsed(&app, &key).len(), 1);
+    }
+
+    #[test]
+    fn clicking_a_header_in_the_full_work_view_folds_it() {
+        let mut app = ticket_view_app();
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        app.state.view.terminal_area = area;
+        app.state.mode = Mode::Terminal;
+        let key = app
+            .visible_ticket_view_keys()
+            .first()
+            .cloned()
+            .expect("a visible ticket");
+        let detail = crate::ui::work_view::detail_inner_rect(area);
+        let layout = app
+            .work_view_detail_layout(&key)
+            .expect("a ticket detail layout");
+        let (header, section) = layout.sections[1];
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: detail.x + 2,
+            row: detail.y + u16::try_from(header).expect("a header on screen"),
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert_eq!(
+            work_view_collapsed(&app, &key),
+            vec![format!("{section:?}")]
+        );
     }
 
     #[test]
