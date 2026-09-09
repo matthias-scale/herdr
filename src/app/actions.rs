@@ -326,6 +326,7 @@ impl AppState {
             workspace_id: ws.id.clone(),
             pane_id,
         };
+        self.sidebar_selected_remote_agent = None;
         if previous.as_ref() != Some(&target) {
             self.previous_pane_focus = previous;
         }
@@ -370,6 +371,7 @@ impl AppState {
         // Released before the already-focused early return: re-focusing the
         // current pane is still the operator saying "type here now".
         self.release_dock_focus_to_pane();
+        self.sidebar_selected_remote_agent = None;
         if previous.as_ref() == Some(&target) {
             return false;
         }
@@ -1277,6 +1279,7 @@ impl AppState {
 
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
+            self.sidebar_selected_remote_agent = None;
             let previous_focus = self.current_pane_focus_target();
             self.active = Some(idx);
             self.selected = idx;
@@ -1316,6 +1319,7 @@ impl AppState {
         }
 
         let previous_focus = self.current_pane_focus_target();
+        self.sidebar_selected_remote_agent = None;
         let workspace_changed = self.active != Some(ws_idx);
         self.active = Some(ws_idx);
         self.selected = ws_idx;
@@ -1419,6 +1423,7 @@ impl AppState {
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
+            self.sidebar_selected_remote_agent = None;
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
             };

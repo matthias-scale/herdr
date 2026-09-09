@@ -804,6 +804,8 @@ impl App {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             agent_host_name: config.remote.fleet.resolved_self_name(),
+            remote_agent_panel_entries: Vec::new(),
+            sidebar_selected_remote_agent: None,
             dock_symphony: None,
             symphony_detail: None,
             work_view: None,
@@ -2294,6 +2296,7 @@ impl App {
             let agent_host_name = config.remote.fleet.resolved_self_name();
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;
+                self.refresh_remote_agent_panel_entries();
                 self.state.mark_sidebar_projection_changed();
             }
         }

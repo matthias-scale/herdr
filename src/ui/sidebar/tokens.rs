@@ -23,6 +23,7 @@ pub(super) enum ResolvedTokenKind {
     Tab(String),
     Pane(String),
     Agent(String),
+    Host(String),
     TerminalTitle(String),
     Branch(String),
     GitStatus { ahead: usize, behind: usize },
@@ -145,6 +146,12 @@ pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
             SidebarTokenStyle::default(),
         ));
     }
+    if let Some(host) = entry.host_label.clone() {
+        row.push(ResolvedToken::new(
+            ResolvedTokenKind::Host(host),
+            SidebarTokenStyle::default(),
+        ));
+    }
     vec![row]
 }
 
@@ -221,6 +228,13 @@ mod tests {
 
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
+            agent_ref: crate::api::schema::AgentRef::new("localhost", "p1"),
+            local_target: Some(super::super::AgentPanelLocalTarget {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            }),
+            host_label: None,
             usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,

@@ -4,6 +4,12 @@ use crate::layout::PaneId;
 
 use super::{state::PaneSettlementChange, App, AppState};
 
+struct PaneSettlementCandidate {
+    agent_ref: crate::api::schema::AgentRef,
+    ws_idx: usize,
+    pane_id: PaneId,
+}
+
 pub(crate) fn unix_seconds(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
@@ -79,6 +85,24 @@ fn derived_pane_label(state: &AppState, ws_idx: usize, pane_id: PaneId) -> Optio
 }
 
 impl AppState {
+    fn settle_owned_candidates(
+        &mut self,
+        candidates: &[PaneSettlementCandidate],
+        now_unix: u64,
+    ) -> usize {
+        let mut settled = 0;
+        for candidate in candidates {
+            if candidate.agent_ref.host != self.agent_host_name {
+                // This client does not own remote panes. Selection may point at
+                // one, but settlement must never mutate a colliding local id.
+                continue;
+            }
+            settled +=
+                usize::from(self.settle_pane_at(candidate.ws_idx, candidate.pane_id, now_unix));
+        }
+        settled
+    }
+
     fn pane_state_mut(&mut self, pane_id: PaneId) -> Option<(usize, &mut crate::pane::PaneState)> {
         self.workspaces
             .iter_mut()
@@ -237,7 +261,14 @@ impl AppState {
                         observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
                     }
                     if inactive || (new_work_trigger && finished_ripe) {
-                        candidates.push((ws_idx, *pane_id, work_key));
+                        candidates.push(PaneSettlementCandidate {
+                            agent_ref: crate::api::schema::AgentRef::new(
+                                self.agent_host_name.clone(),
+                                pane_id.raw().to_string(),
+                            ),
+                            ws_idx,
+                            pane_id: *pane_id,
+                        });
                     }
                 }
             }
@@ -261,10 +292,7 @@ impl AppState {
                 pane.finished_since = *armed;
             }
         }
-        for (ws_idx, pane_id, _) in &candidates {
-            self.settle_pane_at(*ws_idx, *pane_id, now_unix);
-        }
-        candidates.len()
+        self.settle_owned_candidates(&candidates, now_unix)
     }
 }
 
@@ -875,6 +903,24 @@ mod tests {
 
         assert!(state.observe_pane_detection_snapshot_at(pane_id, 2, None, "after", now));
         assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn remote_candidate_never_settles_a_colliding_local_pane() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        state.agent_host_name = "local".into();
+        let candidate = PaneSettlementCandidate {
+            agent_ref: crate::api::schema::AgentRef::new("remote", pane_id.raw().to_string()),
+            ws_idx: 0,
+            pane_id,
+        };
+
+        assert_eq!(
+            state.settle_owned_candidates(&[candidate], 1_725_000_002),
+            0
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert!(state.pending_pane_settlement_changes.is_empty());
     }
 
     #[test]

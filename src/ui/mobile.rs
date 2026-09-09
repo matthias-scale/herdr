@@ -144,7 +144,8 @@ fn mobile_switcher_target_for_row(
             ws_idx: entry.ws_idx,
             tab_idx: entry.tab_idx,
         },
-        SidebarRow::SectionHeader { .. }
+        SidebarRow::RemoteAgent { .. }
+        | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty => return None,
@@ -169,8 +170,9 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
-        | SidebarRow::SymphonyEmpty => 1,
-        SidebarRow::Agent { .. } => 1,
+        | SidebarRow::SymphonyEmpty
+        | SidebarRow::Agent { .. }
+        | SidebarRow::RemoteAgent { .. } => 1,
     }
 }
 
@@ -738,6 +740,24 @@ fn render_mobile_switcher_content(
                     }),
                     p,
                 );
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    render_compact_agent_row(
+                        app,
+                        frame,
+                        entry,
+                        Rect::new(content.x, y, content.width, 1),
+                        *depth,
+                        false,
+                        Some(bg),
+                    );
+                }
+            }
+            SidebarRow::RemoteAgent { entry, depth } => {
+                let selected = app
+                    .sidebar_selected_remote_agent
+                    .as_ref()
+                    .is_some_and(|agent_ref| agent_ref == &entry.agent_ref);
+                let bg = mobile_item_bg(selected, false, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
                     render_compact_agent_row(
                         app,
@@ -1385,6 +1405,13 @@ mod tests {
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
+            agent_ref: crate::api::schema::AgentRef::new("local", "1"),
+            local_target: Some(crate::ui::sidebar::AgentPanelLocalTarget {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: PaneId::from_raw(1),
+            }),
+            host_label: None,
             usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,

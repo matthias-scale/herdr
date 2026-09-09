@@ -33,6 +33,34 @@ enum RuntimeExitAction {
 }
 
 impl App {
+    pub(crate) fn refresh_remote_agent_panel_entries(&mut self) {
+        self.state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(
+            &self.state.fleet_snapshot,
+            &self.state.agent_host_name,
+        );
+        if self
+            .state
+            .sidebar_selected_remote_agent
+            .as_ref()
+            .is_some_and(|selected| {
+                !self
+                    .state
+                    .remote_agent_panel_entries
+                    .iter()
+                    .any(|entry| &entry.agent_ref == selected)
+            })
+        {
+            self.state.sidebar_selected_remote_agent = None;
+        }
+    }
+
+    fn install_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+        let changed = self.state.fleet_snapshot != snapshot;
+        self.state.fleet_snapshot = snapshot;
+        self.refresh_remote_agent_panel_entries();
+        changed
+    }
+
     pub(crate) fn pane_runtime_is_suspended(&self, pane_id: crate::layout::PaneId) -> bool {
         self.find_pane(pane_id)
             .and_then(|(_, pane)| self.terminal_runtimes.get(&pane.attached_terminal_id))
@@ -71,11 +99,7 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
-            AppEvent::FleetRefreshed { snapshot } => {
-                let changed = self.state.fleet_snapshot != snapshot;
-                self.state.fleet_snapshot = snapshot;
-                changed
-            }
+            AppEvent::FleetRefreshed { snapshot } => self.install_fleet_snapshot(snapshot),
             AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
                 self.refresh_symphony_snapshot(snapshot)
             }
@@ -290,9 +314,7 @@ impl App {
         }
 
         if let AppEvent::FleetRefreshed { snapshot } = ev {
-            let changed = self.state.fleet_snapshot != snapshot;
-            self.state.fleet_snapshot = snapshot;
-            return Some(changed);
+            return Some(self.install_fleet_snapshot(snapshot));
         }
 
         if let AppEvent::ScratchpadChanged = ev {

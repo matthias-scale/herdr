@@ -203,6 +203,8 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub usage_limited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

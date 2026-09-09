@@ -3109,6 +3109,11 @@ pub struct AppState {
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
     /// This server's configured component in cross-host agent references.
     pub(crate) agent_host_name: String,
+    /// TUI projection materialized only when the fleet snapshot changes.
+    pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::AgentPanelEntry>>,
+    /// Read-only remote row selected by blocked navigation. Activation remains
+    /// reserved for the later remote-control slice.
+    pub(crate) sidebar_selected_remote_agent: Option<crate::api::schema::AgentRef>,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
     /// Which job the dock's Symphony surface is bound to. Client presentation
     /// state: the runtime knows nothing about which panel is open.
@@ -4416,6 +4421,7 @@ impl AppState {
     pub(crate) fn release_surface_focus_to_pane(&mut self) {
         self.release_dock_focus_to_pane();
         self.sidebar_selected_work_group = None;
+        self.sidebar_selected_remote_agent = None;
         self.sidebar_object_menu = None;
         self.sidebar_selected_settled = None;
         self.sidebar_settled_menu_target = None;
@@ -5498,6 +5504,8 @@ impl AppState {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
             agent_host_name: "localhost".to_string(),
+            remote_agent_panel_entries: Vec::new(),
+            sidebar_selected_remote_agent: None,
             symphony_detail: None,
             dock_symphony: None,
             work_view: None,

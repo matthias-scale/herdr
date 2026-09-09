@@ -998,6 +998,8 @@ pub(crate) struct FleetRow {
     pub(crate) error: Option<String>,
     #[serde(skip)]
     native_session: Option<String>,
+    #[serde(skip)]
+    agent_info: Option<AgentInfo>,
 }
 
 impl FleetRow {
@@ -1013,6 +1015,23 @@ impl FleetRow {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_agent_info_row(host: &str, agent: AgentInfo) -> Self {
+        Self::from_agent(host, agent, 0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_run_row(host: &str, run_id: &str, blocked: bool) -> Self {
+        let agent_ref = crate::api::schema::AgentRef::new(host, run_id);
+        let mut row = Self::unknown(host, EvidenceSource::RunState, agent_ref, String::new());
+        row.error = None;
+        row.name = Some(run_id.to_string());
+        row.agent = Some("codex".to_string());
+        row.state = if blocked { "blocked" } else { "active" }.to_string();
+        row.blocked = blocked;
+        row
+    }
+
+    #[cfg(test)]
     fn with_test_name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self.agent = Some("codex".to_string());
@@ -1020,6 +1039,7 @@ impl FleetRow {
     }
 
     fn from_agent(host: &str, agent: AgentInfo, now_s: u64) -> Self {
+        let agent_info = agent.clone();
         let liveness = match agent.agent_status {
             AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
             AgentStatus::Done => Liveness::Terminal,
@@ -1081,6 +1101,7 @@ impl FleetRow {
             descendants: DescendantScore::default(),
             error: None,
             native_session,
+            agent_info: Some(agent_info),
         }
     }
 
@@ -1145,6 +1166,7 @@ impl FleetRow {
             descendants: DescendantScore::default(),
             error: None,
             native_session: None,
+            agent_info: None,
         }
     }
 
@@ -1199,7 +1221,12 @@ impl FleetRow {
             descendants: DescendantScore::default(),
             error: Some(error),
             native_session: None,
+            agent_info: None,
         }
+    }
+
+    pub(crate) fn agent_info(&self) -> Option<&AgentInfo> {
+        self.agent_info.as_ref()
     }
 }
 

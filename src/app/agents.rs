@@ -419,6 +419,7 @@ impl App {
             terminal_title_stripped: pane.terminal_title_stripped,
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
+            usage_limited: terminal.usage_limited,
             wait: pane.wait,
             eta_s: pane.eta_s,
             reported_at: pane.reported_at,
