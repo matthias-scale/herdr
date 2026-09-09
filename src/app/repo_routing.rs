@@ -82,6 +82,63 @@ impl App {
         })
     }
 
+    /// Adopt a repository binding for a workspace whose panes agree on one.
+    ///
+    /// `repo_binding` had exactly one production writer: the `workspace.repo.set`
+    /// API call. Panes resolve their repository on their own through the git
+    /// observation tier, but nothing carried that up to the workspace, so
+    /// `repo_route_decision` answered `NoBoundWorkspace` forever and grouping by
+    /// repository only worked for someone who had bound every workspace by hand.
+    ///
+    /// Adoption is deliberately timid, because a wrong binding misfiles panes:
+    ///
+    /// * a workspace that already declares a binding keeps it, and one whose
+    ///   binding the operator cleared stays cleared,
+    /// * every pane that has resolved a repository must name the same one, so a
+    ///   workspace holding two checkouts stays unbound rather than picking one,
+    /// * a repository already claimed by another workspace is never taken, which
+    ///   preserves the one-workspace-per-repository rule the API enforces.
+    ///
+    /// Adoption does not reconcile routing. Creating a binding must not move
+    /// panes the human did not ask to move; `workspace.repo.set` still owns that.
+    pub(crate) fn adopt_repo_binding_for_workspace(&mut self, ws_idx: usize) -> bool {
+        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
+            return false;
+        };
+        if workspace.repo_binding.is_some() || workspace.repo_binding_cleared {
+            return false;
+        }
+        let pane_ids: Vec<PaneId> = workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect();
+
+        let mut candidate: Option<String> = None;
+        for pane_id in pane_ids {
+            let Some(repo) = self.pane_effective_repo(ws_idx, pane_id) else {
+                continue;
+            };
+            match candidate.as_deref() {
+                None => candidate = Some(repo),
+                Some(existing) if crate::work_context::repo_slugs_match(existing, &repo) => {}
+                Some(_) => return false,
+            }
+        }
+        let Some(repo) = candidate else {
+            return false;
+        };
+        if self.workspace_bound_to_repo(&repo).is_some() {
+            return false;
+        }
+        let Some(workspace) = self.state.workspaces.get_mut(ws_idx) else {
+            return false;
+        };
+        workspace.repo_binding = Some(repo);
+        self.schedule_session_save();
+        true
+    }
+
     /// Decide, without mutating anything, where a pane belongs.
     pub(crate) fn repo_route_decision(&self, ws_idx: usize, pane_id: PaneId) -> RepoRouteDecision {
         let Some(repo) = self.pane_effective_repo(ws_idx, pane_id) else {
@@ -276,6 +333,87 @@ mod tests {
                 ..PaneWorkContextPatch::default()
             })
             .expect("declaration must normalize");
+    }
+
+    /// Pane ids of one workspace, in tab/pane order.
+    fn workspace_pane_ids(app: &App, ws_idx: usize) -> Vec<PaneId> {
+        app.state.workspaces[ws_idx]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect()
+    }
+
+    #[test]
+    fn workspace_adopts_the_repo_its_panes_agree_on() {
+        let mut app = app_with_bound_workspace();
+        for pane_id in workspace_pane_ids(&app, 0) {
+            observe_git_repo(&mut app, 0, pane_id, "owner/grab-bag");
+        }
+
+        assert!(app.adopt_repo_binding_for_workspace(0));
+        assert_eq!(
+            app.state.workspaces[0].repo_binding.as_deref(),
+            Some("owner/grab-bag")
+        );
+    }
+
+    #[test]
+    fn workspace_holding_two_repos_stays_unbound() {
+        let mut app = app_with_bound_workspace();
+        let panes = workspace_pane_ids(&app, 0);
+        assert!(panes.len() >= 2, "fixture must hold two panes");
+        observe_git_repo(&mut app, 0, panes[0], "owner/one");
+        observe_git_repo(&mut app, 0, panes[1], "owner/two");
+
+        assert!(!app.adopt_repo_binding_for_workspace(0));
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+    }
+
+    #[test]
+    fn adoption_never_takes_a_repo_another_workspace_claims() {
+        let mut app = app_with_bound_workspace();
+        for pane_id in workspace_pane_ids(&app, 0) {
+            observe_git_repo(&mut app, 0, pane_id, "owner/bound");
+        }
+
+        assert!(!app.adopt_repo_binding_for_workspace(0));
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+    }
+
+    #[test]
+    fn adoption_respects_a_binding_the_operator_cleared() {
+        let mut app = app_with_bound_workspace();
+        for pane_id in workspace_pane_ids(&app, 0) {
+            observe_git_repo(&mut app, 0, pane_id, "owner/grab-bag");
+        }
+        // The operator said "no binding here", which must outlast a refresh.
+        app.state.workspaces[0].repo_binding_cleared = true;
+
+        assert!(!app.adopt_repo_binding_for_workspace(0));
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+    }
+
+    #[test]
+    fn adoption_leaves_an_existing_binding_alone() {
+        let mut app = app_with_bound_workspace();
+        for pane_id in workspace_pane_ids(&app, 1) {
+            observe_git_repo(&mut app, 1, pane_id, "owner/something-else");
+        }
+
+        assert!(!app.adopt_repo_binding_for_workspace(1));
+        assert_eq!(
+            app.state.workspaces[1].repo_binding.as_deref(),
+            Some("owner/bound")
+        );
+    }
+
+    #[test]
+    fn a_workspace_with_no_resolved_repo_stays_unbound() {
+        let mut app = app_with_bound_workspace();
+
+        assert!(!app.adopt_repo_binding_for_workspace(0));
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
     }
 
     #[test]

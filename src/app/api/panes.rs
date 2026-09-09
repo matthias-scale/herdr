@@ -729,6 +729,8 @@ impl App {
                 .clone(),
             previous_worktree_space: self.state.workspaces[source_ws_idx].worktree_space.clone(),
             previous_repo_binding: self.state.workspaces[source_ws_idx].repo_binding.clone(),
+            previous_repo_binding_cleared: self.state.workspaces[source_ws_idx]
+                .repo_binding_cleared,
             identity_cwd: self.state.workspaces[source_ws_idx].identity_cwd.clone(),
         };
 
@@ -1139,6 +1141,7 @@ impl App {
             workspace.id = context.previous_workspace_id;
             workspace.worktree_space = context.previous_worktree_space;
             workspace.repo_binding = context.previous_repo_binding;
+            workspace.repo_binding_cleared = context.previous_repo_binding_cleared;
             let insert_idx = context.source_ws_idx.min(self.state.workspaces.len());
             if let Some(active) = self.state.active {
                 if active >= insert_idx {
@@ -2234,6 +2237,9 @@ struct PaneMoveRecoveryContext {
     /// A failed move must not silently drop the source workspace's repository
     /// binding; losing it would reintroduce the decay this feature prevents.
     previous_repo_binding: Option<String>,
+    /// Restored alongside the binding: recreating the workspace without it
+    /// would let adoption rebind a workspace the operator had cleared.
+    previous_repo_binding_cleared: bool,
     identity_cwd: std::path::PathBuf,
 }
 
@@ -4100,6 +4106,9 @@ mod tests {
             .unwrap()
             .clone();
         let previous_workspace_id = app.public_workspace_id(0);
+        // The operator cleared this workspace's binding; recovery must not
+        // hand it back in a state where adoption would rebind it.
+        app.state.workspaces[0].repo_binding_cleared = true;
         let context = PaneMoveRecoveryContext {
             source_ws_idx: 0,
             previous_workspace_id: previous_workspace_id.clone(),
@@ -4107,6 +4116,7 @@ mod tests {
             previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
             previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
             previous_repo_binding: app.state.workspaces[0].repo_binding.clone(),
+            previous_repo_binding_cleared: app.state.workspaces[0].repo_binding_cleared,
             identity_cwd: app.state.workspaces[0].identity_cwd.clone(),
         };
         let taken = app.state.workspaces[0]
@@ -4127,6 +4137,10 @@ mod tests {
         assert_eq!(
             app.parse_pane_id(&format!("{previous_workspace_id}:p1")),
             Some((0, source))
+        );
+        assert!(
+            app.state.workspaces[0].repo_binding_cleared,
+            "recovery must carry the cleared marker back"
         );
     }
 
