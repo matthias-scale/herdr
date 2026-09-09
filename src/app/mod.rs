@@ -774,6 +774,7 @@ impl App {
             ))
             .collect(),
             sidebar_group_mode,
+            sidebar_focused: false,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: sidebar_group_mode.view_index(),
             sidebar_work_filter,

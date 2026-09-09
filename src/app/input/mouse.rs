@@ -334,6 +334,14 @@ impl AppState {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
         }
 
+        // A press decides which surface owns the keyboard, and the sidebar's
+        // bare-key shortcuts are gated on owning it. Deciding here rather than
+        // per hit-test means a press that lands anywhere else revokes it, and a
+        // press that focuses a pane revokes it again when the resulting action
+        // runs `release_dock_focus_to_pane`.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.sidebar_focused = self.sidebar_claims_pointer(mouse.column, mouse.row);
+        }
         let group_menu_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);

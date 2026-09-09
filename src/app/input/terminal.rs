@@ -51,23 +51,27 @@ impl App {
             }
         }
 
-        let key_event = key.as_key_event();
-        if self.state.handle_sidebar_new_menu_key(key_event) {
-            return None;
-        }
-        if self.state.handle_sidebar_new_thread_key(key_event) {
-            return None;
-        }
-        if self.state.handle_sidebar_search_key(key_event) {
-            return None;
-        }
-
-        match self.state.handle_sidebar_work_group_key(key_event) {
-            super::sidebar::SidebarWorkGroupKeyAction::Ignored => {}
-            super::sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
-            super::sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
-                self.dispatch_sidebar_work_group_plan(*plan);
+        // This is the key already on its way to a pane, so the sidebar may only
+        // intercept it while the sidebar owns the keyboard.
+        if self.state.sidebar_focused {
+            let key_event = key.as_key_event();
+            if self.state.handle_sidebar_new_menu_key(key_event) {
                 return None;
+            }
+            if self.state.handle_sidebar_new_thread_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_search_key(key_event) {
+                return None;
+            }
+
+            match self.state.handle_sidebar_work_group_key(key_event) {
+                super::sidebar::SidebarWorkGroupKeyAction::Ignored => {}
+                super::sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
+                super::sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                    self.dispatch_sidebar_work_group_plan(*plan);
+                    return None;
+                }
             }
         }
 
@@ -573,6 +577,7 @@ mod tests {
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::LinearTeam;
         app.state.sidebar_selected_work_group = Some("linear:OPS-12".into());
+        app.state.sidebar_focused = true;
 
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
 
@@ -591,6 +596,16 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.sidebar_search_active = true;
 
+        // An open search field is not on its own a claim on the keyboard: it
+        // stays open while the operator types into a pane.
+        app.state.sidebar_focused = false;
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('q'),
+            KeyModifiers::empty(),
+        ));
+        assert_eq!(app.state.sidebar_work_filter.query, "");
+
+        app.state.sidebar_focused = true;
         let target = app.handle_terminal_key_headless(TerminalKey::new(
             KeyCode::Char('x'),
             KeyModifiers::empty(),

@@ -3211,6 +3211,15 @@ pub struct AppState {
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
     pub(crate) sidebar_group_mode: SidebarGroupMode,
+    /// Whether the keyboard belongs to the sidebar.
+    ///
+    /// The sidebar's bare-key shortcuts are only reachable through this flag.
+    /// It was previously implied by whatever selection or menu state a click
+    /// happened to leave behind, so `m`, `n`, Enter and the search field kept
+    /// answering long after the operator had moved on to type in a pane. Set by
+    /// a click that lands in the sidebar without handing the keyboard to a
+    /// pane, cleared by every path that focuses a pane.
+    pub(crate) sidebar_focused: bool,
     pub(crate) sidebar_group_menu_open: bool,
     pub(crate) sidebar_group_menu_selected: usize,
     pub(crate) sidebar_work_filter: SidebarWorkFilter,
@@ -4282,6 +4291,7 @@ impl AppState {
     /// the operator meant for the shell: `a`/`m`/`x` on Home, `l`/`c` on a pull
     /// request, a surface shortcut in the chooser.
     pub(crate) fn release_dock_focus_to_pane(&mut self) {
+        self.sidebar_focused = false;
         self.dock_home_focused = false;
         self.dock_pr_focused = false;
         self.dock_linear_focused = false;
@@ -5466,6 +5476,7 @@ impl AppState {
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
             sidebar_group_mode: SidebarGroupMode::Repo,
+            sidebar_focused: false,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: 0,
             sidebar_work_filter: SidebarWorkFilter::default(),

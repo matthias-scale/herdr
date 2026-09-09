@@ -272,6 +272,26 @@ impl AppState {
         }
     }
 
+    /// Whether this point belongs to the sidebar for keyboard purposes.
+    ///
+    /// The sidebar body plus whatever menu it currently has open, which the
+    /// renderer floats outside the sidebar rectangle. A collapsed sidebar
+    /// claims nothing: its only control expands it, and expanding is not the
+    /// operator asking to drive it from the keyboard.
+    pub(crate) fn sidebar_claims_pointer(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+        if self.point_in_rect(self.view.sidebar_rect, col, row) {
+            return true;
+        }
+        self.sidebar_new_menu_item_at(col, row).is_some()
+            || self.sidebar_new_thread_item_at(col, row).is_some()
+            || self.sidebar_group_menu_item_at(col, row).is_some()
+            || self.sidebar_filter_menu_item_at(col, row).is_some()
+            || crate::ui::sidebar_object_menu_item_at(self, self.screen_rect(), col, row).is_some()
+    }
+
     pub(crate) fn sidebar_group_mode_anchor_rect(&self) -> Rect {
         crate::ui::sidebar_group_mode_anchor_rect(self.view.sidebar_rect)
     }
@@ -1457,6 +1477,54 @@ mod tests {
             workspace_id: app.state.workspaces[0].id.clone(),
             pane_id,
         }
+    }
+
+    #[tokio::test]
+    async fn a_pane_keeps_its_own_keys_while_a_sidebar_row_stays_selected() {
+        let mut app = app_for_mouse_test();
+        app.state = crate::ui::sidebar_work_item_fixture();
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
+        app.state.sidebar_focused = false;
+
+        // `m` opens the sidebar object menu, but only for the sidebar. Typed
+        // into a pane it is just a letter.
+        let consumed = app
+            .handle_key_inner(crate::input::TerminalKey::new(
+                KeyCode::Char('m'),
+                KeyModifiers::empty(),
+            ))
+            .await;
+        assert!(
+            app.state.sidebar_object_menu.is_none(),
+            "a selected sidebar row must not claim keys the pane owns"
+        );
+        drop(consumed);
+
+        app.state.sidebar_focused = true;
+        let _ = app
+            .handle_key_inner(crate::input::TerminalKey::new(
+                KeyCode::Char('m'),
+                KeyModifiers::empty(),
+            ))
+            .await;
+        assert_eq!(
+            app.state
+                .sidebar_object_menu
+                .as_ref()
+                .map(|menu| menu.target.as_str()),
+            Some("linear:SCA-3102"),
+            "the same key still works once the sidebar owns the keyboard"
+        );
+    }
+
+    #[test]
+    fn focusing_a_pane_releases_the_sidebar_keyboard() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_focused = true;
+        app.state.release_dock_focus_to_pane();
+        assert!(!app.state.sidebar_focused);
     }
 
     #[test]
