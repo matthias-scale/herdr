@@ -11,7 +11,6 @@
 
 use crate::config::LaunchProfileConfig;
 use crate::detect::{parse_agent_label, Agent};
-use crate::provider_usage::{AccountUsage, ProviderUsageSnapshot};
 
 /// Which quota window a lane reports.
 ///
@@ -32,14 +31,6 @@ impl QuotaSource {
             "codex" => Some(Self::Codex),
             "kimi" => Some(Self::Kimi),
             _ => None,
-        }
-    }
-
-    pub(crate) fn usage(self, snapshot: &ProviderUsageSnapshot) -> &AccountUsage {
-        match self {
-            Self::Claude => &snapshot.claude,
-            Self::Codex => &snapshot.codex,
-            Self::Kimi => &snapshot.kimi,
         }
     }
 }
@@ -275,21 +266,5 @@ mod tests {
             codex.env,
             [("CODEX_HOME".to_string(), "/elsewhere".to_string())]
         );
-    }
-
-    #[test]
-    fn a_quota_source_reads_its_own_window() {
-        let snapshot = ProviderUsageSnapshot {
-            kimi: AccountUsage {
-                account: Some("kimi".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_eq!(
-            QuotaSource::Kimi.usage(&snapshot).account.as_deref(),
-            Some("kimi")
-        );
-        assert!(QuotaSource::Claude.usage(&snapshot).is_empty());
     }
 }
