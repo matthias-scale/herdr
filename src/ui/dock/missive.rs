@@ -127,6 +127,7 @@ mod tests {
             subject: "Billing question".into(),
             app_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
             web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            team: None,
             assignees: vec![MissiveUser {
                 id: "ada".into(),
                 name: "Ada".into(),

@@ -442,6 +442,13 @@ pub(crate) struct MissiveUser {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissiveTeam {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) organization: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MissiveEntry {
     pub(crate) id: String,
     pub(crate) author: Option<String>,
@@ -455,6 +462,8 @@ pub(crate) struct MissiveConversation {
     pub(crate) subject: String,
     pub(crate) app_url: String,
     pub(crate) web_url: String,
+    #[serde(default)]
+    pub(crate) team: Option<MissiveTeam>,
     pub(crate) assignees: Vec<MissiveUser>,
     pub(crate) last_activity_at: Option<SystemTime>,
     pub(crate) closed: bool,
@@ -985,6 +994,15 @@ fn missive_user(value: &Value) -> Option<MissiveUser> {
     })
 }
 
+fn missive_team(value: &Value) -> Option<MissiveTeam> {
+    let id = value.get("id")?.as_str()?.to_string();
+    Some(MissiveTeam {
+        name: value_text(value.get("name")).unwrap_or_else(|| id.clone()),
+        organization: value_text(value.get("organization")),
+        id,
+    })
+}
+
 fn missive_time(value: Option<&Value>) -> Option<SystemTime> {
     if let Some(seconds) = value.and_then(Value::as_u64) {
         return Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
@@ -1079,6 +1097,7 @@ fn parse_missive_conversation_for_user(
             .iter()
             .filter_map(missive_user)
             .collect(),
+        team: value.get("team").and_then(missive_team),
         last_activity_at: missive_time(value.get("last_activity_at")),
         closed: value
             .get("closed")
@@ -4647,6 +4666,14 @@ mod tests {
         let parsed = parse_missive_conversations_for_user(&conversations, Some("user-1"));
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].subject, "Billing question from fixture");
+        assert_eq!(
+            parsed[0].team,
+            Some(MissiveTeam {
+                id: "team-support".into(),
+                name: "Support".into(),
+                organization: Some("organization-example".into()),
+            })
+        );
         assert_eq!(parsed[0].labels, ["billing", "customer"]);
         assert_eq!(parsed[0].assignees[0].name, "Ada Example");
         assert!(!parsed[0].assignees[0].is_me);
@@ -4829,6 +4856,7 @@ esac
                 subject: "Previous".into(),
                 app_url: "missive://previous".into(),
                 web_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,
@@ -6773,6 +6801,7 @@ esac
             subject: "Previous conversation".into(),
             app_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
             web_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+            team: None,
             assignees: Vec::new(),
             last_activity_at: None,
             closed: false,

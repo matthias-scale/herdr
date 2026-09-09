@@ -363,6 +363,9 @@ impl AppState {
             crate::ui::SidebarFilterOption::GithubState(state) => {
                 filter.github.state = state;
             }
+            crate::ui::SidebarFilterOption::MissiveTeam(team) => {
+                filter.missive.team = team;
+            }
             crate::ui::SidebarFilterOption::MissiveAssignee(assignee) => {
                 filter.missive.assignee = assignee;
             }
@@ -1705,6 +1708,7 @@ mod tests {
                 subject: "Billing question".into(),
                 app_url: app_url.into(),
                 web_url: web_url.into(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,

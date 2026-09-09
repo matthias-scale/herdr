@@ -3301,6 +3301,7 @@ pub(crate) enum SidebarFilterOption {
     GithubOwnership(crate::app::state::WorkOwnershipFilter),
     GithubDrafts(bool),
     GithubState(crate::app::state::GithubStateFilter),
+    MissiveTeam(Option<String>),
     MissiveAssignee(Option<String>),
     MissiveClosed(bool),
 }
@@ -3325,6 +3326,8 @@ impl SidebarFilterOption {
                 format!("{} show drafts", if *shown { "[x]" } else { "[ ]" })
             }
             Self::GithubState(state) => format!("state: {}", state.label()),
+            Self::MissiveTeam(None) => "team: all".into(),
+            Self::MissiveTeam(Some(team)) => format!("team: {team}"),
             Self::MissiveAssignee(None) => "assignee: all".into(),
             Self::MissiveAssignee(Some(assignee)) => format!("assignee: {assignee}"),
             Self::MissiveClosed(shown) => {
@@ -3408,10 +3411,28 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
             options
         }
         SidebarGroupMode::Missive => {
-            let mut options = vec![
+            let mut teams = app
+                .work_index_snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|snapshot| snapshot.conversations.iter())
+                .filter_map(|conversation| conversation.team.as_ref().map(|team| team.name.clone()))
+                .collect::<Vec<_>>();
+            if let Some(team) = app.sidebar_work_filter.missive.team.clone() {
+                teams.push(team);
+            }
+            teams.sort();
+            teams.dedup();
+            let mut options = vec![SidebarFilterOption::MissiveTeam(None)];
+            options.extend(
+                teams
+                    .into_iter()
+                    .map(|team| SidebarFilterOption::MissiveTeam(Some(team))),
+            );
+            options.extend([
                 SidebarFilterOption::MissiveAssignee(Some("me".into())),
                 SidebarFilterOption::MissiveAssignee(None),
-            ];
+            ]);
             options.extend(
                 app.work_index_session
                     .missive
@@ -11704,6 +11725,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             subject: subject.into(),
             app_url: url.into(),
             web_url: url.into(),
+            team: None,
             assignees: Vec::new(),
             last_activity_at: None,
             closed: false,
@@ -12403,6 +12425,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .map(|option| option.label())
                 .collect::<Vec<_>>(),
             [
+                "team: all",
                 "assignee: me",
                 "assignee: all",
                 "assignee: Ada",
@@ -12628,7 +12651,70 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::app::state::GithubStateFilter::Open
         );
         assert_eq!(filters.missive.assignee.as_deref(), Some("me"));
+        assert_eq!(filters.missive.team, None);
         assert!(!filters.missive.show_closed);
+    }
+
+    #[test]
+    fn missive_team_filter_uses_observed_and_selected_teams_and_persists() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let mut support = missive_conversation("support", "Support request", CONVERSATION_A);
+        support.team = Some(crate::work_index::MissiveTeam {
+            id: "team-support".into(),
+            name: "Support".into(),
+            organization: Some("organization-example".into()),
+        });
+        let mut billing = missive_conversation("billing", "Billing request", CONVERSATION_B);
+        billing.team = Some(crate::work_index::MissiveTeam {
+            id: "team-billing".into(),
+            name: "Billing".into(),
+            organization: Some("organization-example".into()),
+        });
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .conversations = vec![support.clone(), billing.clone()];
+        app.sidebar_work_filter.missive.team = Some("Escalations".into());
+        app.sidebar_work_filter.missive.assignee = None;
+
+        let options = sidebar_filter_options(&app);
+        assert_eq!(
+            options
+                .iter()
+                .filter_map(|option| match option {
+                    SidebarFilterOption::MissiveTeam(team) => Some(team.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                None,
+                Some("Billing".into()),
+                Some("Escalations".into()),
+                Some("Support".into()),
+            ]
+        );
+
+        let support_option = options
+            .iter()
+            .position(|option| *option == SidebarFilterOption::MissiveTeam(Some("Support".into())))
+            .expect("Support team option");
+        app.select_sidebar_filter_option(support_option);
+        assert!(app
+            .sidebar_work_filter
+            .matches_missive_conversation(Some(&support), &app.work_index_session));
+        assert!(!app
+            .sidebar_work_filter
+            .matches_missive_conversation(Some(&billing), &app.work_index_session));
+        assert_eq!(
+            app.sidebar_work_filter.missive_label(),
+            "Support · all · closed hidden"
+        );
+        assert_eq!(
+            app.take_sidebar_work_filter_persistence_request()
+                .and_then(|filter| filter.missive.team),
+            Some("Support".into())
+        );
     }
 
     #[test]
@@ -15574,6 +15660,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 subject: "Refund approved".into(),
                 app_url: CONVERSATION_A.into(),
                 web_url: CONVERSATION_A.into(),
+                team: None,
                 assignees: vec![crate::work_index::MissiveUser {
                     id: "mina".into(),
                     name: "Mina".into(),
@@ -15594,6 +15681,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 subject: "Needs owner".into(),
                 app_url: CONVERSATION_B.into(),
                 web_url: CONVERSATION_B.into(),
+                team: None,
                 assignees: vec![crate::work_index::MissiveUser {
                     id: "ada".into(),
                     name: "Ada".into(),
