@@ -3192,6 +3192,9 @@ pub struct AppState {
     pub(crate) reap_done_after: std::time::Duration,
     pub(crate) reap_done_panes: bool,
     pub(crate) settle_after: std::time::Duration,
+    /// Grace window a finished work reading must survive before the pane
+    /// settles (`session.settle_finished_after_minutes`).
+    pub(crate) settle_finished_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -5539,6 +5542,7 @@ impl AppState {
             reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
             reap_done_panes: true,
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
+            settle_finished_after: std::time::Duration::from_secs(10 * 60),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
