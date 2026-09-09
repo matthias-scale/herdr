@@ -739,6 +739,8 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
+    /// Environment the selected lane adds to the spawned pane.
+    pub(crate) env: Vec<(String, String)>,
 }
 
 /// Shown when no pane in the selected directory has reported a branch yet.
@@ -796,6 +798,13 @@ pub(crate) struct HomeState {
     pub(crate) reply: String,
     pub(crate) reply_error: Option<String>,
     pub(crate) agent: Agent,
+    /// The lanes this composer offers, resolved from config at open time.
+    /// Never empty: there is always at least one built-in per dispatchable
+    /// agent, so the picker always has a row.
+    profiles: Vec<crate::app::launch_profiles::LaunchProfile>,
+    /// Id of the selected lane. Held as an id rather than an index so a config
+    /// reload that reorders the list cannot silently repoint the selection.
+    profile: String,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     pub(crate) access: Option<HomeAccess>,
@@ -839,6 +848,8 @@ impl Default for HomeState {
             reply: String::new(),
             reply_error: None,
             agent: Agent::Claude,
+            profiles: crate::app::launch_profiles::resolve(&[]),
+            profile: crate::detect::agent_label(Agent::Claude).to_ascii_lowercase(),
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
             access: default_access(Agent::Claude),
@@ -1047,11 +1058,11 @@ impl HomeState {
     }
 
     pub(crate) fn access_visible(&self) -> bool {
-        self.access.is_some()
+        !self.profile().owns_its_flags() && self.access.is_some()
     }
 
     pub(crate) fn context_visible(&self) -> bool {
-        self.context_window.is_some()
+        !self.profile().owns_its_flags() && self.context_window.is_some()
     }
 
     pub(crate) fn move_focus(&mut self, backwards: bool) {
@@ -1082,6 +1093,42 @@ impl HomeState {
             return false;
         }
         true
+    }
+
+    pub(crate) fn profiles(&self) -> &[crate::app::launch_profiles::LaunchProfile] {
+        &self.profiles
+    }
+
+    /// The selected lane. Falls back to the first rather than returning
+    /// `None`: an id that no longer resolves must not leave the composer with
+    /// no lane at all.
+    pub(crate) fn profile(&self) -> &crate::app::launch_profiles::LaunchProfile {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == self.profile)
+            .or_else(|| self.profiles.first())
+            .expect("resolve() always yields at least one lane")
+    }
+
+    pub(crate) fn set_profiles(
+        &mut self,
+        profiles: Vec<crate::app::launch_profiles::LaunchProfile>,
+    ) {
+        if profiles.is_empty() {
+            return;
+        }
+        self.profiles = profiles;
+        let id = self.profile().id.clone();
+        self.set_profile(&id);
+    }
+
+    pub(crate) fn set_profile(&mut self, id: &str) {
+        let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+            return;
+        };
+        self.profile = profile.id.clone();
+        let agent = profile.agent;
+        self.set_agent(agent);
     }
 
     pub(crate) fn set_agent(&mut self, agent: Agent) {
@@ -1266,6 +1313,15 @@ impl HomeState {
         if prompt.is_empty() {
             return Err("enter a prompt before dispatching".into());
         }
+        let profile = self.profile();
+        if profile.owns_its_flags() {
+            // The lane supplies its own model, effort and permission flags, so
+            // there is nothing here to validate against the probed catalog and
+            // nothing of Herdr's to append but the prompt itself.
+            let mut argv = profile.command.clone();
+            argv.push(prompt.into());
+            return Ok(self.plan_with(argv, profile.env.clone(), prompt));
+        }
         let Some(catalog) = self.catalog.provider(self.agent) else {
             return Err("that agent cannot be dispatched from home".into());
         };
@@ -1305,11 +1361,22 @@ impl HomeState {
         argv.extend(flags);
         argv.push(prompt.into());
 
+        Ok(self.plan_with(argv, self.profile().env.clone(), prompt))
+    }
+
+    /// The plan shared by both dispatch paths: everything that does not depend
+    /// on how the argv was built.
+    fn plan_with(
+        &self,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        prompt: &str,
+    ) -> HomeDispatchPlan {
         let directory = match &self.workspace {
             HomeWorkspace::PreviousWorktree(path) => path.clone(),
             HomeWorkspace::CurrentCheckout | HomeWorkspace::NewWorktree => self.directory.clone(),
         };
-        Ok(HomeDispatchPlan {
+        HomeDispatchPlan {
             agent: self.agent,
             model: self.model.clone(),
             effort: self.effort.clone(),
@@ -1335,7 +1402,8 @@ impl HomeState {
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
-        })
+            env,
+        }
     }
 }
 
@@ -1517,11 +1585,13 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn new_home_state(&self) -> HomeState {
-        HomeState::with_catalog_workspace_and_choices(
+        let mut home = HomeState::with_catalog_workspace_and_choices(
             self.home_catalog.clone(),
             self.default_home_workspace(),
             self.home_agent_choices.clone(),
-        )
+        );
+        home.set_profiles(self.launch_profiles.clone());
+        home
     }
 
     /// Open home as the launch screen, if the config wants it.
@@ -1910,7 +1980,11 @@ impl crate::app::state::AppState {
 
     fn home_picker_len(&self, picker: HomePicker) -> usize {
         match picker {
-            HomePicker::Agent => dispatchable_agents().len(),
+            HomePicker::Agent => self
+                .home
+                .as_ref()
+                .map(|home| home.profiles().len())
+                .unwrap_or(0),
             HomePicker::Model => self
                 .home
                 .as_ref()
@@ -2007,9 +2081,10 @@ impl crate::app::state::AppState {
             .home
             .as_ref()
             .and_then(|home| match picker {
-                HomePicker::Agent => dispatchable_agents()
+                HomePicker::Agent => home
+                    .profiles()
                     .iter()
-                    .position(|agent| *agent == home.agent),
+                    .position(|profile| profile.id == home.profile().id),
                 HomePicker::Model => home
                     .model_options()
                     .iter()
@@ -2213,10 +2288,13 @@ impl crate::app::state::AppState {
         };
         match picker {
             HomePicker::Agent => {
-                if let Some(agent) = dispatchable_agents().get(selected).copied() {
-                    if let Some(home) = self.home.as_mut() {
-                        home.set_agent(agent);
-                    }
+                let id = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.profiles().get(selected))
+                    .map(|profile| profile.id.clone());
+                if let (Some(id), Some(home)) = (id, self.home.as_mut()) {
+                    home.set_profile(&id);
                 }
             }
             HomePicker::Model => {
@@ -2680,6 +2758,7 @@ mod tests {
                     "read-only".into(),
                     "cap the retry loop\nand log it".into(),
                 ],
+                env: Vec::new(),
             }
         );
     }
@@ -3516,5 +3595,94 @@ mod tests {
             home.model, "claude-sonnet-5",
             "the preference must not overwrite what the operator picked"
         );
+    }
+
+    fn kimi_lane() -> crate::app::launch_profiles::LaunchProfile {
+        crate::app::launch_profiles::resolve(&[crate::config::LaunchProfileConfig {
+            id: "kimi".into(),
+            label: "Kimi K3".into(),
+            agent: "claude".into(),
+            command: vec!["bash".into(), "-lc".into(), "cck3".into()],
+            usage: Some("kimi".into()),
+            ..Default::default()
+        }])
+        .pop()
+        .expect("kimi lane")
+    }
+
+    #[test]
+    fn a_lane_that_owns_its_flags_dispatches_its_command_and_hides_the_flag_pickers() {
+        let mut home = HomeState::default();
+        home.set_profiles(vec![
+            crate::app::launch_profiles::LaunchProfile::builtin(Agent::Claude),
+            kimi_lane(),
+        ]);
+        home.set_profile("kimi");
+        home.prompt = "  cap the retry loop  ".into();
+
+        assert_eq!(home.profile().label, "Kimi K3");
+        assert_eq!(
+            home.agent,
+            Agent::Claude,
+            "the lane still runs Claude Code, so detection and icons resolve"
+        );
+        assert!(
+            !home.access_visible() && !home.context_visible(),
+            "the lane sets its own permission mode and context window"
+        );
+
+        let plan = home.dispatch_plan().expect("the lane dispatches");
+        assert_eq!(
+            plan.argv,
+            vec!["bash", "-lc", "cck3", "cap the retry loop"],
+            "Herdr appends the prompt and nothing else"
+        );
+        assert!(plan.env.is_empty());
+    }
+
+    #[test]
+    fn an_env_only_lane_still_builds_flags_and_carries_its_environment() {
+        let lane = crate::app::launch_profiles::resolve(&[crate::config::LaunchProfileConfig {
+            id: "codex-scalable".into(),
+            agent: "codex".into(),
+            env: [("CODEX_HOME".to_string(), "/tmp/codex-home".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }])
+        .pop()
+        .expect("codex lane");
+
+        let mut home = home_with_codex_catalog();
+        home.set_profiles(vec![
+            crate::app::launch_profiles::LaunchProfile::builtin(Agent::Claude),
+            lane,
+        ]);
+        home.set_profile("codex-scalable");
+        home.prompt = "ship it".into();
+
+        assert!(
+            home.access_visible(),
+            "no command, so the pickers still apply"
+        );
+        let plan = home.dispatch_plan().expect("the lane dispatches");
+        assert_eq!(plan.argv.first().map(String::as_str), Some("codex"));
+        assert!(
+            plan.argv.iter().any(|argument| argument == "--model"),
+            "{:?}",
+            plan.argv
+        );
+        assert_eq!(
+            plan.env,
+            [("CODEX_HOME".to_string(), "/tmp/codex-home".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_unknown_lane_id_leaves_the_selection_alone() {
+        let mut home = HomeState::default();
+        let before = home.profile().id.clone();
+        home.set_profile("no-such-lane");
+        assert_eq!(home.profile().id, before);
     }
 }

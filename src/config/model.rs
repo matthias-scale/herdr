@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+};
 
 use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -375,6 +378,37 @@ pub struct Config {
     pub panel: PanelConfig,
     pub linear: LinearConfig,
     pub actions: Vec<ActionConfig>,
+    pub launch_profiles: Vec<LaunchProfileConfig>,
+}
+
+/// One named way to start one agent, offered by the home composer.
+///
+/// A provider is not always a binary. A Kimi session is Claude Code pointed at
+/// a different base URL through a dozen environment variables, and a Codex
+/// account is a `CODEX_HOME` directory. Naming the launcher the operator
+/// already has beats restating its environment here, where it would drift.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LaunchProfileConfig {
+    /// Stable identifier, used to remember the selection across openings.
+    pub id: String,
+    /// What the picker shows. Falls back to `id` when empty.
+    pub label: String,
+    /// Which agent this lane runs, so detection, icons and flag dialect still
+    /// resolve. Parsed with the same labels agent detection uses.
+    pub agent: String,
+    /// The exact argv to run, prompt appended. When set, this lane owns its own
+    /// model, effort and permission flags and the composer hides those pickers
+    /// rather than passing flags the lane would reject. Empty means Herdr
+    /// builds the argv from the probed catalog, as it does without a profile.
+    pub command: Vec<String>,
+    /// Environment applied to the spawned pane. Values starting `~/` expand
+    /// against the home directory.
+    pub env: BTreeMap<String, String>,
+    /// Which quota window the picker shows for this lane: `claude`, `codex` or
+    /// `kimi`. Absent means the lane reports no usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
