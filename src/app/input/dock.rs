@@ -258,28 +258,25 @@ impl AppState {
         }
     }
 
-    /// Open an agentless provider object without creating a pane. An expanded
-    /// dock gets a normal user tab; a collapsed dock leaves the object in the
-    /// pane area as a centre preview.
+    /// Open an agentless provider object in Home without creating a pane.
     pub(crate) fn open_sidebar_unassigned_object(&mut self, key: &str) -> bool {
-        let Some(object) = crate::ui::sidebar_unassigned_dock_object(self, key) else {
+        let Ok(plan) = self.sidebar_unassigned_dispatch_plan(key) else {
             return false;
         };
-        let surface = object.surface;
-        if self.dock_collapsed {
-            self.dock_object_preview = Some(object);
-            self.clear_work_view();
-            self.clear_usage_view();
-            self.clear_symphony();
-            self.clear_loop_run_history();
-            self.clear_home();
-            self.inbox = None;
-            self.dock_pr_focused = surface == DockSurface::Pr;
-            self.dock_linear_focused = surface == DockSurface::Linear;
-        } else {
-            self.dock_surface_override = true;
-            self.open_dock_object(object, crate::app::state::DockTabOrigin::User);
-            self.finish_dock_surface_activation(surface);
+        self.clear_work_view();
+        self.clear_usage_view();
+        self.clear_symphony();
+        self.clear_loop_run_history();
+        self.dock_object_preview = None;
+        self.open_home_composer_in_directory(plan.directory.clone(), plan.workspace.clone());
+        if let Some(home) = self.home.as_mut() {
+            home.prompt = plan.prompt;
+            home.target = plan.target;
+            home.selected_ref = plan.git_ref;
+            home.pr = plan.pr;
+            home.ticket = plan.ticket;
+            home.missive = plan.missive;
+            home.work_context_patch = plan.work_context_patch;
         }
         true
     }

@@ -821,6 +821,8 @@ pub(crate) struct HomeState {
     pub(crate) ticket: Option<HomeTicketContext>,
     /// Missive conversation that opened this composer. TUI-only launch context.
     pub(crate) missive: Option<HomeMissiveContext>,
+    /// Full runtime context the launch source attached to this draft.
+    pub(crate) work_context_patch: crate::work_context::PaneWorkContextPatch,
     pub(crate) ref_repo_root: Option<PathBuf>,
     pub(crate) ref_directory: PathBuf,
     workspace_options: Vec<HomeWorkspace>,
@@ -857,6 +859,7 @@ impl Default for HomeState {
             pr: None,
             ticket: None,
             missive: None,
+            work_context_patch: Default::default(),
             ref_repo_root: None,
             ref_directory: default_directory(),
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
@@ -1309,6 +1312,25 @@ impl HomeState {
             HomeWorkspace::PreviousWorktree(path) => path.clone(),
             HomeWorkspace::CurrentCheckout | HomeWorkspace::NewWorktree => self.directory.clone(),
         };
+        let mut work_context_patch = self.work_context_patch.clone();
+        if work_context_patch.repo.is_none() {
+            work_context_patch.repo = self.pr.as_ref().map(|pr| pr.repo.clone());
+        }
+        if work_context_patch.pr_urls.is_none() {
+            work_context_patch.pr_urls = self.pr.as_ref().map(|pr| vec![pr.url.clone()]);
+        }
+        if work_context_patch.ticket_ids.is_none() {
+            work_context_patch.ticket_ids = self
+                .ticket
+                .as_ref()
+                .map(|ticket| vec![ticket.identifier.clone()]);
+        }
+        if work_context_patch.missive_urls.is_none() {
+            work_context_patch.missive_urls = self
+                .missive
+                .as_ref()
+                .map(|conversation| vec![conversation.web_url.clone()]);
+        }
         Ok(HomeDispatchPlan {
             agent: self.agent,
             model: self.model.clone(),
@@ -1319,19 +1341,7 @@ impl HomeState {
             pr: self.pr.clone(),
             ticket: self.ticket.clone(),
             missive: self.missive.clone(),
-            work_context_patch: crate::work_context::PaneWorkContextPatch {
-                repo: self.pr.as_ref().map(|pr| pr.repo.clone()),
-                pr_urls: self.pr.as_ref().map(|pr| vec![pr.url.clone()]),
-                ticket_ids: self
-                    .ticket
-                    .as_ref()
-                    .map(|ticket| vec![ticket.identifier.clone()]),
-                missive_urls: self
-                    .missive
-                    .as_ref()
-                    .map(|conversation| vec![conversation.web_url.clone()]),
-                ..Default::default()
-            },
+            work_context_patch,
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -1550,6 +1560,8 @@ impl crate::app::state::AppState {
         home.prompt = activation.spawn_prompt;
         home.pr = activation.pr;
         home.ticket = activation.ticket;
+        home.missive = activation.missive;
+        home.work_context_patch = activation.work_context_patch;
         home.selected_ref = activation.git_ref;
         if let Some(directory) = activation.directory {
             home.directory = directory.clone();
@@ -1574,9 +1586,7 @@ impl crate::app::state::AppState {
                     .unwrap_or(HomeTarget::NewSpace);
             }
         }
-        let mut plan = home.dispatch_plan()?;
-        plan.work_context_patch = activation.work_context_patch;
-        Ok(plan)
+        home.dispatch_plan()
     }
 
     pub(crate) fn open_home_composer_in_directory(
