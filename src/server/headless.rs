@@ -7339,6 +7339,8 @@ esac
                 files_last_click: None,
                 agents_focused: false,
                 agents_selection: None,
+                hosts_focused: false,
+                hosts_selection: None,
                 linear_focused: false,
                 ticket_start_menu: None,
                 ticket_action_menu: None,

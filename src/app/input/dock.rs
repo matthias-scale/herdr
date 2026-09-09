@@ -246,6 +246,7 @@ impl AppState {
         self.dock_diff_focused = surface == DockSurface::Diff;
         self.dock_files_focused = surface == DockSurface::Files;
         self.dock_agents_focused = surface == DockSurface::Agents;
+        self.dock_hosts_focused = surface == DockSurface::Hosts;
         self.dock_pr_focused = surface == DockSurface::Pr;
         self.dock_linear_focused = surface == DockSurface::Linear;
         self.dock_pr_checkout_menu = None;
@@ -255,6 +256,9 @@ impl AppState {
         self.dock_pr_action_menu = None;
         if self.dock_agents_focused {
             self.reconcile_dock_agents_selection();
+        }
+        if self.dock_hosts_focused {
+            self.reconcile_dock_hosts_selection();
         }
     }
 

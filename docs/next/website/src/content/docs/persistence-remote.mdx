@@ -100,6 +100,29 @@ Use `--session` with `--remote` to attach to a named session on the remote host:
 herdr --remote workbox --session agents
 ```
 
+## Fleet hosts in the dock
+
+Add `[[remote.fleet.hosts]]` entries to make them available in the Hosts dock
+surface. Herdr refreshes their reachability, version, and agent inventory in the
+background. Select a reachable remote host to open `herdr --remote` in a new
+local pane.
+
+```toml
+[remote.fleet]
+refresh_interval_ms = 15000
+timeout_ms = 5000
+heartbeat_stale_ms = 1800000
+
+[[remote.fleet.hosts]]
+name = "workbox"
+target = "workbox"
+session = "agents"
+```
+
+The optional `session` value adds `--session` when the host opens. Hosts marked
+`local = true` use the local API socket for inventory reads and never poll over SSH.
+An empty Hosts surface points back to `[[remote.fleet.hosts]]`.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.

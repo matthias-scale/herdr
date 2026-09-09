@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod common;
 pub mod events;
+pub mod fleet;
 pub mod integrations;
 pub mod loops;
 pub mod panes;
@@ -18,6 +19,7 @@ pub mod worktrees;
 pub use agents::*;
 pub use common::*;
 pub use events::*;
+pub use fleet::*;
 pub use integrations::*;
 pub use loops::*;
 pub use panes::*;
@@ -97,6 +99,8 @@ pub enum Method {
     LoopRunHistory(LoopRunHistoryParams),
     #[serde(rename = "symphony.list")]
     SymphonyList(EmptyParams),
+    #[serde(rename = "fleet.list")]
+    FleetList(EmptyParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

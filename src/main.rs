@@ -68,6 +68,7 @@ mod contract_false_positive;
 mod detect;
 mod events;
 mod files;
+mod fleet;
 mod ghostty;
 mod handoff_runtime;
 mod input;
@@ -534,6 +535,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Read-only host inventory for `herdr fleet status`.
 # [remote.fleet]
+# refresh_interval_ms = 15000
 # timeout_ms = 5000
 # heartbeat_stale_ms = 1800000
 # [[remote.fleet.hosts]]
@@ -544,6 +546,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # name = "workbox"
 # target = "workbox"             # OpenSSH config alias or user@host
 # socket = "/path/to/herdr.sock" # optional
+# session = "agents"              # optional named Herdr session
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.

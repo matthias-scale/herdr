@@ -91,6 +91,28 @@ HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
 herdr --remote workbox --session agents
 ```
 
+## 停靠面板中的集群主机
+
+添加 `[[remote.fleet.hosts]]` 条目后，这些主机会出现在 Hosts 停靠面板中。
+herdr 会在后台刷新它们的可达性、版本和代理清单。选择一个可达的远程主机，
+即可在新的本地窗格中打开 `herdr --remote`。
+
+```toml
+[remote.fleet]
+refresh_interval_ms = 15000
+timeout_ms = 5000
+heartbeat_stale_ms = 1800000
+
+[[remote.fleet.hosts]]
+name = "workbox"
+target = "workbox"
+session = "agents"
+```
+
+可选的 `session` 值会在打开主机时附加 `--session`。标记为 `local = true` 的
+主机使用本地 API 套接字读取清单，不会通过 SSH 轮询。当 Hosts 面板为空时，
+它会指引你配置 `[[remote.fleet.hosts]]`。
+
 ## 直接终端附加
 
 完整的 Herdr 连接会打开整个工作区 UI。直接附加则在你当前的终端中打开一个由服务器拥有的终端。

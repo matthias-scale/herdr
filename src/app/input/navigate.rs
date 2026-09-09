@@ -294,6 +294,7 @@ impl App {
                     self.state.dock_diff_focused = false;
                     self.state.dock_files_focused = false;
                     self.state.dock_agents_focused = false;
+                    self.state.dock_hosts_focused = false;
                 }
                 leave_navigate_mode(&mut self.state);
             }
@@ -506,6 +507,7 @@ impl App {
                     self.state.dock_diff_focused = false;
                     self.state.dock_files_focused = false;
                     self.state.dock_agents_focused = false;
+                    self.state.dock_hosts_focused = false;
                 } else {
                     sync_dock_tab_focus(&mut self.state);
                 }
@@ -2110,10 +2112,14 @@ fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_diff_focused = state.dock_tab == Some(crate::app::DockSurface::Diff);
     state.dock_files_focused = state.dock_tab == Some(crate::app::DockSurface::Files);
     state.dock_agents_focused = state.dock_tab == Some(crate::app::DockSurface::Agents);
+    state.dock_hosts_focused = state.dock_tab == Some(crate::app::DockSurface::Hosts);
     state.dock_pr_focused = state.dock_tab == Some(crate::app::DockSurface::Pr);
     state.dock_linear_focused = state.dock_tab == Some(crate::app::DockSurface::Linear);
     if state.dock_agents_focused {
         state.reconcile_dock_agents_selection();
+    }
+    if state.dock_hosts_focused {
+        state.reconcile_dock_hosts_selection();
     }
     state.dock_chooser_focused = state.dock_tab.is_none();
     if state.dock_editor_focused {
@@ -2451,6 +2457,7 @@ pub(super) fn execute_navigate_action_in_context(
                 state.dock_diff_focused = false;
                 state.dock_files_focused = false;
                 state.dock_agents_focused = false;
+                state.dock_hosts_focused = false;
                 state.dock_linear_focused = false;
             }
             leave_navigate_mode(state);
@@ -2644,6 +2651,7 @@ pub(super) fn execute_navigate_action_in_context(
                 state.dock_diff_focused = false;
                 state.dock_files_focused = false;
                 state.dock_agents_focused = false;
+                state.dock_hosts_focused = false;
             } else {
                 sync_dock_tab_focus(state);
             }

@@ -55,6 +55,8 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// A read-only fleet host inventory poll completed.
+    FleetRefreshed { snapshot: crate::fleet::Snapshot },
     /// A read-only Symphony Temporal workflow poll completed.
     SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
     /// The focused repository's scratchpad file changed on disk; reload it.

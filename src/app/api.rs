@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod env;
+mod fleet;
 mod integrations;
 mod layouts;
 mod loops;
@@ -70,6 +71,11 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::FleetRefreshed { snapshot } => {
+                let changed = self.state.fleet_snapshot != snapshot;
+                self.state.fleet_snapshot = snapshot;
+                changed
+            }
             AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
                 self.refresh_symphony_snapshot(snapshot)
             }
@@ -281,6 +287,12 @@ impl App {
         };
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
+        }
+
+        if let AppEvent::FleetRefreshed { snapshot } = ev {
+            let changed = self.state.fleet_snapshot != snapshot;
+            self.state.fleet_snapshot = snapshot;
+            return Some(changed);
         }
 
         if let AppEvent::ScratchpadChanged = ev {
@@ -1508,6 +1520,7 @@ impl App {
                 return self.handle_loop_run_history(request.id, params)
             }
             Method::SymphonyList(_) => return self.handle_symphony_list(request.id),
+            Method::FleetList(_) => return self.handle_fleet_list(request.id),
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }

@@ -356,6 +356,7 @@ fn card_icon(surface: DockSurface) -> &'static str {
         DockSurface::Linear => "◇",
         DockSurface::Missive => "@",
         DockSurface::Agents => "♙",
+        DockSurface::Hosts => "⌘",
         DockSurface::Home => "⌂",
         DockSurface::Editor => "✎",
         DockSurface::Shortcuts => "#",
@@ -382,6 +383,7 @@ fn card_description(surface: DockSurface) -> &'static str {
         DockSurface::Linear => "Open or attach the pane's ticket.",
         DockSurface::Missive => "Open the pane's conversation.",
         DockSurface::Agents => "Follow subagents and workflows.",
+        DockSurface::Hosts => "Check and open fleet hosts.",
         DockSurface::Home => "Prompt card for a new thread.",
         DockSurface::Editor => "Edit a workspace file.",
         DockSurface::Shortcuts => "Review keyboard shortcuts.",
@@ -770,6 +772,12 @@ mod tests {
                 "Follow subagents and workflows.",
             ),
             (
+                DockSurface::Hosts,
+                "Hosts",
+                'R',
+                "Check and open fleet hosts.",
+            ),
+            (
                 DockSurface::Home,
                 "Home",
                 'H',
@@ -821,7 +829,7 @@ mod tests {
 
     #[test]
     fn card_hit_areas_tile_two_columns_without_overlapping() {
-        let area = Rect::new(4, 2, 70, 30);
+        let area = Rect::new(4, 2, 70, 34);
         let cards = card_hit_areas(area, 120);
 
         assert_eq!(cards.len(), DockSurface::CARDS.len());
