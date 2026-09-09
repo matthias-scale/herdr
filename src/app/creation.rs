@@ -405,7 +405,7 @@ impl App {
                         self.event_tx.clone(),
                         self.render_notify.clone(),
                         self.render_dirty.clone(),
-                        Vec::new(),
+                        plan.env.clone(),
                     )?;
                 apply_home_work_context(
                     &mut terminal,
@@ -446,7 +446,7 @@ impl App {
                         cols,
                         plan.directory,
                         &plan.argv,
-                        Vec::new(),
+                        plan.env.clone(),
                         scrollback_limit_bytes,
                         host_terminal_theme,
                         host_terminal_appearance,
@@ -1131,6 +1131,7 @@ mod tests {
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            env: Vec::new(),
         };
 
         app.dispatch_home_composer(plan)
