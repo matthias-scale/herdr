@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::agents::AgentInfo;
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
+use super::fleet::FleetSnapshotInfo;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
@@ -77,6 +78,9 @@ pub enum ResponseResult {
         workflows: Vec<SymphonyWorkflowInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unavailable: Option<String>,
+    },
+    FleetList {
+        snapshot: FleetSnapshotInfo,
     },
     WorktreeList {
         source: WorktreeSourceInfo,

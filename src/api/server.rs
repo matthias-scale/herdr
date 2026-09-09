@@ -406,6 +406,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::LoopList(_) => "loop.list",
         Method::LoopRunHistory(_) => "loop.run_history",
         Method::SymphonyList(_) => "symphony.list",
+        Method::FleetList(_) => "fleet.list",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",

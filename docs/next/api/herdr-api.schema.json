@@ -5860,6 +5860,22 @@
         {
           "properties": {
             "method": {
+              "const": "fleet.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "worktree.list",
               "type": "string"
             },
@@ -8510,6 +8526,131 @@
           ],
           "type": "string"
         },
+        "FleetAgentInfo": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "host": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "name",
+            "state",
+            "source"
+          ],
+          "type": "object"
+        },
+        "FleetHostInfo": {
+          "properties": {
+            "agent_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "agents": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/FleetAgentInfo"
+              },
+              "type": "array"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "local": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "protocol": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/FleetHostStateInfo"
+            },
+            "target": {
+              "type": "string"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "target",
+            "local",
+            "state",
+            "agent_count",
+            "agents"
+          ],
+          "type": "object"
+        },
+        "FleetHostStateInfo": {
+          "enum": [
+            "reachable",
+            "unreachable",
+            "version_skew"
+          ],
+          "type": "string"
+        },
+        "FleetSnapshotInfo": {
+          "properties": {
+            "hosts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/FleetHostInfo"
+              },
+              "type": "array"
+            },
+            "polled": {
+              "type": "boolean"
+            },
+            "refreshed_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "polled",
+            "hosts"
+          ],
+          "type": "object"
+        },
         "HostAppearanceOverride": {
           "enum": [
             "auto",
@@ -10616,6 +10757,22 @@
               "required": [
                 "type",
                 "workflows"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/FleetSnapshotInfo"
+                },
+                "type": {
+                  "const": "fleet_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
               ],
               "type": "object"
             },

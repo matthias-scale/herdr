@@ -135,6 +135,17 @@ fn symphony_list_is_a_typed_read_only_api_method() {
 }
 
 #[test]
+fn fleet_list_is_a_typed_read_only_api_method() {
+    let request = Request {
+        id: "fleet".to_string(),
+        method: Method::FleetList(EmptyParams::default()),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["method"], "fleet.list");
+    assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+}
+
+#[test]
 fn workspace_close_group_intent_defaults_false_and_round_trips() {
     let request: Request = serde_json::from_value(serde_json::json!({
         "id": "close",

@@ -299,6 +299,89 @@ impl App {
         self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new())
     }
 
+    pub(crate) fn open_fleet_host(&mut self, name: &str) {
+        let Some(host) = self
+            .state
+            .fleet_snapshot
+            .hosts
+            .iter()
+            .find(|host| host.name == name)
+            .cloned()
+        else {
+            self.show_fleet_launch_error("host is no longer in the fleet inventory".to_string());
+            return;
+        };
+        if host.state == crate::fleet::HostState::Unreachable {
+            self.show_fleet_launch_error(
+                host.error
+                    .clone()
+                    .unwrap_or_else(|| format!("{} is unreachable", host.name)),
+            );
+            return;
+        }
+        let argv = match crate::fleet::host_attach_argv(&host) {
+            Ok(argv) => argv,
+            Err(error) => {
+                self.show_fleet_launch_error(error);
+                return;
+            }
+        };
+        if let Err(error) = self.create_fleet_host_tab(&argv) {
+            tracing::warn!(host = %host.name, %error, "could not open fleet host");
+            self.show_fleet_launch_error(error.to_string());
+        }
+    }
+
+    fn create_fleet_host_tab(&mut self, argv: &[String]) -> std::io::Result<()> {
+        let Some(ws_idx) = self.state.active else {
+            return Err(std::io::Error::other("no active workspace"));
+        };
+        let (rows, cols) = self.state.estimate_pane_size();
+        let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+        let host_terminal_theme = self.state.pane_terminal_theme();
+        let host_terminal_appearance = Some(self.state.pane_terminal_appearance());
+        let cwd = self.state.workspaces[ws_idx]
+            .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| std::io::Error::other("no working directory for host pane"))?;
+        let (tab_idx, terminal, runtime, root_pane) = {
+            let workspace = &mut self.state.workspaces[ws_idx];
+            let (tab_idx, terminal, runtime) = workspace.create_tab_argv_command(
+                rows,
+                cols,
+                cwd,
+                argv,
+                Vec::new(),
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                host_terminal_appearance,
+            )?;
+            let root_pane = workspace.tabs[tab_idx].root_pane;
+            (tab_idx, terminal, runtime, root_pane)
+        };
+        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        self.state.terminals.insert(terminal.id.clone(), terminal);
+        self.pending_first_frame_pane = Some(root_pane);
+        self.state.remove_alias_shadowed_by_new_pane(root_pane);
+        self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.state.mode = Mode::Terminal;
+        self.emit_tab_created_events(ws_idx, tab_idx);
+        self.schedule_session_save();
+        Ok(())
+    }
+
+    fn show_fleet_launch_error(&mut self, context: String) {
+        let previous_toast = self.state.toast.clone();
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: "host launch failed".to_string(),
+            context,
+            position: None,
+            target: None,
+        });
+        self.sync_toast_deadline(previous_toast);
+    }
+
     pub(crate) fn dispatch_home_composer(
         &mut self,
         plan: crate::app::home::HomeDispatchPlan,
@@ -806,6 +889,36 @@ fn aggregate_tab_agent_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreachable_fleet_host_surfaces_error_without_spawning() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "ub2".to_string(),
+            target: "ub2".to_string(),
+            local: false,
+            session: None,
+            state: crate::fleet::HostState::Unreachable,
+            version: None,
+            protocol: None,
+            error: Some("ssh: connection refused".to_string()),
+            entries: Vec::new(),
+        }];
+
+        app.open_fleet_host("ub2");
+
+        assert!(app.state.workspaces.is_empty());
+        let toast = app.state.toast.expect("launch failure toast");
+        assert_eq!(toast.title, "host launch failed");
+        assert_eq!(toast.context, "ssh: connection refused");
+    }
 
     fn fixed_home_dispatch_plan(
         target: crate::app::home::HomeTarget,

@@ -18,6 +18,10 @@ Custom command bindings (`[[keys.command]]`) are user-defined tables and are not
 listed per key here; see
 [Custom command keybindings](/docs/configuration/#custom-command-keybindings).
 
+Fleet polling uses `remote.fleet.refresh_interval_ms` for its background refresh
+period and `remote.fleet.timeout_ms` as the deadline for each configured host.
+Set `remote.fleet.hosts[].session` to open that host's named Herdr session.
+
 <ConfigReference />
 
 By default, `session.settle_stops_agent` stops an agent only when Herdr has a

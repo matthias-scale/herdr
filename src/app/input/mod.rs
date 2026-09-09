@@ -228,6 +228,9 @@ impl App {
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
         }
+        if self.handle_dock_hosts_key(&key) {
+            return None;
+        }
         if self.handle_dock_agents_key(&key) {
             return None;
         }
@@ -346,6 +349,7 @@ impl App {
         let dock_surface_focused = self.state.dock_home_focused
             || self.state.dock_files_focused
             || self.state.dock_agents_focused
+            || self.state.dock_hosts_focused
             || self.state.dock_chooser_focused;
         if dock_surface_focused && self.state.dock_tab.is_some() {
             if let KeyCode::Char(character) = event.code {
@@ -531,6 +535,36 @@ impl App {
                 }
             }
             KeyCode::Esc => self.state.dock_agents_focused = false,
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_dock_hosts_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Hosts)
+            || !self.state.dock_hosts_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        match event.code {
+            KeyCode::Down => self.state.move_dock_hosts_selection(1),
+            KeyCode::Up => self.state.move_dock_hosts_selection(-1),
+            KeyCode::Enter => {
+                if let Some(name) = self
+                    .state
+                    .selected_fleet_host()
+                    .map(|host| host.name.clone())
+                {
+                    self.open_fleet_host(&name);
+                }
+            }
+            KeyCode::Esc => self.state.dock_hosts_focused = false,
             _ => return false,
         }
         true
@@ -4925,6 +4959,10 @@ impl App {
                         self.state.clear_home();
                         self.open_symphony_workflow_at(index);
                     }
+                    MouseAction::OpenFleetHost { name } => {
+                        self.state.clear_home();
+                        self.open_fleet_host(&name);
+                    }
                     MouseAction::FocusToastTarget => {
                         self.state.clear_home();
                         self.focus_toast_target_via_api()
@@ -5145,6 +5183,7 @@ impl App {
         self.state.dock_diff_focused = false;
         self.state.dock_files_focused = false;
         self.state.dock_agents_focused = false;
+        self.state.dock_hosts_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }

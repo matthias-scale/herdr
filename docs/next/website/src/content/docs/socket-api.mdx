@@ -109,6 +109,7 @@ Raw socket method names use dot notation:
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Fleet | `fleet.list` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -121,6 +122,15 @@ Raw socket method names use dot notation:
 
 ```json
 {"id":"history","method":"loop.run_history","params":{"loop_id":"daily"}}
+```
+
+`fleet.list` returns the server-owned, most recently polled fleet snapshot. It is
+read-only and never waits for SSH. The response distinguishes an inventory that
+has never been polled from a completed poll with no running agents, and includes
+each configured host's reachability, version, protocol, error, and agents.
+
+```json
+{"id":"fleet","method":"fleet.list","params":{}}
 ```
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep

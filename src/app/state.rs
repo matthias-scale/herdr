@@ -1577,6 +1577,8 @@ pub(crate) struct DockPresentationState {
     pub(crate) files_last_click: Option<(std::path::PathBuf, std::time::Instant)>,
     pub(crate) agents_focused: bool,
     pub(crate) agents_selection: Option<String>,
+    pub(crate) hosts_focused: bool,
+    pub(crate) hosts_selection: Option<String>,
     pub(crate) linear_focused: bool,
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
@@ -1642,6 +1644,8 @@ impl Default for DockPresentationState {
             files_last_click: None,
             agents_focused: false,
             agents_selection: None,
+            hosts_focused: false,
+            hosts_selection: None,
             linear_focused: false,
             ticket_start_menu: None,
             ticket_action_menu: None,
@@ -1840,6 +1844,7 @@ pub enum DockSurface {
     Linear,
     Missive,
     Agents,
+    Hosts,
     Editor,
     Shortcuts,
     Context,
@@ -1879,7 +1884,7 @@ pub(crate) struct PaneDockTabs {
 
 impl DockSurface {
     /// Every surface the chooser can open, in menu order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
@@ -1887,6 +1892,7 @@ impl DockSurface {
         Self::Linear,
         Self::Missive,
         Self::Agents,
+        Self::Hosts,
         Self::Home,
         Self::Editor,
         Self::Shortcuts,
@@ -1896,7 +1902,7 @@ impl DockSurface {
     ];
 
     /// The card grid of the empty dock, each with its single-key shortcut.
-    pub const CARDS: [Self; 12] = [
+    pub const CARDS: [Self; 13] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
@@ -1904,6 +1910,7 @@ impl DockSurface {
         Self::Linear,
         Self::Missive,
         Self::Agents,
+        Self::Hosts,
         Self::Home,
         Self::Editor,
         Self::Shortcuts,
@@ -1925,6 +1932,7 @@ impl DockSurface {
             Self::Linear => "linear",
             Self::Missive => "missive",
             Self::Agents => "agents",
+            Self::Hosts => "hosts",
             Self::Symphony => "flow",
         }
     }
@@ -1944,6 +1952,7 @@ impl DockSurface {
             Self::Linear => "Linear",
             Self::Missive => "Missive",
             Self::Agents => "Agents",
+            Self::Hosts => "Hosts",
             Self::Symphony => "Symphony",
         }
     }
@@ -1957,6 +1966,7 @@ impl DockSurface {
             Self::Pr => Some('P'),
             Self::Linear => Some('L'),
             Self::Agents => Some('A'),
+            Self::Hosts => Some('R'),
             Self::Missive => None,
             _ => None,
         }
@@ -1972,6 +1982,7 @@ impl DockSurface {
             Self::Linear => 'L',
             Self::Missive => 'M',
             Self::Agents => 'A',
+            Self::Hosts => 'R',
             Self::Home => 'H',
             Self::Editor => 'E',
             Self::Shortcuts => 'K',
@@ -2056,6 +2067,12 @@ pub(crate) struct DockFileRowHitArea {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockAgentRowHitArea {
     pub(crate) id: String,
+    pub(crate) rect: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHostRowHitArea {
+    pub(crate) name: String,
     pub(crate) rect: Rect,
 }
 
@@ -2205,6 +2222,7 @@ pub struct ViewState {
     pub(crate) editor_preview_refresh_rect: Rect,
     pub(crate) editor_preview_open_rect: Rect,
     pub(crate) dock_agent_row_hit_areas: Vec<DockAgentRowHitArea>,
+    pub(crate) dock_host_row_hit_areas: Vec<DockHostRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -3076,6 +3094,8 @@ pub struct AppState {
     pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
+    /// Server-owned fleet inventory, refreshed off the render thread.
+    pub(crate) fleet_snapshot: crate::fleet::Snapshot,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
     /// Which job the dock's Symphony surface is bound to. Client presentation
     /// state: the runtime knows nothing about which panel is open.
@@ -3387,6 +3407,10 @@ pub struct AppState {
     /// Both fields are attach-local TUI presentation state.
     pub(crate) dock_agents_focused: bool,
     pub(crate) dock_agents_selection: Option<String>,
+    /// Selection and keyboard ownership for the fleet Hosts surface.
+    /// Both fields are attach-local TUI presentation state.
+    pub(crate) dock_hosts_focused: bool,
+    pub(crate) dock_hosts_selection: Option<String>,
     pub(crate) dock_linear_focused: bool,
     pub(crate) dock_ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) dock_ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
@@ -4337,6 +4361,7 @@ impl AppState {
         self.dock_diff_focused = false;
         self.dock_files_focused = false;
         self.dock_agents_focused = false;
+        self.dock_hosts_focused = false;
     }
 
     /// Drop dock keyboard focus when a terminal pane takes input.
@@ -4355,6 +4380,7 @@ impl AppState {
         self.dock_diff_focused = false;
         self.dock_files_focused = false;
         self.dock_agents_focused = false;
+        self.dock_hosts_focused = false;
         self.dock_editor_focused = false;
         self.dock_chooser_focused = false;
     }
@@ -5002,6 +5028,7 @@ impl AppState {
             self.dock_diff_focused = false;
             self.dock_files_focused = false;
             self.dock_agents_focused = false;
+            self.dock_hosts_focused = false;
             self.dock_chooser_focused = true;
         }
     }
@@ -5076,6 +5103,8 @@ impl AppState {
         std::mem::swap(&mut self.dock_files_last_click, &mut other.files_last_click);
         std::mem::swap(&mut self.dock_agents_focused, &mut other.agents_focused);
         std::mem::swap(&mut self.dock_agents_selection, &mut other.agents_selection);
+        std::mem::swap(&mut self.dock_hosts_focused, &mut other.hosts_focused);
+        std::mem::swap(&mut self.dock_hosts_selection, &mut other.hosts_selection);
         std::mem::swap(&mut self.dock_linear_focused, &mut other.linear_focused);
         std::mem::swap(
             &mut self.dock_ticket_start_menu,
@@ -5441,6 +5470,7 @@ impl AppState {
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
+            fleet_snapshot: crate::fleet::Snapshot::default(),
             symphony_detail: None,
             dock_symphony: None,
             work_view: None,
@@ -5634,6 +5664,7 @@ impl AppState {
                 editor_preview_refresh_rect: Rect::default(),
                 editor_preview_open_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
+                dock_host_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -5703,6 +5734,8 @@ impl AppState {
             dock_files_last_click: None,
             dock_agents_focused: false,
             dock_agents_selection: None,
+            dock_hosts_focused: false,
+            dock_hosts_selection: None,
             dock_linear_focused: false,
             dock_ticket_start_menu: None,
             dock_ticket_action_menu: None,

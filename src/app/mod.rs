@@ -407,6 +407,7 @@ fn dock_surfaces_from_config(panel: &crate::config::PanelConfig) -> Vec<state::D
             crate::config::PanelSurfaceConfig::Linear => state::DockSurface::Linear,
             crate::config::PanelSurfaceConfig::Missive => state::DockSurface::Missive,
             crate::config::PanelSurfaceConfig::Agents => state::DockSurface::Agents,
+            crate::config::PanelSurfaceConfig::Hosts => state::DockSurface::Hosts,
             crate::config::PanelSurfaceConfig::Editor => state::DockSurface::Editor,
             crate::config::PanelSurfaceConfig::Shortcuts => state::DockSurface::Shortcuts,
             crate::config::PanelSurfaceConfig::Context => state::DockSurface::Context,
@@ -800,6 +801,7 @@ impl App {
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
+            fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             dock_symphony: None,
             symphony_detail: None,
             work_view: None,
@@ -989,6 +991,7 @@ impl App {
                 editor_preview_refresh_rect: Rect::default(),
                 editor_preview_open_rect: Rect::default(),
                 dock_agent_row_hit_areas: Vec::new(),
+                dock_host_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -1055,6 +1058,8 @@ impl App {
             dock_files_last_click: None,
             dock_agents_focused: false,
             dock_agents_selection: None,
+            dock_hosts_focused: false,
+            dock_hosts_selection: None,
             dock_linear_focused: false,
             dock_ticket_start_menu: None,
             dock_ticket_action_menu: None,
@@ -1240,6 +1245,7 @@ impl App {
             });
         }
         crate::symphony::start_poller(event_tx.clone());
+        crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
 
         let last_focus = state.active.and_then(|idx| {
             state

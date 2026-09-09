@@ -15,6 +15,7 @@ pub(crate) mod diff;
 pub(crate) mod editor;
 pub(crate) mod files;
 mod home;
+pub(crate) mod hosts;
 pub(crate) mod linear;
 pub(crate) mod missive;
 pub(crate) mod pr;
@@ -188,6 +189,7 @@ pub(super) fn render_dock(
         Some(DockSurface::Linear) => linear::render_linear(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Missive) => missive::render_missive(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Agents) => agents::render_agents(app, frame, app.view.dock_body_rect),
+        Some(DockSurface::Hosts) => hosts::render_hosts(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Symphony) => {
             symphony::render_symphony(app, frame, app.view.dock_body_rect)
         }

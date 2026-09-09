@@ -95,6 +95,10 @@ pub(super) enum MouseAction {
     OpenSymphonyWorkflow {
         index: usize,
     },
+    /// Open a configured fleet host in a normal local tab.
+    OpenFleetHost {
+        name: String,
+    },
     /// Hand a link to the desktop browser.
     OpenUrl {
         url: String,
@@ -1016,6 +1020,8 @@ impl AppState {
                         && self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.dock_agents_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_hosts_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Hosts);
                     self.dock_pr_focused =
                         !self.dock_collapsed && self.dock_tab == Some(crate::app::DockSurface::Pr);
                     self.dock_linear_focused = !self.dock_collapsed
@@ -1056,6 +1062,8 @@ impl AppState {
                             self.dock_tab == Some(crate::app::DockSurface::Files);
                         self.dock_agents_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Agents);
+                        self.dock_hosts_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Hosts);
                         self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
                         self.dock_linear_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Linear);
@@ -1078,10 +1086,14 @@ impl AppState {
                     self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
                     self.dock_files_focused = tab == crate::app::DockSurface::Files;
                     self.dock_agents_focused = tab == crate::app::DockSurface::Agents;
+                    self.dock_hosts_focused = tab == crate::app::DockSurface::Hosts;
                     self.dock_pr_focused = tab == crate::app::DockSurface::Pr;
                     self.dock_linear_focused = tab == crate::app::DockSurface::Linear;
                     if self.dock_agents_focused {
                         self.reconcile_dock_agents_selection();
+                    }
+                    if self.dock_hosts_focused {
+                        self.reconcile_dock_hosts_selection();
                     }
                     return None;
                 }
@@ -1185,6 +1197,11 @@ impl AppState {
                         return Some(MouseAction::OpenUrl { url });
                     }
                 }
+                if in_dock && self.dock_tab == Some(crate::app::DockSurface::Hosts) {
+                    if let Some(name) = self.click_dock_host_row(mouse.column, mouse.row) {
+                        return Some(MouseAction::OpenFleetHost { name });
+                    }
+                }
                 // A section header folds on click. This runs before the plain
                 // focus fallback below, which would otherwise swallow it.
                 if in_dock {
@@ -1208,6 +1225,7 @@ impl AppState {
                     self.dock_files_focused = self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.dock_agents_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Agents);
+                    self.dock_hosts_focused = self.dock_tab == Some(crate::app::DockSurface::Hosts);
                     self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
                     self.dock_linear_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Linear);

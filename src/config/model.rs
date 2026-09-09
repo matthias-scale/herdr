@@ -411,6 +411,7 @@ pub enum PanelSurfaceConfig {
     Linear,
     Missive,
     Agents,
+    Hosts,
     #[serde(alias = "edit")]
     Editor,
     #[serde(alias = "keys")]
@@ -1569,6 +1570,8 @@ impl Default for RemoteConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct FleetConfig {
+    /// Fleet inventory refresh interval. Default: 15000 milliseconds.
+    pub refresh_interval_ms: u64,
     /// Per-host read deadline. Default: 5000 milliseconds.
     pub timeout_ms: u64,
     /// A non-terminal run heartbeat older than this has unknown liveness.
@@ -1581,6 +1584,7 @@ pub struct FleetConfig {
 impl Default for FleetConfig {
     fn default() -> Self {
         Self {
+            refresh_interval_ms: 15_000,
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
             hosts: Vec::new(),
@@ -1623,6 +1627,8 @@ pub struct FleetHostConfig {
     pub local: bool,
     /// Optional Herdr socket override for this host.
     pub socket: Option<String>,
+    /// Optional named Herdr session opened when this host is activated.
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2110,7 +2116,7 @@ agent_panel_scope = "current"
         let config: Config = toml::from_str(
             r#"
 [panel]
-default_surfaces = ["home", "pull_request", "keys", "note"]
+default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
 "#,
         )
         .expect("panel config");
@@ -2120,11 +2126,37 @@ default_surfaces = ["home", "pull_request", "keys", "note"]
             vec![
                 PanelSurfaceConfig::Home,
                 PanelSurfaceConfig::PullRequest,
+                PanelSurfaceConfig::Hosts,
                 PanelSurfaceConfig::Shortcuts,
                 PanelSurfaceConfig::Scratchpad,
             ]
         );
         assert!(Config::default().panel.default_surfaces.is_empty());
+    }
+
+    #[test]
+    fn fleet_polling_and_named_session_parse_with_defaults() {
+        let defaults = Config::default().remote.fleet;
+        assert_eq!(defaults.refresh_interval_ms, 15_000);
+        assert!(defaults.hosts.is_empty());
+
+        let config: Config = toml::from_str(
+            r#"
+[remote.fleet]
+refresh_interval_ms = 30000
+
+[[remote.fleet.hosts]]
+name = "workbox"
+target = "workbox"
+session = "agents"
+"#,
+        )
+        .expect("fleet config");
+        assert_eq!(config.remote.fleet.refresh_interval_ms, 30_000);
+        assert_eq!(
+            config.remote.fleet.hosts[0].session.as_deref(),
+            Some("agents")
+        );
     }
 
     #[test]
