@@ -751,6 +751,25 @@ impl AppState {
         if self.dock_object_preview.is_some()
             && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
         {
+            // The preview draws the same detail the dock tab does, so its
+            // section headers fold on click too. Resolved from the previewed
+            // surface, because the dock tab underneath it may be anything.
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some((object_key, section)) = self
+                    .dock_object_preview
+                    .as_ref()
+                    .map(|object| object.surface)
+                    .and_then(|surface| {
+                        self.dock_detail_section_at(surface, mouse.column, mouse.row)
+                    })
+                {
+                    self.dock_object_views
+                        .entry(object_key)
+                        .or_default()
+                        .toggle_section(section);
+                    return None;
+                }
+            }
             let delta = match mouse.kind {
                 MouseEventKind::ScrollUp => Some(-3_i16),
                 MouseEventKind::ScrollDown => Some(3_i16),
@@ -1164,6 +1183,22 @@ impl AppState {
                 if in_dock && self.dock_tab == Some(crate::app::DockSurface::Symphony) {
                     if let Some(url) = self.dock_symphony_dashboard_click(mouse.column, mouse.row) {
                         return Some(MouseAction::OpenUrl { url });
+                    }
+                }
+                // A section header folds on click. This runs before the plain
+                // focus fallback below, which would otherwise swallow it.
+                if in_dock {
+                    if let Some((object_key, section)) = self.dock_tab.and_then(|surface| {
+                        self.dock_detail_section_at(surface, mouse.column, mouse.row)
+                    }) {
+                        self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
+                        self.dock_linear_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Linear);
+                        self.dock_object_views
+                            .entry(object_key)
+                            .or_default()
+                            .toggle_section(section);
+                        return None;
                     }
                 }
                 if in_dock {
@@ -2152,6 +2187,52 @@ impl AppState {
         let idx = self.tab_at(col, row)?;
         let rect = self.view.tab_hit_areas.get(idx)?;
         (rect.width > 1 && col == rect.x).then_some(idx)
+    }
+
+    /// The section whose header sits under this screen row in a detail drawn by
+    /// `surface`, accounting for the scroll offset the render applies. The
+    /// surface is passed in because the same renderers back the dock tab and the
+    /// collapsed-dock preview, which resolve it differently.
+    fn dock_detail_section_at(
+        &self,
+        surface: crate::app::DockSurface,
+        column: u16,
+        row: u16,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        crate::app::state::DetailSection,
+    )> {
+        // Rebuilding a detail layout is proportional to the detail's size, so
+        // the surface check comes first: a click on any other surface costs a
+        // single comparison.
+        if !matches!(
+            surface,
+            crate::app::DockSurface::Pr | crate::app::DockSurface::Linear
+        ) {
+            return None;
+        }
+        let area = super::dock_detail_area(self);
+        if !self.point_in_rect(area, column, row) {
+            return None;
+        }
+        let (object_key, layout) = match surface {
+            crate::app::DockSurface::Pr => (
+                crate::ui::dock::pr::focused_pr_key(self)?,
+                crate::ui::dock::pr::focused_pr_layout(self, area)?,
+            ),
+            crate::app::DockSurface::Linear => (
+                crate::ui::dock::linear::focused_ticket_key(self)?,
+                crate::ui::dock::linear::focused_ticket_layout(self, area)?,
+            ),
+            _ => return None,
+        };
+        let view = self
+            .dock_object_views
+            .get(&object_key)
+            .cloned()
+            .unwrap_or_default();
+        let section = super::section_at_row(&layout, &view, area, row)?;
+        Some((object_key, section))
     }
 
     pub(super) fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {

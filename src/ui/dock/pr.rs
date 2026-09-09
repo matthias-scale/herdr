@@ -59,6 +59,31 @@ pub(crate) fn focused_pr_key(app: &AppState) -> Option<WorkItemKey> {
     })
 }
 
+/// The detail layout the dock is drawing, so the input layer can number the
+/// section digits and hit-test the headers against the same geometry.
+pub(crate) fn focused_pr_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<crate::ui::work_view::DetailLayout> {
+    let item = focused_pr_item(app)?;
+    let view = focused_pr_key(app)
+        .and_then(|key| app.dock_object_views.get(&key).cloned())
+        .unwrap_or_default();
+    Some(crate::ui::work_view::pr_detail_layout(
+        app,
+        &item,
+        &view,
+        &crate::ui::work_view::PrDetailControls {
+            checkout_menu: app.dock_pr_checkout_menu,
+            action_menu: app.dock_pr_action_menu,
+            reviewer_picker: view.reviewer_picker.as_ref(),
+            pending_write: app.dock_pending_write.as_ref(),
+            notice: app.dock_write_notice.as_deref(),
+        },
+        area,
+    ))
+}
+
 fn focused_pr_item(app: &AppState) -> Option<PrItem<'_>> {
     let key = focused_pr_key(app)?;
     let snapshot = app.work_index_snapshot.as_ref()?;
