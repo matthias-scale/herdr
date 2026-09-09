@@ -3229,6 +3229,7 @@ pub struct AppState {
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
+    pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
@@ -4443,6 +4444,7 @@ impl AppState {
         self.sidebar_group_menu_selected = mode.view_index();
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
+        self.sidebar_view_scan_request = true;
         self.sidebar_selected_work_group = None;
         self.sidebar_object_menu = None;
         self.sidebar_selected_settled = None;
@@ -4461,6 +4463,10 @@ impl AppState {
         &mut self,
     ) -> Option<SidebarGroupMode> {
         self.sidebar_group_mode_persistence_request.take()
+    }
+
+    pub(crate) fn take_sidebar_view_scan_request(&mut self) -> bool {
+        std::mem::take(&mut self.sidebar_view_scan_request)
     }
 
     pub(crate) fn set_sidebar_work_filter(&mut self, filter: SidebarWorkFilter) {
@@ -5555,6 +5561,7 @@ impl AppState {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
