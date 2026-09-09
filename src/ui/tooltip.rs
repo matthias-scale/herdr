@@ -56,6 +56,10 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<ControlId> {
     let view = &app.view;
     let fixed = [
+        (
+            ControlId::SidebarAnimationPause,
+            view.hyperspace_pause_hit_area,
+        ),
         (ControlId::DockClose, view.dock_tab_close_rect),
         (ControlId::DockAdd, view.dock_plus_rect),
         (ControlId::TopBarScrollLeft, view.tab_scroll_left_hit_area),
@@ -152,6 +156,14 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
             };
             (rect, label.into())
         }
+        ControlId::SidebarAnimationPause => (
+            view.hyperspace_pause_hit_area,
+            if app.hyperspace.paused() {
+                "Resume the sidebar animation".into()
+            } else {
+                "Pause the sidebar animation".into()
+            },
+        ),
         ControlId::DockTab(index) => (
             view.dock_tab_hit_areas.get(index).copied()?,
             app.dock_tab_title(index),

@@ -20,6 +20,7 @@ mod dock_scratchpad;
 mod dock_shortcuts;
 pub(crate) mod dropdown;
 mod home;
+pub(crate) mod hyperspace;
 mod inbox;
 pub(crate) mod info_panel;
 mod keybind_help;
@@ -602,6 +603,8 @@ fn compute_view_internal(
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
+    let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
+    let hyperspace_pause_hit_area = hyperspace::pause_hit_area(app, hyperspace_rect);
     // The caret has to stay inside the rows the panel actually got, which is
     // only known once the sidebar geometry above resolved.
     app.notepad
@@ -750,6 +753,8 @@ fn compute_view_internal(
         notepad_rect,
         notepad_tab_hit_areas,
         pomodoro_hit_area,
+        hyperspace_rect,
+        hyperspace_pause_hit_area,
         sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
@@ -1025,6 +1030,8 @@ fn compute_mobile_view(
         notepad_rect: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
         pomodoro_hit_area: Rect::default(),
+        hyperspace_rect: Rect::default(),
+        hyperspace_pause_hit_area: Rect::default(),
         sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),

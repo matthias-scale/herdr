@@ -3751,11 +3751,25 @@ pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
     ws_area
 }
 
+/// The sidebar's content area minus the idle animation pinned to its bottom.
+/// Everything above the animation - the workspace list and the notepad - is
+/// laid out inside this, so both shrink with it.
+fn expanded_sidebar_body(app: &AppState, area: Rect) -> Rect {
+    let content = expanded_sidebar_content(area);
+    let animation = crate::ui::hyperspace::animation_height(app, content);
+    Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.saturating_sub(animation),
+    )
+}
+
 /// The workspace list gets the sidebar's content area minus whatever the
 /// notepad panel reserved at the bottom, so every row geometry derived from
 /// here shrinks with it.
 pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
-    let content = expanded_sidebar_content(area);
+    let content = expanded_sidebar_body(app, area);
     let notepad = crate::ui::notepad::notepad_height(app, content);
     Rect::new(
         content.x,
@@ -3767,7 +3781,13 @@ pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
 
 /// The notepad panel's rows inside the sidebar.
 pub(crate) fn sidebar_notepad_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_content(area))
+    crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_body(app, area))
+}
+
+/// The idle animation's rows, at the very bottom of the sidebar's content area
+/// and below the notepad.
+pub(crate) fn sidebar_animation_rect(app: &AppState, area: Rect) -> Rect {
+    crate::ui::hyperspace::animation_panel_rect(app, expanded_sidebar_content(area))
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -5086,6 +5106,7 @@ pub(super) fn render_sidebar(
     let ws_area = workspace_list_rect_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
+    crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
     let settings = sidebar_footer_settings_hit_area(area);
     if settings.width > 0 {

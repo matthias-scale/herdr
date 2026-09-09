@@ -2178,6 +2178,10 @@ pub struct ViewState {
     pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
+    /// The idle animation's panel under the notepad. Empty when it is off.
+    pub(crate) hyperspace_rect: Rect,
+    /// Its pause button, in the panel's bottom-left corner.
+    pub(crate) hyperspace_pause_hit_area: Rect,
     /// Sidebar-footer entry for refreshing work and Git metadata.
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
@@ -3575,6 +3579,8 @@ pub struct AppState {
     pub(crate) notepad: crate::notepad::NotepadState,
     /// The break reminder shown next to it.
     pub(crate) pomodoro: crate::pomodoro::PomodoroState,
+    /// The idle star field pinned under both of them.
+    pub(crate) hyperspace: crate::hyperspace::HyperspaceState,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -3938,6 +3944,7 @@ pub(crate) enum ControlId {
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
+    SidebarAnimationPause,
     DockTab(usize),
     DockClose,
     DockAdd,
@@ -5710,6 +5717,8 @@ impl AppState {
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
+                hyperspace_rect: Rect::default(),
+                hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
@@ -5876,6 +5885,10 @@ impl AppState {
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             notepad: crate::notepad::NotepadState::default(),
             pomodoro: crate::pomodoro::PomodoroState::default(),
+            // Off in fixtures, the way the break timer is: a decorative panel
+            // must not silently move every existing sidebar layout assertion.
+            // Tests that care about it set `hyperspace.enabled = true`.
+            hyperspace: crate::hyperspace::HyperspaceState::new(false, std::time::Instant::now()),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
