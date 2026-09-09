@@ -547,6 +547,12 @@
           "description": "Open settings."
         },
         {
+          "key": "keys.command_palette",
+          "type": "keybinding",
+          "default": "[\"ctrl+alt+p\", \"super+p\"]",
+          "description": "Open the fuzzy command palette."
+        },
+        {
           "key": "keys.new_workspace",
           "type": "keybinding",
           "default": "\"prefix+shift+n\"",

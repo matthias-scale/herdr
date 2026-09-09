@@ -181,7 +181,7 @@ impl App {
         }
     }
 
-    pub(super) fn execute_tui_navigate_action(
+    pub(crate) fn execute_tui_navigate_action(
         &mut self,
         action: NavigateAction,
         context: ActionContext,
@@ -452,7 +452,7 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
-            NavigateAction::EditScrollback => {}
+            NavigateAction::EditScrollback => self.launch_focused_scrollback_editor(),
             NavigateAction::CopyMode => self.state.enter_copy_mode(&self.terminal_runtimes),
             NavigateAction::Zoom => {
                 self.zoom_focused_pane_via_api();
@@ -562,6 +562,7 @@ impl App {
             }
             NavigateAction::Help => super::modal::open_keybind_help(&mut self.state),
             NavigateAction::Settings => super::settings::open_settings(&mut self.state),
+            NavigateAction::OpenCommandPalette => self.state.open_command_palette(),
             NavigateAction::ReloadConfig => {
                 self.runtime_server_reload_config("tui.server.reload_config");
                 leave_navigate_mode(&mut self.state);
@@ -1238,7 +1239,7 @@ impl App {
         true
     }
 
-    pub(super) fn launch_custom_command(
+    pub(crate) fn launch_custom_command(
         &mut self,
         binding: crate::config::CustomCommandKeybind,
         context: ActionContext,
@@ -2040,6 +2041,7 @@ pub(crate) enum NavigateAction {
     OpenMissiveView,
     Detach,
     OpenNavigator,
+    OpenCommandPalette,
 }
 
 fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
@@ -2184,6 +2186,15 @@ fn action_for_key(
         .or_else(|| indexed_navigation_action(state, &key, dispatch))
 }
 
+#[cfg(test)]
+pub(crate) fn action_for_key_for_test(
+    state: &AppState,
+    key: TerminalKey,
+    dispatch: BindingDispatch,
+) -> Option<NavigateAction> {
+    action_for_key(state, key, dispatch)
+}
+
 fn non_indexed_action_for_key(
     state: &AppState,
     key: &TerminalKey,
@@ -2193,6 +2204,7 @@ fn non_indexed_action_for_key(
     for (bindings, action) in [
         (&kb.help, NavigateAction::Help),
         (&kb.settings, NavigateAction::Settings),
+        (&kb.command_palette, NavigateAction::OpenCommandPalette),
         (&kb.workspace_picker, NavigateAction::WorkspacePicker),
         (&kb.new_workspace, NavigateAction::NewWorkspace),
         (&kb.new_worktree, NavigateAction::NewWorktree),
@@ -2685,6 +2697,7 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::Help => super::modal::open_keybind_help(state),
         NavigateAction::Settings => super::settings::open_settings(state),
+        NavigateAction::OpenCommandPalette => state.open_command_palette(),
         NavigateAction::ReloadConfig => {
             state.request_reload_config = true;
             leave_navigate_mode(state);

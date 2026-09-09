@@ -2283,6 +2283,7 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    CommandPalette,
     WorkLinkPicker,
 }
 
@@ -2334,7 +2335,11 @@ impl Mode {
     pub(crate) fn mouse_motion_changes_view(self) -> bool {
         matches!(
             self,
-            Self::GlobalMenu | Self::ContextMenu | Self::GitMenu | Self::Navigator
+            Self::GlobalMenu
+                | Self::ContextMenu
+                | Self::GitMenu
+                | Self::Navigator
+                | Self::CommandPalette
         )
     }
 
@@ -2354,6 +2359,7 @@ impl Mode {
             Mode::Prefix
                 | Mode::Navigate
                 | Mode::Navigator
+                | Mode::CommandPalette
                 | Mode::Copy
                 | Mode::Resize
                 | Mode::ConfirmClose
@@ -2488,6 +2494,13 @@ pub(crate) struct NavigatorState {
     pub search_focused: bool,
     pub state_filter: Option<NavigatorStateFilter>,
     pub expanded_workspaces: std::collections::HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CommandPaletteState {
+    pub query: String,
+    pub selected: usize,
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3253,6 +3266,7 @@ pub struct AppState {
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
+    pub command_palette: CommandPaletteState,
     pub work_link_picker: Option<WorkLinkPickerState>,
     pub(crate) add_action: Option<AddActionState>,
     pub copy_mode: Option<CopyModeState>,
@@ -5459,6 +5473,7 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
+            command_palette: CommandPaletteState::default(),
             work_link_picker: None,
             add_action: None,
             copy_mode: None,

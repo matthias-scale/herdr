@@ -194,6 +194,49 @@ impl App {
             return true;
         }
 
+        if self.state.mode == Mode::CommandPalette {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(index) = self
+                        .state
+                        .command_palette_row_index_at(mouse.column, mouse.row)
+                    {
+                        self.state.command_palette.selected = index;
+                        self.state.ensure_command_palette_selection_visible();
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(index) = self
+                        .state
+                        .command_palette_row_index_at(mouse.column, mouse.row)
+                    {
+                        self.state.command_palette.selected = index;
+                        self.accept_command_palette_selection();
+                    } else if !self
+                        .state
+                        .command_palette_popup_contains(mouse.column, mouse.row)
+                    {
+                        leave_modal(&mut self.state);
+                        self.state.command_palette = Default::default();
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.state.command_palette.scroll =
+                        self.state.command_palette.scroll.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.state.command_palette.scroll = self
+                        .state
+                        .command_palette
+                        .scroll
+                        .saturating_add(3)
+                        .min(self.state.command_palette_max_scroll());
+                }
+                _ => {}
+            }
+            return true;
+        }
+
         if self.state.mode == Mode::KeybindHelp {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left)
@@ -275,6 +318,61 @@ impl AppState {
             width.max(4),
             height.max(4),
         )
+    }
+
+    pub(crate) fn command_palette_popup_rect(&self) -> Option<Rect> {
+        let area = self.screen_rect();
+        let width = ((u32::from(area.width) * 3) / 5).clamp(40, 90) as u16;
+        let height = ((u32::from(area.height) * 3) / 5).clamp(10, 24) as u16;
+        crate::ui::centered_popup_rect(area, width, height)
+    }
+
+    pub(crate) fn command_palette_inner_rect(&self) -> Option<Rect> {
+        self.command_palette_popup_rect()
+            .map(|popup| Block::default().borders(Borders::ALL).inner(popup))
+    }
+
+    pub(crate) fn command_palette_input_rect(&self) -> Option<Rect> {
+        self.command_palette_inner_rect()
+            .map(|inner| Rect::new(inner.x, inner.y, inner.width, inner.height.min(1)))
+    }
+
+    pub(crate) fn command_palette_body_rect(&self) -> Option<Rect> {
+        let inner = self.command_palette_inner_rect()?;
+        (inner.height > 4).then_some(Rect::new(
+            inner.x,
+            inner.y + 2,
+            inner.width,
+            inner.height.saturating_sub(4),
+        ))
+    }
+
+    pub(crate) fn command_palette_footer_rect(&self) -> Option<Rect> {
+        self.command_palette_inner_rect().map(|inner| {
+            Rect::new(
+                inner.x,
+                inner.y + inner.height.saturating_sub(1),
+                inner.width,
+                inner.height.min(1),
+            )
+        })
+    }
+
+    pub(crate) fn command_palette_popup_contains(&self, col: u16, row: u16) -> bool {
+        self.command_palette_popup_rect()
+            .is_some_and(|popup| rect_contains(popup, col, row))
+    }
+
+    pub(crate) fn command_palette_row_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        let body = self.command_palette_body_rect()?;
+        if !rect_contains(body, col, row) {
+            return None;
+        }
+        let index = self
+            .command_palette
+            .scroll
+            .saturating_add(row.saturating_sub(body.y) as usize);
+        (index < self.command_palette_entries().len()).then_some(index)
     }
 
     pub(crate) fn navigator_inner_rect(&self) -> Rect {

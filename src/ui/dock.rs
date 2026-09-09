@@ -385,11 +385,11 @@ mod tests {
                 " keybinds                    \u{2595}",
                 " prefix+s                    \u{2595}",
                 " settings                    \u{2595}",
+                " ctrl+alt+p / super+p        \u{2595}",
+                " command palette             \u{2595}",
                 " prefix+q                    \u{2595}",
                 " detach                      \u{2595}",
                 " prefix+shift+r              \u{2595}",
-                " reload config               \u{2595}",
-                " prefix+o                    \u{2595}",
             ]
             .join("\n")
         );
