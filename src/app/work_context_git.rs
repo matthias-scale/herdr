@@ -283,7 +283,10 @@ impl App {
             self.schedule_session_save();
             self.emit_pane_updated(ws_idx, observation.pane_id);
             // The observation may have resolved the repository for the first
-            // time. It is the weakest tier, so it only routes a pane that has
+            // time, which is also the first chance the workspace has to learn
+            // which repository it collects for.
+            self.adopt_repo_binding_for_workspace(ws_idx);
+            // It is the weakest tier, so it only routes a pane that has
             // declared nothing better.
             self.route_pane_to_bound_workspace(ws_idx, observation.pane_id);
         }
@@ -1371,6 +1374,68 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         );
         assert_eq!(app.last_git_work_context_refresh_generation, 1);
         assert!(app.git_work_context_refresh_due_after_in_flight);
+    }
+
+    #[test]
+    fn a_resolved_repository_binds_the_workspace_through_the_refresh_path() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("adopt-through-refresh");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let cwd = app.state.terminals[&terminal_id].cwd.clone();
+        app.git_program_override = Some(PathBuf::from("herdr-test-missing-git"));
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+
+        let now = Instant::now();
+        app.next_git_work_context_refresh = now;
+        app.start_git_work_context_refresh_if_due(now);
+        let generation = app
+            .git_work_context_refresh_in_flight
+            .as_ref()
+            .expect("git refresh in flight")
+            .generation;
+
+        let repo_root = PathBuf::from("/adopt-through-refresh/repo");
+        let branch = "feat/adopt".to_string();
+        let context = crate::work_context::PaneWorkContext {
+            repo: Some("owner/adopted".into()),
+            branch: Some(branch.clone()),
+            ..crate::work_context::PaneWorkContext::default()
+        };
+        assert!(app.handle_git_work_context_refreshed(
+            generation,
+            vec![GitWorkContextObservation {
+                pane_id,
+                input: GitWorkContextInput {
+                    repo: Some("owner/adopted".into()),
+                    origin_unparsed: false,
+                    cwd,
+                    repo_root: Some(repo_root),
+                    branch: Some(branch),
+                },
+                context,
+            }],
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            app.state.workspaces[0].repo_binding.as_deref(),
+            Some("owner/adopted"),
+            "the workspace must adopt the repository its pane resolved"
+        );
     }
 
     #[test]
