@@ -299,6 +299,8 @@ impl AppState {
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
                                 HomeHitTarget::Access => crate::app::home::HomePicker::Access,
                                 HomeHitTarget::Context => crate::app::home::HomePicker::Context,
+                                HomeHitTarget::Project => crate::app::home::HomePicker::Project,
+                                HomeHitTarget::Repo => crate::app::home::HomePicker::Repo,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
                                 HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,
                                 HomeHitTarget::Ref => crate::app::home::HomePicker::Ref,

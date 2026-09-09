@@ -36,6 +36,7 @@ pub(crate) mod pane_graphics;
 mod pane_lifecycle;
 mod popup;
 pub(crate) mod probes;
+pub(crate) mod projects;
 mod repo_editor;
 mod repo_routing;
 mod runtime;
@@ -1138,6 +1139,7 @@ impl App {
             combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
             new_thread_workspace: config.ui.new_thread_workspace,
             launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
+            projects: crate::app::projects::resolve(&config.projects),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
@@ -2348,6 +2350,7 @@ impl App {
                 self.state.new_thread_workspace = config.ui.new_thread_workspace;
                 self.state.launch_profiles =
                     crate::app::launch_profiles::resolve(&config.launch_profiles);
+                self.state.projects = crate::app::projects::resolve(&config.projects);
                 self.state
                     .add_project_start_dir
                     .clone_from(&config.ui.add_project_start_dir);

@@ -384,6 +384,23 @@ pub struct Config {
     pub linear: LinearConfig,
     pub actions: Vec<ActionConfig>,
     pub launch_profiles: Vec<LaunchProfileConfig>,
+    pub projects: Vec<ProjectConfig>,
+}
+
+/// One named group of checkouts the home composer can dispatch into.
+///
+/// Which repositories belong together is a fact about how someone works, not
+/// about the filesystem, so it cannot be inferred from a path. `roots` names
+/// directories whose immediate children are checkouts; `repos` names single
+/// checkouts, absolute or relative to `~/Repos`. With no project configured
+/// the composer groups everything under `~/Repos`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProjectConfig {
+    pub id: String,
+    pub label: String,
+    pub roots: Vec<String>,
+    pub repos: Vec<String>,
 }
 
 /// One named way to start one agent, offered by the home composer.

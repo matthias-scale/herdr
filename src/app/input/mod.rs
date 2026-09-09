@@ -108,6 +108,8 @@ impl AppState {
                 crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
                 crate::app::home::HomePicker::Access => crate::app::home::HomeFocus::Access,
                 crate::app::home::HomePicker::Context => crate::app::home::HomeFocus::Context,
+                crate::app::home::HomePicker::Project => crate::app::home::HomeFocus::Project,
+                crate::app::home::HomePicker::Repo => crate::app::home::HomeFocus::Repo,
                 crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
                 crate::app::home::HomePicker::Workspace => crate::app::home::HomeFocus::Workspace,
                 crate::app::home::HomePicker::Ref => crate::app::home::HomeFocus::Ref,

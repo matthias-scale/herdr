@@ -26,9 +26,9 @@ pub use self::{
         ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
         LaunchProfileConfig, LinearLayoutConfig, MergeMethodConfig, MissiveConfig,
         NewTerminalCwdConfig, NewThreadWorkspaceConfig, PanelConfig, PanelSurfaceConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
+        ProjectConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
+        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
         MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{

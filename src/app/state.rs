@@ -2099,6 +2099,8 @@ pub(crate) enum HomeHitTarget {
     Effort,
     Access,
     Context,
+    Project,
+    Repo,
     Directory,
     Workspace,
     Ref,
@@ -3142,6 +3144,9 @@ pub struct AppState {
     /// reload. Shared session fact rather than presentation state: it decides
     /// what a dispatch actually runs.
     pub(crate) launch_profiles: Vec<crate::app::launch_profiles::LaunchProfile>,
+    /// Checkout groups resolved from `[[projects]]`, scanned once at config
+    /// time. Never rescanned from the render path: the scan reads directories.
+    pub(crate) projects: Vec<crate::app::projects::Project>,
     /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
     pub(crate) home_ref_cache:
         std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
@@ -5511,6 +5516,7 @@ impl AppState {
             home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             launch_profiles: crate::app::launch_profiles::resolve(&[]),
+            projects: Vec::new(),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
             request_tool_probes: false,
