@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, DockHostRowHitArea};
-use crate::fleet::{EvidenceSource, HostSnapshot, HostState};
+use crate::fleet::{counts_as_live_agent, EvidenceSource, HostSnapshot, HostState};
 
 const HEADER_ROWS: u16 = 1;
 
@@ -129,7 +129,7 @@ fn render_host(app: &AppState, frame: &mut Frame, area: Rect, host: &HostSnapsho
     let agent_count = host
         .entries
         .iter()
-        .filter(|entry| entry.source != EvidenceSource::Host)
+        .filter(|entry| counts_as_live_agent(entry))
         .count();
     let version = host.version.as_deref().unwrap_or("unknown");
     let local = if host.local { "  local" } else { "" };
