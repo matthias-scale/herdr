@@ -374,6 +374,11 @@ fn refresh_git_work_contexts(
     let mut cache_updates = Vec::new();
     let mut observations = Vec::new();
     let mut discovered = HashMap::<PathBuf, Option<GitWorkContextInput>>::new();
+    // Keyed by repository root, not by cwd: sibling panes sitting in different
+    // subdirectories of one checkout share a slug, and paying `gh repo view`
+    // again for each of them used to spend the budget the pull-request query
+    // needed.
+    let mut repo_slugs = HashMap::<PathBuf, Option<String>>::new();
 
     for target in targets {
         // Clamp to the batch ceiling so the per-target budget can extend a probe
@@ -398,12 +403,23 @@ fn refresh_git_work_contexts(
         let mut input = input;
         if input.repo.is_none() && input.origin_unparsed {
             if let Some(repo_root) = input.repo_root.as_deref() {
-                input.repo = gh_repo_slug(repo_root, target_gh_deadline, gh_program);
+                input.repo = match repo_slugs.get(repo_root) {
+                    Some(slug) => slug.clone(),
+                    None => {
+                        let slug = gh_repo_slug(repo_root, target_gh_deadline, gh_program);
+                        repo_slugs.insert(repo_root.to_path_buf(), slug.clone());
+                        slug
+                    }
+                };
                 // Remember it so sibling panes in the same checkout do not each
                 // pay for another gh call.
                 discovered.insert(target.cwd.clone(), Some(input.clone()));
             }
         }
+        // Re-measured after the slug lookup. Sharing one window between the two
+        // gh calls let `gh repo view` spend it all, so the pull-request query
+        // was skipped outright and the pane reported a branch with no link.
+        let target_gh_deadline = (Instant::now() + target_timeout).min(gh_deadline);
 
         let context = match (&input.repo_root, &input.branch) {
             (Some(repo_root), Some(branch)) => {
@@ -416,20 +432,30 @@ fn refresh_git_work_contexts(
                 }) {
                     entry.context.clone()
                 } else {
-                    let context = git_work_context_for_branch(
+                    let probe = git_work_context_for_branch(
                         branch,
                         repo_root,
                         input.repo.as_deref(),
                         target_gh_deadline,
                         gh_program,
                     );
-                    let entry = GitWorkContextCacheEntry {
-                        context: context.clone(),
-                        cached_at: now,
-                    };
-                    cache_updates.push((key.clone(), entry.clone()));
-                    cache.insert(key, entry);
-                    context
+                    if probe.answered {
+                        let entry = GitWorkContextCacheEntry {
+                            context: probe.context.clone(),
+                            cached_at: now,
+                        };
+                        cache_updates.push((key.clone(), entry.clone()));
+                        cache.insert(key, entry);
+                        probe.context
+                    } else if let Some(entry) = cache.get(&key) {
+                        // The probe never reached GitHub. Serving the expired
+                        // answer keeps the pane's pull request on screen instead
+                        // of replacing it with an empty context, and leaving the
+                        // entry stale means the next refresh retries at once.
+                        entry.context.clone()
+                    } else {
+                        probe.context
+                    }
                 }
             }
             // A pane with no branch (detached HEAD during a bisect, rebase or
@@ -619,13 +645,40 @@ fn gh_repo_slug(repo_root: &Path, deadline: Instant, gh_program: &Path) -> Optio
     crate::work_context::normalize_repo_slug(slug.trim()).ok()
 }
 
+/// The outcome of one `gh` probe for a branch.
+///
+/// A probe that never reached GitHub is not evidence that the branch has no
+/// pull request, so the two cases stay distinguishable: an answered probe may
+/// be cached and published, an unanswered one must not overwrite what a
+/// previous refresh already found.
+struct BranchProbe {
+    context: crate::work_context::PaneWorkContext,
+    answered: bool,
+}
+
+impl BranchProbe {
+    fn unanswered(context: crate::work_context::PaneWorkContext) -> Self {
+        Self {
+            context,
+            answered: false,
+        }
+    }
+
+    fn answered(context: crate::work_context::PaneWorkContext) -> Self {
+        Self {
+            context,
+            answered: true,
+        }
+    }
+}
+
 fn git_work_context_for_branch(
     branch: &str,
     repo_root: &Path,
     repo: Option<&str>,
     deadline: Instant,
     gh_program: &Path,
-) -> crate::work_context::PaneWorkContext {
+) -> BranchProbe {
     let mut context = crate::work_context::PaneWorkContext {
         ticket_ids: extract_ticket_ids(branch),
         branch: Some(branch.to_string()),
@@ -634,7 +687,7 @@ fn git_work_context_for_branch(
 
     if Instant::now() >= deadline {
         tracing::debug!(branch, "git work context: gh budget spent before the query");
-        return context;
+        return BranchProbe::unanswered(context);
     }
 
     let mut command = crate::noninteractive_process::command(gh_program);
@@ -643,7 +696,7 @@ fn git_work_context_for_branch(
         .args(gh_pr_view_args(branch, repo));
     let Ok(output) = crate::noninteractive_process::output_with_deadline(command, deadline) else {
         tracing::debug!(branch, "git work context: gh did not run to completion");
-        return context;
+        return BranchProbe::unanswered(context);
     };
     if !output.status.success() {
         tracing::debug!(
@@ -652,26 +705,17 @@ fn git_work_context_for_branch(
             stderr = %String::from_utf8_lossy(&output.stderr),
             "git work context: gh exited non-zero"
         );
-        return context;
+        return BranchProbe::unanswered(context);
     }
     let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) else {
         tracing::debug!(branch, "git work context: gh output was not JSON");
-        return context;
+        return BranchProbe::unanswered(context);
     };
     let Some(prs) = value.as_array() else {
-        return context;
+        return BranchProbe::unanswered(context);
     };
-    // `--head` matches by branch name alone, so every fork with a branch of this
-    // name comes back. A PR whose head lives in this repository is unambiguously
-    // ours; otherwise only a single candidate is safe to attribute to this pane.
-    let same_repo = prs
-        .iter()
-        .find(|pr| pr.get("isCrossRepository").and_then(Value::as_bool) == Some(false));
-    let Some(pr) = same_repo.or(match prs.as_slice() {
-        [only] => Some(only),
-        _ => None,
-    }) else {
-        return context;
+    let Some(pr) = choose_branch_pr(prs) else {
+        return BranchProbe::answered(context);
     };
     if let Some(url) = pr.get("url").and_then(Value::as_str) {
         context.pr_urls = extract_pr_urls(url);
@@ -683,7 +727,57 @@ fn git_work_context_for_branch(
     // the whole list away, which is what it used to do.
     preview_urls.truncate(crate::work_context::MAX_PREVIEW_URLS);
     context.preview_urls = preview_urls;
-    context
+    BranchProbe::answered(context)
+}
+
+/// Pick the one pull request a branch's panes should link to.
+///
+/// `--head` matches by branch name alone, so every fork with a branch of this
+/// name comes back, and `--state all` additionally brings back every pull
+/// request a reused branch name ever opened in this repository. Those are two
+/// different kinds of plurality: several pull requests from one head are all
+/// ours and the best of them is the answer, while heads in different forks are
+/// namesakes and none of them can be attributed to this pane.
+fn choose_branch_pr(prs: &[Value]) -> Option<&Value> {
+    let same_repo: Vec<&Value> = prs
+        .iter()
+        .filter(|pr| pr.get("isCrossRepository").and_then(Value::as_bool) == Some(false))
+        .collect();
+    // A head in this repository is unambiguously ours, so it wins outright.
+    let candidates = if same_repo.is_empty() {
+        // Otherwise every candidate must come from the same fork. Fork work is
+        // the normal shape here, so one owner with several attempts on a reused
+        // branch name still resolves; two owners genuinely do not.
+        let owners: HashSet<Option<&str>> = prs
+            .iter()
+            .map(|pr| pr.get("headRepositoryOwner").and_then(owner_login))
+            .collect();
+        if owners.len() > 1 {
+            return None;
+        }
+        prs.iter().collect()
+    } else {
+        same_repo
+    };
+    // Rank rather than take the first: a branch whose only pull request has
+    // merged still belongs to it, which is why the open-only query left panes
+    // showing a diff and no link at all.
+    candidates.into_iter().max_by_key(|pr| {
+        let state = match pr.get("state").and_then(Value::as_str) {
+            Some("OPEN") => 2,
+            Some("MERGED") => 1,
+            // Closed-unmerged is the weakest signal but still better than none.
+            _ => 0,
+        };
+        // Highest number is the most recent attempt on a reused branch name.
+        let number = pr.get("number").and_then(Value::as_i64).unwrap_or(0);
+        (state, number)
+    })
+}
+
+/// `headRepositoryOwner` is an object in gh's JSON, and its `login` is the fork.
+fn owner_login(owner: &Value) -> Option<&str> {
+    owner.get("login").and_then(Value::as_str)
 }
 
 fn gh_pr_view_args(branch: &str, repo: Option<&str>) -> Vec<String> {
@@ -698,8 +792,15 @@ fn gh_pr_view_args(branch: &str, repo: Option<&str>) -> Vec<String> {
     // `body` and `comments` are where a preview URL actually lives: Vercel and
     // our own `post-preview-urls` workflow post the alias as a comment, while
     // `statusCheckRollup` only ever carries a vercel.com dashboard link.
+    // Without this `gh` filters to open pull requests, so a branch whose pull
+    // request had already merged or closed reported no link at all.
+    args.push("--state".to_string());
+    args.push("all".to_string());
     args.push("--json".to_string());
-    args.push("url,statusCheckRollup,isCrossRepository,body,comments".to_string());
+    args.push(
+        "url,state,number,headRepositoryOwner,statusCheckRollup,isCrossRepository,body,comments"
+            .to_string(),
+    );
     args.push("--limit".to_string());
     args.push("10".to_string());
     args
@@ -863,11 +964,12 @@ expecting=
 head=
 json=
 limit=
+state=
 positionals=0
 for arg
 do
     case "$arg" in
-        --head|--json|--limit|--repo)
+        --head|--json|--limit|--repo|--state)
             [ "$after_separator" -eq 0 ] || exit 2
             [ -z "$expecting" ] || exit 2
             expecting="$arg"
@@ -888,6 +990,7 @@ do
                     --json) json="$arg" ;;
                     --limit) limit="$arg" ;;
                     --repo) repo_arg="$arg" ;;
+                    --state) state="$arg" ;;
                 esac
                 expecting=
             elif [ "$after_separator" -eq 1 ]; then
@@ -902,7 +1005,8 @@ done
 [ -z "$expecting" ] || exit 2
 [ "$positionals" -eq 0 ] || exit 2
 [ "$head" = feat/MAT-27-branch-qualified ] || exit 2
-[ "$json" = url,statusCheckRollup,isCrossRepository,body,comments ] || exit 2
+[ "$state" = all ] || exit 2
+[ "$json" = url,state,number,headRepositoryOwner,statusCheckRollup,isCrossRepository,body,comments ] || exit 2
 [ "$limit" = 10 ] || exit 2
 printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]'
 "#,
@@ -1059,7 +1163,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         write_executable(
             &gh,
             &format!(
-                "#!/bin/sh\nif [ -f '{}' ]; then printf '%s\\n' '[{{\"url\":\"https://github.com/o/r/pull/8\"}}]'; else exit 1; fi\n",
+                "#!/bin/sh\nif [ -f '{}' ]; then printf '%s\\n' '[{{\"url\":\"https://github.com/o/r/pull/8\"}}]'; else printf '%s\\n' '[]'; fi\n",
                 marker.display()
             ),
         );
@@ -1141,7 +1245,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         fake_git(&git, &repo, "master");
         write_executable(
             &gh,
-            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/a/r/pull/1\",\"statusCheckRollup\":[],\"isCrossRepository\":true},{\"url\":\"https://github.com/b/r/pull/2\",\"statusCheckRollup\":[],\"isCrossRepository\":true}]'\n",
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/a/r/pull/1\",\"statusCheckRollup\":[],\"isCrossRepository\":true,\"headRepositoryOwner\":{\"login\":\"a\"}},{\"url\":\"https://github.com/b/r/pull/2\",\"statusCheckRollup\":[],\"isCrossRepository\":true,\"headRepositoryOwner\":{\"login\":\"b\"}}]'\n",
         );
 
         let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
@@ -1149,6 +1253,115 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         assert!(context.pr_urls.is_empty());
         assert!(context.preview_urls.is_empty());
         assert_eq!(context.branch.as_deref(), Some("master"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gh_query_covers_every_pull_request_state() {
+        let args = gh_pr_view_args("feat/x", Some("o/r"));
+        let state = args
+            .iter()
+            .position(|arg| arg == "--state")
+            .and_then(|idx| args.get(idx + 1));
+        assert_eq!(
+            state.map(String::as_str),
+            Some("all"),
+            "gh defaults to open, so a merged pull request reported no link at all"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_reports_the_merged_pull_request_for_a_branch_that_is_still_checked_out() {
+        let dir = fixture_dir("merged-pr");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/landed");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/o/r/pull/11\",\"state\":\"MERGED\",\"number\":11,\"isCrossRepository\":false}]'\n",
+        );
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            output.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/11"],
+            "a finished branch still on disk has a pull request, not just a diff"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_prefers_the_open_pull_request_when_one_fork_reused_a_branch_name() {
+        let dir = fixture_dir("reused-branch-name");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/reused");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/o/r/pull/3\",\"state\":\"CLOSED\",\"number\":3,\"isCrossRepository\":true,\"headRepositoryOwner\":{\"login\":\"fork\"}},{\"url\":\"https://github.com/o/r/pull/7\",\"state\":\"OPEN\",\"number\":7,\"isCrossRepository\":true,\"headRepositoryOwner\":{\"login\":\"fork\"}}]'\n",
+        );
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            output.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/7"],
+            "one fork with several attempts is not the ambiguous case"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_gh_probe_keeps_the_pull_request_the_last_one_found() {
+        let dir = fixture_dir("gh-failure-keeps-pr");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/flaky");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/o/r/pull/5\",\"state\":\"OPEN\",\"number\":5,\"isCrossRepository\":false}]'\n",
+        );
+        let first = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            first.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/5"]
+        );
+
+        // gh is now unauthenticated, offline, or simply too slow. That is not
+        // evidence the branch lost its pull request.
+        write_executable(&gh, "#!/bin/sh\nexit 1\n");
+        let cache: HashMap<_, _> = first.cache_updates.iter().cloned().collect();
+        let now = Instant::now();
+        let second = refresh_git_work_contexts(
+            vec![GitWorkContextTarget {
+                pane_id: PaneId::from_raw(1),
+                cwd: repo.clone(),
+            }],
+            cache,
+            // Past the cache TTL, so the probe really runs again.
+            now + WORK_CONTEXT_CACHE_TTL,
+            now + Duration::from_secs(5),
+            now + Duration::from_secs(5),
+            Duration::from_secs(5),
+            &git,
+            &gh,
+        );
+        assert_eq!(
+            second.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/5"],
+            "a probe that never reached GitHub must not erase what the last one found"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
