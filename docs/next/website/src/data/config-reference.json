@@ -1111,6 +1111,18 @@
           "description": "Show the scratchpad in the dock without opening an editor."
         },
         {
+          "key": "keys.toggle_notepad",
+          "type": "keybinding",
+          "default": "\"ctrl+alt+m\"",
+          "description": "Focus the sidebar notepad for typing."
+        },
+        {
+          "key": "keys.toggle_pomodoro",
+          "type": "keybinding",
+          "default": "\"ctrl+alt+b\"",
+          "description": "Pause or resume the break timer, or dismiss a due reminder."
+        },
+        {
           "key": "keys.toggle_pin_tab",
           "type": "keybinding",
           "default": "unset",
@@ -2167,6 +2179,98 @@
           "type": "boolean",
           "default": "false",
           "description": "While prefix mode is active, temporarily switch the host input source to an ASCII-capable mode so prefix commands are read as ASCII even when an IME is active, then restore the previous input source when prefix mode exits. On macOS this selects the ASCII-capable keyboard layout; on Windows it switches the IME to English (ASCII) input. Windows support is currently limited to the Korean IME; with an IME for any other language, the input source is left unchanged. macOS and Windows only; a no-op elsewhere and a best-effort no-op if the switch fails."
+        }
+      ]
+    },
+    {
+      "id": "notepad",
+      "title": "Notepad",
+      "description": "A folder of Markdown notes edited at the bottom of the sidebar. Sync is whatever already carries the folder: a sync daemon, or the built-in git sync.",
+      "keys": [
+        {
+          "key": "notepad.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show the notepad panel at the bottom of the sidebar."
+        },
+        {
+          "key": "notepad.dir",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Notes directory. Empty uses `<config dir>/notes`. `~` is expanded."
+        },
+        {
+          "key": "notepad.files",
+          "type": "array of strings",
+          "default": "[]",
+          "description": "Note names to offer first, in this order. Others follow alphabetically."
+        },
+        {
+          "key": "notepad.height",
+          "type": "integer",
+          "default": "8",
+          "description": "Sidebar rows the panel occupies, header included. Clamped to 3..=24."
+        },
+        {
+          "key": "notepad.git_sync",
+          "type": "boolean",
+          "default": "false",
+          "description": "Pull and push the notes directory as a git checkout."
+        },
+        {
+          "key": "notepad.git_sync_interval_seconds",
+          "type": "integer",
+          "default": "120",
+          "description": "Seconds between background `git pull` runs when `git_sync` is set."
+        }
+      ]
+    },
+    {
+      "id": "pomodoro",
+      "title": "Break timer",
+      "description": "A pomodoro cycle whose reminder is an overlay that has to be answered in writing before it goes away.",
+      "keys": [
+        {
+          "key": "pomodoro.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Run the break timer."
+        },
+        {
+          "key": "pomodoro.work_minutes",
+          "type": "integer",
+          "default": "25",
+          "description": "Minutes of focus before a break is due."
+        },
+        {
+          "key": "pomodoro.short_break_minutes",
+          "type": "integer",
+          "default": "5",
+          "description": "Minutes in a short break."
+        },
+        {
+          "key": "pomodoro.long_break_minutes",
+          "type": "integer",
+          "default": "20",
+          "description": "Minutes in a long break."
+        },
+        {
+          "key": "pomodoro.long_break_every",
+          "type": "integer",
+          "default": "4",
+          "description": "Work intervals between long breaks."
+        },
+        {
+          "key": "pomodoro.min_confirm_chars",
+          "type": "integer",
+          "default": "3",
+          "description": "Characters the operator has to type to dismiss a due reminder."
+        },
+        {
+          "key": "pomodoro.log_file",
+          "type": "string",
+          "default": "\"pomodoro-log.md\"",
+          "description": "Note in the notepad directory confirmations are appended to. Empty disables the log."
         }
       ]
     }

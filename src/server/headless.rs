@@ -1066,6 +1066,10 @@ impl HeadlessServer {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_git_action");
         }
+        if self.app.apply_notepad_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_notepad");
+        }
         if self.app.apply_add_project_clone_request() {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_add_project_clone");
@@ -5098,6 +5102,7 @@ impl HeadlessServer {
                         self.app.ensure_dock_editor();
                         self.app.resize_dock_editor();
                         self.app.ensure_scratchpad();
+                        self.app.ensure_notepad();
                     }
                     if let Some(deadline) = self
                         .app
@@ -5390,6 +5395,10 @@ impl HeadlessServer {
             }
         }
         changed |= self.app.handle_loop_receipt_fallback(now);
+        changed |= self.app.tick_notepad(now);
+        if has_app_client {
+            changed |= self.app.tick_pomodoro(now);
+        }
         if self.app.status_metrics_visible {
             changed |= self.app.schedule_status_metrics(now);
             self.app.schedule_status_side_signals(now);

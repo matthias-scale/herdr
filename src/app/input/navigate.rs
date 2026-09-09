@@ -643,6 +643,15 @@ impl App {
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::ToggleNotepad => {
+                self.state.toggle_notepad_focus();
+                self.apply_notepad_request();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::TogglePomodoro => {
+                self.state.toggle_pomodoro(std::time::Instant::now());
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CyclePaneNext => {
                 self.cycle_pane_via_api(false);
                 leave_navigate_mode(&mut self.state);
@@ -2142,6 +2151,8 @@ pub(crate) enum NavigateAction {
     OpenHome,
     EditScratchpad,
     ShowScratchpad,
+    ToggleNotepad,
+    TogglePomodoro,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -2413,6 +2424,8 @@ macro_rules! non_indexed_action_bindings {
             (&kb.dock_symphony, NavigateAction::OpenDockSymphony),
             (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
             (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
+            (&kb.toggle_notepad, NavigateAction::ToggleNotepad),
+            (&kb.toggle_pomodoro, NavigateAction::TogglePomodoro),
             (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
             (&kb.symphony, NavigateAction::OpenSymphony),
             (&kb.work, NavigateAction::OpenWorkView),
@@ -2909,6 +2922,14 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::ShowScratchpad => {
             state.show_scratchpad_tab();
             sync_dock_tab_focus(state);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleNotepad => {
+            state.toggle_notepad_focus();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::TogglePomodoro => {
+            state.toggle_pomodoro(std::time::Instant::now());
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {

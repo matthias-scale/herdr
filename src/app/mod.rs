@@ -32,6 +32,7 @@ mod input;
 pub(crate) mod launch_profiles;
 #[cfg(test)]
 pub(crate) use input::SidebarWorkGroupKeyAction;
+mod notepad;
 pub(crate) mod pane_graphics;
 mod pane_lifecycle;
 mod popup;
@@ -170,6 +171,16 @@ pub struct App {
     /// to a different repository.
     pub(crate) scratchpad_watcher: Option<notify::RecommendedWatcher>,
     pub(crate) scratchpad_watched_path: Option<std::path::PathBuf>,
+    /// Held only to keep the notepad directory watcher alive.
+    pub(crate) notepad_watcher: Option<notify::RecommendedWatcher>,
+    pub(crate) notepad_watched_dir: Option<std::path::PathBuf>,
+    /// Note names the operator wants offered first, from `[notepad] files`.
+    pub(crate) notepad_preferred_files: Vec<String>,
+    pub(crate) notepad_git_sync: bool,
+    pub(crate) notepad_git_sync_interval: std::time::Duration,
+    pub(crate) notepad_next_git_pull: Option<Instant>,
+    /// `[pomodoro] log_file`; empty disables the break log.
+    pub(crate) pomodoro_log_file: String,
     pub(crate) loop_receipt_fallback_deadline: Option<Instant>,
     pub(crate) loop_receipt_watch_degraded: bool,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
@@ -874,6 +885,7 @@ impl App {
             request_new_tab: false,
             request_pane_toggle: None,
             request_open_repo_editor: false,
+            notepad_request: None,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
@@ -939,6 +951,9 @@ impl App {
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
+                notepad_rect: Rect::default(),
+                notepad_tab_hit_areas: Vec::new(),
+                pomodoro_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
@@ -1105,6 +1120,8 @@ impl App {
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
+            notepad: crate::notepad::NotepadState::from_config(&config.notepad),
+            pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
@@ -1289,6 +1306,15 @@ impl App {
             _loop_receipt_watcher: loop_receipt_watcher,
             scratchpad_watcher: None,
             scratchpad_watched_path: None,
+            notepad_watcher: None,
+            notepad_watched_dir: None,
+            notepad_preferred_files: config.notepad.files.clone(),
+            notepad_git_sync: config.notepad.git_sync,
+            notepad_git_sync_interval: std::time::Duration::from_secs(
+                config.notepad.git_sync_interval_seconds.clamp(15, 3600),
+            ),
+            notepad_next_git_pull: None,
+            pomodoro_log_file: config.pomodoro.log_file.clone(),
             loop_receipt_fallback_deadline,
             loop_receipt_watch_degraded: false,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -1738,6 +1764,10 @@ impl App {
                 needs_render = true;
             }
 
+            if self.apply_notepad_request() {
+                needs_render = true;
+            }
+
             if self.apply_git_action_request() {
                 needs_render = true;
             }
@@ -1900,6 +1930,7 @@ impl App {
                     self.ensure_dock_editor();
                     self.resize_dock_editor();
                     self.ensure_scratchpad();
+                    self.ensure_notepad();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,
@@ -2381,6 +2412,7 @@ impl App {
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
+                self.apply_notepad_and_pomodoro_config(config);
             }
         }
 

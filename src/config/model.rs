@@ -377,6 +377,8 @@ pub struct Config {
     pub files: FilesConfig,
     pub panel: PanelConfig,
     pub linear: LinearConfig,
+    pub notepad: NotepadConfig,
+    pub pomodoro: PomodoroConfig,
     pub actions: Vec<ActionConfig>,
     pub launch_profiles: Vec<LaunchProfileConfig>,
 }
@@ -409,6 +411,73 @@ pub struct LaunchProfileConfig {
     /// `kimi`. Absent means the lane reports no usage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<String>,
+}
+
+/// `[notepad]` — the sidebar note folder.
+///
+/// Sync is deliberately somebody else's job: point `dir` at a folder a sync
+/// daemon already carries, or set `git_sync` and let Herdr pull and push the
+/// checkout itself.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct NotepadConfig {
+    /// Show the notepad panel at the bottom of the sidebar.
+    pub enabled: bool,
+    /// Notes directory. Empty uses `<config dir>/notes`. `~` is expanded.
+    pub dir: String,
+    /// Note names to offer first, in this order. Others follow alphabetically.
+    pub files: Vec<String>,
+    /// Sidebar rows the panel occupies, header included. Clamped to 3..=24.
+    pub height: u16,
+    /// Pull and push the notes directory as a git checkout.
+    pub git_sync: bool,
+    /// Seconds between background `git pull` runs when `git_sync` is set.
+    pub git_sync_interval_seconds: u64,
+}
+
+impl Default for NotepadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: String::new(),
+            files: Vec::new(),
+            height: 8,
+            git_sync: false,
+            git_sync_interval_seconds: 120,
+        }
+    }
+}
+
+/// `[pomodoro]` — the break reminder.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PomodoroConfig {
+    pub enabled: bool,
+    /// Minutes of focus before a break is due.
+    pub work_minutes: u64,
+    pub short_break_minutes: u64,
+    pub long_break_minutes: u64,
+    /// Work intervals between long breaks.
+    pub long_break_every: u32,
+    /// Characters the operator has to type to dismiss a due reminder.
+    pub min_confirm_chars: usize,
+    /// Note in the notepad directory the confirmations are appended to. Empty
+    /// disables the log.
+    pub log_file: String,
+}
+
+impl Default for PomodoroConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            work_minutes: 25,
+            short_break_minutes: 5,
+            long_break_minutes: 20,
+            long_break_every: 4,
+            min_confirm_chars: crate::pomodoro::DEFAULT_MIN_CONFIRM_CHARS,
+            log_file: "pomodoro-log.md".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -874,6 +943,10 @@ pub struct KeysConfig {
     pub edit_scratchpad: BindingConfig,
     /// Show the scratchpad in the dock without opening an editor. Default: "ctrl+alt+n"
     pub show_scratchpad: BindingConfig,
+    /// Focus the sidebar notepad for typing. Default: "ctrl+alt+m"
+    pub toggle_notepad: BindingConfig,
+    /// Pause or resume the break timer, or dismiss a due reminder. Default: "ctrl+alt+b"
+    pub toggle_pomodoro: BindingConfig,
     /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
     pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
@@ -1104,6 +1177,10 @@ pub(crate) struct KeysConfigOverlay {
     edit_scratchpad: Option<BindingConfig>,
     show_scratchpad: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_notepad: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_pomodoro: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symphony: Option<BindingConfig>,
@@ -1255,6 +1332,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(editor_open_repo);
         apply_field!(edit_scratchpad);
         apply_field!(show_scratchpad);
+        apply_field!(toggle_notepad);
+        apply_field!(toggle_pomodoro);
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(work);
@@ -1411,6 +1490,8 @@ impl KeysConfig {
         copy_effective_action_field!(editor_open_repo, keybinds.editor_open_repo);
         copy_effective_action_field!(edit_scratchpad, keybinds.edit_scratchpad);
         copy_effective_action_field!(show_scratchpad, keybinds.show_scratchpad);
+        copy_effective_action_field!(toggle_notepad, keybinds.toggle_notepad);
+        copy_effective_action_field!(toggle_pomodoro, keybinds.toggle_pomodoro);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(work, keybinds.work);
@@ -1902,6 +1983,8 @@ impl Default for KeysConfig {
             editor_open_repo: BindingConfig::empty(),
             edit_scratchpad: BindingConfig::one("ctrl+alt+e"),
             show_scratchpad: BindingConfig::one("ctrl+alt+n"),
+            toggle_notepad: BindingConfig::one("ctrl+alt+m"),
+            toggle_pomodoro: BindingConfig::one("ctrl+alt+b"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             work: BindingConfig::one("prefix+ctrl+w"),

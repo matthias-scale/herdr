@@ -100,6 +100,8 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "toggle_status_detail" => NavigateAction::ToggleStatusDetail,
         "edit_scratchpad" => NavigateAction::EditScratchpad,
         "show_scratchpad" => NavigateAction::ShowScratchpad,
+        "toggle_notepad" => NavigateAction::ToggleNotepad,
+        "toggle_pomodoro" => NavigateAction::TogglePomodoro,
         "home" => NavigateAction::OpenHome,
         "work" => NavigateAction::OpenWorkView,
         "usage" => NavigateAction::OpenUsageView,

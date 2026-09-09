@@ -322,6 +322,8 @@ impl App {
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = self.take_due_agent_activity_refresh(now);
         changed |= self.handle_loop_receipt_fallback(now);
+        changed |= self.tick_notepad(now);
+        changed |= self.tick_pomodoro(now);
         let mut resized = false;
 
         if now >= self.next_resize_poll {
