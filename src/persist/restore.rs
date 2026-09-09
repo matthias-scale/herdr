@@ -598,6 +598,8 @@ fn restore_tab(
             if initial_restore_agent.is_some() && !startup.duplicate_agent_session {
                 reseed_blocked_hook_authority(&mut terminal, saved_agent_session);
             }
+            terminal.settled_auto_label =
+                saved_pane.and_then(|pane| pane.settled_auto_label.clone());
             let mut pane = PaneState::new(terminal_id);
             pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
             pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
@@ -710,6 +712,8 @@ fn restore_tab(
                 if initial_restore_agent.is_some() && !startup.duplicate_agent_session {
                     reseed_blocked_hook_authority(&mut terminal, saved_agent_session);
                 }
+                terminal.settled_auto_label =
+                    saved_pane.and_then(|pane| pane.settled_auto_label.clone());
                 #[cfg(unix)]
                 {
                     if let Some(activity) = imported_agent_activity {
@@ -1502,6 +1506,7 @@ mod tests {
                             cwd,
                             settled_at: None,
                             settled_work_key: None,
+                            settled_auto_label: Some("#3 Restore context".into()),
                             work_context: crate::work_context::PaneWorkContext {
                                 repo: None,
                                 ticket_ids: vec!["MAT-12".into()],
@@ -1565,6 +1570,10 @@ mod tests {
             .values()
             .next()
             .expect("restored terminal should exist");
+        assert_eq!(
+            terminal.settled_auto_label.as_deref(),
+            Some("#3 Restore context")
+        );
         assert!(
             !terminal.respawn_shell_on_exit,
             "agent sessions should not use native restore lifecycle when resume_agents_on_restore is disabled"
@@ -1629,6 +1638,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 settled_at: None,
                                 settled_work_key: None,
+                                settled_auto_label: None,
                                 work_context: Default::default(),
                                 work_context_tiers: None,
                                 label: None,
@@ -1644,6 +1654,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 settled_at: None,
                                 settled_work_key: None,
+                                settled_auto_label: None,
                                 work_context: Default::default(),
                                 work_context_tiers: None,
                                 label: None,
@@ -1704,6 +1715,7 @@ mod tests {
                     cwd: cwd.clone(),
                     settled_at: None,
                     settled_work_key: None,
+                    settled_auto_label: None,
                     work_context: Default::default(),
                     work_context_tiers: None,
                     label: None,
@@ -1718,6 +1730,7 @@ mod tests {
             cwd: cwd.clone(),
             settled_at: None,
             settled_work_key: None,
+            settled_auto_label: None,
             work_context: Default::default(),
             work_context_tiers: None,
             label: Some("planner".into()),
@@ -1902,6 +1915,7 @@ mod tests {
                             cwd,
                             settled_at: None,
                             settled_work_key: None,
+                            settled_auto_label: None,
                             work_context: Default::default(),
                             work_context_tiers: None,
                             label: None,
@@ -2148,6 +2162,7 @@ mod tests {
                 cwd: cwd.clone(),
                 settled_at: None,
                 settled_work_key: None,
+                settled_auto_label: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,

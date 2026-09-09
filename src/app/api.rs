@@ -32,6 +32,12 @@ enum RuntimeExitAction {
 }
 
 impl App {
+    pub(crate) fn pane_runtime_is_suspended(&self, pane_id: crate::layout::PaneId) -> bool {
+        self.find_pane(pane_id)
+            .and_then(|(_, pane)| self.terminal_runtimes.get(&pane.attached_terminal_id))
+            .is_some_and(crate::terminal::TerminalRuntime::is_suspended)
+    }
+
     pub(crate) fn dispatch_api_request(
         &mut self,
         id: &'static str,
@@ -489,6 +495,9 @@ impl App {
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
+            if self.pane_runtime_is_suspended(*pane_id) {
+                return None;
+            }
             if let Some(ws_idx) = self.orphan_pane_work_owner(*pane_id) {
                 self.schedule_session_save();
                 self.emit_pane_updated(ws_idx, *pane_id);

@@ -484,6 +484,8 @@ pub struct TerminalState {
     pub(crate) claude_transcript_path: Option<PathBuf>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
+    /// Label Herdr applied before suspending this terminal, if still owned by settlement.
+    pub(crate) settled_auto_label: Option<String>,
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
     managed_agent: Option<ManagedAgent>,
@@ -572,6 +574,7 @@ impl TerminalState {
             claude_transcript_path: None,
             terminal_title: None,
             manual_label: None,
+            settled_auto_label: None,
             agent_name: None,
             agent_name_owner: None,
             managed_agent: None,

@@ -90,6 +90,9 @@ impl App {
                     let Some(pane) = tab.panes.get(&info.id) else {
                         continue;
                     };
+                    if pane.settled_at.is_some() {
+                        continue;
+                    }
                     if self
                         .terminal_runtimes
                         .get(&pane.attached_terminal_id)
@@ -260,7 +263,11 @@ impl App {
                     .state
                     .terminals
                     .get_mut(&terminal_id)
-                    .is_some_and(|terminal| terminal.clear_agent_runtime_identity_after_respawn());
+                    .is_some_and(|terminal| {
+                        let changed = terminal.clear_agent_runtime_identity_after_respawn();
+                        terminal.pending_agent_resume_plan = Some(plan.clone());
+                        changed
+                    });
                 if hook_work_context_changed {
                     self.schedule_session_save();
                     if let Some((ws_idx, _)) = self.find_pane(pane_id) {
@@ -797,6 +804,36 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn settled_pane_is_skipped_by_pending_resume_candidates() {
+        let mut app = test_app();
+        let workspace = crate::workspace::Workspace::test_new("settled-restore");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0]
+            .pane_state_mut(pane_id)
+            .unwrap()
+            .settled_at = Some(1_725_000_020);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: long_running_test_argv(),
+            dedupe_key: "settled-restore-test".into(),
+        });
+
+        assert!(app.pending_agent_resume_candidates().is_empty());
+        assert!(!app.start_pending_agent_resumes(true));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
     }
 
     #[test]

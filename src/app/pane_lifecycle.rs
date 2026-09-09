@@ -204,6 +204,9 @@ impl App {
 }
 
 fn pane_is_done(pane: &crate::pane::PaneState, terminal: &crate::terminal::TerminalState) -> bool {
+    if pane.settled_at.is_some() {
+        return false;
+    }
     let (state, seen) = terminal.sidebar_projection(pane.seen);
     if seen || terminal.supervisor_stale {
         return false;
@@ -361,6 +364,20 @@ mod tests {
             due.is_empty(),
             "a pane waiting on a human gate must not be reaped: {due:?}"
         );
+    }
+
+    #[test]
+    fn settled_pane_is_not_done_or_reaped() {
+        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.settled_at = Some(1_725_000_021);
+
+        assert!(!pane_is_done(pane, &app.terminals[&terminal_id]));
+        assert!(app.due_done_pane_ids(Instant::now()).is_empty());
     }
 
     #[test]

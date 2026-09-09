@@ -2848,6 +2848,9 @@ impl HeadlessServer {
             }
             AppEvent::PaneDied { pane_id } => {
                 let pane_id_val = *pane_id;
+                if self.app.pane_runtime_is_suspended(pane_id_val) {
+                    return true;
+                }
                 let terminal_id = self.app.state.workspaces.iter().find_map(|ws| {
                     ws.tabs.iter().find_map(|tab| {
                         tab.panes

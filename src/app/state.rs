@@ -3505,6 +3505,8 @@ pub struct AppState {
     pub auto_settle_finished: bool,
     /// Settle a pane after `settle_after` of inactivity (`session.auto_settle_inactive`).
     pub auto_settle_inactive: bool,
+    /// Stop resumable agent processes when their pane settles (`session.settle_stops_agent`).
+    pub settle_stops_agent: bool,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -5768,6 +5770,7 @@ impl AppState {
             add_project_start_dir: String::new(),
             auto_settle_finished: true,
             auto_settle_inactive: true,
+            settle_stops_agent: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,

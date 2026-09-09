@@ -1127,6 +1127,7 @@ impl App {
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
+            settle_stops_agent: config.session.settle_stops_agent,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
@@ -2227,6 +2228,7 @@ impl App {
             self.state.reap_done_panes = config.session.reap_done_panes;
             self.state.auto_settle_finished = config.session.auto_settle_finished;
             self.state.auto_settle_inactive = config.session.auto_settle_inactive;
+            self.state.settle_stops_agent = config.session.settle_stops_agent;
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session

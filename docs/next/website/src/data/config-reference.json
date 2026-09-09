@@ -1835,6 +1835,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Settle a pane that has had no activity for settle_after_days."
+        },
+        {
+          "key": "session.settle_stops_agent",
+          "type": "boolean",
+          "default": "true",
+          "description": "Stop resumable agent processes when their pane settles. Unsettling the pane resumes the stored agent session."
         }
       ]
     },

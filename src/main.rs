@@ -518,6 +518,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # auto_settle_finished = true
 # Settle a pane that has only gone quiet for settle_after_days.
 # auto_settle_inactive = true
+# Stop resumable agent processes when their pane settles.
+# settle_stops_agent = true
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
@@ -1100,6 +1102,7 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# hide_done_after_minutes = 30"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
         assert!(DEFAULT_CONFIG.contains("# settle_after_days = 3"));
+        assert!(DEFAULT_CONFIG.contains("# settle_stops_agent = true"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
         assert!(DEFAULT_CONFIG.contains("[source_control]\n# Merge strategy"));
         assert!(DEFAULT_CONFIG.contains("# merge_method = \"merge\""));
