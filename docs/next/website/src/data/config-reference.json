@@ -50,7 +50,11 @@
           "key": "theme.host_appearance",
           "type": "enum",
           "default": "auto",
-          "values": ["auto", "light", "dark"],
+          "values": [
+            "auto",
+            "light",
+            "dark"
+          ],
           "description": "Override the detected host appearance when a terminal relay drops OSC 11 or Mode 2031 replies. When set to auto, an attached client can use HERDR_HOST_APPEARANCE=light or dark as a lower-precedence override."
         },
         {
@@ -1274,6 +1278,18 @@
           "type": "boolean",
           "default": "false",
           "description": "Hide the tab row when the workspace has one tab."
+        },
+        {
+          "key": "ui.show_pull_button",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show the pull button in the top-right action row. Off by default. It is the only entry point to the git menu, so enable it to reach that menu."
+        },
+        {
+          "key": "ui.show_pane_toggle_buttons",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show the split-below and split-right buttons in the top-right action row. Off by default; both splits have keybindings."
         },
         {
           "key": "ui.show_subscription_usage",

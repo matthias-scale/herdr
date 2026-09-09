@@ -1954,6 +1954,7 @@ impl AppState {
             self.tab_scroll_follow_active,
             self.mouse_capture,
             &visible_user_actions,
+            crate::ui::TabActionVisibility::from_state(self),
         );
         self.tab_scroll = layout.scroll;
         self.view.tab_hit_areas = layout.tab_hit_areas;
@@ -1963,7 +1964,7 @@ impl AppState {
         // Mirrors `compute_view`: a hidden or too-narrow tab row hands the
         // toggles to the status row instead of dropping them.
         let (editor, add, actions, menu, below, right) =
-            if layout.pane_toggle_below_hit_area.width > 0 {
+            if layout.add_action_button_hit_area.width > 0 {
                 (
                     layout.repo_editor_button_hit_area,
                     layout.add_action_button_hit_area,
@@ -1977,6 +1978,7 @@ impl AppState {
                     self.view.status_bar_rect,
                     self.mouse_capture,
                     &visible_user_actions,
+                    crate::ui::TabActionVisibility::from_state(self),
                 )
             };
         self.view.repo_editor_button_hit_area = editor;

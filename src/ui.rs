@@ -175,7 +175,7 @@ pub(crate) use self::{
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
     tabs::{
         compute_tab_bar_view, tab_action_fallback_hit_areas, tab_bar_content_area,
-        visible_user_actions,
+        visible_user_actions, TabActionVisibility,
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
@@ -322,6 +322,14 @@ fn compute_view_internal(
             app.dock_linear_focused = surface == crate::app::DockSurface::Linear;
         }
     }
+    // The pull button is the git menu's only anchor and its only entry point.
+    // Turning it off while the menu is open, which a live config reload can do,
+    // would otherwise leave the popup stranded. Keyed on the setting rather than
+    // on the button's rect: the rect is this client's geometry, and a narrow
+    // background client must not close a menu another client is looking at.
+    if app.mode == Mode::GitMenu && !app.show_pull_button {
+        app.mode = Mode::Terminal;
+    }
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -438,6 +446,7 @@ fn compute_view_internal(
                 app.tab_scroll_follow_active,
                 app.mouse_capture,
                 &visible_user_actions,
+                tabs::TabActionVisibility::from_state(app),
             )
         })
         .unwrap_or_default();
@@ -450,7 +459,9 @@ fn compute_view_internal(
         git_menu_button_hit_area,
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
-    ) = if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
+        // `+ Action` is always present when the row is drawn, so it is the sentinel
+        // for "the tab row hosts the buttons"; the other controls are optional.
+    ) = if tab_bar_view.add_action_button_hit_area.width > 0 {
         (
             tab_bar_view.repo_editor_button_hit_area,
             tab_bar_view.add_action_button_hit_area,
@@ -464,6 +475,7 @@ fn compute_view_internal(
             status_bar_rect,
             app.mouse_capture,
             &visible_user_actions,
+            tabs::TabActionVisibility::from_state(app),
         )
     } else {
         (
@@ -2269,12 +2281,173 @@ mod tests {
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
     }
 
+    /// The pull button and the two pane toggles duplicate keybindings and eat
+    /// tab-title width, so they are opt-in. Their hit areas must collapse, not
+    /// merely go undrawn, or the row still reserves their columns.
+    #[test]
+    fn the_optional_top_right_controls_are_absent_by_default() {
+        let defaults = crate::config::Config::default();
+        assert!(!defaults.ui.show_pull_button);
+        assert!(!defaults.ui.show_pane_toggle_buttons);
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
+        app.mouse_capture = true;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.ensure_test_terminals();
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
+        assert_eq!(app.view.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(app.view.pane_toggle_right_hit_area, Rect::default());
+        // `+ Action` is not optional and still anchors the row.
+        assert!(app.view.add_action_button_hit_area.width > 0);
+    }
+
+    /// Each control is independent, so the mixed combinations have to place the
+    /// remaining ones correctly too, on the tab row and on the status row.
+    #[test]
+    fn each_optional_control_hides_independently_on_both_host_rows() {
+        for on_tab_row in [true, false] {
+            for (pull, toggles) in [(true, false), (false, true)] {
+                let mut app = crate::app::state::AppState::test_new();
+                app.tab_bar_position = if on_tab_row {
+                    crate::config::TabBarPositionConfig::Top
+                } else {
+                    crate::config::TabBarPositionConfig::Hidden
+                };
+                app.mouse_capture = true;
+                app.show_pull_button = pull;
+                app.show_pane_toggle_buttons = toggles;
+                app.workspaces = vec![Workspace::test_new("one")];
+                app.active = Some(0);
+                app.selected = 0;
+                app.mode = Mode::Terminal;
+                app.ensure_test_terminals();
+
+                compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+                let label = format!("tab_row={on_tab_row} pull={pull} toggles={toggles}");
+                let menu = app.view.git_menu_button_hit_area;
+                let below = app.view.pane_toggle_below_hit_area;
+                let right = app.view.pane_toggle_right_hit_area;
+                let add = app.view.add_action_button_hit_area;
+                assert!(add.width > 0, "{label}");
+                assert_eq!(menu.width > 0, pull, "{label}");
+                assert_eq!(below.width > 0, toggles, "{label}");
+                assert_eq!(right.width > 0, toggles, "{label}");
+                // Every drawn control shares the row and never overlaps.
+                let mut spans: Vec<(u16, u16)> = [add, menu, below, right]
+                    .into_iter()
+                    .filter(|rect| rect.width > 0)
+                    .map(|rect| {
+                        assert_eq!(rect.y, add.y, "{label}");
+                        (rect.x, rect.x + rect.width)
+                    })
+                    .collect();
+                spans.sort_unstable();
+                for pair in spans.windows(2) {
+                    assert!(pair[0].1 <= pair[1].0, "{label} overlapping {spans:?}");
+                }
+            }
+        }
+    }
+
+    /// Turning the pull button off while its menu is open, which a live config
+    /// reload can do, must close the menu rather than strand the popup. The
+    /// close is keyed on the setting, not on this client's geometry, and it
+    /// happens before the mobile layout takes its early return.
+    #[test]
+    fn losing_the_pull_button_closes_an_open_git_menu() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
+        app.mouse_capture = true;
+        app.show_pull_button = true;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.ensure_test_terminals();
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        app.mode = Mode::GitMenu;
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        assert_eq!(app.mode, Mode::GitMenu);
+        assert!(app.view.git_menu_popup_rect.width > 0);
+
+        app.show_pull_button = false;
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.view.git_menu_popup_rect, Rect::default());
+    }
+
+    /// A narrow client that cannot fit the button must not close a menu another
+    /// client is looking at, and the mobile layout must not skip the close.
+    #[test]
+    fn client_geometry_does_not_decide_whether_the_git_menu_closes() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
+        app.mouse_capture = true;
+        app.show_pull_button = true;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::GitMenu;
+        app.ensure_test_terminals();
+
+        // Too narrow for the action row, and narrow enough for mobile layout.
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
+        assert_eq!(app.mode, Mode::GitMenu, "geometry alone must not close it");
+
+        app.show_pull_button = false;
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.mode, Mode::Terminal);
+    }
+
+    /// Hiding the two controls must give their columns back to the tabs rather
+    /// than leave a gap at the right edge.
+    #[test]
+    fn hiding_the_optional_controls_reclaims_their_columns() {
+        let build = |show: bool| {
+            let mut app = crate::app::state::AppState::test_new();
+            app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
+            app.mouse_capture = true;
+            app.show_pull_button = show;
+            app.show_pane_toggle_buttons = show;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.selected = 0;
+            app.mode = Mode::Terminal;
+            app.ensure_test_terminals();
+            compute_view(&mut app, Rect::new(0, 0, 120, 40));
+            app
+        };
+
+        let shown = build(true);
+        let hidden = build(false);
+        let right_edge = |app: &crate::app::state::AppState| {
+            app.view.add_action_button_hit_area.x + app.view.add_action_button_hit_area.width
+        };
+        assert!(
+            right_edge(&hidden) > right_edge(&shown),
+            "hidden {} vs shown {}",
+            right_edge(&hidden),
+            right_edge(&shown)
+        );
+    }
+
     /// The buttons were only ever computed for the tab row, which the shipped
     /// default config does not draw: `tab_bar_position` defaults to `hidden`.
     /// Every unit test used `AppState::test_new()`, whose tab row is `Top`, so
     /// the whole feature was invisible at runtime while the tests were green.
     #[test]
-    fn pane_toggles_fall_back_to_the_status_row_under_the_default_config() {
+    fn opted_in_pane_toggles_fall_back_to_the_status_row_under_the_default_config() {
         assert_eq!(
             crate::config::Config::default().ui.tab_bar_position,
             crate::config::TabBarPositionConfig::Hidden,
@@ -2287,6 +2460,8 @@ mod tests {
             app.tab_bar_position = defaults.ui.tab_bar_position;
             app.hide_tab_bar_when_single_tab = defaults.ui.hide_tab_bar_when_single_tab;
             app.mouse_capture = defaults.ui.mouse_capture;
+            app.show_pull_button = true;
+            app.show_pane_toggle_buttons = true;
             app.workspaces = vec![Workspace::test_new("one")];
             app.active = Some(0);
             app.selected = 0;
@@ -2334,6 +2509,7 @@ mod tests {
             let defaults = crate::config::Config::default();
             app.tab_bar_position = defaults.ui.tab_bar_position;
             app.mouse_capture = true;
+            app.show_pull_button = true;
             app.workspaces = vec![Workspace::test_new("one")];
             app.active = Some(0);
             app.ensure_test_terminals();

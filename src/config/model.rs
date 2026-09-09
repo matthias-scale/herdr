@@ -1449,6 +1449,12 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
+    /// Show the pull button in the top-right action row. It is the only entry
+    /// point to the git menu, so turn it on to reach that menu. Default: false.
+    pub show_pull_button: bool,
+    /// Show the split-below and split-right buttons in the top-right action
+    /// row. Default: false.
+    pub show_pane_toggle_buttons: bool,
     /// Expand the top status row from bars alone to percentages and reset
     /// times. Toggled at runtime; this is only the starting state. Default: false.
     #[serde(default)]
@@ -1791,6 +1797,8 @@ impl Default for UiConfig {
             pane_borders: true,
             pane_outer_borders: true,
             pane_scrollbars: true,
+            show_pull_button: false,
+            show_pane_toggle_buttons: false,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
@@ -2146,6 +2154,8 @@ status_indicators = "symbols"
         assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
         assert!(!default_config.ui.hide_tab_bar_when_single_tab);
+        assert!(!default_config.ui.show_pull_button);
+        assert!(!default_config.ui.show_pane_toggle_buttons);
         assert!(default_config.ui.show_subscription_usage);
         assert_eq!(
             default_config.ui.tab_bar_position,
@@ -2159,10 +2169,14 @@ pane_scrollbars = false
 pane_gaps = true
 show_agent_labels_on_pane_borders = true
 hide_tab_bar_when_single_tab = true
+show_pull_button = true
+show_pane_toggle_buttons = true
 show_subscription_usage = false
 tab_bar_position = "bottom"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.show_pull_button);
+        assert!(config.ui.show_pane_toggle_buttons);
         assert!(!config.ui.pane_borders);
         assert!(!config.ui.pane_scrollbars);
         assert!(config.ui.pane_gaps);
