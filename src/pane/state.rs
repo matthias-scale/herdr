@@ -16,6 +16,10 @@ pub struct PaneState {
     pub settled_at: Option<u64>,
     /// Completed work trigger already consumed by this pane's latest resume.
     pub(crate) settled_work_key: Option<String>,
+    /// When the linked work first read as finished for a trigger that has not
+    /// settled yet. Runtime-only: a restart re-arms the grace window, which can
+    /// only delay settling, never settle a pane early.
+    pub(crate) finished_since: Option<std::time::Instant>,
     pub(crate) activity: Box<crate::activity_age::PaneActivity>,
 }
 
@@ -28,6 +32,7 @@ impl PaneState {
             done_since: None,
             settled_at: None,
             settled_work_key: None,
+            finished_since: None,
             activity: Box::new(crate::activity_age::PaneActivity::new(
                 std::time::Instant::now(),
             )),
