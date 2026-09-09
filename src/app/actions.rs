@@ -202,6 +202,7 @@ fn toast_event_text(kind: ToastKind) -> &'static str {
         ToastKind::NeedsAttention => "needs attention",
         ToastKind::Finished => "finished",
         ToastKind::UpdateInstalled => "updated",
+        ToastKind::WorkLinked => "linked",
     }
 }
 
@@ -214,7 +215,7 @@ fn sound_for_toast_kind(
         ToastKind::Finished if !suppress_active_tab_notifications => {
             Some(crate::sound::Sound::Done)
         }
-        ToastKind::Finished | ToastKind::UpdateInstalled => None,
+        ToastKind::Finished | ToastKind::UpdateInstalled | ToastKind::WorkLinked => None,
     }
 }
 

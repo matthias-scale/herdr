@@ -879,6 +879,36 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                linkable_work_link: Some(link),
+                ..
+            },
+            Some(item),
+        ) if item == link.menu_item() => {
+            let patch = link.patch();
+            for pane_id in state.window_pane_ids(ws_idx, tab_idx) {
+                let Some(terminal_id) = state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.pane_state(pane_id))
+                    .map(|pane| pane.attached_terminal_id.clone())
+                else {
+                    continue;
+                };
+                let Some(terminal) = state.terminals.get_mut(&terminal_id) else {
+                    continue;
+                };
+                match terminal.apply_manual_work_context_patch(patch.clone()) {
+                    Ok(true) => state.mark_session_dirty(),
+                    Ok(false) => {}
+                    Err(err) => tracing::warn!(err = %err, "failed to link work item to window"),
+                }
+            }
+            state.mode = Mode::Terminal;
+        }
+        (
+            ContextMenuKind::Pane {
                 ws_idx, pane_id, ..
             },
             Some("Clear pane name"),
@@ -1230,6 +1260,37 @@ impl App {
         }
     }
 
+    /// Confirm a window-wide work link with a toast.
+    ///
+    /// A link click changes sidebar grouping rather than anything inside the
+    /// pane, so without this the only feedback is a row moving somewhere the
+    /// human may not be looking.
+    fn show_work_linked_toast(
+        &mut self,
+        link: &crate::app::state::PaneMenuWorkLink,
+        ws_idx: usize,
+        panes: usize,
+    ) {
+        let workspace_label = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| ws.display_name_from(&self.state.terminals, &self.terminal_runtimes))
+            .unwrap_or_else(|| "workspace".into());
+        let previous_toast = self.state.toast.clone();
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::WorkLinked,
+            title: format!("linked {}", link.short_label()),
+            context: format!(
+                "{workspace_label} · {panes} pane{}",
+                if panes == 1 { "" } else { "s" }
+            ),
+            position: None,
+            target: None,
+        });
+        self.sync_toast_deadline(previous_toast);
+    }
+
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
         let item = menu.items().get(idx).copied();
         match (menu.kind, item) {
@@ -1304,6 +1365,34 @@ impl App {
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx,
+                    tab_idx,
+                    linkable_work_link: Some(link),
+                    ..
+                },
+                Some(item),
+            ) if item == link.menu_item() => {
+                let patch = link.patch();
+                let mut linked = 0usize;
+                for pane_id in self.state.window_pane_ids(ws_idx, tab_idx) {
+                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                        self.runtime_pane_work_context_set(
+                            "tui.pane.work_context.link_work_item",
+                            crate::api::schema::PaneWorkContextSetParams {
+                                pane_id: public_pane_id,
+                                patch: patch.clone(),
+                            },
+                        );
+                        linked += 1;
+                    }
+                }
+                if linked > 0 {
+                    self.show_work_linked_toast(&link, ws_idx, linked);
+                }
+                self.state.mode = Mode::Terminal;
             }
             (
                 ContextMenuKind::Pane {
@@ -2342,6 +2431,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 0,
             y: 0,
@@ -2390,6 +2480,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 0,
             y: 0,
@@ -2500,6 +2591,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 0,
             y: 0,

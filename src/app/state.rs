@@ -2815,7 +2815,75 @@ pub enum ContextMenuKind {
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        /// Work link under the click, when the clicked cell carries one that is
+        /// not already bound to every pane of this window.
+        linkable_work_link: Option<PaneMenuWorkLink>,
     },
+}
+
+/// Label of the pane menu entry that binds the clicked pull request to the window.
+pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
+/// Label of the pane menu entry that binds the clicked ticket to the window.
+pub const LINK_TICKET_TO_WINDOW_ITEM: &str = "Link ticket to this window";
+
+/// Work item a right-clicked link resolves to, ready to bind to a window.
+///
+/// Windows, not panes, are what the sidebar groups, so a link click binds every
+/// pane of the clicked tab rather than only the pane under the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneMenuWorkLink {
+    PullRequest(String),
+    Ticket(String),
+}
+
+impl PaneMenuWorkLink {
+    pub fn menu_item(&self) -> &'static str {
+        match self {
+            Self::PullRequest(_) => LINK_PR_TO_WINDOW_ITEM,
+            Self::Ticket(_) => LINK_TICKET_TO_WINDOW_ITEM,
+        }
+    }
+
+    /// The manual patch that binds this link, leaving every other field alone.
+    pub fn patch(&self) -> crate::work_context::PaneWorkContextPatch {
+        match self {
+            Self::PullRequest(url) => crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec![url.clone()]),
+                ..Default::default()
+            },
+            Self::Ticket(id) => crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec![id.clone()]),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Short human label for this link, as it appears in the link toast.
+    pub fn short_label(&self) -> String {
+        match self {
+            Self::PullRequest(url) => url
+                .rsplit('/')
+                .next()
+                .filter(|segment| !segment.is_empty())
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| url.clone()),
+            Self::Ticket(id) => id.clone(),
+        }
+    }
+
+    /// Whether a work context already carries this exact binding.
+    pub fn is_bound_in(&self, context: &crate::work_context::PaneWorkContext) -> bool {
+        match self {
+            Self::PullRequest(url) => context
+                .pr_urls
+                .iter()
+                .any(|bound| bound.eq_ignore_ascii_case(url)),
+            Self::Ticket(id) => context
+                .ticket_ids
+                .iter()
+                .any(|bound| bound.eq_ignore_ascii_case(id)),
+        }
+    }
 }
 
 /// Right-click context menu state.
@@ -2828,7 +2896,7 @@ pub struct ContextMenuState {
 
 impl ContextMenuState {
     pub fn items(&self) -> Vec<&'static str> {
-        match self.kind {
+        match &self.kind {
             ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
@@ -2849,24 +2917,28 @@ impl ContextMenuState {
                 "Close group",
                 "New worktree",
                 "Open worktree...",
-                if collapsed { "Expand" } else { "Collapse" },
+                if *collapsed { "Expand" } else { "Collapse" },
             ],
             ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
+                linkable_work_link,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
-                if has_manual_label {
+                if let Some(link) = linkable_work_link {
+                    items.push(link.menu_item());
+                }
+                if *has_manual_label {
                     items.push("Clear pane name");
                 }
                 if source_pane_id.is_some() {
                     items.push("Swap with focused pane");
                 }
                 items.extend(["Split right", "Split down", "Zoom"]);
-                items.push(if right_click_passthrough {
+                items.push(if *right_click_passthrough {
                     "Use Herdr right-click menu"
                 } else {
                     "Send right-clicks to pane"
@@ -2883,6 +2955,7 @@ pub enum ToastKind {
     NeedsAttention,
     Finished,
     UpdateInstalled,
+    WorkLinked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

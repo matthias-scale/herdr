@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        HomeHitTarget, MenuListState, Mode, RightClickPassthroughGesture, TabPressState,
-        ViewLayout, WorkspacePressState,
+        HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, RightClickPassthroughGesture,
+        TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -1927,6 +1927,14 @@ impl AppState {
                         .is_some();
                     let right_click_passthrough =
                         pane_state.is_some_and(|pane| pane.right_click_passthrough);
+                    let linkable_work_link = self.linkable_work_link_at(
+                        terminal_runtimes,
+                        &info,
+                        mouse.column,
+                        mouse.row,
+                        ws_idx,
+                        tab_idx,
+                    );
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
                             ws_idx,
@@ -1935,6 +1943,7 @@ impl AppState {
                             source_pane_id,
                             has_manual_label,
                             right_click_passthrough,
+                            linkable_work_link,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -2378,6 +2387,62 @@ impl AppState {
                 && row >= p.inner_rect.y
                 && row < p.inner_rect.y + p.inner_rect.height
         })
+    }
+
+    /// Work link under a pane click that is not already bound to its window.
+    ///
+    /// The menu entry only appears when acting on it would change something, so
+    /// a click on a pull request or ticket the whole window already carries
+    /// offers nothing.
+    pub(super) fn linkable_work_link_at(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        col: u16,
+        row: u16,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<PaneMenuWorkLink> {
+        if col < info.inner_rect.x || row < info.inner_rect.y {
+            return None;
+        }
+        let url = self.url_at_pane_cell(
+            terminal_runtimes,
+            info.id,
+            row - info.inner_rect.y,
+            col - info.inner_rect.x,
+        )?;
+        let link = crate::work_context::extract_pr_urls(&url)
+            .into_iter()
+            .next()
+            .map(PaneMenuWorkLink::PullRequest)
+            .or_else(|| {
+                crate::work_context::extract_ticket_ids(&url)
+                    .into_iter()
+                    .next()
+                    .map(PaneMenuWorkLink::Ticket)
+            })?;
+        let bound_everywhere = self
+            .window_pane_ids(ws_idx, tab_idx)
+            .into_iter()
+            .all(|pane_id| {
+                self.workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.pane_state(pane_id))
+                    .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+                    .is_some_and(|terminal| link.is_bound_in(terminal.effective_work_context()))
+            });
+        (!bound_everywhere).then_some(link)
+    }
+
+    /// Panes of one window, in layout order, so a window-wide binding applies
+    /// deterministically.
+    pub(crate) fn window_pane_ids(&self, ws_idx: usize, tab_idx: usize) -> Vec<PaneId> {
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default()
     }
 
     pub(super) fn pane_mouse_target(&self, col: u16, row: u16) -> Option<&PaneInfo> {
@@ -4589,6 +4654,264 @@ mod tests {
         ));
     }
 
+    fn app_with_pane_screen(
+        bytes: &[u8],
+        splits: usize,
+    ) -> (App, Vec<PaneId>, crate::layout::PaneInfo) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        for _ in 0..splits {
+            ws.test_split(Direction::Horizontal);
+        }
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let pane_ids = app.state.window_pane_ids(0, 0);
+        for pane_id in pane_ids.iter().copied() {
+            let info = app.state.pane_info_by_id(pane_id).unwrap().clone();
+            app.state.insert_test_runtime(
+                pane_id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                    info.inner_rect.width,
+                    info.inner_rect.height,
+                    bytes,
+                ),
+            );
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state.terminals.insert(
+                terminal_id.clone(),
+                crate::terminal::TerminalState::new(terminal_id, "/tmp".into()),
+            );
+        }
+        let info = app.state.pane_info_by_id(pane_ids[0]).unwrap().clone();
+        (app, pane_ids, info)
+    }
+
+    fn pane_work_context(app: &App, pane_id: PaneId) -> crate::work_context::PaneWorkContext {
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.terminals[&terminal_id]
+            .effective_work_context()
+            .clone()
+    }
+
+    fn right_click_link(app: &mut App, info: &crate::layout::PaneInfo, line: &str, needle: &str) {
+        let col = line.find(needle).expect("link host") as u16;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            info.inner_rect.x + col,
+            info.inner_rect.y,
+        ));
+    }
+
+    fn click_menu_item(app: &mut App, item: &str) {
+        let item_idx = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("pane context menu")
+            .items()
+            .iter()
+            .position(|candidate| *candidate == item)
+            .expect("menu item");
+        let menu_rect = app.state.context_menu_rect().expect("menu rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 1,
+            menu_rect.y + 1 + item_idx as u16,
+        ));
+    }
+
+    #[tokio::test]
+    async fn right_click_on_pr_url_offers_linking_it_to_the_window() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane {
+                linkable_work_link: Some(PaneMenuWorkLink::PullRequest(url)),
+                ..
+            } if url == "https://github.com/herdrdev/herdr/pull/398"
+        ));
+        assert!(menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn right_click_on_a_ticket_url_offers_linking_the_ticket() {
+        let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "linear");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane {
+                linkable_work_link: Some(PaneMenuWorkLink::Ticket(id)),
+                ..
+            } if id == "SCA-412"
+        ));
+        assert!(menu
+            .items()
+            .contains(&crate::app::state::LINK_TICKET_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn right_click_away_from_a_work_link_offers_no_link_item() {
+        let line = "opened https://github.com/herdrdev/herdr/issues/398 for review";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane {
+                linkable_work_link: None,
+                ..
+            }
+        ));
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn right_click_on_a_pr_the_window_already_carries_offers_no_link_item() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        for pane_id in &panes {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/398".into()]),
+                    ..Default::default()
+                })
+                .expect("link pull request");
+        }
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn a_pr_bound_to_one_pane_only_is_still_offered_for_the_window() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&panes[0]]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/398".into()]),
+                ..Default::default()
+            })
+            .expect("link pull request");
+
+        right_click_link(&mut app, &info, line, "github");
+
+        assert!(app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("pane context menu")
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn clicking_link_pr_binds_the_pull_request_to_every_pane_of_the_window() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        assert_eq!(panes.len(), 2);
+
+        right_click_link(&mut app, &info, line, "github");
+        click_menu_item(&mut app, crate::app::state::LINK_PR_TO_WINDOW_ITEM);
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        for pane_id in panes {
+            assert_eq!(
+                pane_work_context(&app, pane_id).pr_urls,
+                vec!["https://github.com/herdrdev/herdr/pull/398".to_string()]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn linking_a_pull_request_shows_a_toast() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+
+        right_click_link(&mut app, &info, line, "github");
+        click_menu_item(&mut app, crate::app::state::LINK_PR_TO_WINDOW_ITEM);
+
+        let toast = app.state.toast.as_ref().expect("link toast");
+        assert_eq!(toast.kind, crate::app::state::ToastKind::WorkLinked);
+        assert_eq!(toast.title, "linked #398");
+        assert!(
+            toast.context.ends_with(&format!("· {} panes", panes.len())),
+            "unexpected toast context: {}",
+            toast.context
+        );
+        assert!(toast.target.is_none());
+    }
+
+    #[tokio::test]
+    async fn linking_a_ticket_shows_a_toast_naming_the_ticket() {
+        let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "linear");
+        click_menu_item(&mut app, crate::app::state::LINK_TICKET_TO_WINDOW_ITEM);
+
+        let toast = app.state.toast.as_ref().expect("link toast");
+        assert_eq!(toast.title, "linked SCA-412");
+        assert!(
+            toast.context.ends_with("· 1 pane"),
+            "unexpected toast context: {}",
+            toast.context
+        );
+    }
+
+    #[tokio::test]
+    async fn clicking_link_ticket_binds_the_ticket_to_every_pane_of_the_window() {
+        let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+
+        right_click_link(&mut app, &info, line, "linear");
+        click_menu_item(&mut app, crate::app::state::LINK_TICKET_TO_WINDOW_ITEM);
+
+        for pane_id in panes {
+            assert_eq!(
+                pane_work_context(&app, pane_id).ticket_ids,
+                vec!["SCA-412".to_string()]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn pane_right_click_passthrough_falls_back_when_mouse_reporting_is_off() {
         let mut app = app_for_mouse_test();
@@ -5626,6 +5949,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 2,
             y: 2,
