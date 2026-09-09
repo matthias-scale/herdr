@@ -228,6 +228,35 @@ focus_agent = "prefix+alt+1..9"
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
+## Projects
+
+The Home composer can group your checkouts, so choosing where a task runs is a
+two-step pick rather than a typed path. Which repositories belong together is a
+fact about how you work, not about the filesystem, so it has to be configured:
+
+```toml
+[[projects]]
+id = "scalable"
+label = "scalable"
+roots = ["~/Repos/scalable"]
+repos = ["~/Repos/herdr"]
+
+[[projects]]
+id = "personal"
+label = "personal"
+roots = ["~/Projects"]
+```
+
+`roots` names directories whose immediate children are checkouts. `repos` names
+single checkouts, either absolute or relative to `~/Repos`. A directory counts
+as a checkout when it carries a `.git` entry, so linked worktrees are included.
+Scanning is one level deep and happens once, when the config is read.
+
+With no `[[projects]]` configured the composer groups everything under
+`~/Repos`. The project chip appears only when there is more than one group, and
+the repo chip only when the selected group holds at least one checkout.
+Selecting a repo sets the composer's directory.
+
 ## Custom command keybindings
 
 Custom commands use the same keybinding syntax.
