@@ -6523,7 +6523,13 @@ pub(super) fn render_sidebar_filter_menu(app: &AppState, frame: &mut Frame) {
                     .fg(app.palette.subtext0)
                     .bg(app.palette.panel_bg)
             };
-            Line::from(Span::styled(format!("{marker} {}", option.label()), style))
+            Line::from(Span::styled(
+                super::dropdown::pad_menu_row(
+                    &format!("{marker} {}", option.label()),
+                    layout.list_rect.width,
+                ),
+                style,
+            ))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -6559,7 +6565,10 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                format!("{marker} View: {}", mode.view_label()),
+                super::dropdown::pad_menu_row(
+                    &format!("{marker} View: {}", mode.view_label()),
+                    layout.list_rect.width,
+                ),
                 style,
             ))
         })
