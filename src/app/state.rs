@@ -1075,7 +1075,8 @@ impl SidebarWorkFilter {
 
     pub(crate) fn missive_label(&self) -> String {
         format!(
-            "{} · closed {}",
+            "{} · {} · closed {}",
+            self.missive.team.as_deref().unwrap_or("all teams"),
             assignee_filter_label(self.missive.assignee.as_deref()),
             if self.missive.show_closed {
                 "shown"
@@ -1189,6 +1190,14 @@ impl SidebarWorkFilter {
         };
         if conversation.closed && !self.missive.show_closed {
             return false;
+        }
+        if let Some(selected) = self.missive.team.as_deref() {
+            let matches_team = conversation.team.as_ref().is_some_and(|team| {
+                team.name.eq_ignore_ascii_case(selected) || team.id.eq_ignore_ascii_case(selected)
+            });
+            if !matches_team {
+                return false;
+            }
         }
         let Some(selected) = self.missive.assignee.as_deref() else {
             return true;
@@ -1356,6 +1365,7 @@ impl GithubStateFilter {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct MissiveSidebarFilter {
+    pub(crate) team: Option<String>,
     pub(crate) assignee: Option<String>,
     pub(crate) show_closed: bool,
 }
@@ -1363,6 +1373,7 @@ pub(crate) struct MissiveSidebarFilter {
 impl Default for MissiveSidebarFilter {
     fn default() -> Self {
         Self {
+            team: None,
             assignee: Some("me".into()),
             show_closed: false,
         }
@@ -3181,6 +3192,9 @@ pub struct AppState {
     pub(crate) reap_done_after: std::time::Duration,
     pub(crate) reap_done_panes: bool,
     pub(crate) settle_after: std::time::Duration,
+    /// Grace window a finished work reading must survive before the pane
+    /// settles (`session.settle_finished_after_minutes`).
+    pub(crate) settle_finished_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -3229,6 +3243,7 @@ pub struct AppState {
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
+    pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
@@ -4443,6 +4458,7 @@ impl AppState {
         self.sidebar_group_menu_selected = mode.view_index();
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
+        self.sidebar_view_scan_request = true;
         self.sidebar_selected_work_group = None;
         self.sidebar_object_menu = None;
         self.sidebar_selected_settled = None;
@@ -4461,6 +4477,10 @@ impl AppState {
         &mut self,
     ) -> Option<SidebarGroupMode> {
         self.sidebar_group_mode_persistence_request.take()
+    }
+
+    pub(crate) fn take_sidebar_view_scan_request(&mut self) -> bool {
+        std::mem::take(&mut self.sidebar_view_scan_request)
     }
 
     pub(crate) fn set_sidebar_work_filter(&mut self, filter: SidebarWorkFilter) {
@@ -5522,6 +5542,7 @@ impl AppState {
             reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
             reap_done_panes: true,
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
+            settle_finished_after: std::time::Duration::from_secs(10 * 60),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -5555,6 +5576,7 @@ impl AppState {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -7004,6 +7026,7 @@ mod tests {
                 subject: "提交 attachment review".into(),
                 app_url: "https://mail.missiveapp.com/#inbox/conversations/abc".into(),
                 web_url: String::new(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,

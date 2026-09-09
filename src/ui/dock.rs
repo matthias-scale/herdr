@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn f27_collapsed_dock_hosts_rich_ticket_preview_in_the_pane_area() {
+    fn f27_collapsed_dock_stays_collapsed_when_unassigned_ticket_opens_home() {
         let mut app = crate::ui::sidebar_work_item_fixture();
         app.sidebar_group_mode = crate::app::state::SidebarGroupMode::LinearTeam;
         app.dock_collapsed = true;
@@ -433,25 +433,16 @@ mod tests {
         app.dock_tab = Some(DockSurface::Linear);
         app.dock_active_tab_index = Some(0);
         assert!(app.open_sidebar_unassigned_object("linear:OPS-12"));
-        let area = Rect::new(0, 0, 70, 20);
-        let mut terminal =
-            Terminal::new(TestBackend::new(area.width, area.height)).expect("preview terminal");
-
-        terminal
-            .draw(|frame| render_object_preview(&app, frame, area))
-            .expect("render centre preview");
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
 
         assert!(app.dock_collapsed);
         assert_eq!(app.dock_tab_label(0), "SCA-3165");
-        assert!(text.contains("OPS-12"), "{text:?}");
-        assert!(text.contains("pixel EMQ drop"), "{text:?}");
-        assert!(text.contains("Start thread"), "{text:?}");
+        assert!(app.dock_object_preview.is_none());
+        assert_eq!(
+            app.home
+                .as_ref()
+                .and_then(|home| home.ticket.as_ref())
+                .map(|ticket| (ticket.identifier.as_str(), ticket.title.as_str())),
+            Some(("OPS-12", "pixel EMQ drop"))
+        );
     }
 }

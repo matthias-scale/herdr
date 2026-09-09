@@ -27,13 +27,10 @@ fn work_context_settlement_key(
                 .as_deref()
                 .is_some_and(|url| url.eq_ignore_ascii_case(primary))
                 .then_some(())?;
-            (state_is(Some(state), "merged") || state_is(Some(state), "closed")).then(|| {
-                format!(
-                    "pr:{}:{}",
-                    primary.to_ascii_lowercase(),
-                    state.to_ascii_lowercase()
-                )
-            })
+            // A closed, unmerged pull request usually means work continues.
+            // Only merging makes the pull request a settlement candidate.
+            state_is(Some(state), "merged")
+                .then(|| format!("pr:{}:merged", primary.to_ascii_lowercase()))
         })
     });
     if pr_done.is_some() {
@@ -189,28 +186,57 @@ impl AppState {
     ) -> usize {
         let mut candidates = Vec::new();
         let mut observed_work_keys = Vec::new();
+        let mut arm_writes = Vec::new();
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
                     if pane.settled_at.is_some() {
                         continue;
                     }
-                    let Some(context) = self
-                        .terminals
-                        .get(&pane.attached_terminal_id)
-                        .map(crate::terminal::TerminalState::effective_work_context)
-                    else {
+                    let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
+                    let state = terminal.sidebar_projection(pane.seen).0;
+                    let open_blockers = !terminal.closing_gates.is_empty();
+                    if crate::terminal::counts_as_blocked(
+                        state,
+                        open_blockers,
+                        terminal.usage_limited,
+                    ) {
+                        // Settling suspends the agent and would bury an
+                        // unanswered question. A blocking pane is never a
+                        // settle candidate, no matter how old the work reads.
+                        continue;
+                    }
+                    let context = terminal.effective_work_context();
                     let work_key = work_context_settlement_key(context, snapshot);
                     let new_work_trigger = work_key
                         .as_ref()
                         .is_some_and(|key| pane.settled_work_key.as_ref() != Some(key));
-                    observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
-                    let inactive = self.auto_settle_inactive
-                        && pane.activity.inactive_for(now) >= self.settle_after;
+                    let quiet_for = pane.activity.inactive_for(now);
+                    let inactive = self.auto_settle_inactive && quiet_for >= self.settle_after;
                     let new_work_trigger = self.auto_settle_finished && new_work_trigger;
-                    if pane.settled_at.is_none() && (inactive || new_work_trigger) {
+                    // A finished reading is evidence, not a verdict. A pull
+                    // request reads merged while its agent works the follow-up,
+                    // and a ticket can be moved to done by someone else. So the
+                    // reading has to survive `settle_finished_after` with the
+                    // pane quiet before it settles: settling stops the agent,
+                    // which costs far more than waiting out a wrong reading.
+                    let finished_since = pane.finished_since.unwrap_or(now);
+                    let finished_ripe = now.saturating_duration_since(finished_since)
+                        >= self.settle_finished_after
+                        && quiet_for >= self.settle_finished_after;
+                    let holding = new_work_trigger && !finished_ripe;
+                    let armed = holding.then_some(finished_since);
+                    if pane.finished_since != armed {
+                        arm_writes.push((ws_idx, *pane_id, armed));
+                    }
+                    // Recording the observed key consumes the one-shot trigger,
+                    // so it must wait until the grace window resolves.
+                    if !holding {
+                        observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
+                    }
+                    if inactive || (new_work_trigger && finished_ripe) {
                         candidates.push((ws_idx, *pane_id, work_key));
                     }
                 }
@@ -224,6 +250,15 @@ impl AppState {
                 .find_map(|tab| tab.panes.get_mut(pane_id))
             {
                 pane.settled_work_key.clone_from(work_key);
+            }
+        }
+        for (ws_idx, pane_id, armed) in &arm_writes {
+            if let Some(pane) = self.workspaces[*ws_idx]
+                .tabs
+                .iter_mut()
+                .find_map(|tab| tab.panes.get_mut(pane_id))
+            {
+                pane.finished_since = *armed;
             }
         }
         for (ws_idx, pane_id, _) in &candidates {
@@ -517,43 +552,204 @@ mod tests {
     }
 
     #[test]
-    fn primary_pr_merged_or_closed_settles_and_input_unsettles() {
-        for pr_state in ["merged", "closed"] {
-            let url = "https://github.com/owner/repo/pull/7";
-            let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
-                pr_urls: vec![url.into()],
-                ..Default::default()
-            });
-            let mut first_item = item();
-            first_item.pr_url = Some(url.into());
-            first_item.pr_state = Some(pr_state.into());
+    fn primary_pr_merged_settles_and_input_unsettles() {
+        let url = "https://github.com/owner/repo/pull/7";
+        let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![url.into()],
+            ..Default::default()
+        });
+        let mut first_item = item();
+        first_item.pr_url = Some(url.into());
+        first_item.pr_state = Some("merged".into());
 
-            assert_eq!(
-                state.refresh_settled_panes_at(
-                    Some(&snapshot(first_item)),
-                    Instant::now(),
-                    1_725_000_000
-                ),
-                1
-            );
-            assert!(state.pane_is_settled(0, pane_id));
-            assert!(state.note_pane_activity_at(pane_id, Instant::now()));
-            assert!(!state.pane_is_settled(0, pane_id));
-            assert_eq!(
-                state.refresh_settled_panes_at(
-                    Some(&snapshot({
-                        let mut item = item();
-                        item.pr_url = Some(url.into());
-                        item.pr_state = Some(pr_state.into());
-                        item
-                    })),
-                    Instant::now(),
-                    1_725_000_001
-                ),
-                0,
-                "resuming completed work must consume the trigger"
-            );
-        }
+        let now = Instant::now();
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&snapshot(first_item.clone())), now, 1_725_000_000),
+            0,
+            "a finished pull request arms the grace window instead of settling"
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(first_item)),
+                now + state.settle_finished_after,
+                1_725_000_000
+            ),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
+        assert!(state.note_pane_activity_at(pane_id, Instant::now()));
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot({
+                    let mut item = item();
+                    item.pr_url = Some(url.into());
+                    item.pr_state = Some("merged".into());
+                    item
+                })),
+                Instant::now(),
+                1_725_000_001
+            ),
+            0,
+            "resuming completed work must consume the trigger"
+        );
+    }
+
+    #[test]
+    fn primary_pr_closed_without_merge_never_settles() {
+        let url = "https://github.com/owner/repo/pull/7";
+        let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![url.into()],
+            ..Default::default()
+        });
+        state.auto_settle_inactive = false;
+        let mut closed_item = item();
+        closed_item.pr_url = Some(url.into());
+        closed_item.pr_state = Some("closed".into());
+
+        let now = Instant::now();
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(closed_item.clone())),
+                now,
+                1_725_000_000
+            ),
+            0
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(closed_item)),
+                now + state.settle_finished_after * 3,
+                1_725_000_001
+            ),
+            0
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn blocked_pane_with_merged_pr_waits_for_a_fresh_grace_window() {
+        let url = "https://github.com/owner/repo/pull/7";
+        let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![url.into()],
+            ..Default::default()
+        });
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Blocked);
+        state.settle_after = Duration::ZERO;
+        let mut merged_item = item();
+        merged_item.pr_url = Some(url.into());
+        merged_item.pr_state = Some("merged".into());
+
+        let now = Instant::now();
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(merged_item.clone())),
+                now,
+                1_725_000_000
+            ),
+            0
+        );
+        let after_old_deadline = now + state.settle_finished_after * 3;
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(merged_item.clone())),
+                after_old_deadline,
+                1_725_000_001
+            ),
+            0
+        );
+        let pane = &state.workspaces[0].tabs[0].panes[&pane_id];
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert!(pane.finished_since.is_none());
+        assert!(pane.settled_work_key.is_none());
+
+        state.auto_settle_inactive = false;
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Idle);
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(merged_item.clone())),
+                after_old_deadline,
+                1_725_000_002
+            ),
+            0,
+            "unblocking starts the normal grace window"
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(merged_item)),
+                after_old_deadline + state.settle_finished_after,
+                1_725_000_003
+            ),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn finished_reading_that_disappears_during_the_grace_window_revokes_the_trigger() {
+        let url = "https://github.com/owner/repo/pull/7";
+        let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![url.into()],
+            ..Default::default()
+        });
+        let merged = || {
+            let mut item = item();
+            item.pr_url = Some(url.into());
+            item.pr_state = Some("merged".into());
+            item
+        };
+        let open = || {
+            let mut item = item();
+            item.pr_url = Some(url.into());
+            item.pr_state = Some("open".into());
+            item
+        };
+
+        let now = Instant::now();
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&snapshot(merged())), now, 1_725_000_000),
+            0
+        );
+        // The reading is revoked mid-window: the pane must never settle for it.
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(open())),
+                now + state.settle_finished_after / 2,
+                1_725_000_001
+            ),
+            0
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+
+        // A fresh finished reading arms a fresh window rather than inheriting
+        // the revoked one.
+        let restart = now + state.settle_finished_after;
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&snapshot(merged())), restart, 1_725_000_002),
+            0
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(merged())),
+                restart + state.settle_finished_after,
+                1_725_000_003
+            ),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
     }
 
     #[test]
@@ -565,8 +761,18 @@ mod tests {
         let mut item = item();
         item.ticket_ids = vec!["SCA-42".into()];
         item.ticket_state = Some("Done".into());
+        let now = Instant::now();
         assert_eq!(
-            state.refresh_settled_panes_at(Some(&snapshot(item)), Instant::now(), 1_725_000_001),
+            state.refresh_settled_panes_at(Some(&snapshot(item.clone())), now, 1_725_000_001),
+            0,
+            "a done ticket arms the grace window instead of settling"
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(item)),
+                now + state.settle_finished_after,
+                1_725_000_001
+            ),
             1
         );
 
@@ -585,6 +791,72 @@ mod tests {
             })
             .expect("agent state transition");
         assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn revoked_finished_reading_requires_a_fresh_grace_window() {
+        let url = "https://github.com/owner/repo/pull/7";
+        let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![url.into()],
+            ..Default::default()
+        });
+        let mut finished_item = item();
+        finished_item.pr_url = Some(url.into());
+        finished_item.pr_state = Some("merged".into());
+        let mut unfinished_item = finished_item.clone();
+        unfinished_item.pr_state = Some("open".into());
+        let now = Instant::now();
+        let old_deadline = now + state.settle_finished_after;
+
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(finished_item.clone())),
+                now,
+                1_725_000_001
+            ),
+            0
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(unfinished_item.clone())),
+                now + state.settle_finished_after / 2,
+                1_725_000_002
+            ),
+            0
+        );
+        assert!(state.workspaces[0].tabs[0].panes[&pane_id]
+            .finished_since
+            .is_none());
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(unfinished_item)),
+                old_deadline,
+                1_725_000_003
+            ),
+            0,
+            "revoked finished work must stay unsettled past the old deadline"
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+
+        let rearmed_at = old_deadline + Duration::from_secs(1);
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(finished_item.clone())),
+                rearmed_at,
+                1_725_000_004
+            ),
+            0,
+            "a fresh finished reading re-arms the grace window"
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&snapshot(finished_item)),
+                rearmed_at + state.settle_finished_after,
+                1_725_000_005
+            ),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
     }
 
     #[test]

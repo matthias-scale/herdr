@@ -175,6 +175,7 @@ const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
 const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
+const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
 
 fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
@@ -284,7 +285,7 @@ fn sidebar_tab_title(
     let Some(crate::workspace::TabDisplayProjection::Derived {
         agent,
         ticket,
-        binding,
+        binding: _,
         title,
     }) = projection
     else {
@@ -296,7 +297,9 @@ fn sidebar_tab_title(
             .or_else(|| Some(title.to_string())),
         (_, title) => title.map(str::to_string),
     };
-    let label = [ticket.clone(), binding.clone(), normalized_title]
+    // Worktree identity belongs to the Spaces and Repo group headers. Agent
+    // rows use the work object and session title only.
+    let label = [ticket.clone(), normalized_title]
         .into_iter()
         .flatten()
         .filter(|part| !part.trim().is_empty())
@@ -435,7 +438,7 @@ fn compact_row_widths(
     let provider = compact_provider_field_width(provider);
     let title_width = display_width(title);
     let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
-    let minimum_prefix_width = usize::from(requested_prefix > 0);
+    let minimum_prefix_width = requested_prefix.min(SIDEBAR_MIN_NESTED_PREFIX_WIDTH);
     let age = if width
         >= SIDEBAR_DOT_FIELD_WIDTH
             + provider
@@ -459,7 +462,7 @@ fn compact_row_widths(
                 + readable_title_width
                 + minimum_prefix_width;
     let prefix = requested_prefix.min(if preserve_nested_prefix {
-        prefix_budget.max(1)
+        prefix_budget.max(minimum_prefix_width)
     } else {
         prefix_budget
     });
@@ -1504,7 +1507,10 @@ fn compact_sidebar_rows_inner(
     }
     let mut rows = Vec::new();
     append_recently_done_rows(app, &mut rows, recently_done);
-    if app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
+    // A Space is a folder, so this separation must hold even when no pane
+    // resolved a repository.
+    if app.sidebar_group_mode == SidebarGroupMode::Spaces
+        || app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
         || (app.sidebar_group_mode == SidebarGroupMode::Repo
             && !visible_entries
                 .iter()
@@ -1518,10 +1524,11 @@ fn compact_sidebar_rows_inner(
         return rows;
     }
     match app.sidebar_group_mode {
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
             append_repo_group_rows(app, &mut rows, &visible_entries, false);
             append_unassigned_rows(app, &mut rows, &visible_entries);
         }
+        SidebarGroupMode::Spaces => {}
         SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
@@ -1581,7 +1588,12 @@ fn append_legacy_space_rows(
             continue;
         }
         let mut member_entries = Vec::new();
-        for member_idx in sidebar_space_member_indices(app, ws_idx) {
+        let member_indices = if app.sidebar_group_mode == SidebarGroupMode::Spaces {
+            vec![ws_idx]
+        } else {
+            sidebar_space_member_indices(app, ws_idx)
+        };
+        for member_idx in member_indices {
             if let Some(entries) = entries_by_workspace.remove(&member_idx) {
                 member_entries.extend(entries);
             }
@@ -1628,12 +1640,11 @@ fn entry_repo_group(app: &AppState, entry: &AgentPanelEntry) -> Option<(String, 
         .map(str::trim)
         .filter(|repo| !repo.is_empty())
     {
-        let title = repo
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .filter(|title| !title.is_empty())?
-            .to_string();
+        let title = repo.trim_end_matches('/');
+        if title.is_empty() {
+            return None;
+        }
+        let title = title.to_string();
         return Some((format!("repo:{repo}"), title));
     }
     if let Some(root) = entry_terminal(app, entry)
@@ -2097,6 +2108,7 @@ pub(crate) struct SidebarWorkGroupActivation {
     pub(crate) git_ref: Option<crate::app::home_refs::HomeRef>,
     pub(crate) pr: Option<crate::app::home::HomePrContext>,
     pub(crate) ticket: Option<crate::app::home::HomeTicketContext>,
+    pub(crate) missive: Option<crate::app::home::HomeMissiveContext>,
     pub(crate) work_context_patch: crate::work_context::PaneWorkContextPatch,
 }
 
@@ -2210,6 +2222,7 @@ fn ticket_activation(
                 .unwrap_or_else(|| "(untitled ticket)".into()),
             url: object_link,
         }),
+        missive: None,
         work_context_patch: crate::work_context::PaneWorkContextPatch {
             ticket_ids: Some(vec![row.ticket.identifier.clone()]),
             repo,
@@ -2218,6 +2231,47 @@ fn ticket_activation(
             ..Default::default()
         },
     }
+}
+
+fn sidebar_linear_ticket_rows(app: &AppState) -> Vec<crate::work_projection::DockHomeTicketRow> {
+    let mut rows = app.dock_home_projection().ticket_rows;
+    for item in app
+        .work_index_snapshot
+        .as_ref()
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+    {
+        for ticket in &item.ticket_details {
+            if let Some(row) = rows.iter_mut().find(|row| {
+                row.ticket
+                    .identifier
+                    .eq_ignore_ascii_case(&ticket.identifier)
+            }) {
+                if row.linked_pr_url.is_none() {
+                    row.linked_pr_url.clone_from(&item.pr_url);
+                }
+                continue;
+            }
+            rows.push(crate::work_projection::DockHomeTicketRow {
+                key: crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(ticket.identifier.clone()),
+                },
+                ticket: ticket.clone(),
+                linked_pr_url: item.pr_url.clone(),
+                jump_target: None,
+            });
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.ticket
+            .identifier
+            .to_ascii_lowercase()
+            .cmp(&right.ticket.identifier.to_ascii_lowercase())
+    });
+    rows
 }
 
 /// Where a thread for this ticket should start: the checkout of a pane already
@@ -2519,6 +2573,21 @@ fn push_unlinked_entry(app: &AppState, groups: &mut Vec<SidebarWorkGroup>, entry
     }
 }
 
+fn push_linear_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
+    match work_group_index(groups, UNLINKED_GROUP_KEY) {
+        Some(index) => groups[index].entries.push(entry),
+        None => groups.push(SidebarWorkGroup {
+            key: UNLINKED_GROUP_KEY.into(),
+            title: "unlinked".into(),
+            entries: vec![entry],
+            unlinked: true,
+            status: None,
+            created_at: None,
+            activation: None,
+        }),
+    }
+}
+
 /// Group panes by the work item they are bound to, joined with the work items
 /// the projection knows about. Work items without a pane stay in the list; the
 /// caller renders them dim. Linked groups keep projection or first-seen order,
@@ -2562,7 +2631,7 @@ pub(crate) fn sidebar_work_groups(
         }
     }
     if mode == SidebarGroupMode::LinearTeam {
-        for row in app.dock_home_projection().ticket_rows {
+        for row in sidebar_linear_ticket_rows(app) {
             if !labels_match_sidebar_query(&row.ticket.labels, &app.sidebar_work_filter.query) {
                 continue;
             }
@@ -2629,6 +2698,11 @@ pub(crate) fn sidebar_work_groups(
                     git_ref: None,
                     pr: None,
                     ticket: None,
+                    missive: Some(crate::app::home::HomeMissiveContext {
+                        app_url: conversation.app_url.clone(),
+                        web_url: conversation.web_url.clone(),
+                        subject: conversation.subject.clone(),
+                    }),
                     work_context_patch: crate::work_context::PaneWorkContextPatch {
                         missive_urls: Some(vec![url.to_string()]),
                         work_title: Some(conversation.subject.clone()),
@@ -2691,7 +2765,7 @@ pub(crate) fn sidebar_work_groups(
                 let ticket_ids = preferred_ticket_ids(app, &entry);
                 if ticket_ids.is_empty() {
                     if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
-                        push_unlinked_entry(app, &mut groups, entry);
+                        push_linear_unlinked_entry(&mut groups, entry);
                     }
                     continue;
                 }
@@ -2770,6 +2844,13 @@ pub(crate) fn sidebar_work_groups(
                                     git_ref: None,
                                     pr: None,
                                     ticket: None,
+                                    missive: conversation.map(|conversation| {
+                                        crate::app::home::HomeMissiveContext {
+                                            app_url: conversation.app_url.clone(),
+                                            web_url: conversation.web_url.clone(),
+                                            subject: conversation.subject.clone(),
+                                        }
+                                    }),
                                     work_context_patch: crate::work_context::PaneWorkContextPatch {
                                         missive_urls: Some(vec![group_url.to_string()]),
                                         work_title: Some(missive_subject(app, group_url)),
@@ -2877,6 +2958,7 @@ fn github_activation(
             repo: item.repo.clone(),
         }),
         ticket: None,
+        missive: None,
         work_context_patch: crate::work_context::PaneWorkContextPatch {
             pr_urls: Some(vec![url.to_string()]),
             repo: Some(item.repo.clone()),
@@ -3006,6 +3088,7 @@ pub(crate) fn sidebar_unassigned_objects(
                             git_ref: None,
                             pr: None,
                             ticket: None,
+                            missive: None,
                             work_context_patch: crate::work_context::PaneWorkContextPatch {
                                 repo: Some(repo),
                                 ..Default::default()
@@ -3140,33 +3223,6 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
     }
 }
 
-/// Resolve a provider row into the object identity used by dock tabs and the
-/// centre preview. Repository rows have no object surface.
-pub(crate) fn sidebar_unassigned_dock_object(
-    app: &AppState,
-    key: &str,
-) -> Option<crate::app::state::DockObjectRef> {
-    let entries = sidebar_thread_entries(app);
-    let object = sidebar_unassigned_objects(app, &entries, app.sidebar_group_mode)
-        .into_iter()
-        .find(|object| object.key == key)?;
-    let (surface, key) = match app.sidebar_group_mode {
-        SidebarGroupMode::LinearTeam => (
-            crate::app::DockSurface::Linear,
-            object.key.strip_prefix("linear:")?.to_string(),
-        ),
-        SidebarGroupMode::RepoPr => (crate::app::DockSurface::Pr, object.activation.object_link),
-        SidebarGroupMode::Missive => (
-            crate::app::DockSurface::Missive,
-            object.activation.object_link,
-        ),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
-            return None
-        }
-    };
-    Some(crate::app::state::DockObjectRef { surface, key })
-}
-
 fn unassigned_empty_text(app: &AppState) -> String {
     let ownership_label = |ownership: crate::app::state::WorkOwnershipFilter,
                            authored: &'static str,
@@ -3245,6 +3301,7 @@ pub(crate) enum SidebarFilterOption {
     GithubOwnership(crate::app::state::WorkOwnershipFilter),
     GithubDrafts(bool),
     GithubState(crate::app::state::GithubStateFilter),
+    MissiveTeam(Option<String>),
     MissiveAssignee(Option<String>),
     MissiveClosed(bool),
 }
@@ -3269,6 +3326,8 @@ impl SidebarFilterOption {
                 format!("{} show drafts", if *shown { "[x]" } else { "[ ]" })
             }
             Self::GithubState(state) => format!("state: {}", state.label()),
+            Self::MissiveTeam(None) => "team: all".into(),
+            Self::MissiveTeam(Some(team)) => format!("team: {team}"),
             Self::MissiveAssignee(None) => "assignee: all".into(),
             Self::MissiveAssignee(Some(assignee)) => format!("assignee: {assignee}"),
             Self::MissiveClosed(shown) => {
@@ -3281,9 +3340,7 @@ impl SidebarFilterOption {
 pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption> {
     match app.sidebar_group_mode {
         SidebarGroupMode::LinearTeam => {
-            let projection = app.dock_home_projection();
-            let mut teams = projection
-                .ticket_rows
+            let mut teams = sidebar_linear_ticket_rows(app)
                 .iter()
                 .filter_map(|row| ticket_team(&row.ticket.identifier))
                 .collect::<Vec<_>>();
@@ -3354,10 +3411,28 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
             options
         }
         SidebarGroupMode::Missive => {
-            let mut options = vec![
+            let mut teams = app
+                .work_index_snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|snapshot| snapshot.conversations.iter())
+                .filter_map(|conversation| conversation.team.as_ref().map(|team| team.name.clone()))
+                .collect::<Vec<_>>();
+            if let Some(team) = app.sidebar_work_filter.missive.team.clone() {
+                teams.push(team);
+            }
+            teams.sort();
+            teams.dedup();
+            let mut options = vec![SidebarFilterOption::MissiveTeam(None)];
+            options.extend(
+                teams
+                    .into_iter()
+                    .map(|team| SidebarFilterOption::MissiveTeam(Some(team))),
+            );
+            options.extend([
                 SidebarFilterOption::MissiveAssignee(Some("me".into())),
                 SidebarFilterOption::MissiveAssignee(None),
-            ];
+            ]);
             options.extend(
                 app.work_index_session
                     .missive
@@ -6523,7 +6598,13 @@ pub(super) fn render_sidebar_filter_menu(app: &AppState, frame: &mut Frame) {
                     .fg(app.palette.subtext0)
                     .bg(app.palette.panel_bg)
             };
-            Line::from(Span::styled(format!("{marker} {}", option.label()), style))
+            Line::from(Span::styled(
+                super::dropdown::pad_menu_row(
+                    &format!("{marker} {}", option.label()),
+                    layout.list_rect.width,
+                ),
+                style,
+            ))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -6559,7 +6640,10 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                format!("{marker} View: {}", mode.view_label()),
+                super::dropdown::pad_menu_row(
+                    &format!("{marker} View: {}", mode.view_label()),
+                    layout.list_rect.width,
+                ),
                 style,
             ))
         })
@@ -7993,7 +8077,7 @@ pub(crate) mod tests {
             app.status_indicators,
         );
 
-        assert_eq!(display_width(&linked_layout.title), 10);
+        assert_eq!(display_width(&linked_layout.title), 9);
         assert_eq!(
             display_width(&unlinked_layout.title),
             display_width(&linked_layout.title),
@@ -10523,7 +10607,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "  ●  sample-linear pi  2m");
+        assert_eq!(nested_ticket, "   ●  sample-line… pi  2m");
 
         let area = Rect::new(0, 0, 80, 12);
         let cards = compute_tab_card_areas(&app, area);
@@ -10674,17 +10758,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|row| row.contains("sample-"))
             .collect::<Vec<_>>();
         assert_eq!(rendered_rows.len(), 4, "{rendered_rows:#?}");
-        for expected_title in [
-            "sample-linear",
-            "sample-pr",
-            "sample-missive",
-            "sample-settled",
-        ] {
+        for expected_title in ["sample-line", "sample-pr", "sample-miss", "sample-sett"] {
             let row = rendered_rows
                 .iter()
                 .find(|row| row.contains(expected_title))
-                .expect("full seeded title");
-            assert_eq!(row.find('●'), Some(1), "{row:?}");
+                .expect("readable seeded title fragment");
+            assert_eq!(row.find('●'), Some(3), "{row:?}");
         }
     }
 
@@ -11646,6 +11725,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             subject: subject.into(),
             app_url: url.into(),
             web_url: url.into(),
+            team: None,
             assignees: Vec::new(),
             last_activity_at: None,
             closed: false,
@@ -11819,9 +11899,40 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 // The two-ticket pane is listed under both of its tickets.
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
-                (unlinked_bucket_title(), 1, false),
+                ("unlinked".to_string(), 1, false),
                 ("OPS-12 · pixel EMQ drop".to_string(), 0, true),
             ]
+        );
+    }
+
+    #[test]
+    fn linear_ticketless_panes_share_one_unlinked_bucket() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        for (workspace, cwd) in app.workspaces.iter().zip(["/work/alpha", "/work/beta"]) {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().cwd = cwd.into();
+        }
+
+        let groups = sidebar_work_groups(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::LinearTeam,
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (
+                    group.key.as_str(),
+                    group.title.as_str(),
+                    group.entries.len()
+                ))
+                .collect::<Vec<_>>(),
+            [("unlinked", "unlinked", 2)]
         );
     }
 
@@ -11944,7 +12055,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn indexed_missive_conversation_without_pane_is_dim_and_enter_previews() {
+    fn indexed_missive_conversation_without_pane_is_dim_and_enter_opens_home() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = sidebar_work_item_fixture();
@@ -11982,14 +12093,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
             crate::app::SidebarWorkGroupKeyAction::Consumed
         ));
-        assert!(app.home.is_none());
+        let home = app
+            .home
+            .as_ref()
+            .expect("conversation-linked Home composer");
         assert_eq!(
-            app.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Missive,
-                key: CONVERSATION_C.into(),
-            })
+            home.missive
+                .as_ref()
+                .map(|conversation| conversation.web_url.as_str()),
+            Some(CONVERSATION_C)
         );
+        assert!(app.dock_object_preview.is_none());
     }
 
     #[test]
@@ -12094,7 +12208,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
-                unlinked_bucket_title().as_str(),
+                "unlinked",
             ]
         );
 
@@ -12107,7 +12221,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("SCA-3102 · annual credits".to_string(), 1, false),
                 ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
-                (unlinked_bucket_title(), 1, false),
+                ("unlinked".to_string(), 1, false),
             ]
         );
     }
@@ -12311,6 +12425,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .map(|option| option.label())
                 .collect::<Vec<_>>(),
             [
+                "team: all",
                 "assignee: me",
                 "assignee: all",
                 "assignee: Ada",
@@ -12536,7 +12651,70 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::app::state::GithubStateFilter::Open
         );
         assert_eq!(filters.missive.assignee.as_deref(), Some("me"));
+        assert_eq!(filters.missive.team, None);
         assert!(!filters.missive.show_closed);
+    }
+
+    #[test]
+    fn missive_team_filter_uses_observed_and_selected_teams_and_persists() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let mut support = missive_conversation("support", "Support request", CONVERSATION_A);
+        support.team = Some(crate::work_index::MissiveTeam {
+            id: "team-support".into(),
+            name: "Support".into(),
+            organization: Some("organization-example".into()),
+        });
+        let mut billing = missive_conversation("billing", "Billing request", CONVERSATION_B);
+        billing.team = Some(crate::work_index::MissiveTeam {
+            id: "team-billing".into(),
+            name: "Billing".into(),
+            organization: Some("organization-example".into()),
+        });
+        app.work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .conversations = vec![support.clone(), billing.clone()];
+        app.sidebar_work_filter.missive.team = Some("Escalations".into());
+        app.sidebar_work_filter.missive.assignee = None;
+
+        let options = sidebar_filter_options(&app);
+        assert_eq!(
+            options
+                .iter()
+                .filter_map(|option| match option {
+                    SidebarFilterOption::MissiveTeam(team) => Some(team.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                None,
+                Some("Billing".into()),
+                Some("Escalations".into()),
+                Some("Support".into()),
+            ]
+        );
+
+        let support_option = options
+            .iter()
+            .position(|option| *option == SidebarFilterOption::MissiveTeam(Some("Support".into())))
+            .expect("Support team option");
+        app.select_sidebar_filter_option(support_option);
+        assert!(app
+            .sidebar_work_filter
+            .matches_missive_conversation(Some(&support), &app.work_index_session));
+        assert!(!app
+            .sidebar_work_filter
+            .matches_missive_conversation(Some(&billing), &app.work_index_session));
+        assert_eq!(
+            app.sidebar_work_filter.missive_label(),
+            "Support · all · closed hidden"
+        );
+        assert_eq!(
+            app.take_sidebar_work_filter_persistence_request()
+                .and_then(|filter| filter.missive.team),
+            Some("Support".into())
+        );
     }
 
     #[test]
@@ -12555,7 +12733,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
-                unlinked_bucket_title().as_str(),
+                "unlinked",
             ]
         );
 
@@ -12651,7 +12829,39 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f27_enter_on_no_agent_yet_rows_opens_centre_preview_without_a_pane() {
+    fn linear_no_agent_yet_includes_ticket_linked_to_pull_request() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("repo")];
+        app.ensure_test_terminals();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter.team = None;
+        app.sidebar_work_filter.assignee = None;
+        let mut ticket = work_ticket("SCA-9999", "linked without agent", "jacob", &[]);
+        ticket.url = Some("https://linear.app/scalable/issue/SCA-9999".into());
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: vec![work_item("scalable-so/herdr", Some(42), vec![ticket])],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        });
+
+        let objects = sidebar_unassigned_objects(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::LinearTeam,
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].key, "linear:SCA-9999");
+        assert_eq!(objects[0].title, "SCA-9999 · linked without agent");
+        assert_eq!(
+            objects[0].activation.work_context_patch.repo.as_deref(),
+            Some("scalable-so/herdr")
+        );
+    }
+
+    #[test]
+    fn f27_enter_on_no_agent_yet_rows_opens_linked_home_without_a_pane() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -12676,18 +12886,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 vec![unassigned_ticket],
             ));
         app.sidebar_selected_work_group = Some("linear:SCA-9999".into());
+        let pane_count = app.workspaces[0].tabs[0].panes.len();
         assert!(matches!(
             app.handle_sidebar_work_group_key(enter),
             SidebarWorkGroupKeyAction::Consumed
         ));
         assert_eq!(app.sidebar_selected_work_group, None);
-        assert!(app.home.is_none());
+        assert_eq!(app.workspaces[0].tabs[0].panes.len(), pane_count);
+        assert!(app.dock_object_preview.is_none());
+        let home = app.home.as_ref().expect("linked Home composer");
+        assert!(home.prompt.contains("SCA-9999: unassigned"));
         assert_eq!(
-            app.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Linear,
-                key: "SCA-9999".into(),
-            })
+            home.ticket
+                .as_ref()
+                .map(|ticket| ticket.identifier.as_str()),
+            Some("SCA-9999")
+        );
+        let plan = home.dispatch_plan().expect("prefilled Home dispatch plan");
+        assert_eq!(
+            plan.work_context_patch.ticket_ids,
+            Some(vec!["SCA-9999".into()])
+        );
+        assert_eq!(
+            plan.work_context_patch.work_title.as_deref(),
+            Some("unassigned")
         );
 
         app.sidebar_group_mode = SidebarGroupMode::Missive;
@@ -12701,17 +12923,65 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_work_group_key(enter),
             SidebarWorkGroupKeyAction::Consumed
         ));
+        let home = app.home.as_ref().expect("Missive-linked Home composer");
         assert_eq!(
-            app.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Missive,
-                key: CONVERSATION_C.into(),
-            })
+            home.missive
+                .as_ref()
+                .map(|conversation| conversation.web_url.as_str()),
+            Some(CONVERSATION_C)
+        );
+        assert_eq!(
+            home.dispatch_plan()
+                .expect("prefilled Missive plan")
+                .work_context_patch,
+            crate::work_context::PaneWorkContextPatch {
+                missive_urls: Some(vec![CONVERSATION_C.into()]),
+                work_title: Some("new lead".into()),
+                ..Default::default()
+            }
+        );
+
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.sidebar_work_filter.github.assignee = None;
+        let github = app
+            .work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .items
+            .iter_mut()
+            .find(|item| item.pr_number == Some(159))
+            .expect("pull request fixture");
+        github.source.github = true;
+        github.pr_title = Some("sidebar review".into());
+        app.sidebar_selected_work_group =
+            Some("github:https://github.com/scalable-so/herdr/pull/159".into());
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(enter),
+            SidebarWorkGroupKeyAction::Consumed
+        ));
+        let home = app
+            .home
+            .as_ref()
+            .expect("pull-request-linked Home composer");
+        assert_eq!(
+            home.pr.as_ref().map(|pr| (pr.repo.as_str(), pr.number)),
+            Some(("scalable-so/herdr", 159))
+        );
+        assert_eq!(
+            home.directory,
+            std::path::PathBuf::from("/tmp/herdr-fixture/herdr")
+        );
+        assert_eq!(
+            home.dispatch_plan()
+                .expect("prefilled pull request plan")
+                .work_context_patch
+                .pr_urls,
+            Some(vec!["https://github.com/scalable-so/herdr/pull/159".into()])
         );
     }
 
     #[test]
-    fn f27_enter_on_no_agent_yet_row_opens_an_object_tab_when_dock_is_open() {
+    fn f27_enter_on_no_agent_yet_row_opens_home_when_dock_is_open() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -12733,12 +13003,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarWorkGroupKeyAction::Consumed
         ));
         assert_eq!(app.workspaces[0].tabs[0].panes.len(), pane_count);
-        assert!(app.home.is_none());
-        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Linear));
-        assert_eq!(app.dock_tab_label(0), "SCA-9999");
+        assert!(app.home.is_some());
+        assert!(app.dock_object_preview.is_none());
         assert_eq!(
-            app.active_dock_object(crate::app::DockSurface::Linear)
-                .map(|object| object.key.as_str()),
+            app.home
+                .as_ref()
+                .and_then(|home| home.ticket.as_ref())
+                .map(|ticket| ticket.identifier.as_str()),
             Some("SCA-9999")
         );
     }
@@ -13196,7 +13467,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(repo_headers, [("herdr", Some(2)), ("growth", Some(1))]);
+        assert_eq!(
+            repo_headers,
+            [
+                ("scalable-so/herdr", Some(2)),
+                ("scalable-so/growth", Some(1))
+            ]
+        );
         let nested = rows
             .iter()
             .filter_map(|row| match row {
@@ -13268,6 +13545,32 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(row_title("SCA-3165: Studio edit"), "SCA-3165 · Studio edit");
         assert_eq!(row_title("sca-3165 Studio edit"), "SCA-3165 · Studio edit");
         assert_eq!(row_title("Studio edit"), "SCA-3165 · Studio edit");
+    }
+
+    #[test]
+    fn agent_row_title_omits_worktree_binding() {
+        let projection = crate::workspace::TabDisplayProjection::Derived {
+            agent: Some("codex".into()),
+            ticket: Some("SCA-3165".into()),
+            binding: Some("sidebar-view-fixes".into()),
+            title: Some("Fix sidebar rows".into()),
+        };
+
+        assert_eq!(
+            sidebar_tab_title(Some(&projection), None).as_deref(),
+            Some("SCA-3165 · Fix sidebar rows")
+        );
+
+        let binding_only = crate::workspace::TabDisplayProjection::Derived {
+            agent: Some("codex".into()),
+            ticket: None,
+            binding: Some("sidebar-view-fixes".into()),
+            title: None,
+        };
+        assert_eq!(
+            sidebar_tab_title(Some(&binding_only), Some("New Thread".into())).as_deref(),
+            Some("codex")
+        );
     }
 
     #[test]
@@ -13496,6 +13799,101 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn repo_view_keeps_owner_repo_and_elides_it_at_minimum_width() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("repo")];
+        app.ensure_test_terminals();
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("matthias-scale/herdr".into()),
+                work_title: Some("Sidebar fixes".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.set_sidebar_group_mode(SidebarGroupMode::Repo);
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Workspace { title, .. } if title == "matthias-scale/herdr"
+        )));
+
+        let area = Rect::new(0, 0, 18, 12);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let header = compute_workspace_card_areas(&app, area)
+            .into_iter()
+            .next()
+            .expect("repo header");
+        let rendered = row_text(
+            terminal.backend().buffer(),
+            header.rect.y,
+            header.rect.width,
+        );
+        assert!(rendered.contains("matthias"), "{rendered:?}");
+        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(display_width(&rendered) <= usize::from(header.rect.width));
+    }
+
+    #[test]
+    fn parent_rows_start_left_of_children_at_supported_widths() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("repo")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/42".into()],
+                work_title: Some("Fix nested row hierarchy".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+
+        for width in [18, 30] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let header = compute_sidebar_nested_header_areas(&app, area)
+                .into_iter()
+                .find(|header| !header.dim)
+                .expect("parent header");
+            let child = compute_tab_card_areas(&app, area)
+                .into_iter()
+                .next()
+                .expect("child row");
+            let first_non_space = |y, row_width| {
+                row_text(terminal.backend().buffer(), y, row_width)
+                    .chars()
+                    .position(|character| !character.is_whitespace())
+                    .expect("visible row content")
+            };
+
+            assert!(
+                first_non_space(header.rect.y, header.rect.width)
+                    < first_non_space(child.rect.y, child.rect.width),
+                "parent must start left of child at width {width}"
+            );
+        }
+    }
+
+    #[test]
     fn sidebar_grouping_modes_render_expected_header_tree() {
         let mut app = sidebar_grouping_fixture();
         let tree = |mode| workspace_entry_tree(workspace_list_entries_for_mode(&app, false, mode));
@@ -13521,10 +13919,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         // Work items are the top level in these modes; this fixture binds none,
         // so every pane lands in the unlinked bucket and no repo header shows.
-        assert_eq!(
-            tree(SidebarGroupMode::LinearTeam),
-            [unlinked_bucket_title()]
-        );
+        assert_eq!(tree(SidebarGroupMode::LinearTeam), ["unlinked"]);
         assert_eq!(tree(SidebarGroupMode::Missive), [unlinked_bucket_title()]);
 
         let mut tab_sets = Vec::new();
@@ -13548,12 +13943,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .collect::<Vec<_>>();
             match mode {
-                // Neither view adds a work-object level: the only nested header
-                // is the section for panes with no branch of their own. Spaces
-                // differs from Repo in the Space rows above it, not here.
-                SidebarGroupMode::Repo | SidebarGroupMode::Spaces => {
-                    assert_eq!(nested, [unlinked_bucket_title()])
-                }
+                SidebarGroupMode::Repo => assert_eq!(nested, [unlinked_bucket_title()]),
+                SidebarGroupMode::Spaces => assert!(nested.is_empty()),
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
@@ -13577,7 +13968,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarGroupMode::LinearTeam => assert_eq!(
                     nested,
                     [
-                        unlinked_bucket_title(),
+                        "unlinked".to_string(),
                         "no active tickets for me · creator or assignee".to_string()
                     ]
                 ),
@@ -13698,6 +14089,29 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .collect::<Vec<_>>(),
             vec![(0, false), (1, false), (2, false), (3, false)],
         );
+    }
+
+    #[test]
+    fn spaces_view_without_repositories_keeps_one_row_per_space() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+
+        let rows = sidebar_rows(&app);
+        let spaces = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(spaces, [0, 1]);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { title, .. } if *title == unlinked_bucket_title()
+        )));
     }
 
     #[test]
@@ -15246,6 +15660,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 subject: "Refund approved".into(),
                 app_url: CONVERSATION_A.into(),
                 web_url: CONVERSATION_A.into(),
+                team: None,
                 assignees: vec![crate::work_index::MissiveUser {
                     id: "mina".into(),
                     name: "Mina".into(),
@@ -15266,6 +15681,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 subject: "Needs owner".into(),
                 app_url: CONVERSATION_B.into(),
                 web_url: CONVERSATION_B.into(),
+                team: None,
                 assignees: vec![crate::work_index::MissiveUser {
                     id: "ada".into(),
                     name: "Ada".into(),

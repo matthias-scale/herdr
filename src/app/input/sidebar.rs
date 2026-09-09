@@ -363,6 +363,9 @@ impl AppState {
             crate::ui::SidebarFilterOption::GithubState(state) => {
                 filter.github.state = state;
             }
+            crate::ui::SidebarFilterOption::MissiveTeam(team) => {
+                filter.missive.team = team;
+            }
             crate::ui::SidebarFilterOption::MissiveAssignee(assignee) => {
                 filter.missive.assignee = assignee;
             }
@@ -1583,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn f27_sidebar_row_click_opens_pr_tab_without_starting_a_pane() {
+    fn f27_sidebar_row_click_opens_linked_home_without_starting_a_pane() {
         let mut app = app_for_mouse_test();
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.sidebar_group_mode = SidebarGroupMode::RepoPr;
@@ -1617,14 +1620,14 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), pane_count);
-        assert!(app.state.home.is_none());
-        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Pr));
-        assert_eq!(app.state.dock_tab_label(0), "#159");
+        assert!(app.state.dock_object_preview.is_none());
         assert_eq!(
             app.state
-                .active_dock_object(crate::app::DockSurface::Pr)
-                .map(|object| object.key.as_str()),
-            Some("https://github.com/scalable-so/herdr/pull/159")
+                .home
+                .as_ref()
+                .and_then(|home| home.pr.as_ref())
+                .map(|pr| (pr.repo.as_str(), pr.number)),
+            Some(("scalable-so/herdr", 159))
         );
     }
 
@@ -1705,6 +1708,7 @@ mod tests {
                 subject: "Billing question".into(),
                 app_url: app_url.into(),
                 web_url: web_url.into(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,

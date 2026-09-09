@@ -858,6 +858,12 @@ impl App {
                     .settle_after_days
                     .saturating_mul(24 * 60 * 60),
             ),
+            settle_finished_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .settle_finished_after_minutes
+                    .saturating_mul(60),
+            ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -890,6 +896,7 @@ impl App {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1843,6 +1850,9 @@ impl App {
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);
             }
+            if self.state.take_sidebar_view_scan_request() {
+                self.request_sidebar_view_scan(now);
+            }
             if let Some(filter) = self.state.take_sidebar_work_filter_persistence_request() {
                 crate::client::presentation::save_sidebar_work_filter(filter);
             }
@@ -2235,6 +2245,12 @@ impl App {
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
             self.state.auto_settle_finished = config.session.auto_settle_finished;
+            self.state.settle_finished_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .settle_finished_after_minutes
+                    .saturating_mul(60),
+            );
             self.state.auto_settle_inactive = config.session.auto_settle_inactive;
             self.state.settle_stops_agent = config.session.settle_stops_agent;
             self.state.settle_after = std::time::Duration::from_secs(

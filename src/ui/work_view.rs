@@ -2303,6 +2303,7 @@ mod tests {
             subject: "Billing question that stays readable".into(),
             app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
             web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            team: None,
             assignees: vec![crate::work_index::MissiveUser {
                 id: "ada".into(),
                 name: "Ada Lovelace".into(),
@@ -2949,6 +2950,7 @@ mod tests {
             subject: "Billing question".into(),
             app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
             web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            team: None,
             assignees: vec![crate::work_index::MissiveUser {
                 id: "ada".into(),
                 name: "Ada".into(),

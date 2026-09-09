@@ -963,13 +963,10 @@ impl App {
     }
 
     fn focus_next_blocked_window(&mut self) {
-        let Some((ws_idx, tab_idx)) = next_blocked_window_target(&self.state) else {
+        let Some((ws_idx, pane_id)) = next_blocked_window_target(&self.state) else {
             return;
         };
-        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
-            return;
-        };
-        self.runtime_tab_focus("tui.window.focus_next_blocked", tab_id);
+        self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
 
     pub(crate) fn close_active_tab_via_api_requires_confirmation(&mut self) -> bool {
@@ -2041,27 +2038,67 @@ pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
     order
 }
 
-fn next_blocked_window_target(state: &AppState) -> Option<(usize, usize)> {
-    let windows = state
-        .workspaces
-        .iter()
-        .enumerate()
-        .flat_map(|(ws_idx, ws)| (0..ws.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx)))
-        .collect::<Vec<_>>();
-    if windows.is_empty() {
+/// Panes `next_blocked_window` visits, in sidebar row order.
+///
+/// The cycle walks the worklist the operator reads. Panes hidden by the current
+/// projection are appended afterward so none become unreachable.
+/// `counts_as_blocked` is the same rule the Blocked section and the inbox use,
+/// so a pane is a stop only while it waits on a human: a latched gate on a pane
+/// whose agent has resumed working is not a stop, and neither is a settled pane.
+/// Comparing a tab's aggregate state against `Blocked` instead missed usage
+/// limits and unanswered gates, ignored the stale-supervisor projection the
+/// sidebar renders, and could not reach a blocked pane inside a tab that rolled
+/// up to another state.
+fn blocked_pane_cycle(state: &AppState) -> Vec<((usize, usize, crate::layout::PaneId), bool)> {
+    crate::ui::all_agent_panel_entries(state)
+        .into_iter()
+        .map(|entry| {
+            let blocked = crate::terminal::counts_as_blocked(
+                entry.state,
+                entry.open_blockers,
+                entry.usage_limited,
+            ) && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
+            ((entry.ws_idx, entry.tab_idx, entry.pane_id), blocked)
+        })
+        .collect()
+}
+
+fn next_blocked_window_target(state: &AppState) -> Option<(usize, crate::layout::PaneId)> {
+    let panes = blocked_pane_cycle(state);
+    if panes.is_empty() {
         return None;
     }
-    let active_ws = state.active?;
-    let active_tab = state.workspaces.get(active_ws)?.active_tab_index();
-    let current = windows
-        .iter()
-        .position(|window| *window == (active_ws, active_tab))?;
-
-    (1..=windows.len()).find_map(|offset| {
-        let target = windows[(current + offset) % windows.len()];
-        let tab = &state.workspaces[target.0].tabs[target.1];
-        (tab.aggregate_state(&state.terminals).0 == crate::detect::AgentState::Blocked)
-            .then_some(target)
+    let active_window = state
+        .active
+        .and_then(|ws_idx| Some((ws_idx, state.workspaces.get(ws_idx)?.active_tab_index())));
+    let focused = state.active.and_then(|ws_idx| {
+        state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.focused_pane_id())
+            .map(|pane_id| (ws_idx, pane_id))
+    });
+    // Walking forward from where the operator stands, rather than restarting at
+    // the first blocked pane, is what keeps every blocked pane reachable when
+    // one is skipped instead of answered. The active window is the fallback
+    // anchor: a pane that carries no agent panel entry still has a position.
+    let start = focused
+        .and_then(|focused| {
+            panes
+                .iter()
+                .position(|((ws_idx, _, pane_id), _)| (*ws_idx, *pane_id) == focused)
+        })
+        .or_else(|| {
+            active_window.and_then(|window| {
+                panes
+                    .iter()
+                    .rposition(|((ws_idx, tab_idx, _), _)| (*ws_idx, *tab_idx) == window)
+            })
+        })
+        .map_or(0, |current| current + 1);
+    (0..panes.len()).find_map(|offset| {
+        let ((ws_idx, _, pane_id), blocked) = panes[(start + offset) % panes.len()];
+        blocked.then_some((ws_idx, pane_id))
     })
 }
 
@@ -2696,9 +2733,8 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NextBlockedWindow => {
-            if let Some((ws_idx, tab_idx)) = next_blocked_window_target(state) {
-                state.switch_workspace(ws_idx);
-                state.switch_tab(tab_idx);
+            if let Some((ws_idx, pane_id)) = next_blocked_window_target(state) {
+                state.focus_pane_in_workspace(ws_idx, pane_id);
             }
             leave_navigate_mode(state);
         }
@@ -3509,10 +3545,45 @@ mod tests {
             .set_detected_state(Some(crate::detect::Agent::Claude), agent_state);
     }
 
+    fn set_pane_open_blocker(
+        state: &mut AppState,
+        workspace: usize,
+        tab: usize,
+        pane: crate::layout::PaneId,
+    ) {
+        let terminal_id = state.workspaces[workspace].tabs[tab].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "gate".into(),
+            text: "A latched gate".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+    }
+
+    fn expand_all_workspaces_for_sidebar(state: &mut AppState) {
+        for workspace in &state.workspaces {
+            state
+                .sidebar_presentation
+                .expanded_workspace_ids
+                .insert(workspace.id.clone());
+        }
+    }
+
     fn app_with_blocked_window_fixture() -> App {
         let mut app = app_with_global_window_fixture();
         let blocked_child = app.state.workspaces[1].test_split(Direction::Horizontal);
         app.state.ensure_test_terminals();
+        expand_all_workspaces_for_sidebar(&mut app.state);
         set_tab_agent_state(&mut app.state, 0, 1, crate::detect::AgentState::Blocked);
         set_tab_agent_state(&mut app.state, 1, 0, crate::detect::AgentState::Working);
         set_pane_agent_state(
@@ -3540,6 +3611,43 @@ mod tests {
             &mut state,
             NavigateAction::NextBlockedWindow,
             &[(0, 1), (1, 0), (0, 1)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_skips_working_pane_with_blocker_and_stops_at_idle_blocked_pane() {
+        let mut app = app_with_global_window_fixture();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        let working_blocker = app.state.workspaces[0].tabs[1].root_pane;
+        let idle_blocker = app.state.workspaces[1].tabs[0].root_pane;
+
+        set_tab_agent_state(&mut app.state, 0, 0, crate::detect::AgentState::Blocked);
+        set_tab_agent_state(&mut app.state, 0, 1, crate::detect::AgentState::Working);
+        set_pane_open_blocker(&mut app.state, 0, 1, working_blocker);
+        set_tab_agent_state(&mut app.state, 1, 0, crate::detect::AgentState::Idle);
+        set_pane_open_blocker(&mut app.state, 1, 0, idle_blocker);
+
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextBlockedWindow,
+            &[(1, 0), (0, 0)],
+        );
+
+        let mut state = app_with_global_window_fixture().state;
+        expand_all_workspaces_for_sidebar(&mut state);
+        let working_blocker = state.workspaces[0].tabs[1].root_pane;
+        let idle_blocker = state.workspaces[1].tabs[0].root_pane;
+
+        set_tab_agent_state(&mut state, 0, 0, crate::detect::AgentState::Blocked);
+        set_tab_agent_state(&mut state, 0, 1, crate::detect::AgentState::Working);
+        set_pane_open_blocker(&mut state, 0, 1, working_blocker);
+        set_tab_agent_state(&mut state, 1, 0, crate::detect::AgentState::Idle);
+        set_pane_open_blocker(&mut state, 1, 0, idle_blocker);
+
+        assert_headless_window_cycle(
+            &mut state,
+            NavigateAction::NextBlockedWindow,
+            &[(1, 0), (0, 0)],
         );
     }
 
