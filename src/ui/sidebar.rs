@@ -2231,6 +2231,47 @@ fn ticket_activation(
     }
 }
 
+fn sidebar_linear_ticket_rows(app: &AppState) -> Vec<crate::work_projection::DockHomeTicketRow> {
+    let mut rows = app.dock_home_projection().ticket_rows;
+    for item in app
+        .work_index_snapshot
+        .as_ref()
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+    {
+        for ticket in &item.ticket_details {
+            if let Some(row) = rows.iter_mut().find(|row| {
+                row.ticket
+                    .identifier
+                    .eq_ignore_ascii_case(&ticket.identifier)
+            }) {
+                if row.linked_pr_url.is_none() {
+                    row.linked_pr_url.clone_from(&item.pr_url);
+                }
+                continue;
+            }
+            rows.push(crate::work_projection::DockHomeTicketRow {
+                key: crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(ticket.identifier.clone()),
+                },
+                ticket: ticket.clone(),
+                linked_pr_url: item.pr_url.clone(),
+                jump_target: None,
+            });
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.ticket
+            .identifier
+            .to_ascii_lowercase()
+            .cmp(&right.ticket.identifier.to_ascii_lowercase())
+    });
+    rows
+}
+
 /// Where a thread for this ticket should start: the checkout of a pane already
 /// working the repository the ticket's pull request lives in.
 fn ticket_directory(
@@ -2588,7 +2629,7 @@ pub(crate) fn sidebar_work_groups(
         }
     }
     if mode == SidebarGroupMode::LinearTeam {
-        for row in app.dock_home_projection().ticket_rows {
+        for row in sidebar_linear_ticket_rows(app) {
             if !labels_match_sidebar_query(&row.ticket.labels, &app.sidebar_work_filter.query) {
                 continue;
             }
@@ -3307,9 +3348,7 @@ impl SidebarFilterOption {
 pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption> {
     match app.sidebar_group_mode {
         SidebarGroupMode::LinearTeam => {
-            let projection = app.dock_home_projection();
-            let mut teams = projection
-                .ticket_rows
+            let mut teams = sidebar_linear_ticket_rows(app)
                 .iter()
                 .filter_map(|row| ticket_team(&row.ticket.identifier))
                 .collect::<Vec<_>>();
@@ -11876,7 +11915,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             groups
                 .iter()
-                .map(|group| (group.key.as_str(), group.title.as_str(), group.entries.len()))
+                .map(|group| (
+                    group.key.as_str(),
+                    group.title.as_str(),
+                    group.entries.len()
+                ))
                 .collect::<Vec<_>>(),
             [("unlinked", "unlinked", 2)]
         );
@@ -12705,6 +12748,38 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let layout = sidebar_filter_menu_layout(&app, area).expect("filter dropdown layout");
         assert_eq!(layout.rect.y, anchor.bottom());
         assert!(layout.rect.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn linear_no_agent_yet_includes_ticket_linked_to_pull_request() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("repo")];
+        app.ensure_test_terminals();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter.team = None;
+        app.sidebar_work_filter.assignee = None;
+        let mut ticket = work_ticket("SCA-9999", "linked without agent", "jacob", &[]);
+        ticket.url = Some("https://linear.app/scalable/issue/SCA-9999".into());
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: vec![work_item("scalable-so/herdr", Some(42), vec![ticket])],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        });
+
+        let objects = sidebar_unassigned_objects(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::LinearTeam,
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].key, "linear:SCA-9999");
+        assert_eq!(objects[0].title, "SCA-9999 · linked without agent");
+        assert_eq!(
+            objects[0].activation.work_context_patch.repo.as_deref(),
+            Some("scalable-so/herdr")
+        );
     }
 
     #[test]
