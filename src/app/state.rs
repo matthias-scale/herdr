@@ -3982,6 +3982,39 @@ pub(crate) struct ObjectViewState {
     /// Selected row while the narrow-width sub-tab picker is open.
     pub(crate) tab_picker: Option<usize>,
     pub(crate) reviewer_picker: Option<ReviewerPickerState>,
+    /// Comments the reader expanded, keyed by content rather than by position:
+    /// the comment list is rebuilt on every observation, and a new comment
+    /// shifts the index of every older one.
+    pub(crate) expanded_comments: std::collections::BTreeSet<u64>,
+}
+
+impl ObjectViewState {
+    pub(crate) fn comment_is_expanded(&self, identity: u64) -> bool {
+        self.expanded_comments.contains(&identity)
+    }
+
+    pub(crate) fn toggle_comment(&mut self, identity: u64) {
+        if !self.expanded_comments.remove(&identity) {
+            self.expanded_comments.insert(identity);
+        }
+    }
+
+    /// Expand every comment, or collapse them all when they already are.
+    /// Seeding the set rather than holding a separate override keeps one
+    /// source of truth, so a following per-comment toggle behaves normally.
+    /// Rebuilding it from the current list also drops identities left behind
+    /// by comments that have since been edited away.
+    pub(crate) fn toggle_all_comments(&mut self, identities: impl IntoIterator<Item = u64>) {
+        let identities = identities.into_iter().collect::<Vec<_>>();
+        let all_expanded = !identities.is_empty()
+            && identities
+                .iter()
+                .all(|identity| self.expanded_comments.contains(identity));
+        self.expanded_comments.clear();
+        if !all_expanded {
+            self.expanded_comments.extend(identities);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -6906,8 +6939,7 @@ mod tests {
             ObjectViewState {
                 tab: PrDetailTab::Files,
                 scroll: 11,
-                tab_picker: None,
-                reviewer_picker: None,
+                ..Default::default()
             },
         );
         state.dock_object_views.insert(

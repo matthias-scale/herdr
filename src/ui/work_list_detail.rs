@@ -38,6 +38,77 @@ pub(crate) fn comment_header(comment: &WorkItemComment, observed_at: SystemTime)
     format!("{author} · {age}")
 }
 
+/// A collapsed comment shows this many body lines before its expand hint.
+pub(crate) const COLLAPSED_COMMENT_BODY_LINES: usize = 3;
+
+/// Stable identity for a comment across index refreshes. The comment list is
+/// rebuilt on every observation and a new comment shifts the index of every
+/// older one, so an expanded comment has to be remembered by content.
+pub(crate) fn comment_identity(comment: &WorkItemComment) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    comment.author.hash(&mut hasher);
+    comment.created_at.hash(&mut hasher);
+    comment.body.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Digit key that expands or collapses the comment at `index`. Only the first
+/// nine get one; the rest are reached through expand-all.
+pub(crate) fn comment_expand_digit(index: usize) -> Option<char> {
+    if index >= 9 {
+        return None;
+    }
+    char::from_digit(index as u32 + 1, 10)
+}
+
+/// Body lines for one comment, cut to a readable head unless it is expanded.
+///
+/// A long review comment used to push every comment under it off the pane, so
+/// the list only read as a list once the reader had scrolled past all of it.
+pub(crate) fn comment_body_lines(
+    palette: &Palette,
+    comment: &WorkItemComment,
+    index: usize,
+    width: usize,
+    indent: &str,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    let hint = |text: String| {
+        Line::from(Span::styled(
+            format!("{indent}{text}"),
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        ))
+    };
+    let body = crate::ui::markdown::body_lines(palette, Some(&comment.body), width, indent);
+    if expanded {
+        let mut lines = body;
+        match comment_expand_digit(index) {
+            Some(digit) => lines.push(hint(format!("{digit} to collapse"))),
+            None => lines.push(hint("a to collapse all".to_string())),
+        }
+        return lines;
+    }
+    // Hiding a single line behind a hint line saves nothing and costs the
+    // reader the content, so only cut when there is more than one line to gain.
+    if body.len() <= COLLAPSED_COMMENT_BODY_LINES + 1 {
+        return body;
+    }
+    let hidden = body.len() - COLLAPSED_COMMENT_BODY_LINES;
+    let mut lines = body
+        .into_iter()
+        .take(COLLAPSED_COMMENT_BODY_LINES)
+        .collect::<Vec<_>>();
+    lines.push(match comment_expand_digit(index) {
+        Some(digit) => hint(format!("… {hidden} more lines · {digit} to expand")),
+        None => hint(format!("… {hidden} more lines · a to expand all")),
+    });
+    lines
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkRow {
     pub(crate) group: &'static str,
@@ -549,11 +620,11 @@ impl WorkItem for PrItem<'_> {
             linked_prs: Vec::new(),
             sections: Vec::new(),
             open_url: detail.url.clone().or_else(|| self.summary.pr_url.clone()),
-            comments: {
-                let mut comments = detail.comments.clone();
-                comments.sort_by_key(|comment| std::cmp::Reverse(comment.created_at));
-                comments
-            },
+            // Already ordered by the provider parsers; re-sorting here would
+            // give the render a different order from the cached list the key
+            // handler indexes, so a digit would open a different comment than
+            // the one it numbers.
+            comments: detail.comments.clone(),
         }
     }
 }
@@ -813,11 +884,12 @@ impl WorkItem for TicketItem<'_> {
             .cached_detail
             .and_then(|detail| detail.body.clone())
             .or_else(|| self.summary.description.clone());
-        let comments = self.cached_detail.map_or_else(Vec::new, |detail| {
-            let mut comments = detail.comments.clone();
-            comments.sort_by_key(|comment| std::cmp::Reverse(comment.created_at));
-            comments
-        });
+        // Same as the pull-request projection: keep the parsers' order. A flat
+        // re-sort here would also split Linear's threads, which are ordered by
+        // whole thread so a reply stays under the root it answers.
+        let comments = self
+            .cached_detail
+            .map_or_else(Vec::new, |detail| detail.comments.clone());
         let linked_prs = self
             .linked_prs
             .iter()
@@ -1315,6 +1387,100 @@ mod tests {
         }));
     }
 
+    fn comment(body: &str) -> WorkItemComment {
+        WorkItemComment {
+            author: Some("ada".into()),
+            body: body.into(),
+            created_at: None,
+        }
+    }
+
+    fn rendered(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_collapsed_comment_keeps_a_readable_head_and_names_its_digit() {
+        let palette = Palette::catppuccin();
+        let long = comment("one\ntwo\nthree\nfour\nfive\nsix");
+
+        let collapsed = rendered(&comment_body_lines(&palette, &long, 2, 40, "  ", false));
+
+        assert_eq!(collapsed.len(), COLLAPSED_COMMENT_BODY_LINES + 1);
+        assert!(collapsed[0].contains("one"), "{collapsed:?}");
+        assert_eq!(
+            collapsed.last().map(String::as_str),
+            Some("  … 3 more lines · 3 to expand"),
+            "{collapsed:?}"
+        );
+
+        let expanded = rendered(&comment_body_lines(&palette, &long, 2, 40, "  ", true));
+
+        assert!(expanded.iter().any(|line| line.contains("six")));
+        assert_eq!(
+            expanded.last().map(String::as_str),
+            Some("  3 to collapse"),
+            "{expanded:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_comment_is_never_traded_for_a_hint_line() {
+        let palette = Palette::catppuccin();
+        // Four lines against a three-line head: cutting would hide one line
+        // and spend one line saying so, which costs the reader and saves
+        // nothing.
+        let short = comment("one\ntwo\nthree\nfour");
+
+        let collapsed = rendered(&comment_body_lines(&palette, &short, 0, 40, "  ", false));
+
+        assert!(
+            collapsed.iter().any(|line| line.contains("four")),
+            "{collapsed:?}"
+        );
+        assert!(
+            !collapsed.iter().any(|line| line.contains("to expand")),
+            "{collapsed:?}"
+        );
+    }
+
+    #[test]
+    fn comments_past_the_ninth_point_at_expand_all_instead_of_a_digit() {
+        let palette = Palette::catppuccin();
+        let long = comment("one\ntwo\nthree\nfour\nfive");
+
+        assert_eq!(comment_expand_digit(8), Some('9'));
+        assert_eq!(comment_expand_digit(9), None);
+
+        let collapsed = rendered(&comment_body_lines(&palette, &long, 9, 40, "  ", false));
+
+        assert_eq!(
+            collapsed.last().map(String::as_str),
+            Some("  … 2 more lines · a to expand all"),
+            "{collapsed:?}"
+        );
+    }
+
+    #[test]
+    fn comment_identity_follows_content_not_position() {
+        let first = comment("first");
+        let second = comment("second");
+
+        assert_eq!(
+            comment_identity(&first),
+            comment_identity(&comment("first"))
+        );
+        assert_ne!(comment_identity(&first), comment_identity(&second));
+    }
+
     #[test]
     fn comment_header_joins_author_and_age() {
         let comment = WorkItemComment {
@@ -1668,16 +1834,19 @@ mod tests {
         linked_pr.ticket_ids = vec!["sca-7".into()];
         let mut cached = IndexedWorkItemDetail::empty();
         cached.body = Some("Intro\n- [x] parsed\n- [ ] rendered".into());
+        // Provider parsers hand the cache a newest-first list; the projection
+        // passes it through so the render and the key handler agree on which
+        // comment is which.
         cached.comments = vec![
-            WorkItemComment {
-                author: Some("old".into()),
-                body: "first".into(),
-                created_at: Some(SystemTime::UNIX_EPOCH),
-            },
             WorkItemComment {
                 author: Some("new".into()),
                 body: "second".into(),
                 created_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            },
+            WorkItemComment {
+                author: Some("old".into()),
+                body: "first".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
             },
         ];
         let item = TicketItem {

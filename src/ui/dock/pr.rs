@@ -95,7 +95,9 @@ pub(crate) fn render_pr(app: &AppState, frame: &mut Frame, area: Rect) {
         );
         return;
     };
-    let key = item.stable_key();
+    // Key the view exactly as the input layer does, so scroll, sub-tab and
+    // comment expansion land in the entry this render reads.
+    let key = focused_pr_key(app).unwrap_or_else(|| item.stable_key());
     let view = app
         .dock_object_views
         .get(&key)
