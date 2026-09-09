@@ -879,6 +879,36 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                linkable_work_link: Some(link),
+                ..
+            },
+            Some(item),
+        ) if item == link.menu_item() => {
+            let patch = link.patch();
+            for pane_id in state.window_pane_ids(ws_idx, tab_idx) {
+                let Some(terminal_id) = state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.pane_state(pane_id))
+                    .map(|pane| pane.attached_terminal_id.clone())
+                else {
+                    continue;
+                };
+                let Some(terminal) = state.terminals.get_mut(&terminal_id) else {
+                    continue;
+                };
+                match terminal.apply_manual_work_context_patch(patch.clone()) {
+                    Ok(true) => state.mark_session_dirty(),
+                    Ok(false) => {}
+                    Err(err) => tracing::warn!(err = %err, "failed to link work item to window"),
+                }
+            }
+            state.mode = Mode::Terminal;
+        }
+        (
+            ContextMenuKind::Pane {
                 ws_idx, pane_id, ..
             },
             Some("Clear pane name"),
@@ -1304,6 +1334,29 @@ impl App {
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx,
+                    tab_idx,
+                    linkable_work_link: Some(link),
+                    ..
+                },
+                Some(item),
+            ) if item == link.menu_item() => {
+                let patch = link.patch();
+                for pane_id in self.state.window_pane_ids(ws_idx, tab_idx) {
+                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                        self.runtime_pane_work_context_set(
+                            "tui.pane.work_context.link_work_item",
+                            crate::api::schema::PaneWorkContextSetParams {
+                                pane_id: public_pane_id,
+                                patch: patch.clone(),
+                            },
+                        );
+                    }
+                }
+                self.state.mode = Mode::Terminal;
             }
             (
                 ContextMenuKind::Pane {
@@ -2342,6 +2395,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 0,
             y: 0,
@@ -2390,6 +2444,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 0,
             y: 0,
@@ -2500,6 +2555,7 @@ mod tests {
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
+                linkable_work_link: None,
             },
             x: 0,
             y: 0,
