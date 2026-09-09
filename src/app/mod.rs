@@ -887,6 +887,7 @@ impl App {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1834,6 +1835,9 @@ impl App {
             }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);
+            }
+            if self.state.take_sidebar_view_scan_request() {
+                self.request_sidebar_view_scan(now);
             }
             if let Some(filter) = self.state.take_sidebar_work_filter_persistence_request() {
                 crate::client::presentation::save_sidebar_work_filter(filter);

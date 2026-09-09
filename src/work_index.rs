@@ -3975,6 +3975,11 @@ fn resolve_program(name: &str) -> std::path::PathBuf {
 }
 
 impl crate::app::App {
+    pub(crate) fn request_sidebar_view_scan(&mut self, now: Instant) {
+        self.request_git_work_context_refresh(now);
+        self.next_work_index_refresh = now;
+    }
+
     fn note_work_index_contexts(&mut self, panes: &[WorkIndexPane], now: Instant) -> bool {
         let fingerprint = panes
             .iter()
@@ -5012,6 +5017,26 @@ esac
         app.next_work_index_refresh = later;
         assert!(!app.note_work_index_contexts(&panes, now));
         assert_eq!(app.next_work_index_refresh, later);
+    }
+
+    #[test]
+    fn opening_sidebar_view_requests_git_and_provider_scans_once() {
+        let mut app = test_app_with_work_index();
+        let now = Instant::now();
+        let later = now + Duration::from_secs(300);
+        app.next_git_work_context_refresh = later;
+        app.next_work_index_refresh = later;
+
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Spaces);
+        assert!(app.state.take_sidebar_view_scan_request());
+        app.request_sidebar_view_scan(now);
+        assert_eq!(app.next_git_work_context_refresh, now);
+        assert_eq!(app.next_work_index_refresh, now);
+
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Spaces);
+        assert!(!app.state.take_sidebar_view_scan_request());
     }
 
     fn fake_programs(
