@@ -697,6 +697,12 @@
           "description": "Copy the focused pane's first preview URL."
         },
         {
+          "key": "keys.toggle_theme",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Swap the active theme with its dark or light sibling for the current session without writing config. Unset by default."
+        },
+        {
           "key": "keys.previous_workspace",
           "type": "keybinding",
           "default": "unset",
@@ -979,6 +985,12 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.focus_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Move keyboard focus to the sidebar, expanding it if collapsed. Unset by default."
+        },
+        {
           "key": "keys.sidebar_cycle_group_mode",
           "type": "keybinding",
           "default": "unset",
@@ -1013,6 +1025,72 @@
           "type": "keybinding",
           "default": "\"prefix+shift+]\"",
           "description": "Select the next dock tab."
+        },
+        {
+          "key": "keys.dock_home",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Home dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_terminal",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Terminal dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_files",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Files dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_diff",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Diff dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_pr",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the pull request dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_linear",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Linear dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_missive",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Missive dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_agents",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Agents dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_shortcuts",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Shortcuts dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_context",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Context dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_symphony",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Symphony dock surface, expanding the dock if collapsed. Unset by default."
         },
         {
           "key": "keys.editor_open_repo",
@@ -1085,6 +1163,30 @@
           "type": "keybinding",
           "default": "\"ctrl+alt+h\"",
           "description": "Open the home view."
+        },
+        {
+          "key": "keys.git_pull",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's pull flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
+          "key": "keys.git_commit",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's commit flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
+          "key": "keys.git_push",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's push flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
+          "key": "keys.git_create_pr",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's create-pull-request flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
         },
         {
           "key": "keys.toggle_status_detail",
