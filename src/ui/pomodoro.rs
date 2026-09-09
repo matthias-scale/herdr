@@ -79,7 +79,7 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     };
     super::dim_background(frame, area);
     let palette = &app.palette;
-    let Some(inner) = render_modal_shell(frame, area, 62, 11, palette) else {
+    let Some(inner) = render_modal_shell(frame, area, 62, 10, palette) else {
         return;
     };
     if inner.height < 6 {
@@ -129,8 +129,10 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let footer = match prompt.error.as_deref() {
         Some(error) => Span::styled(error.to_string(), Style::default().fg(palette.red)),
+        // The escape hatch is only useful if it is on the overlay that traps
+        // the keyboard, so it is named here rather than only in the docs.
         None => Span::styled(
-            "↵ confirm   ^c clear".to_string(),
+            "↵ confirm   ^c clear   ^⌥b snooze".to_string(),
             Style::default().fg(palette.overlay0),
         ),
     };
