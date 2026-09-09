@@ -812,12 +812,46 @@ fn target_label(app: &AppState, target: &HomeTarget) -> String {
     }
 }
 
+/// A lane's remaining plan quota, as the picker row shows it: the 5h window
+/// then the 7d one, in the same fill-column vocabulary the status bar uses.
+///
+/// The number is spelled out only once a window is nearly spent. Below that a
+/// column height is the whole answer, and a percentage on every row would bury
+/// the lane names the picker exists to show. A lane with no collected window
+/// renders nothing rather than a zero, because absent and idle are different.
+fn lane_quota_summary(
+    profile: &crate::app::launch_profiles::LaunchProfile,
+    app: &AppState,
+) -> Option<String> {
+    let usage = profile.quota?.usage(&app.provider_usage);
+    if usage.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for window in [usage.five_hour, usage.seven_day].into_iter().flatten() {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push(crate::ui::status::fill_glyph(window.used_percent));
+        if window.used_percent >= LANE_QUOTA_ESCALATION_PERCENT {
+            text.push_str(&window.used_percent.to_string());
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+/// Above this the picker spells the percentage out beside the column.
+const LANE_QUOTA_ESCALATION_PERCENT: u8 = 88;
+
 fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<String> {
     match picker {
         HomePicker::Agent => home
             .profiles()
             .iter()
-            .map(|profile| profile.label.clone())
+            .map(|profile| match lane_quota_summary(profile, app) {
+                Some(quota) => format!("{}  {quota}", profile.label),
+                None => profile.label.clone(),
+            })
             .collect(),
         HomePicker::Model => home
             .model_options()
@@ -2645,6 +2679,34 @@ mod tests {
                 "Claude Haiku 4.5",
             ]
         );
+    }
+
+    #[test]
+    fn lane_picker_rows_carry_quota_and_stay_bare_without_a_snapshot() {
+        use crate::provider_usage::QuotaWindow;
+
+        let mut app = AppState::test_new();
+        let home = HomeState::default();
+        let bare = picker_labels(&app, &home, HomePicker::Agent);
+        assert!(
+            bare.iter().all(|label| !label.contains(' ')),
+            "no collected usage must leave the lane names untouched: {bare:?}"
+        );
+
+        app.provider_usage.claude.five_hour = Some(QuotaWindow {
+            used_percent: 40,
+            resets_at: None,
+        });
+        app.provider_usage.claude.seven_day = Some(QuotaWindow {
+            used_percent: 92,
+            resets_at: None,
+        });
+        let claude = picker_labels(&app, &home, HomePicker::Agent)
+            .into_iter()
+            .find(|label| label.starts_with("claude"))
+            .expect("a claude lane");
+        // Only the window past the escalation point spells its number out.
+        assert!(claude.ends_with("92"), "{claude}");
     }
 
     #[test]
