@@ -320,6 +320,43 @@ fn active_tab_cell_width(ws: &crate::workspace::Workspace, view: &TabBarView) ->
         .unwrap_or(0)
 }
 
+/// Which optional top-right controls the operator asked for.
+///
+/// Both are off by default, because they crowd the tab titles they sit beside.
+/// The pane toggles duplicate the split keybindings. The pull button does not
+/// duplicate anything: it is the only entry point to the git menu, so hiding it
+/// hides that menu too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TabActionVisibility {
+    pub git_menu: bool,
+    pub pane_toggles: bool,
+}
+
+impl TabActionVisibility {
+    pub(crate) fn from_state(app: &AppState) -> Self {
+        Self {
+            git_menu: app.show_pull_button,
+            pane_toggles: app.show_pane_toggle_buttons,
+        }
+    }
+
+    fn git_menu_width(self) -> u16 {
+        if self.git_menu {
+            GIT_MENU_BUTTON_WIDTH
+        } else {
+            0
+        }
+    }
+
+    fn pane_toggles_width(self) -> u16 {
+        if self.pane_toggles {
+            PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2)
+        } else {
+            0
+        }
+    }
+}
+
 pub(crate) fn compute_tab_bar_view(
     ws: &crate::workspace::Workspace,
     terminals: &std::collections::HashMap<
@@ -331,6 +368,7 @@ pub(crate) fn compute_tab_bar_view(
     follow_active: bool,
     mouse_chrome: bool,
     user_actions: &[(usize, String)],
+    visibility: TabActionVisibility,
 ) -> TabBarView {
     if !mouse_chrome || area.width == 0 || area.height == 0 {
         return compute_tab_bar_view_inner(
@@ -346,8 +384,8 @@ pub(crate) fn compute_tab_bar_view(
     // The buttons are the rightmost content, so they are paid for out of the
     // tab strip's width. When that would truncate the active tab title they are
     // dropped entirely rather than shown over a clipped label.
-    let user_widths = action_button_widths(user_actions, area.width);
-    let actions_width = action_controls_width(&user_widths);
+    let user_widths = action_button_widths(user_actions, area.width, visibility);
+    let actions_width = action_controls_width(&user_widths, visibility);
     if area.width > actions_width {
         let tabs_area = Rect::new(
             area.x,
@@ -386,16 +424,20 @@ pub(crate) fn compute_tab_bar_view(
                 })
                 .collect();
             let menu_x = action_x;
-            view.git_menu_button_hit_area = Rect::new(menu_x, area.y, GIT_MENU_BUTTON_WIDTH, 1);
-            let below_x = menu_x + GIT_MENU_BUTTON_WIDTH;
-            view.pane_toggle_below_hit_area =
-                Rect::new(below_x, area.y, PANE_TOGGLE_BUTTON_WIDTH, 1);
-            view.pane_toggle_right_hit_area = Rect::new(
-                below_x + PANE_TOGGLE_BUTTON_WIDTH,
-                area.y,
-                PANE_TOGGLE_BUTTON_WIDTH,
-                1,
-            );
+            if visibility.git_menu {
+                view.git_menu_button_hit_area = Rect::new(menu_x, area.y, GIT_MENU_BUTTON_WIDTH, 1);
+            }
+            let below_x = menu_x + visibility.git_menu_width();
+            if visibility.pane_toggles {
+                view.pane_toggle_below_hit_area =
+                    Rect::new(below_x, area.y, PANE_TOGGLE_BUTTON_WIDTH, 1);
+                view.pane_toggle_right_hit_area = Rect::new(
+                    below_x + PANE_TOGGLE_BUTTON_WIDTH,
+                    area.y,
+                    PANE_TOGGLE_BUTTON_WIDTH,
+                    1,
+                );
+            }
             return view;
         }
     }
@@ -415,9 +457,10 @@ pub(crate) fn tab_action_fallback_hit_areas(
     status_bar_rect: Rect,
     mouse_chrome: bool,
     user_actions: &[(usize, String)],
+    visibility: TabActionVisibility,
 ) -> (Rect, Rect, Vec<(usize, Rect)>, Rect, Rect, Rect) {
-    let user_widths = action_button_widths(user_actions, status_bar_rect.width);
-    let actions_width = action_controls_width(&user_widths);
+    let user_widths = action_button_widths(user_actions, status_bar_rect.width, visibility);
+    let actions_width = action_controls_width(&user_widths, visibility);
     if !mouse_chrome || status_bar_rect.height == 0 || status_bar_rect.width <= actions_width {
         return (
             Rect::default(),
@@ -441,27 +484,37 @@ pub(crate) fn tab_action_fallback_hit_areas(
         })
         .collect();
     let menu_x = action_x;
-    let below_x = menu_x + GIT_MENU_BUTTON_WIDTH;
+    let below_x = menu_x + visibility.git_menu_width();
+    let toggle = |x: u16| {
+        if visibility.pane_toggles {
+            Rect::new(x, status_bar_rect.y, PANE_TOGGLE_BUTTON_WIDTH, 1)
+        } else {
+            Rect::default()
+        }
+    };
     (
         Rect::new(editor_x, status_bar_rect.y, REPO_EDITOR_BUTTON_WIDTH, 1),
         Rect::new(add_x, status_bar_rect.y, ADD_ACTION_BUTTON_WIDTH, 1),
         action_rects,
-        Rect::new(menu_x, status_bar_rect.y, GIT_MENU_BUTTON_WIDTH, 1),
-        Rect::new(below_x, status_bar_rect.y, PANE_TOGGLE_BUTTON_WIDTH, 1),
-        Rect::new(
-            below_x + PANE_TOGGLE_BUTTON_WIDTH,
-            status_bar_rect.y,
-            PANE_TOGGLE_BUTTON_WIDTH,
-            1,
-        ),
+        if visibility.git_menu {
+            Rect::new(menu_x, status_bar_rect.y, GIT_MENU_BUTTON_WIDTH, 1)
+        } else {
+            Rect::default()
+        },
+        toggle(below_x),
+        toggle(below_x + PANE_TOGGLE_BUTTON_WIDTH),
     )
 }
 
-fn action_button_widths(user_actions: &[(usize, String)], row_width: u16) -> Vec<u16> {
+fn action_button_widths(
+    user_actions: &[(usize, String)],
+    row_width: u16,
+    visibility: TabActionVisibility,
+) -> Vec<u16> {
     let fixed = REPO_EDITOR_BUTTON_WIDTH
         .saturating_add(ADD_ACTION_BUTTON_WIDTH)
-        .saturating_add(GIT_MENU_BUTTON_WIDTH)
-        .saturating_add(PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2));
+        .saturating_add(visibility.git_menu_width())
+        .saturating_add(visibility.pane_toggles_width());
     let mut widths = user_actions
         .iter()
         .map(|(_, name)| display_width_u16(name).saturating_add(2).max(3))
@@ -479,12 +532,12 @@ fn action_button_widths(user_actions: &[(usize, String)], row_width: u16) -> Vec
     widths
 }
 
-fn action_controls_width(user_widths: &[u16]) -> u16 {
+fn action_controls_width(user_widths: &[u16], visibility: TabActionVisibility) -> u16 {
     REPO_EDITOR_BUTTON_WIDTH
         .saturating_add(ADD_ACTION_BUTTON_WIDTH)
         .saturating_add(user_widths.iter().copied().sum::<u16>())
-        .saturating_add(GIT_MENU_BUTTON_WIDTH)
-        .saturating_add(PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2))
+        .saturating_add(visibility.git_menu_width())
+        .saturating_add(visibility.pane_toggles_width())
 }
 
 /// The width the status row must keep clear when it hosts the toggles.
@@ -494,7 +547,9 @@ pub(crate) fn tab_action_status_bar_reserved_width(app: &AppState, status_bar_re
     let add = app.view.add_action_button_hit_area;
     let below = app.view.pane_toggle_below_hit_area;
     let right = app.view.pane_toggle_right_hit_area;
-    if menu.width == 0 || menu.y != status_bar_rect.y || status_bar_rect.height == 0 {
+    // `add` is the sentinel, not `menu`: the pull button and the pane toggles
+    // are optional, so an absent one says nothing about where the row lives.
+    if add.width == 0 || add.y != status_bar_rect.y || status_bar_rect.height == 0 {
         return 0;
     }
     editor
@@ -1064,6 +1119,15 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    /// The layout tests below assert geometry, so they opt every optional
+    /// control in. The hidden default has its own tests.
+    fn all_tab_actions_visible() -> TabActionVisibility {
+        TabActionVisibility {
+            git_menu: true,
+            pane_toggles: true,
+        }
+    }
+
     use super::*;
     use crate::app::state::AppState;
     use crate::workspace::Workspace;
@@ -1115,6 +1179,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
@@ -1167,6 +1232,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas.clone();
 
@@ -1210,6 +1276,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
@@ -1250,6 +1317,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         assert!(view.tab_hit_areas[0].width >= MIN_TAB_WIDTH);
     }
@@ -1281,6 +1349,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         assert!(view.tab_hit_areas[0].width > 0);
         assert!(view.new_tab_hit_area.width > 0);
@@ -1303,6 +1372,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
@@ -1341,6 +1411,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
@@ -1374,6 +1445,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
@@ -1616,6 +1688,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
@@ -1640,6 +1713,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         (ws, view)
     }
@@ -1695,6 +1769,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         assert_eq!(narrow.pane_toggle_below_hit_area, Rect::default());
         assert_eq!(narrow.pane_toggle_right_hit_area, Rect::default());
@@ -1710,6 +1785,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         assert_eq!(wide.pane_toggle_below_hit_area, Rect::new(114, 0, 3, 1));
         assert_eq!(wide.git_menu_button_hit_area, Rect::new(104, 0, 10, 1));
@@ -1725,6 +1801,7 @@ mod tests {
             true,
             false,
             &[],
+            all_tab_actions_visible(),
         );
         assert_eq!(view.pane_toggle_below_hit_area, Rect::default());
         assert_eq!(view.pane_toggle_right_hit_area, Rect::default());
@@ -1751,6 +1828,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.tab_hit_areas = view.tab_hit_areas;
         app.view.new_tab_hit_area = view.new_tab_hit_area;
@@ -1873,6 +1951,7 @@ mod tests {
             true,
             true,
             &[],
+            all_tab_actions_visible(),
         );
         app.view.repo_editor_button_hit_area = view.repo_editor_button_hit_area;
         app.view.add_action_button_hit_area = view.add_action_button_hit_area;
@@ -1922,6 +2001,7 @@ mod tests {
                 true,
                 true,
                 &actions,
+                all_tab_actions_visible(),
             );
             assert_eq!(
                 view.add_action_button_hit_area.width,

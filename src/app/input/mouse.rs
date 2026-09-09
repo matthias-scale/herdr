@@ -7253,6 +7253,7 @@ mod tests {
             crate::app::state::PaneToggleDirection::Right,
         ] {
             let mut app = app_for_mouse_test();
+            app.state.show_pane_toggle_buttons = true;
             app.state.workspaces = vec![Workspace::test_new("one")];
             app.state.active = Some(0);
             app.state.selected = 0;
@@ -7314,6 +7315,7 @@ mod tests {
     #[test]
     fn git_menu_button_and_selectable_rows_queue_actions_but_status_does_not() {
         let mut app = app_for_mouse_test();
+        app.state.show_pull_button = true;
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -7400,6 +7402,7 @@ mod tests {
             ),
         ] {
             let mut app = app_for_mouse_test();
+            app.state.show_pane_toggle_buttons = true;
             let mut ws = Workspace::test_new("one");
             let sibling = ws.test_split(split);
             let root = ws.tabs[0].root_pane;

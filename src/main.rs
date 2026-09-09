@@ -404,6 +404,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # New tabs can still be created with the configured keybinding.
 # hide_tab_bar_when_single_tab = false
 
+# Show the pull button in the top-right action row.
+# Off by default. It is the only entry point to the git menu, so turn it on if
+# you want that menu.
+# show_pull_button = false
+
+# Show the split-below and split-right buttons in the top-right action row.
+# Off by default: both splits have keybindings, and the buttons crowd the tab titles.
+# show_pane_toggle_buttons = false
+
 # Show local Codex and Claude Code subscription usage in the info panel.
 # show_subscription_usage = true
 # Open the home view on launch. Esc dismisses it. Off by default: the launch
