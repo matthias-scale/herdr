@@ -84,6 +84,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             help_entry(keybind_label(&kb.copy_work_ticket), "copy work ticket"),
             help_entry(keybind_label(&kb.copy_work_pr), "copy work pull request"),
             help_entry(keybind_label(&kb.copy_work_preview), "copy work preview"),
+            help_entry(keybind_label(&kb.toggle_theme), "toggle dark/light theme"),
         ],
     ));
 
@@ -152,6 +153,8 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             "previous tab in this Space",
         ),
         help_entry(keybind_label(&kb.next_tab), "next tab in this Space"),
+        help_entry(keybind_label(&kb.move_tab_previous), "move tab previous"),
+        help_entry(keybind_label(&kb.move_tab_next), "move tab next"),
         help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),
         help_entry(keybind_label(&kb.close_tab), "close tab"),
     ];
@@ -172,6 +175,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.resize_pane_up), "resize pane up"),
         help_entry(keybind_label(&kb.resize_pane_right), "resize pane right"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
+        help_entry(keybind_label(&kb.focus_sidebar), "focus sidebar"),
         help_entry(
             keybind_label(&kb.sidebar_cycle_group_mode),
             "cycle sidebar grouping mode",
@@ -206,6 +210,33 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.last_pane), "last pane"),
     ];
     groups.push(("panes", panes));
+
+    groups.push((
+        "git",
+        vec![
+            help_entry(keybind_label(&kb.git_pull), "git pull"),
+            help_entry(keybind_label(&kb.git_commit), "git commit"),
+            help_entry(keybind_label(&kb.git_push), "git push"),
+            help_entry(keybind_label(&kb.git_create_pr), "git create pull request"),
+        ],
+    ));
+
+    groups.push((
+        "dock",
+        vec![
+            help_entry(keybind_label(&kb.dock_home), "dock: home"),
+            help_entry(keybind_label(&kb.dock_terminal), "dock: terminal"),
+            help_entry(keybind_label(&kb.dock_files), "dock: files"),
+            help_entry(keybind_label(&kb.dock_diff), "dock: diff"),
+            help_entry(keybind_label(&kb.dock_pr), "dock: pull requests"),
+            help_entry(keybind_label(&kb.dock_linear), "dock: linear"),
+            help_entry(keybind_label(&kb.dock_missive), "dock: missive"),
+            help_entry(keybind_label(&kb.dock_agents), "dock: agents"),
+            help_entry(keybind_label(&kb.dock_shortcuts), "dock: shortcuts"),
+            help_entry(keybind_label(&kb.dock_context), "dock: context"),
+            help_entry(keybind_label(&kb.dock_symphony), "dock: symphony"),
+        ],
+    ));
 
     if !kb.custom_commands.is_empty() {
         groups.push((
