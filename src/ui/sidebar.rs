@@ -284,7 +284,7 @@ fn sidebar_tab_title(
     let Some(crate::workspace::TabDisplayProjection::Derived {
         agent,
         ticket,
-        binding,
+        binding: _,
         title,
     }) = projection
     else {
@@ -296,7 +296,9 @@ fn sidebar_tab_title(
             .or_else(|| Some(title.to_string())),
         (_, title) => title.map(str::to_string),
     };
-    let label = [ticket.clone(), binding.clone(), normalized_title]
+    // Worktree identity belongs to the Spaces and Repo group headers. Agent
+    // rows use the work object and session title only.
+    let label = [ticket.clone(), normalized_title]
         .into_iter()
         .flatten()
         .filter(|part| !part.trim().is_empty())
@@ -13286,6 +13288,32 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(row_title("SCA-3165: Studio edit"), "SCA-3165 · Studio edit");
         assert_eq!(row_title("sca-3165 Studio edit"), "SCA-3165 · Studio edit");
         assert_eq!(row_title("Studio edit"), "SCA-3165 · Studio edit");
+    }
+
+    #[test]
+    fn agent_row_title_omits_worktree_binding() {
+        let projection = crate::workspace::TabDisplayProjection::Derived {
+            agent: Some("codex".into()),
+            ticket: Some("SCA-3165".into()),
+            binding: Some("sidebar-view-fixes".into()),
+            title: Some("Fix sidebar rows".into()),
+        };
+
+        assert_eq!(
+            sidebar_tab_title(Some(&projection), None).as_deref(),
+            Some("SCA-3165 · Fix sidebar rows")
+        );
+
+        let binding_only = crate::workspace::TabDisplayProjection::Derived {
+            agent: Some("codex".into()),
+            ticket: None,
+            binding: Some("sidebar-view-fixes".into()),
+            title: None,
+        };
+        assert_eq!(
+            sidebar_tab_title(Some(&binding_only), Some("New Thread".into())).as_deref(),
+            Some("codex")
+        );
     }
 
     #[test]
