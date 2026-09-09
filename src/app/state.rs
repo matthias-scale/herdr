@@ -2172,6 +2172,12 @@ pub struct ViewState {
     pub(crate) sidebar_footer_ticket_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen Missive conversation view.
     pub(crate) sidebar_footer_missive_hit_area: Rect,
+    /// The notepad panel at the bottom of the sidebar. Empty when it is off.
+    pub(crate) notepad_rect: Rect,
+    /// Clickable note names in the notepad header, paired with their index.
+    pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
+    /// The break-timer countdown in the sidebar footer row.
+    pub(crate) pomodoro_hit_area: Rect,
     /// Sidebar-footer entry for refreshing work and Git metadata.
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
@@ -3221,6 +3227,8 @@ pub struct AppState {
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
     /// The top-bar repository editor button was activated.
     pub(crate) request_open_repo_editor: bool,
+    /// Notepad work that needs the filesystem, queued by the input handlers.
+    pub(crate) notepad_request: Option<crate::app::input::NotepadRequest>,
     /// Git action chosen from the tab-row menu, drained by the runtime loop.
     pub(crate) request_git_action: Option<GitAction>,
     pub(crate) request_user_action: Option<usize>,
@@ -3507,6 +3515,10 @@ pub struct AppState {
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     pub(crate) dock_editor_requested_paths: std::collections::HashMap<PaneId, std::path::PathBuf>,
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
+    /// The sidebar notepad: a folder of Markdown notes edited in place.
+    pub(crate) notepad: crate::notepad::NotepadState,
+    /// The break reminder shown next to it.
+    pub(crate) pomodoro: crate::pomodoro::PomodoroState,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -5560,6 +5572,7 @@ impl AppState {
             request_new_tab: false,
             request_pane_toggle: None,
             request_open_repo_editor: false,
+            notepad_request: None,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
@@ -5638,6 +5651,9 @@ impl AppState {
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
+                notepad_rect: Rect::default(),
+                notepad_tab_hit_areas: Vec::new(),
+                pomodoro_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
@@ -5802,6 +5818,8 @@ impl AppState {
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
+            notepad: crate::notepad::NotepadState::default(),
+            pomodoro: crate::pomodoro::PomodoroState::default(),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,

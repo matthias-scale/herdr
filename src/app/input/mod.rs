@@ -43,6 +43,7 @@ mod lease;
 mod modal;
 mod mouse;
 mod navigate;
+mod notepad;
 mod overlays;
 mod selection;
 mod settings;
@@ -53,6 +54,7 @@ mod terminal;
 pub(crate) use self::navigate::{
     action_for_key_for_test, non_indexed_navigation_actions_for_test, BindingDispatch,
 };
+pub(crate) use self::notepad::NotepadRequest;
 #[cfg(test)]
 pub(crate) use self::sidebar::SidebarWorkGroupKeyAction;
 pub(crate) use self::{
@@ -159,6 +161,22 @@ impl App {
     }
 
     async fn handle_key_inner(&mut self, key: TerminalKey) -> Option<super::TerminalInputTarget> {
+        // A due break reminder outranks every other surface, panes included:
+        // an overlay that can be typed past is not a reminder.
+        if self.state.pomodoro.prompt.is_some() {
+            self.state
+                .handle_pomodoro_prompt_key(key.as_key_event(), std::time::Instant::now());
+            self.apply_notepad_request();
+            return None;
+        }
+        if self.state.notepad.focused
+            && self
+                .state
+                .handle_notepad_key(key.as_key_event(), std::time::Instant::now())
+        {
+            self.apply_notepad_request();
+            return None;
+        }
         if self.state.popup_pane.is_some() {
             return self.handle_terminal_key(key).await;
         }
@@ -4499,6 +4517,12 @@ impl App {
     }
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
+        if self.state.notepad.focused {
+            self.state
+                .notepad
+                .insert_text(text, std::time::Instant::now());
+            return true;
+        }
         match self.state.mode {
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
@@ -5413,6 +5437,9 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 }
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
+    if state.notepad.focused {
+        return true;
+    }
     match state.mode {
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
             true
