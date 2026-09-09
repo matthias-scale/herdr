@@ -484,6 +484,11 @@ impl App {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::FocusSidebar => {
+                self.state.sidebar_focused = true;
+                self.state.sidebar_collapsed = false;
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CycleSidebarGroupMode => {
                 self.state.cycle_sidebar_group_mode();
                 leave_navigate_mode(&mut self.state);
@@ -541,6 +546,94 @@ impl App {
                 self.open_repo_editor();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenDockHome => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Home)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockTerminal => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Terminal)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockFiles => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Files)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockDiff => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Diff)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockPr => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Pr)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockLinear => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Linear)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockMissive => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Missive)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockAgents => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Agents)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockShortcuts => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Shortcuts)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockContext => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Context)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
+            NavigateAction::OpenDockSymphony => {
+                if self
+                    .state
+                    .activate_dock_surface(crate::app::DockSurface::Symphony)
+                {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::EditScratchpad => {
                 self.open_scratchpad_in_editor();
                 leave_navigate_mode(&mut self.state);
@@ -584,6 +677,22 @@ impl App {
             NavigateAction::CopyWorkTicket => self.copy_focused_work_ticket(),
             NavigateAction::CopyWorkPr => self.copy_focused_work_pr(),
             NavigateAction::CopyWorkPreview => self.copy_focused_work_preview(),
+            NavigateAction::ToggleTheme => {
+                self.toggle_theme();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::GitPull => {
+                request_git_action(&mut self.state, crate::app::state::GitAction::Pull);
+            }
+            NavigateAction::GitCommit => {
+                request_git_action(&mut self.state, crate::app::state::GitAction::Commit);
+            }
+            NavigateAction::GitPush => {
+                request_git_action(&mut self.state, crate::app::state::GitAction::Push);
+            }
+            NavigateAction::GitCreatePr => {
+                request_git_action(&mut self.state, crate::app::state::GitAction::CreatePr);
+            }
             NavigateAction::ToggleInfoPanel => {
                 self.state.info_panel_expanded = !self.state.info_panel_expanded;
                 leave_navigate_mode(&mut self.state);
@@ -2010,6 +2119,7 @@ pub(crate) enum NavigateAction {
     ResizePaneUp,
     ResizePaneRight,
     ToggleSidebar,
+    FocusSidebar,
     CycleSidebarGroupMode,
     RefreshSidebar,
     ToggleStatusDetail,
@@ -2017,6 +2127,17 @@ pub(crate) enum NavigateAction {
     PreviousDockTab,
     NextDockTab,
     OpenRepoEditor,
+    OpenDockHome,
+    OpenDockTerminal,
+    OpenDockFiles,
+    OpenDockDiff,
+    OpenDockPr,
+    OpenDockLinear,
+    OpenDockMissive,
+    OpenDockAgents,
+    OpenDockShortcuts,
+    OpenDockContext,
+    OpenDockSymphony,
     OpenInbox,
     OpenHome,
     EditScratchpad,
@@ -2035,6 +2156,11 @@ pub(crate) enum NavigateAction {
     CopyWorkTicket,
     CopyWorkPr,
     CopyWorkPreview,
+    ToggleTheme,
+    GitPull,
+    GitCommit,
+    GitPush,
+    GitCreatePr,
     ToggleInfoPanel,
     OpenSymphony,
     OpenWorkView,
@@ -2201,111 +2327,145 @@ pub(crate) fn action_for_key_for_test(
     action_for_key(state, key, dispatch)
 }
 
+macro_rules! non_indexed_action_bindings {
+    ($kb:expr) => {{
+        let kb = $kb;
+        [
+            (&kb.help, NavigateAction::Help),
+            (&kb.settings, NavigateAction::Settings),
+            (&kb.command_palette, NavigateAction::OpenCommandPalette),
+            (&kb.workspace_picker, NavigateAction::WorkspacePicker),
+            (&kb.new_workspace, NavigateAction::NewWorkspace),
+            (&kb.new_worktree, NavigateAction::NewWorktree),
+            (&kb.open_worktree, NavigateAction::OpenWorktree),
+            (&kb.remove_worktree, NavigateAction::RemoveWorktree),
+            (&kb.rename_workspace, NavigateAction::RenameWorkspace),
+            (&kb.close_workspace, NavigateAction::CloseWorkspace),
+            (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
+            (&kb.next_workspace, NavigateAction::NextWorkspace),
+            (&kb.previous_agent, NavigateAction::PreviousAgent),
+            (&kb.next_agent, NavigateAction::NextAgent),
+            (&kb.next_review_agent, NavigateAction::NextReviewAgent),
+            (&kb.new_tab, NavigateAction::NewTab),
+            (&kb.rename_tab, NavigateAction::RenameTab),
+            (&kb.toggle_tab_prio, NavigateAction::ToggleTabPrio),
+            (&kb.toggle_prio_panel, NavigateAction::TogglePrioPanel),
+            (
+                &kb.toggle_blocked_filter,
+                NavigateAction::ToggleBlockedFilter,
+            ),
+            (&kb.previous_tab, NavigateAction::PreviousTab),
+            (&kb.next_tab, NavigateAction::NextTab),
+            (&kb.move_tab_previous, NavigateAction::MoveTabPrevious),
+            (&kb.move_tab_next, NavigateAction::MoveTabNext),
+            (&kb.previous_window, NavigateAction::PreviousWindow),
+            (&kb.next_window, NavigateAction::NextWindow),
+            (&kb.next_blocked_window, NavigateAction::NextBlockedWindow),
+            (&kb.close_tab, NavigateAction::CloseTab),
+            (&kb.rename_pane, NavigateAction::RenamePane),
+            (&kb.edit_scrollback, NavigateAction::EditScrollback),
+            (&kb.copy_mode, NavigateAction::CopyMode),
+            (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
+            (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
+            (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
+            (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
+            (&kb.swap_pane_left, NavigateAction::SwapPaneLeft),
+            (&kb.swap_pane_down, NavigateAction::SwapPaneDown),
+            (&kb.swap_pane_up, NavigateAction::SwapPaneUp),
+            (&kb.swap_pane_right, NavigateAction::SwapPaneRight),
+            (&kb.last_pane, NavigateAction::LastPane),
+            (&kb.cycle_pane_next, NavigateAction::CyclePaneNext),
+            (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
+            (&kb.split_vertical, NavigateAction::SplitVertical),
+            (&kb.split_horizontal, NavigateAction::SplitHorizontal),
+            (&kb.split_left, NavigateAction::SplitLeft),
+            (&kb.split_up, NavigateAction::SplitUp),
+            (&kb.close_pane, NavigateAction::ClosePane),
+            (&kb.zoom, NavigateAction::Zoom),
+            (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
+            (&kb.resize_mode, NavigateAction::EnterResizeMode),
+            (&kb.resize_pane_left, NavigateAction::ResizePaneLeft),
+            (&kb.resize_pane_down, NavigateAction::ResizePaneDown),
+            (&kb.resize_pane_up, NavigateAction::ResizePaneUp),
+            (&kb.resize_pane_right, NavigateAction::ResizePaneRight),
+            (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+            (&kb.focus_sidebar, NavigateAction::FocusSidebar),
+            (
+                &kb.sidebar_cycle_group_mode,
+                NavigateAction::CycleSidebarGroupMode,
+            ),
+            (&kb.sidebar_refresh, NavigateAction::RefreshSidebar),
+            (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
+            (&kb.toggle_dock, NavigateAction::ToggleDock),
+            (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
+            (&kb.next_dock_tab, NavigateAction::NextDockTab),
+            (&kb.editor_open_repo, NavigateAction::OpenRepoEditor),
+            (&kb.dock_home, NavigateAction::OpenDockHome),
+            (&kb.dock_terminal, NavigateAction::OpenDockTerminal),
+            (&kb.dock_files, NavigateAction::OpenDockFiles),
+            (&kb.dock_diff, NavigateAction::OpenDockDiff),
+            (&kb.dock_pr, NavigateAction::OpenDockPr),
+            (&kb.dock_linear, NavigateAction::OpenDockLinear),
+            (&kb.dock_missive, NavigateAction::OpenDockMissive),
+            (&kb.dock_agents, NavigateAction::OpenDockAgents),
+            (&kb.dock_shortcuts, NavigateAction::OpenDockShortcuts),
+            (&kb.dock_context, NavigateAction::OpenDockContext),
+            (&kb.dock_symphony, NavigateAction::OpenDockSymphony),
+            (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
+            (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
+            (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
+            (&kb.symphony, NavigateAction::OpenSymphony),
+            (&kb.work, NavigateAction::OpenWorkView),
+            (&kb.usage, NavigateAction::OpenUsageView),
+            (&kb.tickets, NavigateAction::OpenTicketView),
+            (&kb.missive, NavigateAction::OpenMissiveView),
+            (&kb.inbox, NavigateAction::OpenInbox),
+            (&kb.home, NavigateAction::OpenHome),
+            (&kb.reload_config, NavigateAction::ReloadConfig),
+            (
+                &kb.open_notification_target,
+                NavigateAction::OpenNotificationTarget,
+            ),
+            (&kb.open_work_url, NavigateAction::OpenWorkUrl),
+            (&kb.copy_work_url, NavigateAction::CopyWorkUrl),
+            (&kb.open_work_link, NavigateAction::OpenWorkLink),
+            (&kb.copy_work_link, NavigateAction::CopyWorkLink),
+            (&kb.copy_work_ticket, NavigateAction::CopyWorkTicket),
+            (&kb.copy_work_pr, NavigateAction::CopyWorkPr),
+            (&kb.copy_work_preview, NavigateAction::CopyWorkPreview),
+            (&kb.toggle_theme, NavigateAction::ToggleTheme),
+            (&kb.git_pull, NavigateAction::GitPull),
+            (&kb.git_commit, NavigateAction::GitCommit),
+            (&kb.git_push, NavigateAction::GitPush),
+            (&kb.git_create_pr, NavigateAction::GitCreatePr),
+            (&kb.detach, NavigateAction::Detach),
+            (&kb.goto, NavigateAction::OpenNavigator),
+        ]
+    }};
+}
+
 fn non_indexed_action_for_key(
     state: &AppState,
     key: &TerminalKey,
     dispatch: BindingDispatch,
 ) -> Option<NavigateAction> {
     let kb = &state.keybinds;
-    for (bindings, action) in [
-        (&kb.help, NavigateAction::Help),
-        (&kb.settings, NavigateAction::Settings),
-        (&kb.command_palette, NavigateAction::OpenCommandPalette),
-        (&kb.workspace_picker, NavigateAction::WorkspacePicker),
-        (&kb.new_workspace, NavigateAction::NewWorkspace),
-        (&kb.new_worktree, NavigateAction::NewWorktree),
-        (&kb.open_worktree, NavigateAction::OpenWorktree),
-        (&kb.remove_worktree, NavigateAction::RemoveWorktree),
-        (&kb.rename_workspace, NavigateAction::RenameWorkspace),
-        (&kb.close_workspace, NavigateAction::CloseWorkspace),
-        (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
-        (&kb.next_workspace, NavigateAction::NextWorkspace),
-        (&kb.previous_agent, NavigateAction::PreviousAgent),
-        (&kb.next_agent, NavigateAction::NextAgent),
-        (&kb.next_review_agent, NavigateAction::NextReviewAgent),
-        (&kb.new_tab, NavigateAction::NewTab),
-        (&kb.rename_tab, NavigateAction::RenameTab),
-        (&kb.toggle_tab_prio, NavigateAction::ToggleTabPrio),
-        (&kb.toggle_prio_panel, NavigateAction::TogglePrioPanel),
-        (
-            &kb.toggle_blocked_filter,
-            NavigateAction::ToggleBlockedFilter,
-        ),
-        (&kb.previous_tab, NavigateAction::PreviousTab),
-        (&kb.next_tab, NavigateAction::NextTab),
-        (&kb.move_tab_previous, NavigateAction::MoveTabPrevious),
-        (&kb.move_tab_next, NavigateAction::MoveTabNext),
-        (&kb.previous_window, NavigateAction::PreviousWindow),
-        (&kb.next_window, NavigateAction::NextWindow),
-        (&kb.next_blocked_window, NavigateAction::NextBlockedWindow),
-        (&kb.close_tab, NavigateAction::CloseTab),
-        (&kb.rename_pane, NavigateAction::RenamePane),
-        (&kb.edit_scrollback, NavigateAction::EditScrollback),
-        (&kb.copy_mode, NavigateAction::CopyMode),
-        (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
-        (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
-        (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
-        (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
-        (&kb.swap_pane_left, NavigateAction::SwapPaneLeft),
-        (&kb.swap_pane_down, NavigateAction::SwapPaneDown),
-        (&kb.swap_pane_up, NavigateAction::SwapPaneUp),
-        (&kb.swap_pane_right, NavigateAction::SwapPaneRight),
-        (&kb.last_pane, NavigateAction::LastPane),
-        (&kb.cycle_pane_next, NavigateAction::CyclePaneNext),
-        (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
-        (&kb.split_vertical, NavigateAction::SplitVertical),
-        (&kb.split_horizontal, NavigateAction::SplitHorizontal),
-        (&kb.split_left, NavigateAction::SplitLeft),
-        (&kb.split_up, NavigateAction::SplitUp),
-        (&kb.close_pane, NavigateAction::ClosePane),
-        (&kb.zoom, NavigateAction::Zoom),
-        (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
-        (&kb.resize_mode, NavigateAction::EnterResizeMode),
-        (&kb.resize_pane_left, NavigateAction::ResizePaneLeft),
-        (&kb.resize_pane_down, NavigateAction::ResizePaneDown),
-        (&kb.resize_pane_up, NavigateAction::ResizePaneUp),
-        (&kb.resize_pane_right, NavigateAction::ResizePaneRight),
-        (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
-        (
-            &kb.sidebar_cycle_group_mode,
-            NavigateAction::CycleSidebarGroupMode,
-        ),
-        (&kb.sidebar_refresh, NavigateAction::RefreshSidebar),
-        (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
-        (&kb.toggle_dock, NavigateAction::ToggleDock),
-        (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
-        (&kb.next_dock_tab, NavigateAction::NextDockTab),
-        (&kb.editor_open_repo, NavigateAction::OpenRepoEditor),
-        (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
-        (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
-        (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
-        (&kb.symphony, NavigateAction::OpenSymphony),
-        (&kb.work, NavigateAction::OpenWorkView),
-        (&kb.usage, NavigateAction::OpenUsageView),
-        (&kb.tickets, NavigateAction::OpenTicketView),
-        (&kb.missive, NavigateAction::OpenMissiveView),
-        (&kb.inbox, NavigateAction::OpenInbox),
-        (&kb.home, NavigateAction::OpenHome),
-        (&kb.reload_config, NavigateAction::ReloadConfig),
-        (
-            &kb.open_notification_target,
-            NavigateAction::OpenNotificationTarget,
-        ),
-        (&kb.open_work_url, NavigateAction::OpenWorkUrl),
-        (&kb.copy_work_url, NavigateAction::CopyWorkUrl),
-        (&kb.open_work_link, NavigateAction::OpenWorkLink),
-        (&kb.copy_work_link, NavigateAction::CopyWorkLink),
-        (&kb.copy_work_ticket, NavigateAction::CopyWorkTicket),
-        (&kb.copy_work_pr, NavigateAction::CopyWorkPr),
-        (&kb.copy_work_preview, NavigateAction::CopyWorkPreview),
-        (&kb.detach, NavigateAction::Detach),
-        (&kb.goto, NavigateAction::OpenNavigator),
-    ] {
+    for (bindings, action) in non_indexed_action_bindings!(kb) {
         if action_matches(bindings, key, dispatch) {
             return Some(action);
         }
     }
     None
+}
+
+#[cfg(test)]
+pub(crate) fn non_indexed_navigation_actions_for_test(
+    keybinds: &crate::config::Keybinds,
+) -> Vec<NavigateAction> {
+    non_indexed_action_bindings!(keybinds)
+        .into_iter()
+        .map(|(_, action)| action)
+        .collect()
 }
 
 #[cfg(test)]
@@ -2630,6 +2790,11 @@ pub(super) fn execute_navigate_action_in_context(
             state.sidebar_collapsed = !state.sidebar_collapsed;
             leave_navigate_mode(state);
         }
+        NavigateAction::FocusSidebar => {
+            state.sidebar_focused = true;
+            state.sidebar_collapsed = false;
+            leave_navigate_mode(state);
+        }
         NavigateAction::CycleSidebarGroupMode => {
             state.cycle_sidebar_group_mode();
             leave_navigate_mode(state);
@@ -2684,6 +2849,61 @@ pub(super) fn execute_navigate_action_in_context(
             state.request_open_repo_editor = true;
             leave_navigate_mode(state);
         }
+        NavigateAction::OpenDockHome => {
+            if state.activate_dock_surface(crate::app::DockSurface::Home) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockTerminal => {
+            if state.activate_dock_surface(crate::app::DockSurface::Terminal) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockFiles => {
+            if state.activate_dock_surface(crate::app::DockSurface::Files) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockDiff => {
+            if state.activate_dock_surface(crate::app::DockSurface::Diff) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockPr => {
+            if state.activate_dock_surface(crate::app::DockSurface::Pr) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockLinear => {
+            if state.activate_dock_surface(crate::app::DockSurface::Linear) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockMissive => {
+            if state.activate_dock_surface(crate::app::DockSurface::Missive) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockAgents => {
+            if state.activate_dock_surface(crate::app::DockSurface::Agents) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockShortcuts => {
+            if state.activate_dock_surface(crate::app::DockSurface::Shortcuts) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockContext => {
+            if state.activate_dock_surface(crate::app::DockSurface::Context) {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::OpenDockSymphony => {
+            if state.activate_dock_surface(crate::app::DockSurface::Symphony) {
+                leave_navigate_mode(state);
+            }
+        }
         // Spawning the editor needs an `App`; the state-only mirror cannot do it.
         NavigateAction::EditScratchpad => leave_navigate_mode(state),
         NavigateAction::ShowScratchpad => {
@@ -2724,6 +2944,21 @@ pub(super) fn execute_navigate_action_in_context(
         | NavigateAction::CopyWorkPr
         | NavigateAction::CopyWorkPreview => {
             leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleTheme => {
+            // Theme refresh owns the palette, redraw, and pane propagation on App.
+        }
+        NavigateAction::GitPull => {
+            request_git_action(state, crate::app::state::GitAction::Pull);
+        }
+        NavigateAction::GitCommit => {
+            request_git_action(state, crate::app::state::GitAction::Commit);
+        }
+        NavigateAction::GitPush => {
+            request_git_action(state, crate::app::state::GitAction::Push);
+        }
+        NavigateAction::GitCreatePr => {
+            request_git_action(state, crate::app::state::GitAction::CreatePr);
         }
         NavigateAction::ToggleInfoPanel => {
             state.info_panel_expanded = !state.info_panel_expanded;
@@ -2779,6 +3014,15 @@ fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<u
         ActionContext::Navigate => state.selected,
     };
     (idx < state.workspaces.len()).then_some(idx)
+}
+
+fn request_git_action(state: &mut AppState, action: crate::app::state::GitAction) -> bool {
+    if !crate::ui::dock::chooser::focused_in_git_repo(state) {
+        return false;
+    }
+    state.request_git_action = Some(action);
+    state.mode = Mode::Terminal;
+    true
 }
 
 fn toggle_tab_prio(state: &mut AppState, context: ActionContext) -> bool {
@@ -3366,6 +3610,65 @@ mod tests {
         execute_navigate_action(&mut state, NavigateAction::RefreshSidebar);
         assert!(state.sidebar_refreshing);
         assert!(state.sidebar_refresh_requested);
+    }
+
+    fn state_with_git_repo(in_git_repo: bool) -> AppState {
+        let mut state = state_with_workspaces(&["test"]);
+        let cwd = std::path::PathBuf::from("/repo/herdr");
+        state.status_focused_cwd = Some(cwd.clone());
+        state.git_root_for_cwd.insert(
+            cwd.clone(),
+            in_git_repo.then_some(std::path::PathBuf::from("/repo/herdr")),
+        );
+        state
+    }
+
+    #[test]
+    fn git_palette_actions_request_the_matching_git_action_in_a_repo() {
+        for (action, expected) in [
+            (NavigateAction::GitPull, crate::app::state::GitAction::Pull),
+            (
+                NavigateAction::GitCommit,
+                crate::app::state::GitAction::Commit,
+            ),
+            (NavigateAction::GitPush, crate::app::state::GitAction::Push),
+            (
+                NavigateAction::GitCreatePr,
+                crate::app::state::GitAction::CreatePr,
+            ),
+        ] {
+            let mut state = state_with_git_repo(true);
+            execute_navigate_action(&mut state, action);
+            assert_eq!(state.request_git_action, Some(expected));
+            assert_eq!(state.mode, Mode::Terminal);
+        }
+    }
+
+    #[test]
+    fn git_palette_actions_are_no_ops_outside_a_repo() {
+        for action in [
+            NavigateAction::GitPull,
+            NavigateAction::GitCommit,
+            NavigateAction::GitPush,
+            NavigateAction::GitCreatePr,
+        ] {
+            let mut state = state_with_git_repo(false);
+            execute_navigate_action(&mut state, action);
+            assert_eq!(state.request_git_action, None);
+            assert_eq!(state.mode, Mode::Navigate);
+        }
+    }
+
+    #[test]
+    fn focus_sidebar_action_focuses_and_expands_the_sidebar() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.sidebar_collapsed = true;
+
+        execute_navigate_action(&mut state, NavigateAction::FocusSidebar);
+
+        assert!(state.sidebar_focused);
+        assert!(!state.sidebar_collapsed);
+        assert_eq!(state.mode, Mode::Terminal);
     }
 
     #[test]

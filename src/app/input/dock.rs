@@ -213,6 +213,7 @@ impl AppState {
         ) {
             return false;
         }
+        self.dock_collapsed = false;
         if matches!(
             surface,
             DockSurface::Pr | DockSurface::Linear | DockSurface::Missive
@@ -416,6 +417,16 @@ mod tests {
         assert!(app.activate_dock_surface(DockSurface::Linear));
         assert_eq!(app.dock_tab, Some(DockSurface::Linear));
         assert!(app.dock_linear_focused);
+    }
+
+    #[test]
+    fn activating_a_surface_expands_a_collapsed_dock() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = true;
+
+        assert!(app.activate_dock_surface(DockSurface::Terminal));
+        assert!(!app.dock_collapsed);
+        assert_eq!(app.dock_tab, Some(DockSurface::Terminal));
     }
 
     #[test]

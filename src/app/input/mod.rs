@@ -50,7 +50,9 @@ mod sidebar;
 mod terminal;
 
 #[cfg(test)]
-pub(crate) use self::navigate::{action_for_key_for_test, BindingDispatch};
+pub(crate) use self::navigate::{
+    action_for_key_for_test, non_indexed_navigation_actions_for_test, BindingDispatch,
+};
 #[cfg(test)]
 pub(crate) use self::sidebar::SidebarWorkGroupKeyAction;
 pub(crate) use self::{

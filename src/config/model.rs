@@ -754,6 +754,8 @@ pub struct KeysConfig {
     pub copy_work_pr: BindingConfig,
     /// Copy the focused pane's first preview URL. Default: "prefix+ctrl+shift+u".
     pub copy_work_preview: BindingConfig,
+    /// Toggle between the current theme and its dark/light sibling. Unset by default.
+    pub toggle_theme: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -852,6 +854,8 @@ pub struct KeysConfig {
     pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
+    /// Focus the sidebar and expand it if collapsed. Unset by default.
+    pub focus_sidebar: BindingConfig,
     /// Cycle the sidebar grouping mode. Unset by default.
     pub sidebar_cycle_group_mode: BindingConfig,
     /// Refresh sidebar work and Git metadata. Unset by default.
@@ -886,6 +890,36 @@ pub struct KeysConfig {
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
     pub home: BindingConfig,
+    /// Run `git pull --rebase` for the focused repository. Unset by default.
+    pub git_pull: BindingConfig,
+    /// Run the configured Git commit flow for the focused repository. Unset by default.
+    pub git_commit: BindingConfig,
+    /// Run `git push` for the focused repository. Unset by default.
+    pub git_push: BindingConfig,
+    /// Create a pull request for the focused repository. Unset by default.
+    pub git_create_pr: BindingConfig,
+    /// Open the Home dock surface. Unset by default.
+    pub dock_home: BindingConfig,
+    /// Open the Terminal dock surface. Unset by default.
+    pub dock_terminal: BindingConfig,
+    /// Open the Files dock surface. Unset by default.
+    pub dock_files: BindingConfig,
+    /// Open the Diff dock surface. Unset by default.
+    pub dock_diff: BindingConfig,
+    /// Open the pull request dock surface. Unset by default.
+    pub dock_pr: BindingConfig,
+    /// Open the Linear dock surface. Unset by default.
+    pub dock_linear: BindingConfig,
+    /// Open the Missive dock surface. Unset by default.
+    pub dock_missive: BindingConfig,
+    /// Open the Agents dock surface. Unset by default.
+    pub dock_agents: BindingConfig,
+    /// Open the Shortcuts dock surface. Unset by default.
+    pub dock_shortcuts: BindingConfig,
+    /// Open the Context dock surface. Unset by default.
+    pub dock_context: BindingConfig,
+    /// Open the Symphony dock surface. Unset by default.
+    pub dock_symphony: BindingConfig,
     pub toggle_status_detail: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
@@ -955,6 +989,8 @@ pub(crate) struct KeysConfigOverlay {
     copy_work_pr: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_work_preview: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_theme: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1050,6 +1086,8 @@ pub(crate) struct KeysConfigOverlay {
     resize_pane_right: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_sidebar: Option<BindingConfig>,
     sidebar_cycle_group_mode: Option<BindingConfig>,
     sidebar_refresh: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
@@ -1077,6 +1115,36 @@ pub(crate) struct KeysConfigOverlay {
     missive: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
     home: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_pull: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_commit: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_push: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_create_pr: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_home: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_terminal: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_files: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_diff: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_pr: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_linear: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_missive: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_agents: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_shortcuts: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_context: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dock_symphony: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
@@ -1128,6 +1196,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(copy_work_ticket);
         apply_field!(copy_work_pr);
         apply_field!(copy_work_preview);
+        apply_field!(toggle_theme);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -1176,6 +1245,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_up);
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
+        apply_field!(focus_sidebar);
         apply_field!(sidebar_cycle_group_mode);
         apply_field!(sidebar_refresh);
         apply_field!(toggle_blocked_filter);
@@ -1193,6 +1263,21 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(missive);
         apply_field!(inbox);
         apply_field!(home);
+        apply_field!(git_pull);
+        apply_field!(git_commit);
+        apply_field!(git_push);
+        apply_field!(git_create_pr);
+        apply_field!(dock_home);
+        apply_field!(dock_terminal);
+        apply_field!(dock_files);
+        apply_field!(dock_diff);
+        apply_field!(dock_pr);
+        apply_field!(dock_linear);
+        apply_field!(dock_missive);
+        apply_field!(dock_agents);
+        apply_field!(dock_shortcuts);
+        apply_field!(dock_context);
+        apply_field!(dock_symphony);
         apply_field!(toggle_status_detail);
         apply_field!(indexed);
         apply_field!(command);
@@ -1267,6 +1352,7 @@ impl KeysConfig {
         copy_effective_action_field!(copy_work_ticket, keybinds.copy_work_ticket);
         copy_effective_action_field!(copy_work_pr, keybinds.copy_work_pr);
         copy_effective_action_field!(copy_work_preview, keybinds.copy_work_preview);
+        copy_effective_action_field!(toggle_theme, keybinds.toggle_theme);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -1315,6 +1401,7 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(focus_sidebar, keybinds.focus_sidebar);
         copy_effective_action_field!(sidebar_cycle_group_mode, keybinds.sidebar_cycle_group_mode);
         copy_effective_action_field!(sidebar_refresh, keybinds.sidebar_refresh);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
@@ -1332,6 +1419,21 @@ impl KeysConfig {
         copy_effective_action_field!(missive, keybinds.missive);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
+        copy_effective_action_field!(git_pull, keybinds.git_pull);
+        copy_effective_action_field!(git_commit, keybinds.git_commit);
+        copy_effective_action_field!(git_push, keybinds.git_push);
+        copy_effective_action_field!(git_create_pr, keybinds.git_create_pr);
+        copy_effective_action_field!(dock_home, keybinds.dock_home);
+        copy_effective_action_field!(dock_terminal, keybinds.dock_terminal);
+        copy_effective_action_field!(dock_files, keybinds.dock_files);
+        copy_effective_action_field!(dock_diff, keybinds.dock_diff);
+        copy_effective_action_field!(dock_pr, keybinds.dock_pr);
+        copy_effective_action_field!(dock_linear, keybinds.dock_linear);
+        copy_effective_action_field!(dock_missive, keybinds.dock_missive);
+        copy_effective_action_field!(dock_agents, keybinds.dock_agents);
+        copy_effective_action_field!(dock_shortcuts, keybinds.dock_shortcuts);
+        copy_effective_action_field!(dock_context, keybinds.dock_context);
+        copy_effective_action_field!(dock_symphony, keybinds.dock_symphony);
         copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
         copy_user_field!(indexed);
 
@@ -1741,6 +1843,7 @@ impl Default for KeysConfig {
             copy_work_ticket: BindingConfig::one("prefix+ctrl+u"),
             copy_work_pr: BindingConfig::one("prefix+alt+u"),
             copy_work_preview: BindingConfig::one("prefix+ctrl+shift+u"),
+            toggle_theme: BindingConfig::empty(),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
@@ -1789,6 +1892,7 @@ impl Default for KeysConfig {
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
+            focus_sidebar: BindingConfig::empty(),
             sidebar_cycle_group_mode: BindingConfig::empty(),
             sidebar_refresh: BindingConfig::empty(),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
@@ -1806,6 +1910,21 @@ impl Default for KeysConfig {
             missive: BindingConfig::one("prefix+shift+c"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
+            git_pull: BindingConfig::empty(),
+            git_commit: BindingConfig::empty(),
+            git_push: BindingConfig::empty(),
+            git_create_pr: BindingConfig::empty(),
+            dock_home: BindingConfig::empty(),
+            dock_terminal: BindingConfig::empty(),
+            dock_files: BindingConfig::empty(),
+            dock_diff: BindingConfig::empty(),
+            dock_pr: BindingConfig::empty(),
+            dock_linear: BindingConfig::empty(),
+            dock_missive: BindingConfig::empty(),
+            dock_agents: BindingConfig::empty(),
+            dock_shortcuts: BindingConfig::empty(),
+            dock_context: BindingConfig::empty(),
+            dock_symphony: BindingConfig::empty(),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
