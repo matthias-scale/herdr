@@ -624,6 +624,7 @@ fn render_compact_agent_row_with_prefix(
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let trailing_tag = tab
         .then_some(entry.space_label.as_str())
+        .filter(|_| !entry.space_label_redundant)
         .filter(|tag| !tag.is_empty());
     let mut space_suffix = None;
     let mut displayed_title_width = title_width;
@@ -754,6 +755,10 @@ pub(crate) struct AgentPanelEntry {
     /// Server-owned Space label. Grouping views render this in the existing
     /// trailing tag cell instead of deriving a label from the pane title.
     pub space_label: String,
+    /// The current Spaces/RepoWorktree header has the same label, so repeating
+    /// it in the row adds no information. A disambiguating header suffix keeps
+    /// this false and preserves the raw Space tag.
+    pub space_label_redundant: bool,
     pub primary_tab_label: Option<String>,
     pub tab_has_custom_name: bool,
     pub tab_label_leads_with_agent: bool,
@@ -955,12 +960,21 @@ fn collect_agent_panel_entries_with_runtimes(
             &empty_runtimes
         }
     };
+    let workspace_labels = matches!(
+        app.sidebar_group_mode,
+        SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree
+    )
+    .then(|| sidebar_workspace_labels(app, terminal_runtimes));
 
     app.workspaces
         .iter()
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+            let space_label_redundant = workspace_labels
+                .as_ref()
+                .and_then(|labels| labels.get(&ws_idx))
+                .is_some_and(|(header_label, _)| header_label == &workspace_label);
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
@@ -1006,6 +1020,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         space_label: space_label.clone(),
+                        space_label_redundant,
                         primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
@@ -5822,7 +5837,7 @@ fn render_workspace_list(
         render_symphony_job(app, frame, &job, symphony_now);
     }
     for card in tab_cards {
-        render_tab_card(app, frame, &card, narrow_prefix);
+        render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
     }
     for card in agent_cards {
         let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
@@ -5891,12 +5906,13 @@ fn render_tab_card(
     frame: &mut Frame,
     card: &crate::app::state::TabCardArea,
     narrow_prefix: Option<usize>,
+    rows: &[SidebarRow],
 ) {
-    let entry = sidebar_rows(app).into_iter().find_map(|row| match row {
+    let entry = rows.iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
             if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
         {
-            Some((entry, depth))
+            Some((entry.as_ref(), *depth))
         }
         _ => None,
     });
@@ -5904,7 +5920,7 @@ fn render_tab_card(
     render_compact_agent_row_with_prefix(
         app,
         frame,
-        &entry,
+        entry,
         card.rect,
         depth,
         true,
@@ -7643,6 +7659,7 @@ pub(crate) mod tests {
             pane_id: crate::layout::PaneId::alloc(),
             primary_label: "workspace".into(),
             space_label: String::new(),
+            space_label_redundant: false,
             primary_tab_label: Some("tab".into()),
             tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
@@ -10532,8 +10549,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn a_blocked_worklist_row_renders_its_title_with_its_space_suffix() {
+    fn a_blocked_worklist_row_hides_its_redundant_space_suffix() {
         let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
         let blocked_pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(blocked_pane).unwrap().clone();
         app.terminals
@@ -10554,14 +10572,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
         assert!(rendered.contains('—'), "{rendered:?}");
-        assert!(rendered.ends_with("ws0"), "{rendered:?}");
+        assert!(!rendered.contains(" · ws0"), "{rendered:?}");
     }
 
     #[test]
-    fn f19_1a_keeps_age_and_appends_space_suffix_when_wide() {
+    fn f19_1a_keeps_age_and_appends_divergent_space_suffix_when_wide() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].custom_name = Some("t3-sample".into());
         app.workspaces[0].tabs[0].custom_name = Some("sample-pr".into());
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -10587,6 +10616,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .next()
             .expect("thread entry");
         assert_eq!(entry.space_label, "t3-sample");
+        assert!(!entry.space_label_redundant);
 
         let render_at_row_width = |entry: &AgentPanelEntry, width, depth| {
             let mut terminal =
@@ -10659,6 +10689,75 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
         assert!(wide.contains("2m · t3-sample"), "{wide:?}");
+    }
+
+    #[test]
+    fn compact_rows_hide_space_suffix_when_it_matches_spaces_header() {
+        let mut app = app_with_agents(&["herdr-improve"]);
+
+        for mode in [SidebarGroupMode::Spaces, SidebarGroupMode::RepoWorktree] {
+            app.sidebar_group_mode = mode;
+            let entry = sidebar_thread_entries(&app)
+                .into_iter()
+                .next()
+                .expect("thread entry");
+            assert!(entry.space_label_redundant, "mode {mode:?}");
+            let rendered = render_first_tab_row(&app, 80);
+            assert!(
+                !rendered.contains(" · herdr-improve"),
+                "{mode:?}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_rows_keep_space_suffix_when_repo_header_differs() {
+        let mut app = app_with_agents(&["growth"]);
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+
+        let header = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Workspace { title, .. } => Some(title),
+                _ => None,
+            })
+            .expect("repo group header");
+        assert_eq!(header, "herdr");
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("thread entry");
+        assert!(!entry.space_label_redundant);
+        let rendered = render_first_tab_row(&app, 80);
+        assert!(rendered.contains(" · growth"), "{rendered:?}");
+    }
+
+    #[test]
+    fn duplicate_space_headers_keep_space_suffix_for_disambiguation() {
+        let mut app = app_with_agents(&["first", "second"]);
+        for workspace in &mut app.workspaces {
+            workspace.custom_name = Some("same".into());
+        }
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
+
+        let labels = sidebar_workspace_labels(&app, &TerminalRuntimeRegistry::new());
+        assert_eq!(labels[&0].0, "same¹");
+        assert_eq!(labels[&1].0, "same²");
+        assert!(sidebar_thread_entries(&app)
+            .into_iter()
+            .all(|entry| !entry.space_label_redundant));
+        assert!(render_first_tab_row(&app, 80).contains(" · same"));
     }
 
     #[test]
@@ -15447,6 +15546,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             activity_at,
         );
         app.view_observed_at = activity_at + std::time::Duration::from_secs(60);
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("growth".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
 
         for width in [26, 60] {
             let area = Rect::new(0, 0, width, 18);
