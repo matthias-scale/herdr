@@ -2108,6 +2108,7 @@ pub(crate) struct SidebarWorkGroupActivation {
     pub(crate) git_ref: Option<crate::app::home_refs::HomeRef>,
     pub(crate) pr: Option<crate::app::home::HomePrContext>,
     pub(crate) ticket: Option<crate::app::home::HomeTicketContext>,
+    pub(crate) missive: Option<crate::app::home::HomeMissiveContext>,
     pub(crate) work_context_patch: crate::work_context::PaneWorkContextPatch,
 }
 
@@ -2221,6 +2222,7 @@ fn ticket_activation(
                 .unwrap_or_else(|| "(untitled ticket)".into()),
             url: object_link,
         }),
+        missive: None,
         work_context_patch: crate::work_context::PaneWorkContextPatch {
             ticket_ids: Some(vec![row.ticket.identifier.clone()]),
             repo,
@@ -2696,6 +2698,11 @@ pub(crate) fn sidebar_work_groups(
                     git_ref: None,
                     pr: None,
                     ticket: None,
+                    missive: Some(crate::app::home::HomeMissiveContext {
+                        app_url: conversation.app_url.clone(),
+                        web_url: conversation.web_url.clone(),
+                        subject: conversation.subject.clone(),
+                    }),
                     work_context_patch: crate::work_context::PaneWorkContextPatch {
                         missive_urls: Some(vec![url.to_string()]),
                         work_title: Some(conversation.subject.clone()),
@@ -2837,6 +2844,13 @@ pub(crate) fn sidebar_work_groups(
                                     git_ref: None,
                                     pr: None,
                                     ticket: None,
+                                    missive: conversation.map(|conversation| {
+                                        crate::app::home::HomeMissiveContext {
+                                            app_url: conversation.app_url.clone(),
+                                            web_url: conversation.web_url.clone(),
+                                            subject: conversation.subject.clone(),
+                                        }
+                                    }),
                                     work_context_patch: crate::work_context::PaneWorkContextPatch {
                                         missive_urls: Some(vec![group_url.to_string()]),
                                         work_title: Some(missive_subject(app, group_url)),
@@ -2944,6 +2958,7 @@ fn github_activation(
             repo: item.repo.clone(),
         }),
         ticket: None,
+        missive: None,
         work_context_patch: crate::work_context::PaneWorkContextPatch {
             pr_urls: Some(vec![url.to_string()]),
             repo: Some(item.repo.clone()),
@@ -3073,6 +3088,7 @@ pub(crate) fn sidebar_unassigned_objects(
                             git_ref: None,
                             pr: None,
                             ticket: None,
+                            missive: None,
                             work_context_patch: crate::work_context::PaneWorkContextPatch {
                                 repo: Some(repo),
                                 ..Default::default()
@@ -3205,33 +3221,6 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
             spawn: false,
         });
     }
-}
-
-/// Resolve a provider row into the object identity used by dock tabs and the
-/// centre preview. Repository rows have no object surface.
-pub(crate) fn sidebar_unassigned_dock_object(
-    app: &AppState,
-    key: &str,
-) -> Option<crate::app::state::DockObjectRef> {
-    let entries = sidebar_thread_entries(app);
-    let object = sidebar_unassigned_objects(app, &entries, app.sidebar_group_mode)
-        .into_iter()
-        .find(|object| object.key == key)?;
-    let (surface, key) = match app.sidebar_group_mode {
-        SidebarGroupMode::LinearTeam => (
-            crate::app::DockSurface::Linear,
-            object.key.strip_prefix("linear:")?.to_string(),
-        ),
-        SidebarGroupMode::RepoPr => (crate::app::DockSurface::Pr, object.activation.object_link),
-        SidebarGroupMode::Missive => (
-            crate::app::DockSurface::Missive,
-            object.activation.object_link,
-        ),
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
-            return None
-        }
-    };
-    Some(crate::app::state::DockObjectRef { surface, key })
 }
 
 fn unassigned_empty_text(app: &AppState) -> String {
@@ -12044,7 +12033,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn indexed_missive_conversation_without_pane_is_dim_and_enter_previews() {
+    fn indexed_missive_conversation_without_pane_is_dim_and_enter_opens_home() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = sidebar_work_item_fixture();
@@ -12082,14 +12071,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
             crate::app::SidebarWorkGroupKeyAction::Consumed
         ));
-        assert!(app.home.is_none());
+        let home = app
+            .home
+            .as_ref()
+            .expect("conversation-linked Home composer");
         assert_eq!(
-            app.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Missive,
-                key: CONVERSATION_C.into(),
-            })
+            home.missive
+                .as_ref()
+                .map(|conversation| conversation.web_url.as_str()),
+            Some(CONVERSATION_C)
         );
+        assert!(app.dock_object_preview.is_none());
     }
 
     #[test]
@@ -12783,7 +12775,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f27_enter_on_no_agent_yet_rows_opens_centre_preview_without_a_pane() {
+    fn f27_enter_on_no_agent_yet_rows_opens_linked_home_without_a_pane() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -12808,18 +12800,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 vec![unassigned_ticket],
             ));
         app.sidebar_selected_work_group = Some("linear:SCA-9999".into());
+        let pane_count = app.workspaces[0].tabs[0].panes.len();
         assert!(matches!(
             app.handle_sidebar_work_group_key(enter),
             SidebarWorkGroupKeyAction::Consumed
         ));
         assert_eq!(app.sidebar_selected_work_group, None);
-        assert!(app.home.is_none());
+        assert_eq!(app.workspaces[0].tabs[0].panes.len(), pane_count);
+        assert!(app.dock_object_preview.is_none());
+        let home = app.home.as_ref().expect("linked Home composer");
+        assert!(home.prompt.contains("SCA-9999: unassigned"));
         assert_eq!(
-            app.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Linear,
-                key: "SCA-9999".into(),
-            })
+            home.ticket
+                .as_ref()
+                .map(|ticket| ticket.identifier.as_str()),
+            Some("SCA-9999")
+        );
+        let plan = home.dispatch_plan().expect("prefilled Home dispatch plan");
+        assert_eq!(
+            plan.work_context_patch.ticket_ids,
+            Some(vec!["SCA-9999".into()])
+        );
+        assert_eq!(
+            plan.work_context_patch.work_title.as_deref(),
+            Some("unassigned")
         );
 
         app.sidebar_group_mode = SidebarGroupMode::Missive;
@@ -12833,17 +12837,65 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_work_group_key(enter),
             SidebarWorkGroupKeyAction::Consumed
         ));
+        let home = app.home.as_ref().expect("Missive-linked Home composer");
         assert_eq!(
-            app.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Missive,
-                key: CONVERSATION_C.into(),
-            })
+            home.missive
+                .as_ref()
+                .map(|conversation| conversation.web_url.as_str()),
+            Some(CONVERSATION_C)
+        );
+        assert_eq!(
+            home.dispatch_plan()
+                .expect("prefilled Missive plan")
+                .work_context_patch,
+            crate::work_context::PaneWorkContextPatch {
+                missive_urls: Some(vec![CONVERSATION_C.into()]),
+                work_title: Some("new lead".into()),
+                ..Default::default()
+            }
+        );
+
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.sidebar_work_filter.github.assignee = None;
+        let github = app
+            .work_index_snapshot
+            .as_mut()
+            .expect("work index fixture")
+            .items
+            .iter_mut()
+            .find(|item| item.pr_number == Some(159))
+            .expect("pull request fixture");
+        github.source.github = true;
+        github.pr_title = Some("sidebar review".into());
+        app.sidebar_selected_work_group =
+            Some("github:https://github.com/scalable-so/herdr/pull/159".into());
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(enter),
+            SidebarWorkGroupKeyAction::Consumed
+        ));
+        let home = app
+            .home
+            .as_ref()
+            .expect("pull-request-linked Home composer");
+        assert_eq!(
+            home.pr.as_ref().map(|pr| (pr.repo.as_str(), pr.number)),
+            Some(("scalable-so/herdr", 159))
+        );
+        assert_eq!(
+            home.directory,
+            std::path::PathBuf::from("/tmp/herdr-fixture/herdr")
+        );
+        assert_eq!(
+            home.dispatch_plan()
+                .expect("prefilled pull request plan")
+                .work_context_patch
+                .pr_urls,
+            Some(vec!["https://github.com/scalable-so/herdr/pull/159".into()])
         );
     }
 
     #[test]
-    fn f27_enter_on_no_agent_yet_row_opens_an_object_tab_when_dock_is_open() {
+    fn f27_enter_on_no_agent_yet_row_opens_home_when_dock_is_open() {
         use crate::app::SidebarWorkGroupKeyAction;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -12865,12 +12917,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarWorkGroupKeyAction::Consumed
         ));
         assert_eq!(app.workspaces[0].tabs[0].panes.len(), pane_count);
-        assert!(app.home.is_none());
-        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Linear));
-        assert_eq!(app.dock_tab_label(0), "SCA-9999");
+        assert!(app.home.is_some());
+        assert!(app.dock_object_preview.is_none());
         assert_eq!(
-            app.active_dock_object(crate::app::DockSurface::Linear)
-                .map(|object| object.key.as_str()),
+            app.home
+                .as_ref()
+                .and_then(|home| home.ticket.as_ref())
+                .map(|ticket| ticket.identifier.as_str()),
             Some("SCA-9999")
         );
     }
@@ -13692,7 +13745,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .next()
             .expect("repo header");
-        let rendered = row_text(terminal.backend().buffer(), header.rect.y, header.rect.width);
+        let rendered = row_text(
+            terminal.backend().buffer(),
+            header.rect.y,
+            header.rect.width,
+        );
         assert!(rendered.contains("matthias"), "{rendered:?}");
         assert!(rendered.contains('…'), "{rendered:?}");
         assert!(display_width(&rendered) <= usize::from(header.rect.width));

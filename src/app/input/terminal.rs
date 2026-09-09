@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_enter_on_selected_agentless_row_opens_object_preview() {
+    fn headless_enter_on_selected_agentless_row_opens_linked_home() {
         let mut app = app_for_mouse_test();
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::LinearTeam;
@@ -581,14 +581,15 @@ mod tests {
 
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
 
-        assert!(app.state.home.is_none());
         assert_eq!(
-            app.state.dock_object_preview,
-            Some(crate::app::state::DockObjectRef {
-                surface: crate::app::DockSurface::Linear,
-                key: "OPS-12".into(),
-            })
+            app.state
+                .home
+                .as_ref()
+                .and_then(|home| home.ticket.as_ref())
+                .map(|ticket| ticket.identifier.as_str()),
+            Some("OPS-12")
         );
+        assert!(app.state.dock_object_preview.is_none());
     }
 
     #[test]
