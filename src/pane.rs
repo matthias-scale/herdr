@@ -1266,6 +1266,8 @@ pub struct PaneRuntime {
     detect_reset_notify: Arc<Notify>,
     detect_screen_rescan_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
+    suspended: bool,
+    suppress_pane_died: Arc<AtomicBool>,
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: Option<tokio::task::AbortHandle>,
@@ -1811,6 +1813,29 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
+    pub fn suspend_processes(&mut self) {
+        if self.suspended {
+            return;
+        }
+        self.suspended = true;
+        self.suppress_pane_died.store(true, Ordering::Release);
+        if let Some(handle) = self.detect_handle.take() {
+            handle.abort();
+        }
+        self.io.shutdown();
+        shutdown_pane_processes(
+            self.pane_id,
+            self.child_pid.load(Ordering::Acquire),
+            self.child_wait_completed.as_deref(),
+        );
+        self.preserve_processes_on_drop = true;
+        info!(pane = self.pane_id.raw(), "pane processes suspended");
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
     pub fn shutdown(mut self) {
         if let Some(handle) = self.detect_handle.take() {
             handle.abort();
@@ -2150,6 +2175,7 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
+        let suppress_pane_died = Arc::new(AtomicBool::new(false));
 
         let io = {
             let terminal = terminal.clone();
@@ -2203,8 +2229,11 @@ impl PaneRuntime {
                 }
             });
             let exit_events = events.clone();
+            let suppress_pane_died_on_exit = suppress_pane_died.clone();
             let on_reader_exit = Box::new(move || {
-                let _ = rt.block_on(exit_events.send(AppEvent::PaneDied { pane_id }));
+                if !suppress_pane_died_on_exit.load(Ordering::Acquire) {
+                    let _ = rt.block_on(exit_events.send(AppEvent::PaneDied { pane_id }));
+                }
                 debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
             });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
@@ -2258,6 +2287,8 @@ impl PaneRuntime {
             detect_reset_notify,
             detect_screen_rescan_notify,
             pending_release,
+            suspended: false,
+            suppress_pane_died,
             preserve_processes_on_drop: true,
             detect_handle: Some(detect_handle),
         })
@@ -2322,10 +2353,12 @@ impl PaneRuntime {
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
+        let suppress_pane_died = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
             let events = events.clone();
+            let suppress_pane_died_on_exit = suppress_pane_died.clone();
             let rt = tokio::runtime::Handle::current();
             let mut child = spawned.child;
             if let Some(pid) = child.process_id() {
@@ -2341,9 +2374,12 @@ impl PaneRuntime {
                     Err(e) => crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string()),
                 }
                 child_wait_completed.store(true, Ordering::Release);
-                // Use blocking send — PaneDied is critical, must not be dropped
-                if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied { pane_id })) {
-                    error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
+                // Normal exits are critical and must not be dropped. Suspension is
+                // handled synchronously by the settlement lifecycle instead.
+                if !suppress_pane_died_on_exit.load(Ordering::Acquire) {
+                    if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied { pane_id })) {
+                        error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
+                    }
                 }
             });
         }
@@ -2910,6 +2946,8 @@ impl PaneRuntime {
             detect_reset_notify,
             detect_screen_rescan_notify,
             pending_release,
+            suspended: false,
+            suppress_pane_died,
             preserve_processes_on_drop: false,
             detect_handle,
         })
@@ -3256,14 +3294,23 @@ impl PaneRuntime {
     }
 
     pub async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
+        if self.suspended {
+            return Ok(());
+        }
         self.io.send_bytes(bytes).await
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        if self.suspended {
+            return Ok(());
+        }
         self.io.try_send_bytes(bytes)
     }
 
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
+        if self.suspended {
+            return;
+        }
         self.io.send_bytes_after(bytes, delay);
     }
 
@@ -3561,6 +3608,8 @@ impl PaneRuntime {
                 detect_reset_notify: Arc::new(Notify::new()),
                 detect_screen_rescan_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
+                suspended: false,
+                suppress_pane_died: Arc::new(AtomicBool::new(false)),
                 preserve_processes_on_drop: true,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
@@ -3573,6 +3622,34 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    #[tokio::test]
+    async fn suspended_runtime_discards_direct_try_and_delayed_input() {
+        let (mut runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        assert!(!runtime.is_suspended());
+
+        runtime.suspend_processes();
+        runtime.suspend_processes();
+
+        assert!(runtime.is_suspended());
+        runtime
+            .send_bytes(Bytes::from_static(b"async"))
+            .await
+            .expect("suspended async input is accepted and discarded");
+        runtime
+            .try_send_bytes(Bytes::from_static(b"try"))
+            .expect("suspended try input is accepted and discarded");
+        runtime.send_bytes_after(
+            Bytes::from_static(b"delayed"),
+            std::time::Duration::from_millis(1),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
 
     #[tokio::test]
     async fn a_resize_does_not_arm_retirement_of_a_blocked_gate() {
@@ -4316,6 +4393,8 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             detect_screen_rescan_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
+            suspended: false,
+            suppress_pane_died: Arc::new(AtomicBool::new(false)),
             preserve_processes_on_drop: true,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
@@ -4352,6 +4431,8 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             detect_screen_rescan_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
+            suspended: false,
+            suppress_pane_died: Arc::new(AtomicBool::new(false)),
             preserve_processes_on_drop: true,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };

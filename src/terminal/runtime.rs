@@ -17,6 +17,14 @@ use crate::layout::PaneId;
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
 impl TerminalRuntime {
+    pub fn suspend_processes(&mut self) {
+        self.0.suspend_processes();
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.0.is_suspended()
+    }
+
     pub fn shutdown(self) {
         self.0.shutdown();
     }

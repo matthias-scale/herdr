@@ -304,6 +304,9 @@ pub struct SessionConfig {
     /// Settle a pane that has been inactive for `settle_after_days`.
     /// Default: true.
     pub auto_settle_inactive: bool,
+    /// Stop resumable agent processes when their pane settles.
+    /// Default: true.
+    pub settle_stops_agent: bool,
 }
 
 impl Default for SessionConfig {
@@ -316,6 +319,7 @@ impl Default for SessionConfig {
             settle_after_days: 3,
             auto_settle_finished: true,
             auto_settle_inactive: true,
+            settle_stops_agent: true,
         }
     }
 }
@@ -2045,6 +2049,7 @@ new_cwd = "~/Projects"
         assert_eq!(default_config.session.reap_done_after_minutes, 240);
         assert!(default_config.session.reap_done_panes);
         assert_eq!(default_config.session.settle_after_days, 3);
+        assert!(default_config.session.settle_stops_agent);
 
         let toml = r#"
 [session]
@@ -2053,6 +2058,7 @@ hide_done_after_minutes = 15
 reap_done_after_minutes = 90
 reap_done_panes = false
 settle_after_days = 7
+settle_stops_agent = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
@@ -2060,6 +2066,7 @@ settle_after_days = 7
         assert_eq!(config.session.reap_done_after_minutes, 90);
         assert!(!config.session.reap_done_panes);
         assert_eq!(config.session.settle_after_days, 7);
+        assert!(!config.session.settle_stops_agent);
     }
 
     #[test]

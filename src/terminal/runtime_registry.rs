@@ -21,6 +21,10 @@ impl TerminalRuntimeRegistry {
         self.runtimes.get(terminal_id)
     }
 
+    pub(crate) fn get_mut(&mut self, terminal_id: &TerminalId) -> Option<&mut TerminalRuntime> {
+        self.runtimes.get_mut(terminal_id)
+    }
+
     pub(crate) fn insert(
         &mut self,
         terminal_id: TerminalId,

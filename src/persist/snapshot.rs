@@ -125,6 +125,8 @@ pub struct PaneSnapshot {
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_work_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_auto_label: Option<String>,
     /// Flat effective projection, kept for readers of older formats.
     #[serde(default)]
     pub work_context: crate::work_context::PaneWorkContext,
@@ -452,6 +454,8 @@ fn capture_tab(
                 cwd,
                 settled_at: pane.and_then(|pane| pane.settled_at),
                 settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
+                settled_auto_label: terminal
+                    .and_then(|terminal| terminal.settled_auto_label.clone()),
                 work_context,
                 work_context_tiers,
                 label,
@@ -1136,14 +1140,25 @@ mod tests {
         // as it decays across an afternoon.
         let mut ws = crate::workspace::Workspace::test_new("bound");
         ws.repo_binding = Some("matthias-scale/herdr".into());
+        let pane_id = ws.tabs[0].root_pane;
+        let terminal_id = ws.terminal_id(pane_id).cloned().unwrap();
+        let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal.settled_auto_label = Some("#7 Persist settlement".into());
+        let terminals = std::collections::HashMap::from([(terminal_id, terminal)]);
 
-        let captured = capture_workspace(&ws, &Default::default(), &Default::default());
+        let captured = capture_workspace(&ws, &terminals, &Default::default());
         let encoded = serde_json::to_string(&captured).expect("encode");
         let decoded: WorkspaceSnapshot = serde_json::from_str(&encoded).expect("decode");
 
         assert_eq!(
             decoded.repo_binding.as_deref(),
             Some("matthias-scale/herdr")
+        );
+        assert_eq!(
+            decoded.tabs[0].panes[&pane_id.raw()]
+                .settled_auto_label
+                .as_deref(),
+            Some("#7 Persist settlement")
         );
     }
 
@@ -1176,6 +1191,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 settled_at: Some(1_725_000_000),
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
+                settled_auto_label: Some("#7 Fix restore".into()),
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,
@@ -1191,6 +1207,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 settled_at: None,
                 settled_work_key: None,
+                settled_auto_label: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: Some("website".into()),
@@ -1262,6 +1279,12 @@ mod tests {
                 .settled_work_key
                 .as_deref(),
             Some("pr:https://github.com/owner/repo/pull/7:merged")
+        );
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&0]
+                .settled_auto_label
+                .as_deref(),
+            Some("#7 Fix restore")
         );
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&0].cwd,
@@ -1884,6 +1907,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 settled_at: None,
                 settled_work_key: None,
+                settled_auto_label: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,
@@ -1901,6 +1925,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 settled_at: None,
                 settled_work_key: None,
+                settled_auto_label: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,
