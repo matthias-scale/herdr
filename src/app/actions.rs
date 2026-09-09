@@ -366,6 +366,9 @@ impl AppState {
             pane.seen = true;
             pane.done_since = None;
         }
+        // Released before the already-focused early return: re-focusing the
+        // current pane is still the operator saying "type here now".
+        self.release_dock_focus_to_pane();
         if previous.as_ref() == Some(&target) {
             return false;
         }
@@ -1293,6 +1296,7 @@ impl AppState {
             self.record_pane_focus_after_navigation(previous_focus);
             self.sync_selection_after_focus_navigation();
             if focus_changed {
+                self.release_dock_focus_to_pane();
                 self.reconcile_dock_home_with_focused_pane();
             }
         }
@@ -1332,6 +1336,7 @@ impl AppState {
         self.record_pane_focus_after_navigation(previous_focus);
         self.sync_selection_after_focus_navigation();
         if focus_changed {
+            self.release_dock_focus_to_pane();
             self.reconcile_dock_home_with_focused_pane();
         }
         true

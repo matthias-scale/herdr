@@ -4165,6 +4165,41 @@ impl AppState {
         self.dock_agents_focused = false;
     }
 
+    /// Drop dock keyboard focus when a terminal pane takes input.
+    ///
+    /// The key dispatch chain runs every dock handler before the
+    /// `Mode::Terminal` arm and gates each one on its own `dock_*_focused`
+    /// flag. Nothing lowered those flags when focus moved back to a pane, so a
+    /// flag left set by an earlier dock interaction kept consuming bare letters
+    /// the operator meant for the shell: `a`/`m`/`x` on Home, `l`/`c` on a pull
+    /// request, a surface shortcut in the chooser.
+    pub(crate) fn release_dock_focus_to_pane(&mut self) {
+        self.dock_home_focused = false;
+        self.dock_pr_focused = false;
+        self.dock_linear_focused = false;
+        self.dock_diff_focused = false;
+        self.dock_files_focused = false;
+        self.dock_agents_focused = false;
+        self.dock_editor_focused = false;
+        self.dock_chooser_focused = false;
+    }
+
+    /// Hand the keyboard to a pane the operator clicked into.
+    ///
+    /// Clicking pane content is the unambiguous "I am typing here now" signal,
+    /// so it also drops the sidebar selection. That selection is set by clicking
+    /// a sidebar row and is the only gate on the sidebar work-group and object
+    /// menu keys, which would otherwise answer `m`, `n`, and Enter while the
+    /// operator types into the shell.
+    pub(crate) fn release_surface_focus_to_pane(&mut self) {
+        self.release_dock_focus_to_pane();
+        self.sidebar_selected_work_group = None;
+        self.sidebar_object_menu = None;
+        self.sidebar_selected_settled = None;
+        self.sidebar_settled_menu_target = None;
+        self.sidebar_settled_menu_delete_armed = false;
+    }
+
     pub(crate) fn toggle_loop_run_history(&mut self) {
         if self.loop_run_history_detail.is_some() {
             self.clear_loop_run_history();
