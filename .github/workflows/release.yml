@@ -72,14 +72,30 @@ jobs:
         with:
           persist-credentials: false
 
+      # Fork-local: this fork ships its own builds from the same Cargo version as
+      # the upstream release it is based on, so it needs a tag upstream will never
+      # use. `v<cargo>-fork.<n>` is accepted alongside the exact `v<cargo>`;
+      # anything else is still rejected, so a typo cannot ship.
       - name: Verify tag matches Cargo.toml version
         run: |
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "error: tag $GITHUB_REF_NAME doesn't match Cargo.toml version $CARGO_VERSION"
-            exit 1
-          fi
+          case "$TAG_VERSION" in
+            "$CARGO_VERSION") ;;
+            "$CARGO_VERSION"-fork.*)
+              SUFFIX="${TAG_VERSION#"$CARGO_VERSION"-fork.}"
+              case "$SUFFIX" in
+                ''|*[!0-9]*)
+                  echo "error: fork tag $GITHUB_REF_NAME needs a numeric suffix, got '$SUFFIX'"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "error: tag $GITHUB_REF_NAME doesn't match Cargo.toml version $CARGO_VERSION (or $CARGO_VERSION-fork.<n>)"
+              exit 1
+              ;;
+          esac
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
@@ -185,12 +201,30 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          # The release-notes fallback reads the tag annotation, which a shallow
+          # checkout without tags does not have.
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
 
+      # Fork-local: a fork tag has no changelog section of its own, and the
+      # upstream version it rides on need not have one either -- docs/next holds
+      # unreleased entries until upstream cuts the release. A missing section used
+      # to fail the job after every artifact had already built, which is how the
+      # v0.8.2 fork release died with five green builds and no release. Fall back
+      # to the tag's annotation, then to the commit subject.
       - name: Extract release notes from changelog
-        run: python3 scripts/changelog.py extract --version "${GITHUB_REF_NAME#v}" --output RELEASE_NOTES.md
+        run: |
+          if python3 scripts/changelog.py extract \
+               --version "${GITHUB_REF_NAME#v}" --output RELEASE_NOTES.md; then
+            exit 0
+          fi
+          echo "no changelog section for ${GITHUB_REF_NAME#v}; using the tag annotation"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            git log -1 --format='%s%n%n%b' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          fi
 
       - name: Create release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
@@ -340,6 +374,10 @@ jobs:
 
   update-latest-json:
     needs: release
+    # Fork-local: this publishes the update feed on upstream's `master` using
+    # RELEASE_DEPLOY_KEY. The fork's trunk is `main` and it holds no such secret,
+    # so for a fork tag the job can only fail, loudly, after a good release.
+    if: "!contains(github.ref_name, '-fork.')"
     runs-on: ubuntu-latest
     concurrency:
       group: docs-publish-master
