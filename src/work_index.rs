@@ -230,6 +230,15 @@ impl WorkItemDetailCache {
             else {
                 continue;
             };
+            // A detail persisted before comments were ordered still carries
+            // the provider's oldest-first list. Order it on the way in, so the
+            // render and the key handler agree before the first refresh lands.
+            // Pull-request comments are flat, so there are no threads to keep
+            // together here.
+            let mut detail = detail;
+            detail
+                .comments
+                .sort_by_key(|comment| newest_first_key(comment.created_at));
             cache.insert_stale(
                 crate::app::state::WorkItemKey {
                     repo: item.repo.clone(),
@@ -2934,8 +2943,9 @@ fn fetch_linear_ticket_detail(
     Ok(detail)
 }
 
-/// Flatten Linear's comment threads: a root comment followed by its replies, in
-/// the order they were written, so a thread reads top to bottom.
+/// Flatten Linear's comment threads newest thread first: a root comment
+/// followed by its replies, in the order they were written, so a thread still
+/// reads top to bottom while the list leads with the most recent discussion.
 fn linear_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
     fn author(comment: &Value) -> Option<String> {
         let user = comment.get("user")?;
@@ -2965,15 +2975,36 @@ fn linear_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
     let nodes = value
         .and_then(|value| value.get("nodes").or(Some(value)))
         .and_then(Value::as_array);
-    let mut out = Vec::new();
+    let mut threads = Vec::new();
     for comment in nodes.into_iter().flatten() {
-        push(comment, &mut out);
+        let mut thread = Vec::new();
+        push(comment, &mut thread);
+        if !thread.is_empty() {
+            threads.push(thread);
+        }
     }
-    out
+    // Order whole threads, not individual comments: a reply belongs under the
+    // root it answers even when a newer root exists. A thread is placed by its
+    // latest activity, so answering an old thread lifts it back to the top
+    // instead of leaving the newest words at the bottom of the list. A thread
+    // with no timestamps at all sorts last rather than ahead of every dated one.
+    threads.sort_by_key(|thread| {
+        newest_first_key(thread.iter().filter_map(|comment| comment.created_at).max())
+    });
+    threads.into_iter().flatten().collect()
 }
 
+/// Sort key that puts the most recent item first and undated items last.
+fn newest_first_key(
+    created_at: Option<SystemTime>,
+) -> (bool, std::cmp::Reverse<Option<SystemTime>>) {
+    (created_at.is_none(), std::cmp::Reverse(created_at))
+}
+
+/// Newest first, so the detail views lead with the most recent review comment.
+/// GitHub returns them oldest first.
 fn github_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
-    value
+    let mut comments = value
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -2989,7 +3020,9 @@ fn github_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
                 created_at: value_time(comment.get("createdAt")),
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    comments.sort_by_key(|comment| newest_first_key(comment.created_at));
+    comments
 }
 
 fn github_actions(value: Option<&Value>) -> Vec<WorkItemAction> {
@@ -4489,6 +4522,61 @@ mod tests {
             "a comment keeps the time it was written"
         );
         assert!(comments[1].created_at.is_none());
+    }
+
+    #[test]
+    fn linear_comment_threads_lead_with_their_latest_activity() {
+        let value: Value = serde_json::from_str(
+            r#"{"nodes":[
+                 {"body":"older root","createdAt":"2026-09-01T10:00:00.000Z",
+                  "user":{"displayName":"Ada"},
+                  "replies":{"nodes":[
+                    {"body":"older reply","createdAt":"2026-09-04T10:00:00.000Z",
+                     "user":{"name":"Grace"}}]}},
+                 {"body":"undated root","user":{"displayName":"Alan"}},
+                 {"body":"newer root","createdAt":"2026-09-03T10:00:00.000Z",
+                  "user":{"displayName":"Edsger"}}
+               ]}"#,
+        )
+        .expect("fixture");
+
+        let comments = linear_comments(Some(&value));
+        let bodies: Vec<&str> = comments
+            .iter()
+            .map(|comment| comment.body.as_str())
+            .collect();
+
+        assert_eq!(
+            bodies,
+            vec!["older root", "older reply", "newer root", "undated root"],
+            "a reply lifts its whole thread above a newer but quiet one, the \
+             reply stays under the root it answers, and an undated thread \
+             sorts last"
+        );
+    }
+
+    #[test]
+    fn github_comments_lead_with_the_newest() {
+        let value: Value = serde_json::from_str(
+            r#"[
+                 {"body":"first","createdAt":"2026-09-01T10:00:00Z","author":{"login":"ada"}},
+                 {"body":"undated","author":{"login":"alan"}},
+                 {"body":"second","createdAt":"2026-09-03T10:00:00Z","author":{"login":"grace"}}
+               ]"#,
+        )
+        .expect("fixture");
+
+        let comments = github_comments(Some(&value));
+        let bodies: Vec<&str> = comments
+            .iter()
+            .map(|comment| comment.body.as_str())
+            .collect();
+
+        assert_eq!(
+            bodies,
+            vec!["second", "first", "undated"],
+            "GitHub returns comments oldest first; the detail views promise newest first"
+        );
     }
 
     #[test]

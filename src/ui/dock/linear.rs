@@ -170,7 +170,11 @@ pub(crate) fn render_linear(app: &AppState, frame: &mut Frame, area: Rect) {
         render_ticket_picker(app, frame, area);
         return;
     };
-    let key = item.stable_key();
+    // Key the view exactly as the input layer does. `stable_key()` uses the
+    // index's canonical identifier while focus uses the work context's, and
+    // the two differ by case often enough that scroll and expansion state
+    // would land in an entry this render never reads.
+    let key = focused_ticket_key(app).unwrap_or_else(|| item.stable_key());
     let view = app
         .dock_object_views
         .get(&key)

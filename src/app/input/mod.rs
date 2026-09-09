@@ -1882,6 +1882,20 @@ impl App {
                     self.copy_selected_missive_url();
                 }
             }
+            // Same comment bindings the dock detail uses, because it is the
+            // same renderer: a digit toggles the comment it numbers and "a"
+            // toggles every one.
+            KeyCode::Char(digit @ '1'..='9') if key.modifiers.is_empty() => {
+                if let Some(object_key) = self.work_view_comment_object_key() {
+                    let index = digit as usize - '1' as usize;
+                    self.toggle_work_view_comment(object_key, index);
+                }
+            }
+            KeyCode::Char('a') if key.modifiers.is_empty() => {
+                if let Some(object_key) = self.work_view_comment_object_key() {
+                    self.toggle_all_work_view_comments(object_key);
+                }
+            }
             KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 self.next_work_index_refresh = std::time::Instant::now();
@@ -1907,6 +1921,89 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// The object whose comment list the full work view is showing, resolved
+    /// the way the render resolves it.
+    ///
+    /// The render looks the selection up in the visible list and falls back to
+    /// the first row when the selected item has been filtered out, which a
+    /// refresh does routinely: a pull request that closes leaves the open-only
+    /// list. Trusting `selected` directly would toggle a comment on an object
+    /// nobody is looking at.
+    fn work_view_comment_object_key(&self) -> Option<crate::app::state::WorkItemKey> {
+        let keys = match self.state.work_view.as_ref()?.projection {
+            crate::app::state::WorkProjection::PullRequests => self.visible_pr_view_keys(),
+            crate::app::state::WorkProjection::Tickets => self.visible_ticket_view_keys(),
+            _ => return None,
+        };
+        let selected = self.state.work_view.as_ref()?.selected.as_ref();
+        let key = selected
+            .and_then(|selected| keys.iter().find(|key| same_work_object(key, selected)))
+            .or_else(|| keys.first())
+            .cloned()?;
+        self.work_view_comments_are_visible(&key).then_some(key)
+    }
+
+    /// Whether the full work view is showing this object's comment list.
+    /// Pull requests keep comments on the overview sub-tab only, and a ticket
+    /// board shows none until a card is opened.
+    fn work_view_comments_are_visible(&self, object_key: &crate::app::state::WorkItemKey) -> bool {
+        self.state
+            .work_view
+            .as_ref()
+            .is_some_and(|state| match state.projection {
+                crate::app::state::WorkProjection::PullRequests => {
+                    state.object_view(object_key).tab == crate::app::state::PrDetailTab::Overview
+                }
+                crate::app::state::WorkProjection::Tickets => {
+                    state.ticket_layout != crate::app::state::LinearViewLayout::Board
+                        || state.board_detail_open
+                }
+                _ => false,
+            })
+    }
+
+    fn toggle_work_view_comment(
+        &mut self,
+        object_key: crate::app::state::WorkItemKey,
+        index: usize,
+    ) {
+        let Some(identity) = self
+            .state
+            .work_item_detail_cache
+            .get(&object_key)
+            .and_then(|detail| detail.comments.get(index))
+            .map(crate::ui::work_list_detail::comment_identity)
+        else {
+            return;
+        };
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.object_view_mut(object_key).toggle_comment(identity);
+        }
+    }
+
+    fn toggle_all_work_view_comments(&mut self, object_key: crate::app::state::WorkItemKey) {
+        let identities = self
+            .state
+            .work_item_detail_cache
+            .get(&object_key)
+            .map(|detail| {
+                detail
+                    .comments
+                    .iter()
+                    .map(crate::ui::work_list_detail::comment_identity)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if identities.is_empty() {
+            return;
+        }
+        if let Some(state) = self.state.work_view.as_mut() {
+            state
+                .object_view_mut(object_key)
+                .toggle_all_comments(identities);
+        }
     }
 
     fn selected_pr_detail(
@@ -3193,6 +3290,59 @@ impl App {
     }
 
     /// Keys of the dock-hosted PR view, backed by the shared action table.
+    /// Expand or collapse one comment in an object detail view. `index` is
+    /// zero-based; the render offers it as digit `index + 1`.
+    fn toggle_dock_detail_comment(
+        &mut self,
+        object_key: crate::app::state::WorkItemKey,
+        index: usize,
+    ) -> bool {
+        let Some(identity) = self
+            .state
+            .work_item_detail_cache
+            .get(&object_key)
+            .and_then(|detail| detail.comments.get(index))
+            .map(crate::ui::work_list_detail::comment_identity)
+        else {
+            return false;
+        };
+        self.state
+            .dock_object_views
+            .entry(object_key)
+            .or_default()
+            .toggle_comment(identity);
+        true
+    }
+
+    /// Expand every comment, or collapse them all when they already are. This
+    /// is the only way to reach a comment past the ninth, which has no digit.
+    fn toggle_all_dock_detail_comments(
+        &mut self,
+        object_key: crate::app::state::WorkItemKey,
+    ) -> bool {
+        let identities = self
+            .state
+            .work_item_detail_cache
+            .get(&object_key)
+            .map(|detail| {
+                detail
+                    .comments
+                    .iter()
+                    .map(crate::ui::work_list_detail::comment_identity)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if identities.is_empty() {
+            return false;
+        }
+        self.state
+            .dock_object_views
+            .entry(object_key)
+            .or_default()
+            .toggle_all_comments(identities);
+        true
+    }
+
     fn handle_dock_pr_key(&mut self, key: &TerminalKey) -> bool {
         let previewed = self.state.dock_collapsed
             && self
@@ -3426,10 +3576,39 @@ impl App {
                     }
                 }
             }
+            // Comments only render on the overview sub-tab, so the digits stay
+            // free everywhere else.
+            // A key with nothing to toggle stays unconsumed, exactly as it was
+            // before these bindings existed.
+            KeyCode::Char(digit @ '1'..='9') if self.dock_pr_comments_are_visible() => {
+                let index = digit as usize - '1' as usize;
+                if !focused_key
+                    .is_some_and(|object_key| self.toggle_dock_detail_comment(object_key, index))
+                {
+                    return false;
+                }
+            }
+            KeyCode::Char('a') if self.dock_pr_comments_are_visible() => {
+                if !focused_key
+                    .is_some_and(|object_key| self.toggle_all_dock_detail_comments(object_key))
+                {
+                    return false;
+                }
+            }
             KeyCode::Esc => self.state.dock_pr_focused = false,
             _ => return false,
         }
         true
+    }
+
+    /// Whether the focused pull-request detail is showing its comment list.
+    fn dock_pr_comments_are_visible(&self) -> bool {
+        crate::ui::dock::pr::focused_pr_key(&self.state).is_some_and(|object_key| {
+            self.state
+                .dock_object_views
+                .get(&object_key)
+                .is_none_or(|view| view.tab == crate::app::state::PrDetailTab::Overview)
+        })
     }
 
     fn focused_dock_ticket_parts(
@@ -3581,6 +3760,23 @@ impl App {
             }
             KeyCode::Char('c') => self.state.dock_ticket_start_menu = Some(Default::default()),
             KeyCode::Char('m') => self.state.dock_ticket_action_menu = Some(Default::default()),
+            // A key with nothing to toggle stays unconsumed, exactly as it was
+            // before these bindings existed.
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit as usize - '1' as usize;
+                if !crate::ui::dock::linear::focused_ticket_key(&self.state)
+                    .is_some_and(|object_key| self.toggle_dock_detail_comment(object_key, index))
+                {
+                    return false;
+                }
+            }
+            KeyCode::Char('a') => {
+                if !crate::ui::dock::linear::focused_ticket_key(&self.state)
+                    .is_some_and(|object_key| self.toggle_all_dock_detail_comments(object_key))
+                {
+                    return false;
+                }
+            }
             KeyCode::Esc => self.state.dock_linear_focused = false,
             _ => return false,
         }
@@ -4865,6 +5061,19 @@ impl App {
     }
 }
 
+/// The identity the work-view render matches a selection on: a ticket by its
+/// identifier, a pull request by repository and number.
+fn same_work_object(
+    left: &crate::app::state::WorkItemKey,
+    right: &crate::app::state::WorkItemKey,
+) -> bool {
+    match (left.ticket_id.as_deref(), right.ticket_id.as_deref()) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => left.repo == right.repo && left.pr_number == right.pr_number,
+        _ => false,
+    }
+}
+
 pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
     if !matches!(key.code, KeyCode::Char('v' | 'V')) {
         return false;
@@ -5434,6 +5643,161 @@ mod tests {
         app.state.dock_pr_focused = false;
         assert!(
             !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+    }
+
+    fn detail_with_comments(bodies: &[&str]) -> crate::work_index::WorkItemDetail {
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.comments = bodies
+            .iter()
+            .map(|body| crate::work_index::WorkItemComment {
+                author: Some("ada".into()),
+                body: (*body).into(),
+                created_at: None,
+            })
+            .collect();
+        detail
+    }
+
+    fn expanded_bodies(app: &App, key: &crate::app::state::WorkItemKey) -> Vec<String> {
+        let Some(view) = app.state.dock_object_views.get(key) else {
+            return Vec::new();
+        };
+        app.state
+            .work_item_detail_cache
+            .get(key)
+            .map(|detail| {
+                detail
+                    .comments
+                    .iter()
+                    .filter(|comment| {
+                        view.comment_is_expanded(crate::ui::work_list_detail::comment_identity(
+                            comment,
+                        ))
+                    })
+                    .map(|comment| comment.body.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_digit_expands_the_ticket_comment_it_names() {
+        let mut app = dock_linear_test_app();
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), detail_with_comments(&["first", "second"]));
+        let press = |app: &mut App, code| {
+            app.handle_dock_linear_key(&TerminalKey::new(code, KeyModifiers::empty()))
+        };
+
+        assert!(press(&mut app, KeyCode::Char('2')));
+        assert_eq!(expanded_bodies(&app, &key), vec!["second".to_string()]);
+
+        assert!(press(&mut app, KeyCode::Char('2')));
+        assert!(
+            expanded_bodies(&app, &key).is_empty(),
+            "the same digit collapses it again"
+        );
+    }
+
+    #[test]
+    fn a_expands_every_ticket_comment_then_collapses_them_all() {
+        let mut app = dock_linear_test_app();
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state.work_item_detail_cache.insert(
+            key.clone(),
+            detail_with_comments(&["first", "second", "third"]),
+        );
+        let press = |app: &mut App, code| {
+            app.handle_dock_linear_key(&TerminalKey::new(code, KeyModifiers::empty()))
+        };
+
+        assert!(press(&mut app, KeyCode::Char('a')));
+        assert_eq!(expanded_bodies(&app, &key).len(), 3);
+
+        assert!(press(&mut app, KeyCode::Char('a')));
+        assert!(expanded_bodies(&app, &key).is_empty());
+
+        // Expand-all after a single comment is already open still opens the
+        // rest rather than reading as "all expanded" and collapsing.
+        assert!(press(&mut app, KeyCode::Char('1')));
+        assert!(press(&mut app, KeyCode::Char('a')));
+        assert_eq!(expanded_bodies(&app, &key).len(), 3);
+    }
+
+    #[test]
+    fn expanding_survives_a_comment_arriving_above_it() {
+        let mut app = dock_linear_test_app();
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), detail_with_comments(&["first", "second"]));
+
+        assert!(app
+            .handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty())));
+        assert_eq!(expanded_bodies(&app, &key), vec!["first".to_string()]);
+
+        // A refresh puts a newer comment at the head. Position moved; identity
+        // did not, so the reader keeps the comment they opened.
+        app.state.work_item_detail_cache.insert(
+            key.clone(),
+            detail_with_comments(&["newest", "first", "second"]),
+        );
+
+        assert_eq!(expanded_bodies(&app, &key), vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn a_comment_key_with_nothing_to_toggle_still_reaches_the_pane() {
+        let mut app = dock_linear_test_app();
+        let key =
+            crate::ui::dock::linear::focused_ticket_key(&app.state).expect("a focused ticket");
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), detail_with_comments(&["only one"]));
+        let press = |app: &mut App, code| {
+            app.handle_dock_linear_key(&TerminalKey::new(code, KeyModifiers::empty()))
+        };
+
+        assert!(
+            press(&mut app, KeyCode::Char('1')),
+            "the one comment toggles"
+        );
+        assert!(
+            !press(&mut app, KeyCode::Char('2')),
+            "a digit past the last comment is not the dock's key"
+        );
+
+        app.state
+            .work_item_detail_cache
+            .insert(key, crate::work_index::WorkItemDetail::empty());
+        assert!(
+            !press(&mut app, KeyCode::Char('1')),
+            "no comments, so the digit belongs to the pane"
+        );
+        assert!(!press(&mut app, KeyCode::Char('a')));
+    }
+
+    #[test]
+    fn pr_comment_digits_only_bind_on_the_sub_tab_that_shows_comments() {
+        let mut app = test_app();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
+        app.state.dock_pr_focused = true;
+        // No pull request is focused, so the digit has no subject either way;
+        // what matters is that a non-overview sub-tab leaves the key alone.
+        assert!(crate::ui::dock::pr::focused_pr_key(&app.state).is_none());
+        assert!(
+            !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty()))
+        );
+        assert!(
+            !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()))
         );
     }
 
@@ -6322,6 +6686,98 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
         view.projection = crate::app::state::WorkProjection::Tickets;
         app.state.work_view = Some(view);
         app
+    }
+
+    #[test]
+    fn work_view_comment_keys_toggle_the_ticket_the_render_shows() {
+        let mut app = ticket_view_app();
+        let key = app
+            .visible_ticket_view_keys()
+            .first()
+            .cloned()
+            .expect("a visible ticket");
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), detail_with_comments(&["first", "second"]));
+        let expanded = |app: &App| {
+            let view = app
+                .state
+                .work_view
+                .as_ref()
+                .expect("view")
+                .object_view(&key);
+            app.state
+                .work_item_detail_cache
+                .get(&key)
+                .map(|detail| {
+                    detail
+                        .comments
+                        .iter()
+                        .filter(|comment| {
+                            view.comment_is_expanded(crate::ui::work_list_detail::comment_identity(
+                                comment,
+                            ))
+                        })
+                        .map(|comment| comment.body.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let press = |app: &mut App, code| {
+            app.handle_work_view_key(KeyEvent::new(code, KeyModifiers::empty()))
+        };
+
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(expanded(&app), vec!["second".to_string()]);
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(expanded(&app).len(), 2);
+        press(&mut app, KeyCode::Char('a'));
+        assert!(expanded(&app).is_empty());
+
+        // The board hides the detail until a card is opened, so the digit has
+        // nothing to act on there.
+        app.state.work_view.as_mut().expect("view").ticket_layout =
+            crate::app::state::LinearViewLayout::Board;
+        press(&mut app, KeyCode::Char('1'));
+        assert!(expanded(&app).is_empty(), "no detail is on screen");
+    }
+
+    #[test]
+    fn work_view_comment_keys_follow_the_render_when_the_selection_is_filtered_out() {
+        let mut app = ticket_view_app();
+        let visible = app
+            .visible_ticket_view_keys()
+            .first()
+            .cloned()
+            .expect("a visible ticket");
+        app.state
+            .work_item_detail_cache
+            .insert(visible.clone(), detail_with_comments(&["only"]));
+        // A refresh can drop the selected item from the filtered list. The
+        // render then falls back to the first row, so the keys must too.
+        let stale = crate::app::state::WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some("SCA-9999".into()),
+        };
+        app.state
+            .work_item_detail_cache
+            .insert(stale.clone(), detail_with_comments(&["gone"]));
+        app.state.work_view.as_mut().expect("view").selected = Some(stale.clone());
+
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
+
+        let view = app.state.work_view.as_ref().expect("view");
+        assert!(
+            view.object_view(&stale).expanded_comments.is_empty(),
+            "the filtered-out object is not the one on screen"
+        );
+        assert_eq!(
+            view.object_view(&visible).expanded_comments.len(),
+            1,
+            "the rendered object is the one that toggled"
+        );
     }
 
     #[test]

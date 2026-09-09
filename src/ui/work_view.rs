@@ -12,8 +12,9 @@ use crate::{
         WorkViewState,
     },
     ui::work_list_detail::{
-        comment_header, section_separator, sorted_filtered_conversations, sorted_filtered_prs,
-        sorted_filtered_tickets, ConversationItem, TicketItem, WorkItem as _, WorkRow,
+        comment_body_lines, comment_header, comment_identity, section_separator,
+        sorted_filtered_conversations, sorted_filtered_prs, sorted_filtered_tickets,
+        ConversationItem, TicketItem, WorkItem as _, WorkRow,
     },
     work_projection::{project_review_queue, WorkReviewQueueRow},
 };
@@ -1182,11 +1183,13 @@ pub(crate) fn render_ticket_detail(
                 .fg(palette.subtext0)
                 .add_modifier(Modifier::DIM),
         ));
-        lines.extend(crate::ui::markdown::body_lines(
+        lines.extend(comment_body_lines(
             palette,
-            Some(&comment.body),
+            comment,
+            index,
             usize::from(area.width.saturating_sub(4)),
             "    ",
+            view.comment_is_expanded(comment_identity(comment)),
         ));
     }
     if let Some(draft) = controls.comment_draft {
@@ -1417,11 +1420,13 @@ pub(crate) fn render_pr_detail(
                         .fg(palette.subtext0)
                         .add_modifier(Modifier::DIM),
                 ));
-                lines.extend(crate::ui::markdown::body_lines(
+                lines.extend(comment_body_lines(
                     palette,
-                    Some(&comment.body),
+                    comment,
+                    index,
                     usize::from(area.width.saturating_sub(4)),
                     "    ",
+                    view.comment_is_expanded(comment_identity(comment)),
                 ));
             }
         }
