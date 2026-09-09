@@ -314,6 +314,14 @@ pub struct SessionConfig {
     /// Stop resumable agent processes when their pane settles.
     /// Default: true.
     pub settle_stops_agent: bool,
+    /// After a pane is resumed into its native agent session, submit one
+    /// `resume_nudge_message` prompt so the agent picks the work back up
+    /// instead of waiting at a restored, idle prompt. The nudge is skipped
+    /// when the agent comes back blocked, when it resumes straight into work,
+    /// and when the pane already holds a draft the human typed. Default: true.
+    pub nudge_resumed_agents: bool,
+    /// Prompt submitted by `nudge_resumed_agents`. Default: "continue".
+    pub resume_nudge_message: String,
 }
 
 impl Default for SessionConfig {
@@ -328,6 +336,8 @@ impl Default for SessionConfig {
             settle_finished_after_minutes: 10,
             auto_settle_inactive: true,
             settle_stops_agent: true,
+            nudge_resumed_agents: true,
+            resume_nudge_message: "continue".to_string(),
         }
     }
 }

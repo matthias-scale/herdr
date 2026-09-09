@@ -528,6 +528,7 @@ impl App {
             self.sync_pending_agent_resume_deadline(now);
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
+        changed |= self.tick_resume_nudges(now);
         changed
     }
 
@@ -1054,6 +1055,7 @@ impl App {
                 .then_some(self.agent_activity_refresh_deadline)
                 .flatten(),
             self.pending_agent_resume_deadline,
+            self.next_resume_nudge_deadline(),
             self.session_save_deadline,
             self.loop_receipt_fallback_deadline,
             self.selection_autoscroll_deadline,

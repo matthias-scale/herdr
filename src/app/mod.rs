@@ -6,7 +6,7 @@
 
 pub(crate) mod actions;
 mod add_project;
-mod agent_resume;
+pub(crate) mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
@@ -275,6 +275,10 @@ pub struct App {
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) agent_activity_refresh_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    /// Agents that were just resumed into a native session and are waiting to
+    /// be nudged back into their work, keyed by the terminal they run in.
+    pub(crate) pending_resume_nudges:
+        std::collections::HashMap<crate::terminal::TerminalId, agent_resume::ResumeNudge>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -1161,6 +1165,8 @@ impl App {
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
             settle_stops_agent: config.session.settle_stops_agent,
+            nudge_resumed_agents: config.session.nudge_resumed_agents,
+            resume_nudge_message: config.session.resume_nudge_message.clone(),
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
@@ -1402,6 +1408,7 @@ impl App {
             agent_metadata_deadline: None,
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
+            pending_resume_nudges: std::collections::HashMap::new(),
             session_save_deadline: None,
             session_save_scheduled_revision: None,
             session_save_thread: None,
@@ -2286,6 +2293,10 @@ impl App {
             );
             self.state.auto_settle_inactive = config.session.auto_settle_inactive;
             self.state.settle_stops_agent = config.session.settle_stops_agent;
+            self.state.nudge_resumed_agents = config.session.nudge_resumed_agents;
+            self.state
+                .resume_nudge_message
+                .clone_from(&config.session.resume_nudge_message);
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session

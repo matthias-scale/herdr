@@ -856,7 +856,21 @@ Herdr resumes supported Agent conversations after a server restart by default:
 resume_agents_on_restore = true
 ```
 
-Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
+Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells.
+
+A resumed agent comes back at an idle prompt with its conversation replayed but
+its work stopped. Herdr sends it one prompt so it continues:
+
+```toml
+[session]
+nudge_resumed_agents = true
+resume_nudge_message = "continue"
+```
+
+The prompt is skipped when the agent resumes blocked, when it resumes straight
+back into work, and when the pane already holds text you typed.
+
+See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
 
 ## IME cursor tracking
 

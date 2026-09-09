@@ -12,6 +12,7 @@ pub(crate) enum GeneralRow {
     AutoSettleFinished,
     AutoSettleInactive,
     SettleAfterDays,
+    NudgeResumedAgents,
     HideWhitespace,
     NewThreadWorkspace,
     AddProjectStartDir,
@@ -29,6 +30,7 @@ impl GeneralRow {
         Self::AutoSettleFinished,
         Self::AutoSettleInactive,
         Self::SettleAfterDays,
+        Self::NudgeResumedAgents,
         Self::HideWhitespace,
         Self::NewThreadWorkspace,
         Self::AddProjectStartDir,
@@ -42,6 +44,7 @@ impl GeneralRow {
             Self::AutoSettleFinished => "Auto-settle finished threads",
             Self::AutoSettleInactive => "Auto-settle inactive threads",
             Self::SettleAfterDays => "Days of inactivity before auto-settle",
+            Self::NudgeResumedAgents => "Continue resumed agents",
             Self::HideWhitespace => "Hide whitespace changes in diff",
             Self::NewThreadWorkspace => "New threads default workspace",
             Self::AddProjectStartDir => "Add project starts in",
@@ -54,6 +57,9 @@ impl GeneralRow {
     pub(crate) fn hint(self) -> Option<&'static str> {
         match self {
             Self::ProjectGrouping => Some("combine matching repos across hosts"),
+            Self::NudgeResumedAgents => {
+                Some("after a restart, tell an idle resumed agent to carry on")
+            }
             _ => None,
         }
     }
@@ -65,6 +71,7 @@ impl GeneralRow {
             Self::AutoSettleFinished => ("session", "auto_settle_finished"),
             Self::AutoSettleInactive => ("session", "auto_settle_inactive"),
             Self::SettleAfterDays => ("session", "settle_after_days"),
+            Self::NudgeResumedAgents => ("session", "nudge_resumed_agents"),
             Self::HideWhitespace => ("ui", "hide_whitespace_in_diff"),
             Self::NewThreadWorkspace => ("ui", "new_thread_workspace"),
             Self::AddProjectStartDir => ("ui", "add_project_start_dir"),
@@ -85,6 +92,7 @@ impl GeneralRow {
                 .as_secs()
                 .div_ceil(24 * 60 * 60)
                 .to_string(),
+            Self::NudgeResumedAgents => on_off(state.nudge_resumed_agents),
             Self::HideWhitespace => on_off(state.dock_diff_ignore_whitespace),
             Self::NewThreadWorkspace => state.new_thread_workspace.label().to_string(),
             Self::AddProjectStartDir => {
@@ -151,6 +159,7 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
         GeneralRow::ProjectGrouping => toggle(state.combine_repos_across_hosts),
         GeneralRow::AutoSettleFinished => toggle(state.auto_settle_finished),
         GeneralRow::AutoSettleInactive => toggle(state.auto_settle_inactive),
+        GeneralRow::NudgeResumedAgents => toggle(state.nudge_resumed_agents),
         GeneralRow::HideWhitespace => toggle(state.dock_diff_ignore_whitespace),
         GeneralRow::DeleteConfirmation => toggle(state.confirm_close),
         GeneralRow::SettleAfterDays => {
@@ -199,7 +208,7 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), total);
-        assert_eq!(total, 9);
+        assert_eq!(total, 10);
     }
 
     #[test]
@@ -250,6 +259,23 @@ mod tests {
                 value: 1
             })
         );
+    }
+
+    #[test]
+    fn the_resume_nudge_row_toggles_the_session_key() {
+        let mut state = AppState::test_new();
+        assert_eq!(GeneralRow::NudgeResumedAgents.value(&state), "on");
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::NudgeResumedAgents),
+            Some(ConfigEdit::Bool {
+                section: "session",
+                key: "nudge_resumed_agents",
+                value: false
+            })
+        );
+
+        state.nudge_resumed_agents = false;
+        assert_eq!(GeneralRow::NudgeResumedAgents.value(&state), "off");
     }
 
     #[test]
