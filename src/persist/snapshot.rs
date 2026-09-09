@@ -67,6 +67,10 @@ pub struct WorkspaceSnapshot {
     /// it defaults rather than forcing a snapshot-version migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_binding: Option<String>,
+    /// Absent in session files written before adoption existed; an old session
+    /// has never been cleared, so `false` is the correct default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repo_binding_cleared: bool,
     #[serde(default)]
     pub public_pane_numbers: HashMap<u32, usize>,
     #[serde(default)]
@@ -216,6 +220,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             custom_name: snap.custom_name,
             identity_cwd,
             worktree_space: None,
+            repo_binding_cleared: false,
             repo_binding: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
@@ -360,6 +365,7 @@ fn capture_workspace(
             .unwrap_or_else(|| ws.identity_cwd.clone()),
         worktree_space: ws.worktree_space.clone(),
         repo_binding: ws.repo_binding.clone(),
+        repo_binding_cleared: ws.repo_binding_cleared,
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
@@ -1198,6 +1204,7 @@ mod tests {
         let snap = SessionSnapshot {
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
@@ -1908,6 +1915,7 @@ mod tests {
             version: SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
