@@ -420,6 +420,7 @@ fn restore_workspace(
             cached_git_space,
             worktree_space,
             repo_binding: snap.repo_binding.clone(),
+            repo_binding_cleared: snap.repo_binding_cleared,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -1481,6 +1482,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
@@ -1600,6 +1602,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("w1".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
@@ -1733,6 +1736,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("w1".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
@@ -1832,6 +1836,7 @@ mod tests {
     fn legacy_restore_precomputes_missing_public_pane_numbers() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = WorkspaceSnapshot {
+            repo_binding_cleared: false,
             id: Some("w1".into()),
             custom_name: None,
             identity_cwd: cwd,
@@ -1877,6 +1882,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
@@ -2175,6 +2181,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: Some("saved-generation".into()),
             workspaces: vec![WorkspaceSnapshot {
+                repo_binding_cleared: false,
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd,

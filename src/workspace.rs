@@ -221,6 +221,12 @@ pub struct Workspace {
     /// repository otherwise decays: new panes land wherever the session
     /// happened to be, and the grouping has to be rebuilt by hand.
     pub repo_binding: Option<String>,
+    /// The operator cleared the binding, so adoption must not put one back.
+    ///
+    /// Adoption cannot otherwise tell "never had a binding" from "was told to
+    /// have none": both read as `repo_binding: None`, and a workspace whose
+    /// panes agree on a repository would silently rebind on the next refresh.
+    pub repo_binding_cleared: bool,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
@@ -288,6 +294,7 @@ impl Workspace {
             cached_git_space,
             worktree_space: None,
             repo_binding: None,
+            repo_binding_cleared: false,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -488,6 +495,7 @@ impl Workspace {
                 cached_git_space,
                 worktree_space: None,
                 repo_binding: None,
+                repo_binding_cleared: false,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
                 public_pane_numbers,
@@ -1563,6 +1571,7 @@ impl Workspace {
             cached_git_space: None,
             worktree_space: None,
             repo_binding: None,
+            repo_binding_cleared: false,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,

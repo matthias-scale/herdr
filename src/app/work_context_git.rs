@@ -283,12 +283,19 @@ impl App {
             self.schedule_session_save();
             self.emit_pane_updated(ws_idx, observation.pane_id);
             // The observation may have resolved the repository for the first
-            // time, which is also the first chance the workspace has to learn
-            // which repository it collects for.
-            self.adopt_repo_binding_for_workspace(ws_idx);
-            // It is the weakest tier, so it only routes a pane that has
+            // time. It is the weakest tier, so it only routes a pane that has
             // declared nothing better.
             self.route_pane_to_bound_workspace(ws_idx, observation.pane_id);
+        }
+
+        // Adoption runs once the whole batch is applied, and over every
+        // workspace rather than only the ones this batch touched. Adopting
+        // inside the loop read a half-applied batch, so a workspace holding two
+        // checkouts bound itself to whichever pane reported first; and a
+        // restored session, whose panes already carry their repository, never
+        // reached an adoption call at all because no observation changed.
+        for ws_idx in 0..self.state.workspaces.len() {
+            self.adopt_repo_binding_for_workspace(ws_idx);
         }
 
         self.prune_git_work_context_state();
@@ -1374,6 +1381,89 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         );
         assert_eq!(app.last_git_work_context_refresh_generation, 1);
         assert!(app.git_work_context_refresh_due_after_in_flight);
+    }
+
+    /// One observation carrying `repo` for `pane_id`.
+    fn repo_observation(
+        pane_id: crate::layout::PaneId,
+        cwd: PathBuf,
+        repo: &str,
+        branch: &str,
+    ) -> GitWorkContextObservation {
+        GitWorkContextObservation {
+            pane_id,
+            input: GitWorkContextInput {
+                repo: Some(repo.into()),
+                origin_unparsed: false,
+                cwd,
+                repo_root: Some(PathBuf::from(format!("/adopt/{repo}"))),
+                branch: Some(branch.into()),
+            },
+            context: crate::work_context::PaneWorkContext {
+                repo: Some(repo.into()),
+                branch: Some(branch.into()),
+                ..crate::work_context::PaneWorkContext::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_batch_resolving_two_repositories_leaves_the_workspace_unbound() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("two-repos");
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let pane_ids: Vec<crate::layout::PaneId> = app.state.workspaces[0].tabs[0]
+            .panes
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(pane_ids.len(), 2, "fixture must hold two panes");
+        let cwds: Vec<PathBuf> = pane_ids
+            .iter()
+            .map(|pane_id| {
+                let terminal_id = app.state.workspaces[0].tabs[0]
+                    .terminal_id(*pane_id)
+                    .cloned()
+                    .expect("test pane terminal");
+                app.state.terminals[&terminal_id].cwd.clone()
+            })
+            .collect();
+        app.git_program_override = Some(PathBuf::from("herdr-test-missing-git"));
+
+        let now = Instant::now();
+        app.next_git_work_context_refresh = now;
+        app.start_git_work_context_refresh_if_due(now);
+        let generation = app
+            .git_work_context_refresh_in_flight
+            .as_ref()
+            .expect("git refresh in flight")
+            .generation;
+
+        // Applied in order: adopting inside the loop bound the workspace to the
+        // first pane's repository before the second was ever seen.
+        app.handle_git_work_context_refreshed(
+            generation,
+            vec![
+                repo_observation(pane_ids[0], cwds[0].clone(), "owner/one", "feat/one"),
+                repo_observation(pane_ids[1], cwds[1].clone(), "owner/two", "feat/two"),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            app.state.workspaces[0].repo_binding, None,
+            "a workspace holding two checkouts must stay unbound"
+        );
     }
 
     #[test]
