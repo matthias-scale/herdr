@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod agent_ref;
 pub mod agents;
 pub mod common;
 pub mod events;
@@ -16,6 +17,7 @@ pub mod tabs;
 pub mod workspaces;
 pub mod worktrees;
 
+pub use agent_ref::*;
 pub use agents::*;
 pub use common::*;
 pub use events::*;

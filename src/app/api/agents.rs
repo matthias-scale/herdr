@@ -339,6 +339,36 @@ mod tests {
         app
     }
 
+    #[test]
+    fn agent_list_uses_the_server_self_name_and_public_pane_id() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".to_string();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        let expected_pane_id = app.public_pane_id(0, pane_id).expect("public pane id");
+
+        let response = app.handle_agent_list("req".to_string());
+        let success: SuccessResponse = serde_json::from_str(&response).expect("agent list");
+        let ResponseResult::AgentList { agents } = success.result else {
+            panic!("expected agent list response");
+        };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            agents[0].agent_ref.as_ref(),
+            Some(&crate::api::schema::AgentRef::new(
+                "laptop",
+                expected_pane_id
+            ))
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn visible_blocker_overrides_fresh_hook_authority_in_explain_api() {
         let mut app = app_with_agent();

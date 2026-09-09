@@ -803,6 +803,7 @@ impl App {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
+            agent_host_name: config.remote.fleet.resolved_self_name(),
             dock_symphony: None,
             symphony_detail: None,
             work_view: None,
@@ -2287,6 +2288,14 @@ impl App {
 
         if !invalid_section("panel") {
             self.state.dock_default_surfaces = dock_surfaces_from_config(&config.panel);
+        }
+
+        if !invalid_section("remote") {
+            let agent_host_name = config.remote.fleet.resolved_self_name();
+            if self.state.agent_host_name != agent_host_name {
+                self.state.agent_host_name = agent_host_name;
+                self.state.mark_sidebar_projection_changed();
+            }
         }
 
         if !invalid_section("linear") {
@@ -4823,7 +4832,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[remote.fleet]\nself_name = \"laptop\"\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -4858,6 +4867,7 @@ mod tests {
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.headless_size, (160, 50));
+        assert_eq!(app.state.agent_host_name, "laptop");
         assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
         assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
         assert!(app

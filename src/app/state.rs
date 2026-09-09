@@ -3107,6 +3107,8 @@ pub struct AppState {
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     /// Server-owned fleet inventory, refreshed off the render thread.
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
+    /// This server's configured component in cross-host agent references.
+    pub(crate) agent_host_name: String,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
     /// Which job the dock's Symphony surface is bound to. Client presentation
     /// state: the runtime knows nothing about which panel is open.
@@ -5495,6 +5497,7 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
+            agent_host_name: "localhost".to_string(),
             symphony_detail: None,
             dock_symphony: None,
             work_view: None,
