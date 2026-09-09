@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, RightClickPassthroughGesture,
-        TabPressState, ViewLayout, WorkspacePressState,
+        HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -2519,11 +2519,12 @@ impl AppState {
         })
     }
 
-    /// Work link under a pane click that is not already bound to its window.
+    /// Work link under a pane click, resolved to the action worth offering.
     ///
-    /// The menu entry only appears when acting on it would change something, so
-    /// a click on a pull request or ticket the whole window already carries
-    /// offers nothing.
+    /// A link every pane declares offers the way back out. One the window
+    /// carries partially, or not at all, offers the binding that completes it.
+    /// A link only the hook or git tier observed offers nothing, because a
+    /// declaration cannot remove an observation and the entry would lie.
     pub(super) fn linkable_work_link_at(
         &self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -2532,7 +2533,7 @@ impl AppState {
         row: u16,
         ws_idx: usize,
         tab_idx: usize,
-    ) -> Option<PaneMenuWorkLink> {
+    ) -> Option<PaneMenuWorkLinkAction> {
         if col < info.inner_rect.x || row < info.inner_rect.y {
             return None;
         }
@@ -2552,17 +2553,33 @@ impl AppState {
                     .next()
                     .map(PaneMenuWorkLink::Ticket)
             })?;
-        let bound_everywhere = self
-            .window_pane_ids(ws_idx, tab_idx)
-            .into_iter()
-            .all(|pane_id| {
-                self.workspaces
-                    .get(ws_idx)
-                    .and_then(|ws| ws.pane_state(pane_id))
-                    .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
-                    .is_some_and(|terminal| link.is_bound_in(terminal.effective_work_context()))
-            });
-        (!bound_everywhere).then_some(link)
+        let panes = self.window_pane_ids(ws_idx, tab_idx);
+        let mut declared_anywhere = false;
+        let mut declared_everywhere = true;
+        let mut bound_everywhere = true;
+        for pane_id in panes {
+            let terminal = self
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.pane_state(pane_id))
+                .and_then(|pane| self.terminals.get(&pane.attached_terminal_id));
+            let Some(terminal) = terminal else {
+                bound_everywhere = false;
+                declared_everywhere = false;
+                continue;
+            };
+            let declared = link.is_bound_in(terminal.manual_work_context());
+            declared_anywhere |= declared;
+            declared_everywhere &= declared;
+            bound_everywhere &= link.is_bound_in(terminal.effective_work_context());
+        }
+        if declared_everywhere {
+            Some(PaneMenuWorkLinkAction::unlink(link))
+        } else if !bound_everywhere || declared_anywhere {
+            Some(PaneMenuWorkLinkAction::link(link))
+        } else {
+            None
+        }
     }
 
     /// Panes of one window, in layout order, so a window-wide binding applies
@@ -4830,6 +4847,28 @@ mod tests {
             .clone()
     }
 
+    const PR_URL: &str = "https://github.com/herdrdev/herdr/pull/398";
+
+    fn bind_manually(
+        app: &mut App,
+        panes: &[PaneId],
+        build: impl Fn(&mut crate::work_context::PaneWorkContextPatch),
+    ) {
+        for pane_id in panes {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[pane_id]
+                .attached_terminal_id
+                .clone();
+            let mut patch = crate::work_context::PaneWorkContextPatch::default();
+            build(&mut patch);
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .apply_manual_work_context_patch(patch)
+                .expect("manual work-context patch");
+        }
+    }
+
     fn right_click_link(app: &mut App, info: &crate::layout::PaneInfo, line: &str, needle: &str) {
         let col = line.find(needle).expect("link host") as u16;
         app.handle_mouse(mouse(
@@ -4868,7 +4907,10 @@ mod tests {
         assert!(matches!(
             &menu.kind,
             ContextMenuKind::Pane {
-                linkable_work_link: Some(PaneMenuWorkLink::PullRequest(url)),
+                linkable_work_link: Some(PaneMenuWorkLinkAction {
+                    link: PaneMenuWorkLink::PullRequest(url),
+                    unlink: false,
+                }),
                 ..
             } if url == "https://github.com/herdrdev/herdr/pull/398"
         ));
@@ -4888,7 +4930,10 @@ mod tests {
         assert!(matches!(
             &menu.kind,
             ContextMenuKind::Pane {
-                linkable_work_link: Some(PaneMenuWorkLink::Ticket(id)),
+                linkable_work_link: Some(PaneMenuWorkLinkAction {
+                    link: PaneMenuWorkLink::Ticket(id),
+                    unlink: false,
+                }),
                 ..
             } if id == "SCA-412"
         ));
@@ -4988,6 +5033,93 @@ mod tests {
                 vec!["https://github.com/herdrdev/herdr/pull/398".to_string()]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn right_click_on_a_manually_linked_pr_offers_unlinking_it() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        bind_manually(&mut app, &panes, |patch| {
+            patch.pr_urls = Some(vec![PR_URL.into()])
+        });
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(menu
+            .items()
+            .contains(&crate::app::state::UNLINK_PR_FROM_WINDOW_ITEM));
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn clicking_unlink_drops_the_pull_request_from_every_pane_of_the_window() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        bind_manually(&mut app, &panes, |patch| {
+            patch.pr_urls = Some(vec![PR_URL.into()])
+        });
+
+        right_click_link(&mut app, &info, line, "github");
+        click_menu_item(&mut app, crate::app::state::UNLINK_PR_FROM_WINDOW_ITEM);
+
+        for pane_id in &panes {
+            assert!(pane_work_context(&app, *pane_id).pr_urls.is_empty());
+        }
+        let toast = app.state.toast.as_ref().expect("unlink toast");
+        assert_eq!(toast.title, "unlinked #398");
+    }
+
+    #[tokio::test]
+    async fn clicking_unlink_drops_the_ticket_from_every_pane_of_the_window() {
+        let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        bind_manually(&mut app, &panes, |patch| {
+            patch.ticket_ids = Some(vec!["SCA-412".into()])
+        });
+
+        right_click_link(&mut app, &info, line, "linear");
+        click_menu_item(&mut app, crate::app::state::UNLINK_TICKET_FROM_WINDOW_ITEM);
+
+        for pane_id in &panes {
+            assert!(pane_work_context(&app, *pane_id).ticket_ids.is_empty());
+        }
+        assert_eq!(
+            app.state.toast.as_ref().expect("unlink toast").title,
+            "unlinked SCA-412"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_observed_pull_request_offers_neither_link_nor_unlink() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        for pane_id in &panes {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .replace_git_work_context(crate::work_context::PaneWorkContext {
+                    pr_urls: vec![PR_URL.into()],
+                    ..Default::default()
+                })
+                .expect("observe pull request");
+        }
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::UNLINK_PR_FROM_WINDOW_ITEM));
     }
 
     #[tokio::test]

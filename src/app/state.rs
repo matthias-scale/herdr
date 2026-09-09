@@ -2865,7 +2865,7 @@ pub enum ContextMenuKind {
         right_click_passthrough: bool,
         /// Work link under the click, when the clicked cell carries one that is
         /// not already bound to every pane of this window.
-        linkable_work_link: Option<PaneMenuWorkLink>,
+        linkable_work_link: Option<PaneMenuWorkLinkAction>,
     },
 }
 
@@ -2873,6 +2873,10 @@ pub enum ContextMenuKind {
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
 /// Label of the pane menu entry that binds the clicked ticket to the window.
 pub const LINK_TICKET_TO_WINDOW_ITEM: &str = "Link ticket to this window";
+/// Label of the pane menu entry that drops the clicked pull request again.
+pub const UNLINK_PR_FROM_WINDOW_ITEM: &str = "Unlink PR from this window";
+/// Label of the pane menu entry that drops the clicked ticket again.
+pub const UNLINK_TICKET_FROM_WINDOW_ITEM: &str = "Unlink ticket from this window";
 
 /// Work item a right-clicked link resolves to, ready to bind to a window.
 ///
@@ -2885,13 +2889,6 @@ pub enum PaneMenuWorkLink {
 }
 
 impl PaneMenuWorkLink {
-    pub fn menu_item(&self) -> &'static str {
-        match self {
-            Self::PullRequest(_) => LINK_PR_TO_WINDOW_ITEM,
-            Self::Ticket(_) => LINK_TICKET_TO_WINDOW_ITEM,
-        }
-    }
-
     /// The manual patch that binds this link, leaving every other field alone.
     pub fn patch(&self) -> crate::work_context::PaneWorkContextPatch {
         match self {
@@ -2919,6 +2916,22 @@ impl PaneMenuWorkLink {
         }
     }
 
+    /// The manual patch that drops this link, leaving every other field alone.
+    ///
+    /// Clearing the field is what a declaration can express: a pull request the
+    /// hook or git tier observed is not the human's to remove, which is why the
+    /// menu only offers this for a link the window carries manually.
+    pub fn clear_patch(&self) -> crate::work_context::PaneWorkContextPatch {
+        let field = match self {
+            Self::PullRequest(_) => crate::work_context::PaneWorkContextField::PrUrls,
+            Self::Ticket(_) => crate::work_context::PaneWorkContextField::TicketIds,
+        };
+        crate::work_context::PaneWorkContextPatch {
+            clear_fields: vec![field],
+            ..Default::default()
+        }
+    }
+
     /// Whether a work context already carries this exact binding.
     pub fn is_bound_in(&self, context: &crate::work_context::PaneWorkContext) -> bool {
         match self {
@@ -2931,6 +2944,49 @@ impl PaneMenuWorkLink {
                 .iter()
                 .any(|bound| bound.eq_ignore_ascii_case(id)),
         }
+    }
+}
+
+/// A work link click, resolved to the one action that would change something.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneMenuWorkLinkAction {
+    pub link: PaneMenuWorkLink,
+    /// Whether activating it removes the manual binding instead of adding one.
+    pub unlink: bool,
+}
+
+impl PaneMenuWorkLinkAction {
+    pub fn link(link: PaneMenuWorkLink) -> Self {
+        Self {
+            link,
+            unlink: false,
+        }
+    }
+
+    pub fn unlink(link: PaneMenuWorkLink) -> Self {
+        Self { link, unlink: true }
+    }
+
+    pub fn menu_item(&self) -> &'static str {
+        match (&self.link, self.unlink) {
+            (PaneMenuWorkLink::PullRequest(_), false) => LINK_PR_TO_WINDOW_ITEM,
+            (PaneMenuWorkLink::PullRequest(_), true) => UNLINK_PR_FROM_WINDOW_ITEM,
+            (PaneMenuWorkLink::Ticket(_), false) => LINK_TICKET_TO_WINDOW_ITEM,
+            (PaneMenuWorkLink::Ticket(_), true) => UNLINK_TICKET_FROM_WINDOW_ITEM,
+        }
+    }
+
+    pub fn patch(&self) -> crate::work_context::PaneWorkContextPatch {
+        if self.unlink {
+            self.link.clear_patch()
+        } else {
+            self.link.patch()
+        }
+    }
+
+    pub fn toast_title(&self) -> String {
+        let verb = if self.unlink { "unlinked" } else { "linked" };
+        format!("{verb} {}", self.link.short_label())
     }
 }
 
@@ -2976,8 +3032,8 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
-                if let Some(link) = linkable_work_link {
-                    items.push(link.menu_item());
+                if let Some(action) = linkable_work_link {
+                    items.push(action.menu_item());
                 }
                 if *has_manual_label {
                     items.push("Clear pane name");
