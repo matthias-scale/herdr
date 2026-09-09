@@ -175,6 +175,7 @@ const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
 const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
+const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
 
 fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
@@ -437,7 +438,7 @@ fn compact_row_widths(
     let provider = compact_provider_field_width(provider);
     let title_width = display_width(title);
     let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
-    let minimum_prefix_width = usize::from(requested_prefix > 0);
+    let minimum_prefix_width = requested_prefix.min(SIDEBAR_MIN_NESTED_PREFIX_WIDTH);
     let age = if width
         >= SIDEBAR_DOT_FIELD_WIDTH
             + provider
@@ -461,7 +462,7 @@ fn compact_row_widths(
                 + readable_title_width
                 + minimum_prefix_width;
     let prefix = requested_prefix.min(if preserve_nested_prefix {
-        prefix_budget.max(1)
+        prefix_budget.max(minimum_prefix_width)
     } else {
         prefix_budget
     });
@@ -13577,6 +13578,58 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(rendered.contains("matthias"), "{rendered:?}");
         assert!(rendered.contains('…'), "{rendered:?}");
         assert!(display_width(&rendered) <= usize::from(header.rect.width));
+    }
+
+    #[test]
+    fn parent_rows_start_left_of_children_at_supported_widths() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("repo")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/42".into()],
+                work_title: Some("Fix nested row hierarchy".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+
+        for width in [18, 30] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let header = compute_sidebar_nested_header_areas(&app, area)
+                .into_iter()
+                .find(|header| !header.dim)
+                .expect("parent header");
+            let child = compute_tab_card_areas(&app, area)
+                .into_iter()
+                .next()
+                .expect("child row");
+            let first_non_space = |y, row_width| {
+                row_text(terminal.backend().buffer(), y, row_width)
+                    .chars()
+                    .position(|character| !character.is_whitespace())
+                    .expect("visible row content")
+            };
+
+            assert!(
+                first_non_space(header.rect.y, header.rect.width)
+                    < first_non_space(child.rect.y, child.rect.width),
+                "parent must start left of child at width {width}"
+            );
+        }
     }
 
     #[test]
