@@ -2722,6 +2722,13 @@ impl App {
                                 );
                                 continue;
                             }
+                            if self.handle_dock_linear_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             if self.handle_dock_chooser_key_headless(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,

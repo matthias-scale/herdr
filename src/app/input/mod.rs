@@ -666,7 +666,6 @@ impl App {
                 || self.handle_dock_pr_key(key))
     }
 
-    #[cfg(test)]
     pub(crate) fn handle_dock_linear_key_headless(&mut self, key: &TerminalKey) -> bool {
         self.state.popup_pane.is_none() && self.handle_dock_linear_key(key)
     }
@@ -3494,6 +3493,24 @@ impl App {
         if self.handle_pending_dock_write_key(event) {
             return true;
         }
+        // No detail to act on: the surface is rendering its picker, so a digit
+        // attaches a ticket. This mirrors the render gate exactly, including a
+        // ticket that is bound but missing from the index. Esc still releases
+        // focus; the detail bindings have no subject and must not fire.
+        if crate::ui::dock::linear::focused_ticket_item(&self.state).is_none() {
+            match event.code {
+                KeyCode::Char(digit @ '1'..='9') => {
+                    if let Some(ticket_id) =
+                        crate::ui::dock::linear::attachable_ticket_for_digit(&self.state, digit)
+                    {
+                        self.attach_ticket_to_focused_pane(&ticket_id);
+                    }
+                }
+                KeyCode::Esc => self.state.dock_linear_focused = false,
+                _ => return false,
+            }
+            return true;
+        }
         if let Some(draft) = self.state.dock_ticket_comment_draft.as_mut() {
             match event.code {
                 KeyCode::Esc => self.state.dock_ticket_comment_draft = None,
@@ -5434,6 +5451,102 @@ mod tests {
             .work_index_session
             .set_linear_viewer_identity_for_test("viewer-id");
         app
+    }
+
+    #[test]
+    fn a_digit_attaches_a_ticket_when_the_linear_surface_has_none() {
+        let mut app = dock_linear_test_app();
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .map(|pane| pane.attached_terminal_id.clone())
+            .expect("a pane terminal");
+        // Focus a pane whose context resolves no ticket, so the surface shows
+        // the picker instead of a detail.
+        for terminal in app.state.terminals.values_mut() {
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext::default(),
+            );
+        }
+        assert!(crate::ui::dock::linear::focused_ticket_key(&app.state).is_none());
+        let first = crate::ui::dock::linear::attachable_ticket_for_digit(&app.state, '1')
+            .expect("an indexed ticket to attach");
+
+        assert!(app
+            .handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty())));
+        let focused_terminal = app.state.workspaces[0]
+            .focused_pane_id()
+            .and_then(|pane_id| app.state.workspaces[0].terminal_id(pane_id))
+            .cloned()
+            .unwrap_or(terminal_id);
+        assert_eq!(
+            app.state.terminals[&focused_terminal]
+                .work_context
+                .effective()
+                .primary_ticket(),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn attaching_replaces_the_picker_tab_instead_of_adding_a_second_one() {
+        let mut app = dock_linear_test_app();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext::default(),
+            );
+        }
+        app.state.reconcile_dock_context_tabs();
+        app.state
+            .activate_dock_surface(crate::app::DockSurface::Linear);
+
+        assert!(app
+            .handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty())));
+
+        let linear_tabs = app
+            .state
+            .dock_open_surfaces
+            .iter()
+            .filter(|surface| **surface == crate::app::DockSurface::Linear)
+            .count();
+        assert_eq!(linear_tabs, 1, "{:?}", app.state.dock_open_surfaces);
+        assert!(crate::ui::dock::linear::focused_ticket_item(&app.state).is_some());
+    }
+
+    #[test]
+    fn attaching_drops_a_draft_staged_against_the_previous_subject() {
+        let mut app = dock_linear_test_app();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext::default(),
+            );
+        }
+        app.state.reconcile_dock_context_tabs();
+        app.state
+            .activate_dock_surface(crate::app::DockSurface::Linear);
+        app.state.dock_ticket_comment_draft = Some("half-written".into());
+        app.state.dock_ticket_action_menu = Some(Default::default());
+
+        assert!(app
+            .handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty())));
+
+        assert!(app.state.dock_ticket_comment_draft.is_none());
+        assert!(app.state.dock_ticket_action_menu.is_none());
+    }
+
+    #[test]
+    fn the_picker_swallows_digits_but_not_other_keys() {
+        let mut app = dock_linear_test_app();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext::default(),
+            );
+        }
+        assert!(!app
+            .handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        assert!(app
+            .handle_dock_linear_key(&TerminalKey::new(KeyCode::Char('9'), KeyModifiers::empty())));
     }
 
     #[test]
