@@ -27,6 +27,7 @@ pub(crate) mod home_refs;
 mod ids;
 pub(crate) mod inbox;
 mod input;
+pub(crate) mod launch_profiles;
 #[cfg(test)]
 pub(crate) use input::SidebarWorkGroupKeyAction;
 pub(crate) mod pane_graphics;
@@ -1120,6 +1121,7 @@ impl App {
             confirm_close: config.ui.confirm_close,
             combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
             new_thread_workspace: config.ui.new_thread_workspace,
+            launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
@@ -2316,6 +2318,8 @@ impl App {
                     self.state.invalidate_dock_diff();
                 }
                 self.state.new_thread_workspace = config.ui.new_thread_workspace;
+                self.state.launch_profiles =
+                    crate::app::launch_profiles::resolve(&config.launch_profiles);
                 self.state
                     .add_project_start_dir
                     .clone_from(&config.ui.add_project_start_dir);

@@ -1402,6 +1402,7 @@ mod tests {
             target,
             prompt: home.prompt.clone(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            env: Vec::new(),
         };
         home.pending_dispatch = Some(plan);
         app.state.home = Some(home);
@@ -1522,6 +1523,7 @@ mod tests {
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "dispatch after worktree add".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            env: Vec::new(),
         };
 
         app.start_home_worktree_add(plan)

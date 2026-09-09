@@ -401,10 +401,7 @@ fn chip_specs(
     composer: ComposerBands,
 ) -> Vec<(HomeFocus, String)> {
     let mut specs = vec![
-        (
-            HomeFocus::Agent,
-            format!("{} ▾", crate::detect::agent_label(home.agent)),
-        ),
+        (HomeFocus::Agent, format!("{} ▾", home.profile().label)),
         (HomeFocus::Model, format!("{} ▾", home.model_display_name())),
     ];
     if let Some(effort) = &home.effort {
@@ -817,9 +814,10 @@ fn target_label(app: &AppState, target: &HomeTarget) -> String {
 
 fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<String> {
     match picker {
-        HomePicker::Agent => crate::app::home::dispatchable_agents()
+        HomePicker::Agent => home
+            .profiles()
             .iter()
-            .map(|agent| crate::detect::agent_label(*agent).to_string())
+            .map(|profile| profile.label.clone())
             .collect(),
         HomePicker::Model => home
             .model_options()
@@ -1974,6 +1972,7 @@ mod tests {
             target: HomeTarget::NewSpace,
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],
+            env: Vec::new(),
         });
         app.home = Some(home);
         let queue = [blocked(0)];

@@ -3094,6 +3094,10 @@ pub struct AppState {
     pub(crate) home_agent_choices: Vec<crate::app::home::HomeAgentChoice>,
     /// Provider choices resolved outside `HomeState`, ready for the next Home open.
     pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
+    /// Launch lanes resolved from `[[launch_profiles]]`, refreshed on config
+    /// reload. Shared session fact rather than presentation state: it decides
+    /// what a dispatch actually runs.
+    pub(crate) launch_profiles: Vec<crate::app::launch_profiles::LaunchProfile>,
     /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
     pub(crate) home_ref_cache:
         std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
@@ -5356,6 +5360,7 @@ impl AppState {
             home: None,
             home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
+            launch_profiles: crate::app::launch_profiles::resolve(&[]),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
             request_tool_probes: false,
