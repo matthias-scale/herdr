@@ -356,6 +356,12 @@ mod tests {
     #[test]
     fn existing_dock_surfaces_render_unchanged() {
         let app = characterization_app();
+        let super_p = if cfg!(target_os = "macos") {
+            "cmd+p"
+        } else {
+            "super+p"
+        };
+        let palette_chord = format!("ctrl+alt+p / {super_p}");
 
         assert_eq!(
             body_text(&app, DockSurface::Editor),
@@ -375,9 +381,8 @@ mod tests {
             ]
             .join("\n")
         );
-        assert_eq!(
-            body_text(&app, DockSurface::Shortcuts),
-            [
+        assert_eq!(body_text(&app, DockSurface::Shortcuts), {
+            let mut lines = vec![
                 " global                      \u{2590}",
                 " ctrl+b                      \u{2595}",
                 " prefix mode                 \u{2595}",
@@ -391,8 +396,12 @@ mod tests {
                 " detach                      \u{2595}",
                 " prefix+shift+r              \u{2595}",
             ]
-            .join("\n")
-        );
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>();
+            lines[7] = format!(" {palette_chord:<28}\u{2595}");
+            lines.join("\n")
+        },);
         assert_eq!(
             body_text(&app, DockSurface::Context)
                 .lines()
