@@ -54,6 +54,51 @@ impl App {
         }
         true
     }
+
+    /// Attach a Linear ticket to the focused pane by operator choice.
+    ///
+    /// Detection only finds a ticket when the branch name carries one, so a
+    /// pane working a ticket that was never encoded in a branch had no way to
+    /// reach its Linear surface. This is the manual tier, so it outranks the
+    /// git observation and survives the next refresh. A ticket is not
+    /// repository evidence, so it never reroutes the pane.
+    pub(crate) fn attach_ticket_to_focused_pane(&mut self, ticket_id: &str) -> bool {
+        let Some((ws_idx, pane_id, terminal_id)) = self.state.active.and_then(|ws_idx| {
+            let workspace = self.state.workspaces.get(ws_idx)?;
+            let pane_id = workspace.focused_pane_id()?;
+            let terminal_id = workspace.terminal_id(pane_id)?.clone();
+            Some((ws_idx, pane_id, terminal_id))
+        }) else {
+            return false;
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return false;
+        };
+        let patch = crate::work_context::PaneWorkContextPatch {
+            ticket_ids: Some(vec![ticket_id.to_string()]),
+            ..Default::default()
+        };
+        match terminal.apply_manual_work_context_patch(patch) {
+            Ok(changed) => {
+                if changed {
+                    self.state.mark_session_dirty();
+                    self.emit_pane_updated(ws_idx, pane_id);
+                    // A draft or menu staged against the previous subject must
+                    // not carry over and fire at the ticket just attached.
+                    self.state.dock_ticket_comment_draft = None;
+                    self.state.dock_ticket_start_menu = None;
+                    self.state.dock_ticket_action_menu = None;
+                    self.state
+                        .replace_unbound_linear_tab_with_its_object(ticket_id);
+                }
+                changed
+            }
+            Err(error) => {
+                tracing::warn!(ticket = ticket_id, %error, "manual ticket attach rejected");
+                false
+            }
+        }
+    }
 }
 
 impl AppState {
@@ -172,15 +217,21 @@ impl AppState {
             surface,
             DockSurface::Pr | DockSurface::Linear | DockSurface::Missive
         ) {
-            let Some(object) = self
+            let object = self
                 .dock_context_objects
                 .iter()
                 .find(|object| object.surface == surface)
-                .cloned()
-            else {
-                return false;
-            };
-            self.open_dock_object(object, crate::app::state::DockTabOrigin::User);
+                .cloned();
+            match object {
+                Some(object) => {
+                    self.open_dock_object(object, crate::app::state::DockTabOrigin::User)
+                }
+                // Linear stays available without a ticket so the operator can
+                // attach one; the surface renders its picker instead of a
+                // detail. The other two have nothing to offer without an object.
+                None if surface == DockSurface::Linear => self.open_dock_surface(surface),
+                None => return false,
+            }
         } else {
             self.open_dock_surface(surface);
         }
@@ -354,6 +405,25 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn linear_activates_without_a_context_object_so_the_picker_is_reachable() {
+        let mut app = AppState::test_new();
+        app.dock_context_objects.clear();
+
+        assert!(app.activate_dock_surface(DockSurface::Linear));
+        assert_eq!(app.dock_tab, Some(DockSurface::Linear));
+        assert!(app.dock_linear_focused);
+    }
+
+    #[test]
+    fn a_surface_without_an_object_and_without_a_picker_stays_shut() {
+        let mut app = AppState::test_new();
+        app.dock_context_objects.clear();
+
+        assert!(!app.activate_dock_surface(DockSurface::Pr));
+        assert!(!app.activate_dock_surface(DockSurface::Missive));
+    }
+
+    #[test]
     fn dock_home_tab_at_maps_each_horizontal_hit_area() {
         let mut app = AppState::test_new();
         app.dock_collapsed = false;
@@ -450,9 +520,9 @@ mod tests {
         app.dock_open_surfaces.clear();
         app.dock_tab = None;
 
-        // No focused pane: no pull request and no ticket.
+        // No focused pane: no pull request and no subagents. Linear is
+        // exempt; it opens its attach picker instead of nothing.
         assert!(!app.activate_dock_surface(DockSurface::Pr));
-        assert!(!app.activate_dock_surface(DockSurface::Linear));
         assert!(!app.activate_dock_surface(DockSurface::Agents));
         assert!(app.dock_open_surfaces.is_empty());
         assert_eq!(app.dock_tab, None);

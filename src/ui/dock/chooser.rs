@@ -131,8 +131,9 @@ pub(crate) fn entry_title(app: &AppState, entry: &DockChooserEntry) -> String {
 
 /// Can this surface do anything for the focused pane right now?
 ///
-/// Diff needs a repository to diff, PR needs a pull request, Linear needs a
-/// ticket. Everything else is always available.
+/// Diff needs a repository to diff and PR needs a pull request. Linear is
+/// always available because it can attach a ticket itself. Everything else is
+/// always available.
 pub(crate) fn surface_available(
     surface: DockSurface,
     ctx: &PaneWorkContext,
@@ -142,7 +143,10 @@ pub(crate) fn surface_available(
     match surface {
         DockSurface::Diff => in_git_repo,
         DockSurface::Pr => !ctx.pr_urls.is_empty(),
-        DockSurface::Linear => !ctx.ticket_ids.is_empty(),
+        // Linear stays available without a ticket: the surface then offers the
+        // indexed tickets to attach, which is the only way to reach a ticket
+        // detection never found.
+        DockSurface::Linear => true,
         DockSurface::Missive => !ctx.missive_urls.is_empty(),
         DockSurface::Agents => has_subagents,
         _ => true,
@@ -375,7 +379,7 @@ fn card_description(surface: DockSurface) -> &'static str {
         DockSurface::Files => "Browse and read workspace files.",
         DockSurface::Diff => "Review changes in this thread.",
         DockSurface::Pr => "Open the pane's pull request.",
-        DockSurface::Linear => "Open the pane's ticket.",
+        DockSurface::Linear => "Open or attach the pane's ticket.",
         DockSurface::Missive => "Open the pane's conversation.",
         DockSurface::Agents => "Follow subagents and workflows.",
         DockSurface::Home => "Prompt card for a new thread.",
@@ -391,7 +395,6 @@ fn card_unavailable_reason(surface: DockSurface) -> Option<&'static str> {
     match surface {
         DockSurface::Diff => Some("Available for Git repositories."),
         DockSurface::Pr => Some("No pull request on this branch yet."),
-        DockSurface::Linear => Some("No ticket on this thread."),
         DockSurface::Missive => Some("No conversation linked."),
         DockSurface::Agents => Some("No subagents."),
         _ => None,
@@ -589,7 +592,7 @@ mod tests {
             (DockSurface::Diff, false, &linked, false),
             (DockSurface::Pr, true, &empty, false),
             (DockSurface::Pr, false, &linked, true),
-            (DockSurface::Linear, true, &empty, false),
+            (DockSurface::Linear, true, &empty, true),
             (DockSurface::Linear, false, &linked, true),
             (DockSurface::Terminal, false, &empty, true),
             (DockSurface::Files, false, &empty, true),
@@ -752,7 +755,7 @@ mod tests {
                 DockSurface::Linear,
                 "Linear",
                 'L',
-                "Open the pane's ticket.",
+                "Open or attach the pane's ticket.",
             ),
             (
                 DockSurface::Missive,
@@ -805,10 +808,6 @@ mod tests {
         assert_eq!(
             card_unavailable_reason(DockSurface::Pr),
             Some("No pull request on this branch yet.")
-        );
-        assert_eq!(
-            card_unavailable_reason(DockSurface::Linear),
-            Some("No ticket on this thread.")
         );
         assert_eq!(
             card_unavailable_reason(DockSurface::Missive),

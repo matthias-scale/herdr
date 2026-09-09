@@ -4612,6 +4612,57 @@ impl AppState {
     /// Reconcile object tabs at the existing `compute_view()` mutation boundary.
     /// Focus, inferred-context, and declared-context changes all arrive here
     /// before geometry or rendering consumes the presentation state.
+    /// Hand the ticketless Linear tab over to the object the attach created.
+    ///
+    /// The picker tab carries no binding, so context reconciliation adds a
+    /// second, bound Linear tab beside it and leaves the operator looking at
+    /// the empty one. Reconcile first so the bound tab exists, then drop the
+    /// unbound tab and select the replacement. Dropping it first does not work:
+    /// reconciliation re-adds a tab for `dock_tab` when the active index no
+    /// longer resolves.
+    pub(crate) fn replace_unbound_linear_tab_with_its_object(&mut self, ticket_id: &str) {
+        self.reconcile_dock_context_tabs();
+        let bound = self
+            .dock_open_surfaces
+            .iter()
+            .zip(&self.dock_tab_bindings)
+            .any(|(surface, binding)| {
+                *surface == DockSurface::Linear
+                    && binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.object.key.eq_ignore_ascii_case(ticket_id))
+            });
+        if !bound {
+            return;
+        }
+        if let Some(index) = self
+            .dock_open_surfaces
+            .iter()
+            .zip(&self.dock_tab_bindings)
+            .position(|(surface, binding)| *surface == DockSurface::Linear && binding.is_none())
+        {
+            self.dock_open_surfaces.remove(index);
+            self.dock_tab_bindings.remove(index);
+        }
+        // Select the tab for the ticket that was just chosen. An older
+        // user-bound Linear tab can sit ahead of it, and landing on that one
+        // would show a different ticket than the operator asked for.
+        if let Some(index) = self
+            .dock_open_surfaces
+            .iter()
+            .zip(&self.dock_tab_bindings)
+            .position(|(surface, binding)| {
+                *surface == DockSurface::Linear
+                    && binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.object.key.eq_ignore_ascii_case(ticket_id))
+            })
+        {
+            self.select_dock_tab_index(index);
+            self.dock_linear_focused = true;
+        }
+    }
+
     pub(crate) fn reconcile_dock_context_tabs(&mut self) {
         if let Some(surface) = self.dock_tab {
             if self.active_dock_tab_index().is_none() {
