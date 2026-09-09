@@ -2530,6 +2530,21 @@ fn push_unlinked_entry(app: &AppState, groups: &mut Vec<SidebarWorkGroup>, entry
     }
 }
 
+fn push_linear_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
+    match work_group_index(groups, UNLINKED_GROUP_KEY) {
+        Some(index) => groups[index].entries.push(entry),
+        None => groups.push(SidebarWorkGroup {
+            key: UNLINKED_GROUP_KEY.into(),
+            title: "unlinked".into(),
+            entries: vec![entry],
+            unlinked: true,
+            status: None,
+            created_at: None,
+            activation: None,
+        }),
+    }
+}
+
 /// Group panes by the work item they are bound to, joined with the work items
 /// the projection knows about. Work items without a pane stay in the list; the
 /// caller renders them dim. Linked groups keep projection or first-seen order,
@@ -2702,7 +2717,7 @@ pub(crate) fn sidebar_work_groups(
                 let ticket_ids = preferred_ticket_ids(app, &entry);
                 if ticket_ids.is_empty() {
                     if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
-                        push_unlinked_entry(app, &mut groups, entry);
+                        push_linear_unlinked_entry(&mut groups, entry);
                     }
                     continue;
                 }
@@ -11834,9 +11849,36 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 // The two-ticket pane is listed under both of its tickets.
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
-                (unlinked_bucket_title(), 1, false),
+                ("unlinked".to_string(), 1, false),
                 ("OPS-12 · pixel EMQ drop".to_string(), 0, true),
             ]
+        );
+    }
+
+    #[test]
+    fn linear_ticketless_panes_share_one_unlinked_bucket() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        for (workspace, cwd) in app.workspaces.iter().zip(["/work/alpha", "/work/beta"]) {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().cwd = cwd.into();
+        }
+
+        let groups = sidebar_work_groups(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::LinearTeam,
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.key.as_str(), group.title.as_str(), group.entries.len()))
+                .collect::<Vec<_>>(),
+            [("unlinked", "unlinked", 2)]
         );
     }
 
@@ -12109,7 +12151,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
-                unlinked_bucket_title().as_str(),
+                "unlinked",
             ]
         );
 
@@ -12122,7 +12164,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("SCA-3102 · annual credits".to_string(), 1, false),
                 ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
-                (unlinked_bucket_title(), 1, false),
+                ("unlinked".to_string(), 1, false),
             ]
         );
     }
@@ -12570,7 +12612,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
-                unlinked_bucket_title().as_str(),
+                "unlinked",
             ]
         );
 
@@ -13659,10 +13701,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         // Work items are the top level in these modes; this fixture binds none,
         // so every pane lands in the unlinked bucket and no repo header shows.
-        assert_eq!(
-            tree(SidebarGroupMode::LinearTeam),
-            [unlinked_bucket_title()]
-        );
+        assert_eq!(tree(SidebarGroupMode::LinearTeam), ["unlinked"]);
         assert_eq!(tree(SidebarGroupMode::Missive), [unlinked_bucket_title()]);
 
         let mut tab_sets = Vec::new();
@@ -13711,7 +13750,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarGroupMode::LinearTeam => assert_eq!(
                     nested,
                     [
-                        unlinked_bucket_title(),
+                        "unlinked".to_string(),
                         "no active tickets for me · creator or assignee".to_string()
                     ]
                 ),
