@@ -32,7 +32,7 @@ pub(crate) struct KeybindingRow {
     pub(crate) target: Option<KeybindTarget>,
 }
 
-type Accessor = fn(&Keybinds) -> &ActionKeybinds;
+pub(crate) type Accessor = fn(&Keybinds) -> &ActionKeybinds;
 
 /// `(config field under [keys], display label, live binding)`.
 struct BuiltIn {
@@ -56,6 +56,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
         &[
             built_in("help", "keybinds", |kb| &kb.help),
             built_in("settings", "settings", |kb| &kb.settings),
+            built_in("command_palette", "command palette", |kb| {
+                &kb.command_palette
+            }),
             built_in("detach", "detach", |kb| &kb.detach),
             built_in("reload_config", "reload config", |kb| &kb.reload_config),
             built_in(
@@ -243,6 +246,18 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
 ];
 
 /// The label shown when an action has no chord at all.
+/// `(group, config field, display label, live binding)` for every built-in row,
+/// in table order. The command palette reads this so a command can never claim a
+/// label or a key the settings screen does not agree with.
+pub(crate) fn built_in_keybinding_entries(
+) -> impl Iterator<Item = (&'static str, &'static str, &'static str, Accessor)> {
+    BUILT_IN_GROUPS.iter().flat_map(|(group, entries)| {
+        entries
+            .iter()
+            .map(move |entry| (*group, entry.field, entry.label, entry.binding))
+    })
+}
+
 pub(crate) const UNSET: &str = "unset";
 
 /// The action-to-key table: built-in actions first, then the 6b user actions.

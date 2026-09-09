@@ -222,6 +222,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Prefix-mode actions
 # help = "prefix+?"
 # settings = "prefix+s"
+# command_palette = ["ctrl+alt+p", "super+p"]
 # home = "ctrl+alt+h"
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"

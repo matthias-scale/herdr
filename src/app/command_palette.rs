@@ -1,0 +1,554 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::app::{
+    input::{ActionContext, NavigateAction},
+    settings_keybindings::built_in_keybinding_entries,
+    state::{AppState, CommandPaletteState, Mode},
+    App,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteCommand {
+    BuiltIn(NavigateAction),
+    UserAction(usize),
+    CustomCommand(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaletteEntry {
+    pub group: String,
+    pub label: String,
+    pub key: String,
+    pub command: PaletteCommand,
+    score: i32,
+}
+
+pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
+    Some(match field {
+        "help" => NavigateAction::Help,
+        "settings" => NavigateAction::Settings,
+        "command_palette" => NavigateAction::OpenCommandPalette,
+        "detach" => NavigateAction::Detach,
+        "reload_config" => NavigateAction::ReloadConfig,
+        "open_notification_target" => NavigateAction::OpenNotificationTarget,
+        // The legacy URL aliases precede the canonical fields in the real
+        // dispatch table, so these defaults resolve to the alias variants.
+        "open_work_link" => NavigateAction::OpenWorkUrl,
+        "copy_work_link" => NavigateAction::CopyWorkUrl,
+        "copy_work_ticket" => NavigateAction::CopyWorkTicket,
+        "copy_work_pr" => NavigateAction::CopyWorkPr,
+        "copy_work_preview" => NavigateAction::CopyWorkPreview,
+        "workspace_picker" => NavigateAction::WorkspacePicker,
+        "goto" => NavigateAction::OpenNavigator,
+        "new_workspace" => NavigateAction::NewWorkspace,
+        "new_worktree" => NavigateAction::NewWorktree,
+        "open_worktree" => NavigateAction::OpenWorktree,
+        "remove_worktree" => NavigateAction::RemoveWorktree,
+        "rename_workspace" => NavigateAction::RenameWorkspace,
+        "close_workspace" => NavigateAction::CloseWorkspace,
+        "previous_workspace" => NavigateAction::PreviousWorkspace,
+        "next_workspace" => NavigateAction::NextWorkspace,
+        "new_tab" => NavigateAction::NewTab,
+        "rename_tab" => NavigateAction::RenameTab,
+        "close_tab" => NavigateAction::CloseTab,
+        "toggle_tab_prio" => NavigateAction::ToggleTabPrio,
+        "toggle_pin_tab" => NavigateAction::TogglePinTab,
+        "previous_tab" => NavigateAction::PreviousTab,
+        "next_tab" => NavigateAction::NextTab,
+        "previous_window" => NavigateAction::PreviousWindow,
+        "next_window" => NavigateAction::NextWindow,
+        "next_blocked_window" => NavigateAction::NextBlockedWindow,
+        "focus_pane_left" => NavigateAction::FocusPaneLeft,
+        "focus_pane_down" => NavigateAction::FocusPaneDown,
+        "focus_pane_up" => NavigateAction::FocusPaneUp,
+        "focus_pane_right" => NavigateAction::FocusPaneRight,
+        "swap_pane_left" => NavigateAction::SwapPaneLeft,
+        "swap_pane_down" => NavigateAction::SwapPaneDown,
+        "swap_pane_up" => NavigateAction::SwapPaneUp,
+        "swap_pane_right" => NavigateAction::SwapPaneRight,
+        "cycle_pane_next" => NavigateAction::CyclePaneNext,
+        "cycle_pane_previous" => NavigateAction::CyclePanePrevious,
+        "last_pane" => NavigateAction::LastPane,
+        "split_vertical" => NavigateAction::SplitVertical,
+        "split_horizontal" => NavigateAction::SplitHorizontal,
+        "split_left" => NavigateAction::SplitLeft,
+        "split_up" => NavigateAction::SplitUp,
+        "close_pane" => NavigateAction::ClosePane,
+        "zoom" => NavigateAction::Zoom,
+        "resize_mode" => NavigateAction::EnterResizeMode,
+        "rename_pane" => NavigateAction::RenamePane,
+        "edit_scrollback" => NavigateAction::EditScrollback,
+        "copy_mode" => NavigateAction::CopyMode,
+        "toggle_sidebar" => NavigateAction::ToggleSidebar,
+        "sidebar_cycle_group_mode" => NavigateAction::CycleSidebarGroupMode,
+        "sidebar_refresh" => NavigateAction::RefreshSidebar,
+        "toggle_blocked_filter" => NavigateAction::ToggleBlockedFilter,
+        "toggle_prio_panel" => NavigateAction::TogglePrioPanel,
+        "toggle_dock" => NavigateAction::ToggleDock,
+        "previous_dock_tab" => NavigateAction::PreviousDockTab,
+        "next_dock_tab" => NavigateAction::NextDockTab,
+        "editor_open_repo" => NavigateAction::OpenRepoEditor,
+        "toggle_info_panel" => NavigateAction::ToggleInfoPanel,
+        "toggle_status_detail" => NavigateAction::ToggleStatusDetail,
+        "edit_scratchpad" => NavigateAction::EditScratchpad,
+        "show_scratchpad" => NavigateAction::ShowScratchpad,
+        "home" => NavigateAction::OpenHome,
+        "work" => NavigateAction::OpenWorkView,
+        "usage" => NavigateAction::OpenUsageView,
+        "tickets" => NavigateAction::OpenTicketView,
+        "inbox" => NavigateAction::OpenInbox,
+        "symphony" => NavigateAction::OpenSymphony,
+        "next_review_agent" => NavigateAction::NextReviewAgent,
+        "previous_agent" => NavigateAction::PreviousAgent,
+        "next_agent" => NavigateAction::NextAgent,
+        "navigate_workspace_up"
+        | "navigate_workspace_down"
+        | "navigate_pane_left"
+        | "navigate_pane_down"
+        | "navigate_pane_up"
+        | "navigate_pane_right" => return None,
+        _ => return None,
+    })
+}
+
+pub(crate) fn fuzzy_score(text: &str, query: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let text_chars: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    if query_chars.is_empty() {
+        return Some(0);
+    }
+
+    let mut score = 0;
+    let mut text_index = 0usize;
+    let mut previous_match = None;
+    for query_char in query_chars {
+        let relative_index = text_chars[text_index..]
+            .iter()
+            .position(|candidate| *candidate == query_char)?;
+        let match_index = text_index + relative_index;
+        let gap = previous_match.map_or(match_index, |previous| {
+            match_index.saturating_sub(previous + 1)
+        });
+        score += 1;
+        score -= gap.min(4) as i32;
+        if previous_match == Some(match_index.saturating_sub(1)) {
+            score += 8;
+        }
+        if match_index == 0
+            || matches!(
+                text_chars.get(match_index.saturating_sub(1)),
+                Some(' ' | '_' | '-' | '.' | '/')
+            )
+        {
+            score += 6;
+        }
+        previous_match = Some(match_index);
+        text_index = match_index + 1;
+    }
+
+    Some(score - (text_chars.len() / 32) as i32)
+}
+
+fn score_entry(group: &str, label: &str, query: &str) -> Option<i32> {
+    let label_score = fuzzy_score(label, query);
+    let combined = format!("{group} {label}");
+    let combined_score = fuzzy_score(&combined, query);
+    match (label_score, combined_score) {
+        (None, None) => None,
+        (Some(score), None) => Some(score),
+        (None, Some(score)) => Some(score - 4),
+        (Some(label_score), Some(combined_score)) => Some(label_score.max(combined_score)),
+    }
+}
+
+impl AppState {
+    pub(crate) fn command_palette_entries(&self) -> Vec<PaletteEntry> {
+        let query = self.command_palette.query.as_str();
+        let mut entries = Vec::new();
+
+        for (group, field, label, accessor) in built_in_keybinding_entries() {
+            let Some(action) = action_for_field(field) else {
+                continue;
+            };
+            let Some(score) = score_entry(group, label, query) else {
+                continue;
+            };
+            entries.push(PaletteEntry {
+                group: group.to_string(),
+                label: label.to_string(),
+                key: accessor(&self.keybinds).label().unwrap_or_default(),
+                command: PaletteCommand::BuiltIn(action),
+                score,
+            });
+        }
+
+        let repo = self.focused_repo_slug();
+        for (index, action) in self.keybinds.user_actions.iter().enumerate() {
+            if !action.applies_to_repo(repo.as_deref()) {
+                continue;
+            }
+            let group = "actions";
+            let Some(score) = score_entry(group, &action.name, query) else {
+                continue;
+            };
+            entries.push(PaletteEntry {
+                group: group.to_string(),
+                label: action.name.clone(),
+                key: action.bindings.label().unwrap_or_default(),
+                command: PaletteCommand::UserAction(index),
+                score,
+            });
+        }
+
+        for (index, command) in self.keybinds.custom_commands.iter().enumerate() {
+            let group = "commands";
+            let label = command
+                .description
+                .as_deref()
+                .filter(|description| !description.trim().is_empty())
+                .unwrap_or(&command.command);
+            let Some(score) = score_entry(group, label, query) else {
+                continue;
+            };
+            entries.push(PaletteEntry {
+                group: group.to_string(),
+                label: label.to_string(),
+                key: command.bindings.label().unwrap_or_default(),
+                command: PaletteCommand::CustomCommand(index),
+                score,
+            });
+        }
+
+        if !query.is_empty() {
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.score));
+        }
+        entries
+    }
+
+    pub(crate) fn open_command_palette(&mut self) {
+        self.command_palette = CommandPaletteState::default();
+        self.mode = Mode::CommandPalette;
+    }
+
+    pub(crate) fn command_palette_visible_rows(&self) -> usize {
+        self.command_palette_body_rect()
+            .map_or(0, |body| body.height as usize)
+    }
+
+    pub(crate) fn command_palette_max_scroll(&self) -> usize {
+        self.command_palette_entries()
+            .len()
+            .saturating_sub(self.command_palette_visible_rows())
+    }
+
+    pub(crate) fn clamp_command_palette_selection(&mut self) {
+        let entry_count = self.command_palette_entries().len();
+        if entry_count == 0 {
+            self.command_palette.selected = 0;
+            self.command_palette.scroll = 0;
+            return;
+        }
+        self.command_palette.selected = self.command_palette.selected.min(entry_count - 1);
+        self.command_palette.scroll = self
+            .command_palette
+            .scroll
+            .min(self.command_palette_max_scroll());
+    }
+
+    pub(crate) fn ensure_command_palette_selection_visible(&mut self) {
+        self.clamp_command_palette_selection();
+        let visible_rows = self.command_palette_visible_rows();
+        if visible_rows == 0 {
+            self.command_palette.scroll = 0;
+            return;
+        }
+        if self.command_palette.selected < self.command_palette.scroll {
+            self.command_palette.scroll = self.command_palette.selected;
+        } else if self.command_palette.selected >= self.command_palette.scroll + visible_rows {
+            self.command_palette.scroll = self
+                .command_palette
+                .selected
+                .saturating_add(1)
+                .saturating_sub(visible_rows);
+        }
+        self.command_palette.scroll = self
+            .command_palette
+            .scroll
+            .min(self.command_palette_max_scroll());
+    }
+
+    pub(crate) fn move_command_palette_selection(&mut self, delta: isize) {
+        let entry_count = self.command_palette_entries().len();
+        if entry_count == 0 {
+            self.command_palette.selected = 0;
+            self.command_palette.scroll = 0;
+            return;
+        }
+        let current = self.command_palette.selected.min(entry_count - 1);
+        let offset = delta.unsigned_abs() % entry_count;
+        self.command_palette.selected = if delta.is_negative() {
+            (current + entry_count - offset) % entry_count
+        } else {
+            (current + offset) % entry_count
+        };
+        self.ensure_command_palette_selection_visible();
+    }
+
+    pub(crate) fn insert_command_palette_query_text(&mut self, text: &str) {
+        self.command_palette
+            .query
+            .extend(text.chars().filter(|character| !character.is_control()));
+        self.command_palette.selected = 0;
+        self.command_palette.scroll = 0;
+        self.clamp_command_palette_selection();
+    }
+
+    pub(crate) fn selected_command_palette_command(&self) -> Option<PaletteCommand> {
+        self.command_palette_entries()
+            .get(self.command_palette.selected)
+            .map(|entry| entry.command)
+    }
+}
+
+impl App {
+    pub(crate) fn handle_command_palette_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.command_palette = CommandPaletteState::default();
+                self.state.mode = Mode::Terminal;
+            }
+            KeyCode::Enter => self.accept_command_palette_selection(),
+            KeyCode::Backspace => {
+                self.state.command_palette.query.pop();
+                self.state.command_palette.selected = 0;
+                self.state.command_palette.scroll = 0;
+                self.state.clamp_command_palette_selection();
+            }
+            KeyCode::Up if key.modifiers.is_empty() => {
+                self.state.move_command_palette_selection(-1)
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                self.state.move_command_palette_selection(1)
+            }
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                self.state.move_command_palette_selection(-1)
+            }
+            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                self.state.move_command_palette_selection(1)
+            }
+            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                self.state.command_palette.query.clear();
+                self.state.command_palette.selected = 0;
+                self.state.command_palette.scroll = 0;
+            }
+            KeyCode::PageUp => {
+                let page = self.state.command_palette_visible_rows().max(1) as isize;
+                self.state.move_command_palette_selection(-page);
+            }
+            KeyCode::PageDown => {
+                let page = self.state.command_palette_visible_rows().max(1) as isize;
+                self.state.move_command_palette_selection(page);
+            }
+            KeyCode::Home => {
+                self.state.command_palette.selected = 0;
+                self.state.command_palette.scroll = 0;
+            }
+            KeyCode::End => {
+                self.state.command_palette.selected =
+                    self.state.command_palette_entries().len().saturating_sub(1);
+                self.state.ensure_command_palette_selection_visible();
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.state
+                    .insert_command_palette_query_text(&character.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn accept_command_palette_selection(&mut self) {
+        let Some(command) = self.state.selected_command_palette_command() else {
+            return;
+        };
+
+        self.state.mode = Mode::Terminal;
+        self.state.command_palette = CommandPaletteState::default();
+
+        match command {
+            PaletteCommand::BuiltIn(action) => {
+                self.execute_tui_navigate_action(action, ActionContext::Prefix);
+            }
+            PaletteCommand::UserAction(index) => {
+                if self.state.keybinds.user_actions.get(index).is_some() {
+                    self.state.request_user_action = Some(index);
+                }
+            }
+            PaletteCommand::CustomCommand(index) => {
+                if let Some(binding) = self.state.keybinds.custom_commands.get(index).cloned() {
+                    self.launch_custom_command(binding, ActionContext::Prefix);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::input::{action_for_key_for_test, BindingDispatch},
+        config::ActionKeybinds,
+        input::TerminalKey,
+    };
+
+    #[test]
+    fn fuzzy_score_requires_an_ordered_subsequence() {
+        assert!(fuzzy_score("split vertical", "sv").is_some());
+        assert!(fuzzy_score("split vertical", "vs").is_none());
+        assert_eq!(fuzzy_score("anything", ""), Some(0));
+    }
+
+    #[test]
+    fn word_start_matches_outrank_mid_word_matches() {
+        assert!(fuzzy_score("split", "s") > fuzzy_score("isplit", "s"));
+    }
+
+    #[test]
+    fn split_vertical_ranks_first_for_a_specific_query() {
+        let mut state = AppState::test_new();
+        state.command_palette.query = "split vert".to_string();
+        let entries = state.command_palette_entries();
+        assert_eq!(
+            entries.first().map(|entry| entry.label.as_str()),
+            Some("split vertical")
+        );
+    }
+
+    #[test]
+    fn empty_query_keeps_built_in_table_order_and_is_non_trivial() {
+        let state = AppState::test_new();
+        let entries = state.command_palette_entries();
+        assert_eq!(
+            entries.first().map(|entry| entry.label.as_str()),
+            Some("keybinds")
+        );
+        assert!(entries.len() > 40);
+    }
+
+    #[test]
+    fn selection_wraps_at_both_ends() {
+        let mut state = AppState::test_new();
+        let count = state.command_palette_entries().len();
+        state.command_palette.selected = 0;
+        state.move_command_palette_selection(-1);
+        assert_eq!(state.command_palette.selected, count - 1);
+        state.move_command_palette_selection(1);
+        assert_eq!(state.command_palette.selected, 0);
+    }
+
+    #[test]
+    fn no_match_clears_selection_and_selected_command() {
+        let mut state = AppState::test_new();
+        state.command_palette.query = "no such command".to_string();
+        state.command_palette.selected = 9;
+        state.clamp_command_palette_selection();
+        assert!(state.command_palette_entries().is_empty());
+        assert_eq!(state.command_palette.selected, 0);
+        assert_eq!(state.selected_command_palette_command(), None);
+    }
+
+    #[test]
+    fn unbound_commands_have_an_empty_key_hint() {
+        let mut state = AppState::test_new();
+        state.keybinds.help = ActionKeybinds::default();
+        let entry = state
+            .command_palette_entries()
+            .into_iter()
+            .find(|entry| entry.label == "keybinds")
+            .expect("help command");
+        assert!(entry.key.is_empty());
+        assert_ne!(entry.key, crate::app::settings_keybindings::UNSET);
+    }
+
+    #[test]
+    fn built_in_defaults_stay_aligned_with_real_dispatch() {
+        let state = AppState::test_new();
+        for (_group, field, _label, accessor) in built_in_keybinding_entries() {
+            let Some(expected) = action_for_field(field) else {
+                continue;
+            };
+            let bindings = accessor(&state.keybinds);
+            for binding in &bindings.bindings {
+                let (code, modifiers) = binding.trigger.combo();
+                let actual = action_for_key_for_test(
+                    &state,
+                    TerminalKey::new(code, modifiers),
+                    if binding.trigger.is_direct() {
+                        BindingDispatch::Direct
+                    } else {
+                        BindingDispatch::Prefix
+                    },
+                );
+                assert_eq!(actual, Some(expected), "dispatch drift for {field}");
+            }
+        }
+    }
+
+    #[test]
+    fn default_command_palette_bindings_dispatch_and_parse() {
+        let state = AppState::test_new();
+        assert_eq!(
+            action_for_key_for_test(
+                &state,
+                TerminalKey::new(
+                    KeyCode::Char('p'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ),
+                BindingDispatch::Direct,
+            ),
+            Some(NavigateAction::OpenCommandPalette)
+        );
+
+        let super_binding = ActionKeybinds::direct("super+p");
+        assert!(super_binding
+            .matches_direct_key(&TerminalKey::new(KeyCode::Char('p'), KeyModifiers::SUPER,)));
+    }
+
+    #[test]
+    fn opening_the_palette_resets_its_query() {
+        let mut state = AppState::test_new();
+        state.command_palette.query = "split".to_string();
+        state.command_palette.selected = 3;
+        state.open_command_palette();
+        assert_eq!(state.mode, Mode::CommandPalette);
+        assert_eq!(state.command_palette, CommandPaletteState::default());
+    }
+
+    #[test]
+    fn accepting_a_selection_closes_before_dispatch_and_clears_query() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.open_command_palette();
+        app.state.command_palette.query = "keybinds".to_string();
+        app.state.command_palette.selected = 0;
+
+        app.accept_command_palette_selection();
+
+        assert_eq!(app.state.mode, Mode::KeybindHelp);
+        assert_eq!(app.state.command_palette, CommandPaletteState::default());
+        app.state.open_command_palette();
+        assert!(app.state.command_palette.query.is_empty());
+    }
+}

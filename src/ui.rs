@@ -9,6 +9,7 @@ use ratatui::{
 use tokio::sync::Notify;
 
 pub(crate) mod add_project;
+mod command_palette;
 mod dialogs;
 pub(crate) mod dock;
 #[path = "ui/dock/context.rs"]
@@ -58,6 +59,7 @@ mod work_status;
 pub(crate) mod work_view;
 
 use self::add_project::render_add_project_overlay;
+use self::command_palette::render_command_palette;
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
@@ -1226,6 +1228,7 @@ fn render_with_runtime_registry_inner(
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+        Mode::CommandPalette => render_command_palette(app, frame),
         Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
         Mode::Terminal => {}
     }

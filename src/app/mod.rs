@@ -14,6 +14,8 @@ mod api;
 mod api_helpers;
 pub(crate) use api_helpers::read_terminal_snapshot;
 pub(crate) mod claude_subagents;
+mod command_palette;
+pub(crate) use command_palette::PaletteEntry;
 mod config_io;
 mod creation;
 pub(crate) mod diff;
@@ -913,6 +915,7 @@ impl App {
             }),
             keybind_help: state::KeybindHelpState::default(),
             navigator: state::NavigatorState::default(),
+            command_palette: state::CommandPaletteState::default(),
             work_link_picker: None,
             add_action: None,
             copy_mode: None,
@@ -2956,6 +2959,7 @@ impl App {
             Mode::Navigator => {
                 input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
             }
+            Mode::CommandPalette => self.handle_command_palette_key(key_event),
             Mode::WorkLinkPicker => {
                 self.handle_work_link_picker_key(key_event);
             }
@@ -3585,6 +3589,7 @@ mod tests {
             Mode::Prefix,
             Mode::Navigate,
             Mode::Navigator,
+            Mode::CommandPalette,
             Mode::Copy,
             Mode::Resize,
             Mode::ConfirmClose,
