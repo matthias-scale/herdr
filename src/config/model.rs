@@ -301,6 +301,10 @@ pub struct SessionConfig {
     /// Settle a pane when the work it is linked to finishes (its pull request
     /// merged or closed, its ticket done). Default: true.
     pub auto_settle_finished: bool,
+    /// Wait this many minutes after the linked work first reads as finished
+    /// before settling the pane, and settle only if it still reads finished
+    /// and the pane stayed quiet. Default: 10.
+    pub settle_finished_after_minutes: u64,
     /// Settle a pane that has been inactive for `settle_after_days`.
     /// Default: true.
     pub auto_settle_inactive: bool,
@@ -318,6 +322,7 @@ impl Default for SessionConfig {
             reap_done_panes: true,
             settle_after_days: 3,
             auto_settle_finished: true,
+            settle_finished_after_minutes: 10,
             auto_settle_inactive: true,
             settle_stops_agent: true,
         }
@@ -2056,6 +2061,7 @@ new_cwd = "~/Projects"
         assert_eq!(default_config.session.reap_done_after_minutes, 240);
         assert!(default_config.session.reap_done_panes);
         assert_eq!(default_config.session.settle_after_days, 3);
+        assert_eq!(default_config.session.settle_finished_after_minutes, 10);
         assert!(default_config.session.settle_stops_agent);
 
         let toml = r#"
@@ -2065,6 +2071,7 @@ hide_done_after_minutes = 15
 reap_done_after_minutes = 90
 reap_done_panes = false
 settle_after_days = 7
+settle_finished_after_minutes = 20
 settle_stops_agent = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -2073,6 +2080,7 @@ settle_stops_agent = false
         assert_eq!(config.session.reap_done_after_minutes, 90);
         assert!(!config.session.reap_done_panes);
         assert_eq!(config.session.settle_after_days, 7);
+        assert_eq!(config.session.settle_finished_after_minutes, 20);
         assert!(!config.session.settle_stops_agent);
     }
 

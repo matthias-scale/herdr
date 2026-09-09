@@ -516,6 +516,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # settle_after_days = 3
 # Settle a pane when the work it is linked to finishes.
 # auto_settle_finished = true
+# Hold the finished trigger this many minutes: the work has to keep reading as
+# finished and the pane has to stay quiet for that long before it settles.
+# settle_finished_after_minutes = 10
 # Settle a pane that has only gone quiet for settle_after_days.
 # auto_settle_inactive = true
 # Stop resumable agent processes when their pane settles.
@@ -1102,6 +1105,7 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# hide_done_after_minutes = 30"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
         assert!(DEFAULT_CONFIG.contains("# settle_after_days = 3"));
+        assert!(DEFAULT_CONFIG.contains("# settle_finished_after_minutes = 10"));
         assert!(DEFAULT_CONFIG.contains("# settle_stops_agent = true"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
         assert!(DEFAULT_CONFIG.contains("[source_control]\n# Merge strategy"));
