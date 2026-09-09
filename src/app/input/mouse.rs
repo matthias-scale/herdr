@@ -153,6 +153,28 @@ impl AppState {
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
         self.forwarded_pane_input = None;
+        // Same rule as the keyboard: a due break reminder owns the screen.
+        if self.pomodoro.prompt.is_some() {
+            return None;
+        }
+        if self.handle_notepad_mouse(&mouse) {
+            return None;
+        }
+        if rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.toggle_pomodoro(std::time::Instant::now());
+                    return None;
+                }
+                // Right-click ends the phase early, which is the deliberate
+                // "I am done with this block" action.
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.skip_pomodoro_phase(std::time::Instant::now());
+                    return None;
+                }
+                _ => {}
+            }
+        }
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;

@@ -80,12 +80,14 @@ mod logging;
 mod loop_runs;
 mod metadata_tokens;
 mod noninteractive_process;
+mod notepad;
 mod pane;
 mod pane_graphics_files;
 mod persist;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
+mod pomodoro;
 mod popup_size;
 mod product_announcements;
 mod protocol;
@@ -208,6 +210,33 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [source_control]
 # Merge strategy for the primary PR action: "merge", "squash", or "rebase".
 # merge_method = "merge"
+
+[notepad]
+# Markdown notes edited at the bottom of the sidebar. Point `dir` at a folder a
+# sync tool already carries, or set git_sync to let herdr pull and push it.
+# enabled = false
+# Notes directory. Empty uses <config dir>/notes. "~" is expanded.
+# dir = ""
+# Note names offered first, in this order. Others follow alphabetically.
+# files = ["todo", "ideas"]
+# Sidebar rows the panel occupies, header included (3-24).
+# height = 8
+# Pull and push the notes directory as a git checkout.
+# git_sync = false
+# git_sync_interval_seconds = 120
+
+[pomodoro]
+# Break reminder. The overlay it raises has to be answered in writing.
+# enabled = false
+# work_minutes = 25
+# short_break_minutes = 5
+# long_break_minutes = 20
+# Work intervals between long breaks (4 x 25min is roughly two hours).
+# long_break_every = 4
+# Characters required to dismiss a due reminder.
+# min_confirm_chars = 3
+# Note in the notepad directory confirmations are appended to. Empty disables it.
+# log_file = "pomodoro-log.md"
 
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")

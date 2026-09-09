@@ -3751,8 +3751,23 @@ pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
     ws_area
 }
 
-pub(crate) fn workspace_list_rect_for_app(_app: &AppState, area: Rect) -> Rect {
-    expanded_sidebar_content(area)
+/// The workspace list gets the sidebar's content area minus whatever the
+/// notepad panel reserved at the bottom, so every row geometry derived from
+/// here shrinks with it.
+pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
+    let content = expanded_sidebar_content(area);
+    let notepad = crate::ui::notepad::notepad_height(app, content);
+    Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.saturating_sub(notepad),
+    )
+}
+
+/// The notepad panel's rows inside the sidebar.
+pub(crate) fn sidebar_notepad_rect(app: &AppState, area: Rect) -> Rect {
+    crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_content(area))
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -5070,6 +5085,7 @@ pub(super) fn render_sidebar(
 
     let ws_area = workspace_list_rect_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
     render_sidebar_header(app, frame, area, p);
     let settings = sidebar_footer_settings_hit_area(area);
     if settings.width > 0 {
@@ -5127,6 +5143,12 @@ pub(super) fn render_sidebar(
         );
         frame.render_widget(Paragraph::new(Span::styled("✉ ", style)), missive);
     }
+    crate::ui::pomodoro::render_indicator(
+        app,
+        frame,
+        crate::ui::pomodoro::pomodoro_hit_area(app, area),
+        app.view_observed_at,
+    );
     let refresh = sidebar_footer_refresh_hit_area(area);
     if refresh.width > 0 {
         let style = sidebar_footer_style(

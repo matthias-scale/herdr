@@ -413,6 +413,8 @@ pub struct Keybinds {
     pub editor_open_repo: ActionKeybinds,
     pub edit_scratchpad: ActionKeybinds,
     pub show_scratchpad: ActionKeybinds,
+    pub toggle_notepad: ActionKeybinds,
+    pub toggle_pomodoro: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
     pub work: ActionKeybinds,
@@ -634,6 +636,8 @@ impl Config {
             editor_open_repo: empty_action!(),
             edit_scratchpad: empty_action!(),
             show_scratchpad: empty_action!(),
+            toggle_notepad: empty_action!(),
+            toggle_pomodoro: empty_action!(),
             toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
             work: empty_action!(),
@@ -842,6 +846,8 @@ impl Config {
             apply_action!(keybinds.editor_open_repo, editor_open_repo, source);
             apply_action!(keybinds.edit_scratchpad, edit_scratchpad, source);
             apply_action!(keybinds.show_scratchpad, show_scratchpad, source);
+            apply_action!(keybinds.toggle_notepad, toggle_notepad, source);
+            apply_action!(keybinds.toggle_pomodoro, toggle_pomodoro, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.work, work, source);

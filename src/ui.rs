@@ -28,8 +28,10 @@ mod markdown;
 mod menus;
 mod mobile;
 mod navigator;
+pub(crate) mod notepad;
 mod onboarding;
 mod panes;
+pub(crate) mod pomodoro;
 pub(crate) mod pr_actions;
 mod release_notes;
 mod scrollbar;
@@ -597,6 +599,13 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_refresh_hit_area(sidebar_area)
     };
+    let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
+    let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
+    // The caret has to stay inside the rows the panel actually got, which is
+    // only known once the sidebar geometry above resolved.
+    app.notepad
+        .sync_scroll(notepad::notepad_body_rect(notepad_rect).height);
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let DockGeometry {
@@ -738,6 +747,9 @@ fn compute_view_internal(
         usage_hit_areas,
         sidebar_footer_ticket_hit_area,
         sidebar_footer_missive_hit_area,
+        notepad_rect,
+        notepad_tab_hit_areas,
+        pomodoro_hit_area,
         sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
@@ -1010,6 +1022,9 @@ fn compute_mobile_view(
         usage_hit_areas: Vec::new(),
         sidebar_footer_ticket_hit_area: Rect::default(),
         sidebar_footer_missive_hit_area: Rect::default(),
+        notepad_rect: Rect::default(),
+        notepad_tab_hit_areas: Vec::new(),
+        pomodoro_hit_area: Rect::default(),
         sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
@@ -1255,6 +1270,9 @@ fn render_with_runtime_registry_inner(
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
+    // Last, and over everything: a due break reminder outranks whatever the
+    // operator was looking at, which is the point of it.
+    pomodoro::render_overlay(app, frame, frame.area());
 }
 
 fn render_navigation_chrome(

@@ -61,6 +61,8 @@ pub enum AppEvent {
     SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
     /// The focused repository's scratchpad file changed on disk; reload it.
     ScratchpadChanged,
+    /// A note in the notepad directory changed on disk; rescan and reload.
+    NotepadChanged,
     /// The append-only loop receipt source changed; refresh its cursor.
     LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.

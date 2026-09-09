@@ -80,6 +80,7 @@ impl App {
                 self.refresh_symphony_snapshot(snapshot)
             }
             AppEvent::ScratchpadChanged => self.reload_scratchpad(),
+            AppEvent::NotepadChanged => self.reload_notepad(),
             AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
@@ -297,6 +298,10 @@ impl App {
 
         if let AppEvent::ScratchpadChanged = ev {
             return Some(self.reload_scratchpad());
+        }
+
+        if let AppEvent::NotepadChanged = ev {
+            return Some(self.reload_notepad());
         }
 
         if let AppEvent::LoopRunHistoryChanged = ev {

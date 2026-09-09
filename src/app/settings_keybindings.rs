@@ -248,6 +248,10 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("show_scratchpad", "show scratchpad", |kb| {
                 &kb.show_scratchpad
             }),
+            built_in("toggle_notepad", "focus notepad", |kb| &kb.toggle_notepad),
+            built_in("toggle_pomodoro", "pause/resume break timer", |kb| {
+                &kb.toggle_pomodoro
+            }),
             built_in("home", "home", |kb| &kb.home),
             built_in("work", "work", |kb| &kb.work),
             built_in("usage", "usage", |kb| &kb.usage),
