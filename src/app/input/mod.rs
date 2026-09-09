@@ -158,8 +158,21 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
-        if self.state.handle_sidebar_new_menu_key(key_event) {
-            return None;
+        // Every sidebar shortcut below is a bare key the operator also types
+        // into a pane, so they are reachable only while the sidebar owns the
+        // keyboard. Gating them on their own selection or menu state instead
+        // let a stale click keep answering `m`, `n`, Enter and the search
+        // field while the operator was typing in an editor pane.
+        if self.state.sidebar_focused {
+            if self.state.handle_sidebar_new_menu_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_new_thread_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_search_key(key_event) {
+                return None;
+            }
         }
         if self.handle_pr_action_confirmation_key(key_event) {
             return None;
@@ -167,36 +180,32 @@ impl App {
         if self.handle_dock_surface_menu_key(&key) {
             return None;
         }
-        if self.state.handle_sidebar_new_thread_key(key_event) {
-            return None;
-        }
-        if self.state.handle_sidebar_search_key(key_event) {
-            return None;
-        }
-        if self.state.sidebar_settled_menu_target.is_some()
-            && self.handle_sidebar_settled_key(key_event)
-        {
-            return None;
-        }
-        if self.handle_sidebar_object_menu_key(key_event) {
-            return None;
-        }
-        if self.state.handle_sidebar_group_menu_key(key_event) {
-            return None;
-        }
-        if self.state.handle_sidebar_filter_menu_key(key_event) {
-            return None;
-        }
-        match self.state.handle_sidebar_work_group_key(key_event) {
-            sidebar::SidebarWorkGroupKeyAction::Ignored => {}
-            sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
-            sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
-                self.dispatch_sidebar_work_group_plan(*plan);
+        if self.state.sidebar_focused {
+            if self.state.sidebar_settled_menu_target.is_some()
+                && self.handle_sidebar_settled_key(key_event)
+            {
                 return None;
             }
-        }
-        if self.handle_sidebar_settled_key(key_event) {
-            return None;
+            if self.handle_sidebar_object_menu_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_group_menu_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_filter_menu_key(key_event) {
+                return None;
+            }
+            match self.state.handle_sidebar_work_group_key(key_event) {
+                sidebar::SidebarWorkGroupKeyAction::Ignored => {}
+                sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
+                sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                    self.dispatch_sidebar_work_group_plan(*plan);
+                    return None;
+                }
+            }
+            if self.handle_sidebar_settled_key(key_event) {
+                return None;
+            }
         }
         if self.handle_symphony_key(key_event) {
             return None;
