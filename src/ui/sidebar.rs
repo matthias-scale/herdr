@@ -1650,11 +1650,20 @@ fn entry_repo_label(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
     entry_repo_group(app, entry).map(|(_, title)| title)
 }
 
+/// Unlinked buckets stay after every linked group, and the directory-less
+/// bucket stays after the ones that do name a directory.
+fn unlinked_sort_key(group: &SidebarWorkGroup) -> (bool, bool) {
+    (
+        group.unlinked,
+        group.unlinked && group.key == UNLINKED_GROUP_KEY,
+    )
+}
+
 fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<SidebarWorkGroup> {
     let mut groups = Vec::new();
     for entry in ordered_tab_entries(entries) {
         let Some((key, title)) = entry_repo_group(app, &entry) else {
-            push_unlinked_entry(&mut groups, entry);
+            push_unlinked_entry(app, &mut groups, entry);
             continue;
         };
         match work_group_index(&groups, &key) {
@@ -1670,7 +1679,18 @@ fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Sideb
             }),
         }
     }
-    groups.sort_by_key(|group| group.unlinked);
+    disambiguate_unlinked_titles(
+        &mut groups,
+        |group| {
+            group
+                .unlinked
+                .then(|| group.entries.first())
+                .flatten()
+                .and_then(|entry| unlinked_group_directory(app, entry))
+        },
+        |group| &mut group.title,
+    );
+    groups.sort_by_key(unlinked_sort_key);
     groups
 }
 
@@ -1946,6 +1966,17 @@ fn pull_request_number(url: &str) -> Option<&str> {
         .filter(|segment| segment.chars().all(|character| character.is_ascii_digit()))
 }
 
+/// Same reasoning as `push_unlinked_entry`: a tab with nothing to group by
+/// still belongs beside the other tabs in its directory.
+fn push_unlinked_tab_group(
+    app: &AppState,
+    groups: &mut Vec<SidebarTabGroup>,
+    entry: AgentPanelEntry,
+) {
+    let (key, title) = unlinked_group_key_and_title(app, &entry);
+    push_sidebar_tab_group(groups, key, title, entry, true);
+}
+
 fn push_sidebar_tab_group(
     groups: &mut Vec<SidebarTabGroup>,
     key: String,
@@ -1976,13 +2007,7 @@ fn sidebar_tab_groups(
         match mode {
             SidebarGroupMode::RepoPr => {
                 let Some(context) = context.filter(|context| !context.pr_urls.is_empty()) else {
-                    push_sidebar_tab_group(
-                        &mut groups,
-                        "unlinked".into(),
-                        "unlinked".into(),
-                        entry,
-                        true,
-                    );
+                    push_unlinked_tab_group(app, &mut groups, entry);
                     continue;
                 };
                 for url in &context.pr_urls {
@@ -2013,13 +2038,7 @@ fn sidebar_tab_groups(
                         false,
                     );
                 } else {
-                    push_sidebar_tab_group(
-                        &mut groups,
-                        "unlinked".into(),
-                        "unlinked".into(),
-                        entry,
-                        true,
-                    );
+                    push_unlinked_tab_group(app, &mut groups, entry);
                 }
             }
             SidebarGroupMode::Repo
@@ -2028,7 +2047,23 @@ fn sidebar_tab_groups(
             | SidebarGroupMode::Missive => {}
         }
     }
-    groups.sort_by_key(|group| group.unlinked);
+    disambiguate_unlinked_titles(
+        &mut groups,
+        |group| {
+            group
+                .unlinked
+                .then(|| group.entries.first())
+                .flatten()
+                .and_then(|entry| unlinked_group_directory(app, entry))
+        },
+        |group| &mut group.title,
+    );
+    groups.sort_by_key(|group| {
+        (
+            group.unlinked,
+            group.unlinked && group.key == UNLINKED_GROUP_KEY,
+        )
+    });
     groups
 }
 
@@ -2066,6 +2101,8 @@ pub(crate) struct SidebarWorkGroupActivation {
 }
 
 const UNLINKED_GROUP_KEY: &str = "unlinked";
+/// Namespaced away from the raw branch keys the worktree view still uses.
+const UNLINKED_DIR_PREFIX: &str = "unlinked-dir:";
 
 /// `SCA-3165` -> `SCA`. The team is the identifier prefix; the projection
 /// carries no separate team field.
@@ -2366,12 +2403,113 @@ fn pane_bound_conversation(app: &AppState, url: &str) -> bool {
     })
 }
 
-fn push_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
-    match work_group_index(groups, UNLINKED_GROUP_KEY) {
+/// Bucket for a pane no work item claims.
+///
+/// A single flat "unlinked" list stops being readable as soon as it holds more
+/// than a handful of panes, and the panes in it are not actually unrelated:
+/// they share a working directory. Key on that directory so they group, and
+/// keep the plain bucket for a pane whose directory cannot be resolved.
+///
+/// The directory is `TerminalState::cwd`, which is OSC 7-only and therefore
+/// the launch directory for a pane without shell integration. That is the same
+/// source `entry_repo_group` already uses for its git-root lookup, so the two
+/// halves of this projection agree. Rendering is pure and cannot reach
+/// `TerminalRuntimeRegistry`; resolving a live cwd per pane per render is its
+/// own change with its own cost.
+/// Normalised, because the key and the title must agree on what one directory
+/// is: `components()` folds `/a/./project` into `/a/project`, so keying on the
+/// raw path would split one directory into two buckets with the same header.
+/// `..` is left alone; resolving it would need filesystem access.
+fn unlinked_group_directory(app: &AppState, entry: &AgentPanelEntry) -> Option<std::path::PathBuf> {
+    entry_terminal(app, entry)
+        .map(|terminal| terminal.cwd.components().collect::<std::path::PathBuf>())
+        .filter(|cwd| !cwd.as_os_str().is_empty())
+}
+
+/// A directory header, from the last path component.
+///
+/// `depth` says how many trailing components to keep, so a caller that finds
+/// two directories sharing a basename can ask for a longer, distinguishing
+/// title.
+fn unlinked_directory_title(dir: &std::path::Path, depth: usize) -> String {
+    let mut components: Vec<String> = dir
+        .components()
+        .rev()
+        .take(depth.max(1))
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .filter(|component| !component.is_empty())
+        .collect();
+    if components.is_empty() {
+        // A root directory has no named component; show the path itself rather
+        // than an empty header.
+        return format!("▫ {}", dir.display());
+    }
+    components.reverse();
+    format!("▫ {}", components.join("/"))
+}
+
+fn unlinked_group_key_and_title(app: &AppState, entry: &AgentPanelEntry) -> (String, String) {
+    let Some(cwd) = unlinked_group_directory(app, entry) else {
+        return (UNLINKED_GROUP_KEY.into(), "unlinked".into());
+    };
+    (unlinked_group_key(&cwd), unlinked_directory_title(&cwd, 1))
+}
+
+/// Keyed on the debug form of the raw `OsStr`, not `display()`, which is lossy:
+/// two distinct non-UTF-8 paths must not collapse into one bucket.
+fn unlinked_group_key(dir: &std::path::Path) -> String {
+    format!("{UNLINKED_DIR_PREFIX}{:?}", dir.as_os_str())
+}
+
+/// Two unlinked directories can share a basename, and `▫ project` twice tells
+/// the operator nothing. Deepen every title until they are all distinct.
+///
+/// One extra component is not enough on its own: `/a/x/project` and
+/// `/b/x/project` are still both `x/project`. The loop is bounded by the
+/// longest path in the list, and both it and the group list are small.
+fn disambiguate_unlinked_titles<T>(
+    groups: &mut [T],
+    directory: impl Fn(&T) -> Option<std::path::PathBuf>,
+    title: impl Fn(&mut T) -> &mut String,
+) {
+    let dirs: Vec<std::path::PathBuf> = groups.iter().filter_map(&directory).collect();
+    if dirs.len() < 2 {
+        return;
+    }
+    let max_depth = dirs
+        .iter()
+        .map(|dir| dir.components().count())
+        .max()
+        .unwrap_or(1);
+    let mut depth = 1;
+    while depth < max_depth {
+        let mut titles: Vec<String> = dirs
+            .iter()
+            .map(|dir| unlinked_directory_title(dir, depth))
+            .collect();
+        titles.sort_unstable();
+        let before = titles.len();
+        titles.dedup();
+        if titles.len() == before {
+            break;
+        }
+        depth += 1;
+    }
+    for group in groups.iter_mut() {
+        let Some(dir) = directory(group) else {
+            continue;
+        };
+        *title(group) = unlinked_directory_title(&dir, depth);
+    }
+}
+
+fn push_unlinked_entry(app: &AppState, groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
+    let (key, title) = unlinked_group_key_and_title(app, &entry);
+    match work_group_index(groups, &key) {
         Some(index) => groups[index].entries.push(entry),
         None => groups.push(SidebarWorkGroup {
-            key: UNLINKED_GROUP_KEY.into(),
-            title: "unlinked".into(),
+            key,
+            title,
             entries: vec![entry],
             unlinked: true,
             status: None,
@@ -2506,7 +2644,7 @@ pub(crate) fn sidebar_work_groups(
             SidebarGroupMode::RepoPr => {
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
-                    push_unlinked_entry(&mut groups, entry);
+                    push_unlinked_entry(app, &mut groups, entry);
                     continue;
                 }
                 for url in urls {
@@ -2553,7 +2691,7 @@ pub(crate) fn sidebar_work_groups(
                 let ticket_ids = preferred_ticket_ids(app, &entry);
                 if ticket_ids.is_empty() {
                     if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
-                        push_unlinked_entry(&mut groups, entry);
+                        push_unlinked_entry(app, &mut groups, entry);
                     }
                     continue;
                 }
@@ -2592,7 +2730,7 @@ pub(crate) fn sidebar_work_groups(
                     .unwrap_or_default();
                 if urls.is_empty() {
                     if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
-                        push_unlinked_entry(&mut groups, entry);
+                        push_unlinked_entry(app, &mut groups, entry);
                     }
                     continue;
                 }
@@ -2648,7 +2786,18 @@ pub(crate) fn sidebar_work_groups(
             SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {}
         }
     }
-    groups.sort_by_key(|group| group.unlinked);
+    disambiguate_unlinked_titles(
+        &mut groups,
+        |group| {
+            group
+                .unlinked
+                .then(|| group.entries.first())
+                .flatten()
+                .and_then(|entry| unlinked_group_directory(app, entry))
+        },
+        |group| &mut group.title,
+    );
+    groups.sort_by_key(unlinked_sort_key);
     groups
 }
 
@@ -6454,6 +6603,155 @@ fn render_sidebar_toggle(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// Build a workspace whose tabs each sit in a different directory. Separate
+    /// tabs, because a tab rolls its panes into one sidebar row.
+    fn app_with_unlinked_tab_directories(dirs: &[Option<&str>]) -> AppState {
+        let mut app = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mixed");
+        for index in 1..dirs.len() {
+            workspace.test_add_tab(Some(&format!("tab{index}")));
+        }
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        for (tab_idx, dir) in dirs.iter().enumerate() {
+            let terminal_id = {
+                let tab = &app.workspaces[0].tabs[tab_idx];
+                tab.panes[&tab.root_pane].attached_terminal_id.clone()
+            };
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+            terminal.cwd = dir.map(std::path::PathBuf::from).unwrap_or_default();
+        }
+        app
+    }
+
+    #[test]
+    fn repo_and_tab_projections_group_unlinked_panes_by_directory_too() {
+        let app = app_with_unlinked_tab_directories(&[Some("/work/alpha"), Some("/work/beta")]);
+        let entries = sidebar_thread_entries(&app);
+
+        let repo_titles = sidebar_repo_groups(&app, &entries)
+            .into_iter()
+            .map(|group| group.title)
+            .collect::<Vec<_>>();
+        assert_eq!(repo_titles, ["▫ alpha", "▫ beta"]);
+
+        let tab_titles = sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+            .into_iter()
+            .map(|group| group.title)
+            .collect::<Vec<_>>();
+        assert_eq!(tab_titles, ["▫ alpha", "▫ beta"]);
+    }
+
+    #[test]
+    fn directories_sharing_a_basename_get_distinguishable_headers() {
+        let titles = |dirs: &[Option<&str>]| {
+            let app = app_with_unlinked_tab_directories(dirs);
+            let entries = sidebar_thread_entries(&app);
+            sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr)
+                .into_iter()
+                .map(|group| group.title)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            titles(&[Some("/a/project"), Some("/b/project"), Some("/c/other")]),
+            ["▫ a/project", "▫ b/project", "▫ c/other"]
+        );
+        // One extra component is not enough here, so the titles deepen again.
+        assert_eq!(
+            titles(&[Some("/a/x/project"), Some("/b/x/project")]),
+            ["▫ a/x/project", "▫ b/x/project"]
+        );
+        // Distinct basenames stay short.
+        assert_eq!(
+            titles(&[Some("/a/alpha"), Some("/b/beta")]),
+            ["▫ alpha", "▫ beta"]
+        );
+        // Two spellings of one directory are one bucket, not two identical
+        // headers: the key and the title must agree on what a directory is.
+        assert_eq!(
+            titles(&[Some("/a/project"), Some("/a/./project")]),
+            ["▫ project"]
+        );
+    }
+
+    /// `Path::display()` is lossy, so keying on it would merge two distinct
+    /// non-UTF-8 paths into one bucket.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_directories_stay_in_separate_buckets() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let left = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/work/\xff"));
+        let right = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/work/\xfe"));
+        assert_eq!(
+            left.display().to_string(),
+            right.display().to_string(),
+            "the fixture only proves anything if display() collapses them"
+        );
+
+        assert_ne!(unlinked_group_key(&left), unlinked_group_key(&right));
+    }
+
+    /// A flat unlinked list is unreadable past a handful of panes, and the
+    /// panes in it are not unrelated: they share a directory. Two directories
+    /// must produce two buckets, and a pane with no resolvable directory keeps
+    /// the plain one, last.
+    #[test]
+    fn unlinked_panes_group_by_their_working_directory() {
+        let mut app = AppState::test_new();
+        // Separate tabs, because a tab rolls its panes into one sidebar row.
+        let mut workspace = crate::workspace::Workspace::test_new("mixed");
+        workspace.test_add_tab(Some("beta"));
+        workspace.test_add_tab(Some("rootless"));
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        for (tab_idx, dir) in [
+            (0usize, Some("/work/alpha")),
+            (1, Some("/work/beta")),
+            // An empty path is the "cannot resolve a directory" case.
+            (2, None),
+        ] {
+            let terminal_id = {
+                let tab = &app.workspaces[0].tabs[tab_idx];
+                tab.panes[&tab.root_pane].attached_terminal_id.clone()
+            };
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+            terminal.cwd = dir.map(std::path::PathBuf::from).unwrap_or_default();
+        }
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        let listed = groups
+            .iter()
+            .map(|group| (group.title.as_str(), group.entries.len()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            listed,
+            [("▫ alpha", 1), ("▫ beta", 1), ("unlinked", 1)],
+            "{:?}",
+            groups.iter().map(|group| &group.key).collect::<Vec<_>>()
+        );
+        assert!(groups.iter().all(|group| group.unlinked));
+    }
+
+    /// The unlinked bucket is named after the pane's working directory, and
+    /// `Workspace::test_new` uses the process cwd, so tests derive the label
+    /// rather than hardcoding this checkout's name.
+    fn unlinked_bucket_title() -> String {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let name = cwd
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| cwd.display().to_string());
+        format!("▫ {name}")
+    }
+
     use super::*;
     use crate::{
         api::schema::{
@@ -11521,7 +11819,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 // The two-ticket pane is listed under both of its tickets.
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
-                ("unlinked".to_string(), 1, false),
+                (unlinked_bucket_title(), 1, false),
                 ("OPS-12 · pixel EMQ drop".to_string(), 0, true),
             ]
         );
@@ -11539,7 +11837,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 // the conversation id keeps the two headers apart.
                 ("aaa111 · fix pricing".to_string(), 1, false),
                 ("bbb222 · fix pricing".to_string(), 1, false),
-                ("unlinked".to_string(), 2, false),
+                (unlinked_bucket_title(), 2, false),
             ]
         );
     }
@@ -11566,7 +11864,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             work_group_shape(&app),
             vec![
                 ("aaa111 · refund for invoice 42".to_string(), 1, false),
-                ("unlinked".to_string(), 2, false),
+                (unlinked_bucket_title(), 2, false),
             ]
         );
     }
@@ -11796,7 +12094,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
-                "unlinked",
+                unlinked_bucket_title().as_str(),
             ]
         );
 
@@ -11809,7 +12107,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("SCA-3102 · annual credits".to_string(), 1, false),
                 ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
-                ("unlinked".to_string(), 1, false),
+                (unlinked_bucket_title(), 1, false),
             ]
         );
     }
@@ -12257,7 +12555,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
-                "unlinked",
+                unlinked_bucket_title().as_str(),
             ]
         );
 
@@ -12908,7 +13206,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(
             nested,
-            [("⎇ main", 1), ("⎇ feature/sidebar", 1), ("unlinked", 1)]
+            [
+                ("⎇ main", 1),
+                ("⎇ feature/sidebar", 1),
+                (unlinked_bucket_title().as_str(), 1)
+            ]
         );
         let suffixes = rows
             .iter()
@@ -13021,12 +13323,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             [
                 ("#206 · feat sidebar", 1),
                 ("#159 · pricing", 1),
-                ("unlinked", 1)
+                (unlinked_bucket_title().as_str(), 1)
             ]
         );
         assert_eq!(
             rows.iter()
-                .filter(|row| matches!(row, SidebarRow::NestedHeader { title, .. } if title == "unlinked"))
+                .filter(|row| matches!(row, SidebarRow::NestedHeader { title, .. } if *title == unlinked_bucket_title()))
                 .count(),
             1
         );
@@ -13204,7 +13506,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "repo:0:false",
                 "#159 · pricing",
                 "#160 · session fallback",
-                "unlinked",
+                unlinked_bucket_title().as_str(),
             ]
         );
         assert_eq!(
@@ -13214,13 +13516,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "⎇ feature/pricing",
                 "⎇ review/pricing",
                 "⎇ session/branch",
-                "unlinked",
+                unlinked_bucket_title().as_str(),
             ]
         );
         // Work items are the top level in these modes; this fixture binds none,
         // so every pane lands in the unlinked bucket and no repo header shows.
-        assert_eq!(tree(SidebarGroupMode::LinearTeam), ["unlinked"]);
-        assert_eq!(tree(SidebarGroupMode::Missive), ["unlinked"]);
+        assert_eq!(
+            tree(SidebarGroupMode::LinearTeam),
+            [unlinked_bucket_title()]
+        );
+        assert_eq!(tree(SidebarGroupMode::Missive), [unlinked_bucket_title()]);
 
         let mut tab_sets = Vec::new();
         for mode in SidebarGroupMode::ALL {
@@ -13247,7 +13552,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 // is the section for panes with no branch of their own. Spaces
                 // differs from Repo in the Space rows above it, not here.
                 SidebarGroupMode::Repo | SidebarGroupMode::Spaces => {
-                    assert_eq!(nested, ["unlinked"])
+                    assert_eq!(nested, [unlinked_bucket_title()])
                 }
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
@@ -13255,7 +13560,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         [
                             "#159 · pricing",
                             "#160 · session fallback",
-                            "unlinked",
+                            unlinked_bucket_title().as_str(),
                             "no open PRs for me · author or assignee",
                         ]
                     )
@@ -13266,16 +13571,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         "⎇ feature/pricing",
                         "⎇ review/pricing",
                         "⎇ session/branch",
-                        "unlinked",
+                        unlinked_bucket_title().as_str(),
                     ]
                 ),
                 SidebarGroupMode::LinearTeam => assert_eq!(
                     nested,
-                    ["unlinked", "no active tickets for me · creator or assignee"]
+                    [
+                        unlinked_bucket_title(),
+                        "no active tickets for me · creator or assignee".to_string()
+                    ]
                 ),
                 SidebarGroupMode::Missive => assert_eq!(
                     nested,
-                    ["unlinked", "no open conversations for me · assignee"]
+                    [
+                        unlinked_bucket_title(),
+                        "no open conversations for me · assignee".to_string()
+                    ]
                 ),
             }
         }
@@ -14978,7 +15289,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![
                 ("aaa111 · Refund approved".to_string(), 1, false),
                 ("bbb222 · Needs owner".to_string(), 1, false),
-                ("unlinked".to_string(), 2, false),
+                (unlinked_bucket_title(), 2, false),
             ],
             "pane-linked conversations stay visible through sidebar filters"
         );
