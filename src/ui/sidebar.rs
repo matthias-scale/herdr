@@ -1639,12 +1639,11 @@ fn entry_repo_group(app: &AppState, entry: &AgentPanelEntry) -> Option<(String, 
         .map(str::trim)
         .filter(|repo| !repo.is_empty())
     {
-        let title = repo
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .filter(|title| !title.is_empty())?
-            .to_string();
+        let title = repo.trim_end_matches('/');
+        if title.is_empty() {
+            return None;
+        }
+        let title = title.to_string();
         return Some((format!("repo:{repo}"), title));
     }
     if let Some(root) = entry_terminal(app, entry)
@@ -13216,7 +13215,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(repo_headers, [("herdr", Some(2)), ("growth", Some(1))]);
+        assert_eq!(
+            repo_headers,
+            [
+                ("scalable-so/herdr", Some(2)),
+                ("scalable-so/growth", Some(1))
+            ]
+        );
         let nested = rows
             .iter()
             .filter_map(|row| match row {
@@ -13539,6 +13544,45 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             workspace_entry_tree(after),
             vec!["repo:0:false".to_string()]
         );
+    }
+
+    #[test]
+    fn repo_view_keeps_owner_repo_and_elides_it_at_minimum_width() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("repo")];
+        app.ensure_test_terminals();
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("matthias-scale/herdr".into()),
+                work_title: Some("Sidebar fixes".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.set_sidebar_group_mode(SidebarGroupMode::Repo);
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Workspace { title, .. } if title == "matthias-scale/herdr"
+        )));
+
+        let area = Rect::new(0, 0, 18, 12);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let header = compute_workspace_card_areas(&app, area)
+            .into_iter()
+            .next()
+            .expect("repo header");
+        let rendered = row_text(terminal.backend().buffer(), header.rect.y, header.rect.width);
+        assert!(rendered.contains("matthias"), "{rendered:?}");
+        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(display_width(&rendered) <= usize::from(header.rect.width));
     }
 
     #[test]
