@@ -1075,7 +1075,8 @@ impl SidebarWorkFilter {
 
     pub(crate) fn missive_label(&self) -> String {
         format!(
-            "{} · closed {}",
+            "{} · {} · closed {}",
+            self.missive.team.as_deref().unwrap_or("all teams"),
             assignee_filter_label(self.missive.assignee.as_deref()),
             if self.missive.show_closed {
                 "shown"
@@ -1189,6 +1190,14 @@ impl SidebarWorkFilter {
         };
         if conversation.closed && !self.missive.show_closed {
             return false;
+        }
+        if let Some(selected) = self.missive.team.as_deref() {
+            let matches_team = conversation.team.as_ref().is_some_and(|team| {
+                team.name.eq_ignore_ascii_case(selected) || team.id.eq_ignore_ascii_case(selected)
+            });
+            if !matches_team {
+                return false;
+            }
         }
         let Some(selected) = self.missive.assignee.as_deref() else {
             return true;
@@ -1356,6 +1365,7 @@ impl GithubStateFilter {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct MissiveSidebarFilter {
+    pub(crate) team: Option<String>,
     pub(crate) assignee: Option<String>,
     pub(crate) show_closed: bool,
 }
@@ -1363,6 +1373,7 @@ pub(crate) struct MissiveSidebarFilter {
 impl Default for MissiveSidebarFilter {
     fn default() -> Self {
         Self {
+            team: None,
             assignee: Some("me".into()),
             show_closed: false,
         }
@@ -3157,6 +3168,9 @@ pub struct AppState {
     pub(crate) reap_done_after: std::time::Duration,
     pub(crate) reap_done_panes: bool,
     pub(crate) settle_after: std::time::Duration,
+    /// How long linked work must keep reading as finished, with the pane quiet,
+    /// before the finished trigger settles it (`session.settle_finished_after_minutes`).
+    pub(crate) settle_finished_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -5493,6 +5507,7 @@ impl AppState {
             reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
             reap_done_panes: true,
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
+            settle_finished_after: std::time::Duration::from_secs(10 * 60),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -6973,6 +6988,7 @@ mod tests {
                 subject: "提交 attachment review".into(),
                 app_url: "https://mail.missiveapp.com/#inbox/conversations/abc".into(),
                 web_url: String::new(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,

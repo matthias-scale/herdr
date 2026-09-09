@@ -1850,6 +1850,7 @@ mod tests {
                 subject: "Full conversation subject".into(),
                 app_url: key,
                 web_url: String::new(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,

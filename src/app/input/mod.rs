@@ -8629,6 +8629,7 @@ navigate_workspace_down = "ctrl+j"
             subject: "Billing question".into(),
             app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
             web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            team: None,
             assignees: Vec::new(),
             last_activity_at: Some(std::time::SystemTime::UNIX_EPOCH),
             closed: false,

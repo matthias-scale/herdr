@@ -202,6 +202,7 @@ mod tests {
         filters.github.assignee = Some("grace".into());
         filters.github.show_drafts = true;
         filters.github.state = crate::app::state::GithubStateFilter::Merged;
+        filters.missive.team = Some("Support".into());
         filters.missive.assignee = None;
         filters.missive.show_closed = true;
         update_path(&path, |state| {
