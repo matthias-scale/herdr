@@ -157,9 +157,9 @@ pub(crate) use self::{
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
         sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
         sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
-        sidebar_ticket_target, sidebar_unassigned_dock_object, sidebar_unassigned_spawn_at,
-        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
@@ -1485,6 +1485,38 @@ mod tests {
         assert!(violations.is_empty(), "{}", violations.join("\n"));
     }
 
+    #[test]
+    fn selected_sidebar_view_row_paints_the_full_popup_width() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("space")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.sidebar_width = 65;
+        app.sidebar_max_width = 65;
+        app.sidebar_group_menu_open = true;
+        app.palette = crate::app::state::Palette::from_name("github-light-high-contrast")
+            .expect("built-in theme resolves");
+        let area = Rect::new(0, 0, 140, 24);
+        compute_view(&mut app, area);
+        let layout = sidebar_group_menu_layout(&app, area).expect("view dropdown fits");
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| render(&app, frame))
+            .expect("render full frame");
+        let selected_row = layout.list_rect.y;
+        let buffer = terminal.backend().buffer();
+
+        for x in layout.list_rect.x..layout.list_rect.right() {
+            assert_eq!(
+                buffer[(x, selected_row)].style().bg,
+                Some(app.palette.surface1),
+                "selected view row cell at x={x} kept the popup background"
+            );
+        }
+    }
+
     /// Guards the invisibility class, not dimness: text the same color as the
     /// surface it sits on, which is how a mismatched palette used to hide the
     /// sidebar and how a white-on-white style hides a selected tab. The dimmest
@@ -1844,6 +1876,7 @@ mod tests {
                 subject: "Full conversation subject".into(),
                 app_url: key,
                 web_url: String::new(),
+                team: None,
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,

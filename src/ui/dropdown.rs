@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::app::state::Palette;
+use crate::ui::text::display_width;
 
 pub(crate) enum DropdownMenuRow {
     Separator,
@@ -162,6 +163,11 @@ pub(crate) fn hit_test(layout: &DropdownLayout, x: u16, y: u16) -> Option<usize>
     Some(layout.first_visible + usize::from(y - list.y))
 }
 
+pub(crate) fn pad_menu_row(label: &str, width: u16) -> String {
+    let padding = usize::from(width).saturating_sub(display_width(label));
+    format!("{label}{}", " ".repeat(padding))
+}
+
 pub(crate) fn render_menu(
     palette: &Palette,
     frame: &mut Frame,
@@ -202,7 +208,10 @@ pub(crate) fn render_menu(
                     style = style.add_modifier(Modifier::DIM);
                 }
                 Line::from(Span::styled(
-                    format!("{} {label}", if is_selected { "▸" } else { " " }),
+                    pad_menu_row(
+                        &format!("{} {label}", if is_selected { "▸" } else { " " }),
+                        layout.list_rect.width,
+                    ),
                     style,
                 ))
             }

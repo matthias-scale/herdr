@@ -1304,6 +1304,7 @@ mod tests {
             subject: format!("Conversation {id}"),
             app_url: format!("https://mail.missiveapp.com/#inbox/conversations/{id}"),
             web_url: format!("https://mail.missiveapp.com/#inbox/conversations/{id}"),
+            team: None,
             assignees: assigned
                 .then(|| crate::work_index::MissiveUser {
                     id: "ada".into(),

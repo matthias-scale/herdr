@@ -3465,6 +3465,9 @@ impl HeadlessServer {
         if let Some(mode) = self.app.state.take_sidebar_group_mode_persistence_request() {
             crate::client::presentation::save_sidebar_group_mode(mode);
         }
+        if self.app.state.take_sidebar_view_scan_request() {
+            self.app.request_sidebar_view_scan(Instant::now());
+        }
         if let Some(filter) = self
             .app
             .state

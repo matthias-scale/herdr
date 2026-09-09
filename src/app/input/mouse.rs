@@ -1496,6 +1496,7 @@ impl AppState {
                     if self.mode != Mode::Terminal {
                         self.mode = Mode::Terminal;
                     }
+                    self.note_pane_activity_at(info.id, std::time::Instant::now());
                     // Clicking pane content aims the keyboard at the shell, and
                     // it reaches here even when that pane already held focus, so
                     // the surface flags are dropped here rather than only on a
