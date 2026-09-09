@@ -189,12 +189,40 @@ const CODEX_ACCESS_OPTIONS: &[HomeAccess] = &[
 ///
 /// Claude opens on `bypass`: every agent this fork dispatches from a ticket or
 /// the composer is meant to run unattended, and the default permission mode
-/// stops on the first tool prompt with nobody watching the pane. Other
-/// providers keep the first (most restricted) option.
+/// stops on the first tool prompt with nobody watching the pane. Codex opens on
+/// `full` for the same reason. Every other provider keeps the first (most
+/// restricted) option.
 pub(crate) fn default_access(agent: Agent) -> Option<HomeAccess> {
     match agent {
         Agent::Claude => Some(HomeAccess::ClaudeBypass),
+        // Same reason as Claude's bypass: a sandboxed Codex stops on the first
+        // write with nobody watching the pane.
+        Agent::Codex => Some(HomeAccess::CodexFull),
         _ => access_options(agent).first().copied(),
+    }
+}
+
+/// Model the composer opens on for a provider, before the operator picks one.
+///
+/// The catalog is probed from each CLI, so a preference is only a preference:
+/// it applies when the probed catalog still carries that model and otherwise
+/// falls back to the catalog's own first entry. Nothing here can name a model
+/// the installed CLI would reject.
+pub(crate) fn preferred_model(agent: Agent) -> Option<&'static str> {
+    match agent {
+        // The reasoning lane this fork dispatches unattended work to.
+        Agent::Claude => Some("claude-opus-5"),
+        Agent::Codex => Some("gpt-5.6-sol"),
+        _ => None,
+    }
+}
+
+/// Reasoning effort to open on, under the same catalog-membership rule as
+/// [`preferred_model`].
+pub(crate) fn preferred_effort(agent: Agent) -> Option<&'static str> {
+    match agent {
+        Agent::Codex => Some("medium"),
+        _ => None,
     }
 }
 
@@ -802,7 +830,7 @@ pub(crate) struct HomeState {
 
 impl Default for HomeState {
     fn default() -> Self {
-        Self {
+        let mut home = Self {
             catalog: HomeCatalog::fallback(),
             agent_choices: Vec::new(),
             selected: 0,
@@ -834,7 +862,12 @@ impl Default for HomeState {
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
             pending_dispatch: None,
             dispatch_error: None,
-        }
+        };
+        // Resolve the opening provider through the same path a provider switch
+        // takes, so the composer never opens on a selection the picker itself
+        // would not have produced.
+        home.apply_agent_choice(Agent::Claude);
+        home
     }
 }
 
@@ -857,10 +890,12 @@ impl HomeState {
 
     #[cfg(test)]
     pub(crate) fn with_catalog(catalog: HomeCatalog) -> Self {
-        Self {
+        let mut home = Self {
             catalog,
             ..Self::default()
-        }
+        };
+        home.apply_agent_choice(Agent::Claude);
+        home
     }
 
     pub(crate) fn with_catalog_workspace_and_choices(
@@ -1069,6 +1104,13 @@ impl HomeState {
             })
             .map(|choice| choice.model.clone())
             .or_else(|| {
+                preferred_model(agent)
+                    .filter(|model| {
+                        provider.is_some_and(|provider| provider.model(model).is_some())
+                    })
+                    .map(str::to_string)
+            })
+            .or_else(|| {
                 provider
                     .and_then(|provider| provider.models.first())
                     .map(|model| model.id.clone())
@@ -1082,6 +1124,11 @@ impl HomeState {
             .as_ref()
             .and_then(|choice| choice.effort.clone())
             .filter(|effort| efforts.contains(effort))
+            .or_else(|| {
+                preferred_effort(agent)
+                    .filter(|preferred| efforts.iter().any(|effort| effort == preferred))
+                    .map(str::to_string)
+            })
             .or_else(|| efforts.first().cloned());
         let options = access_options(agent);
         self.access = saved
@@ -2534,18 +2581,24 @@ mod tests {
     }
 
     #[test]
-    fn default_model_and_auto_effort_defer_to_the_provider() {
+    fn the_opening_model_is_preferred_while_effort_defers_to_the_provider() {
         let mut home = home_with_codex_catalog();
         home.prompt = "implement the retry cap".into();
 
         let plan = home.dispatch_plan().expect("prompt should dispatch");
 
-        assert_eq!(home.model, "default");
-        assert_eq!(home.effort.as_deref(), Some("auto"));
+        assert_eq!(home.model, "claude-opus-5");
+        assert_eq!(
+            home.effort.as_deref(),
+            Some("auto"),
+            "Claude names no preferred effort, so the catalog's own first stands"
+        );
         assert_eq!(
             plan.argv,
             vec![
                 "claude",
+                "--model",
+                "claude-opus-5",
                 "--dangerously-skip-permissions",
                 "implement the retry cap"
             ]
@@ -2594,6 +2647,9 @@ mod tests {
         home.set_agent(Agent::Codex);
         home.set_model("gpt-5.6-sol");
         home.effort = Some("ultra".into());
+        // Explicit: the frozen argv pins the plan for these inputs, so it must
+        // not move when the opening access policy does.
+        home.set_access(HomeAccess::CodexReadOnly);
         home.directory = PathBuf::from("/tmp/frozen-plan");
         home.target = HomeTarget::Existing("space-7".into());
 
@@ -2715,6 +2771,8 @@ mod tests {
         home.set_access(HomeAccess::ClaudeAcceptEdits);
         let expected_argv = [
             "claude",
+            "--model",
+            "claude-opus-5",
             "--permission-mode",
             "acceptEdits",
             "run the checks",
@@ -2760,6 +2818,7 @@ mod tests {
         home.prompt = "implement the retry cap".into();
         home.set_model("claude-fable-5-1");
         home.effort = Some("high".into());
+        home.set_access(HomeAccess::ClaudeBypass);
         assert_eq!(
             home.dispatch_plan().expect("Claude plan").argv,
             vec![
@@ -2776,6 +2835,7 @@ mod tests {
         home.set_agent(Agent::Codex);
         home.set_model("gpt-5.6-sol");
         home.effort = Some("ultra".into());
+        home.set_access(HomeAccess::CodexReadOnly);
         assert_eq!(
             home.dispatch_plan().expect("Codex plan").argv,
             vec![
@@ -2792,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_dispatches_on_bypass_by_default() {
+    fn each_provider_dispatches_on_its_unattended_access_mode() {
         let home = HomeState::default();
         assert_eq!(home.agent, Agent::Claude);
         assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
@@ -2801,7 +2861,7 @@ mod tests {
         // falling to the first, most restricted option.
         let mut home = HomeState::default();
         home.set_agent(Agent::Codex);
-        assert_eq!(home.access, Some(HomeAccess::CodexReadOnly));
+        assert_eq!(home.access, Some(HomeAccess::CodexFull));
         home.set_agent(Agent::Claude);
         assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
     }
@@ -2854,6 +2914,9 @@ mod tests {
             let mut home = home_with_codex_catalog();
             home.prompt = "ship it".into();
             home.set_agent(agent);
+            // This case is about the access flags alone, so hold the model on
+            // the provider-neutral entry that emits no `--model`.
+            home.set_model(DEFAULT_MODEL);
             home.set_access(access);
             let plan = home.dispatch_plan().expect("access mode should dispatch");
             let mut expected = vec![crate::detect::interactive_agent_executable(agent)];
@@ -2896,6 +2959,7 @@ mod tests {
     #[test]
     fn context_window_is_visible_only_for_supported_claude_models() {
         let mut home = HomeState::default();
+        home.set_model("claude-haiku-4-5-20251001");
         assert!(!home.context_visible());
 
         home.set_model("claude-fable-5-1");
@@ -3384,5 +3448,73 @@ mod tests {
             "the account name is not a place name"
         );
         assert_eq!(name, "~");
+    }
+
+    #[test]
+    fn claude_opens_on_opus_with_bypass_and_a_context_choice() {
+        let home = HomeState::default();
+        assert_eq!(home.agent, Agent::Claude);
+        assert_eq!(home.model, "claude-opus-5");
+        assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
+        assert!(
+            home.context_visible(),
+            "opus carries a 1M window, so the composer must offer the choice"
+        );
+        assert_eq!(
+            home.context_options(),
+            [DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
+        );
+    }
+
+    #[test]
+    fn codex_opens_on_sol_at_medium_with_full_access() {
+        let codex = super::super::home_catalog::parse_codex_catalog(
+            br#"{"models":[
+                {"slug":"gpt-5.6-luna","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"xhigh"}]},
+                {"slug":"gpt-5.6-sol","visibility":"list","priority":2,"supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}
+            ]}"#,
+        )
+        .expect("Codex fixture");
+        let mut home = HomeState::with_catalog(HomeCatalog::with_codex(codex));
+        home.set_agent(Agent::Codex);
+        assert_eq!(
+            home.model, "gpt-5.6-sol",
+            "the preference outranks the catalog's own first entry"
+        );
+        assert_eq!(home.effort.as_deref(), Some("medium"));
+        assert_eq!(home.access, Some(HomeAccess::CodexFull));
+    }
+
+    #[test]
+    fn a_preference_the_catalog_does_not_carry_falls_back_to_its_first_entry() {
+        let codex = super::super::home_catalog::parse_codex_catalog(
+            br#"{"models":[
+                {"slug":"gpt-5.6-terra","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"low"}]}
+            ]}"#,
+        )
+        .expect("Codex fixture");
+        let mut home = HomeState::with_catalog(HomeCatalog::with_codex(codex));
+        home.set_agent(Agent::Codex);
+        assert_eq!(
+            home.model, "default",
+            "sol is absent, so the catalog's own first entry stands"
+        );
+        assert_eq!(
+            home.effort.as_deref(),
+            Some(AUTO_EFFORT),
+            "medium is not offered, so the catalog's own first effort stands"
+        );
+    }
+
+    #[test]
+    fn an_explicit_model_choice_survives_a_provider_round_trip() {
+        let mut home = HomeState::default();
+        home.set_model("claude-sonnet-5");
+        home.set_agent(Agent::Codex);
+        home.set_agent(Agent::Claude);
+        assert_eq!(
+            home.model, "claude-sonnet-5",
+            "the preference must not overwrite what the operator picked"
+        );
     }
 }

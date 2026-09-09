@@ -187,7 +187,12 @@ const NORMAL_COMPOSER_CARD_ROWS: u16 = 8;
 const COMPACT_COMPOSER_CARD_ROWS: u16 = 6;
 /// The card is a reading surface, not a pane: past this it stops being one
 /// glance and the headline drifts away from the prompt it introduces.
-const HOME_CARD_MAX_WIDTH: u16 = 72;
+/// The composer card clamps to this width and centres in whatever is left.
+///
+/// Wide enough that the chip row still reads as one line once the provider,
+/// model, effort, access, project and repository chips are all present; a
+/// narrower terminal simply gets the full width it has.
+const HOME_CARD_MAX_WIDTH: u16 = 96;
 /// `[ ↵ ]`, right-aligned on the picker row.
 const SUBMIT_GLYPH: &str = "[ ↵ ]";
 
@@ -2010,8 +2015,8 @@ mod tests {
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         let chip_row = row_text(&buffer, composer.frame, composer.chips.y);
         assert!(
-            chip_row.contains("claude ▾ │ default ▾ │ auto ▾ │ bypass ▾"),
-            "the picker row should read agent │ model │ effort │ access: {chip_row:?}"
+            chip_row.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 200k ▾"),
+            "the picker row should read agent │ model │ effort │ access │ context: {chip_row:?}"
         );
         assert!(
             chip_row.ends_with("[ ↵ ]│"),
@@ -2162,6 +2167,8 @@ mod tests {
     #[test]
     fn home_tab_order_includes_effort_and_supported_context_options() {
         let mut home = HomeState::default();
+        // Haiku carries no 1M window, so this pass covers the shorter cycle.
+        home.set_model("claude-haiku-4-5-20251001");
         let claude_order = [
             HomeFocus::Agent,
             HomeFocus::Model,
@@ -2228,7 +2235,11 @@ mod tests {
     #[test]
     fn narrow_composer_collapses_chip_gaps_and_keeps_click_targets_in_bounds() {
         let mut app = AppState::test_new();
-        app.home = Some(HomeState::default());
+        let mut home = HomeState::default();
+        // A model without a 1M window, so this stays the four-chip row the
+        // elision assertions below are written against.
+        home.set_model("claude-haiku-4-5-20251001");
+        app.home = Some(home);
         let queue = vec![blocked(0)];
         let area = Rect::new(0, 0, 24, 12);
         let composer = bands(area, queue.len())
@@ -2356,6 +2367,7 @@ mod tests {
     #[test]
     fn unicode_model_labels_do_not_push_effort_or_access_out_of_a_narrow_row() {
         let mut home = HomeState::default();
+        home.set_model("claude-haiku-4-5-20251001");
         home.model = "模型六点一".into();
         let area = Rect::new(0, 0, 24, 1);
         let rects = chip_rects(&AppState::test_new(), &home, chip_row_bands(area));
@@ -2682,7 +2694,10 @@ mod tests {
         );
         assert!(card_row(composer.prompt.y).contains('█'));
         let chips = card_row(composer.chips.y);
-        assert!(chips.contains("claude ▾ │ default ▾ │ auto ▾"), "{chips:?}");
+        assert!(
+            chips.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 200k ▾"),
+            "{chips:?}"
+        );
         assert!(chips.ends_with("[ ↵ ]│"), "{chips:?}");
         assert!(card_row(composer.divider.y).starts_with('├'));
         assert!(card_row(composer.divider.y).ends_with('┤'));
@@ -2749,6 +2764,7 @@ mod tests {
             HomeFocus::Model,
             HomeFocus::Effort,
             HomeFocus::Access,
+            HomeFocus::Context,
             HomeFocus::Directory,
             HomeFocus::Workspace,
             HomeFocus::Ref,
@@ -2765,6 +2781,7 @@ mod tests {
             HomeFocus::Ref,
             HomeFocus::Workspace,
             HomeFocus::Directory,
+            HomeFocus::Context,
             HomeFocus::Access,
             HomeFocus::Effort,
             HomeFocus::Model,
