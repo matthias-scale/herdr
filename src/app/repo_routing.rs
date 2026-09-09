@@ -92,7 +92,8 @@ impl App {
     ///
     /// Adoption is deliberately timid, because a wrong binding misfiles panes:
     ///
-    /// * a workspace that already declares a binding keeps it,
+    /// * a workspace that already declares a binding keeps it, and one whose
+    ///   binding the operator cleared stays cleared,
     /// * every pane that has resolved a repository must name the same one, so a
     ///   workspace holding two checkouts stays unbound rather than picking one,
     /// * a repository already claimed by another workspace is never taken, which
@@ -104,7 +105,7 @@ impl App {
         let Some(workspace) = self.state.workspaces.get(ws_idx) else {
             return false;
         };
-        if workspace.repo_binding.is_some() {
+        if workspace.repo_binding.is_some() || workspace.repo_binding_cleared {
             return false;
         }
         let pane_ids: Vec<PaneId> = workspace
@@ -375,6 +376,19 @@ mod tests {
         for pane_id in workspace_pane_ids(&app, 0) {
             observe_git_repo(&mut app, 0, pane_id, "owner/bound");
         }
+
+        assert!(!app.adopt_repo_binding_for_workspace(0));
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+    }
+
+    #[test]
+    fn adoption_respects_a_binding_the_operator_cleared() {
+        let mut app = app_with_bound_workspace();
+        for pane_id in workspace_pane_ids(&app, 0) {
+            observe_git_repo(&mut app, 0, pane_id, "owner/grab-bag");
+        }
+        // The operator said "no binding here", which must outlast a refresh.
+        app.state.workspaces[0].repo_binding_cleared = true;
 
         assert!(!app.adopt_repo_binding_for_workspace(0));
         assert_eq!(app.state.workspaces[0].repo_binding, None);

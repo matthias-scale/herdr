@@ -167,6 +167,9 @@ impl App {
         let Some(ws) = self.state.workspaces.get_mut(index) else {
             return workspace_not_found(id, &params.workspace_id);
         };
+        // Clearing is an instruction, not an absence: remember it so adoption
+        // does not put the same binding back on the next git refresh.
+        ws.repo_binding_cleared = repo.is_none();
         ws.repo_binding = repo;
         self.schedule_session_save();
         if params.reconcile {
