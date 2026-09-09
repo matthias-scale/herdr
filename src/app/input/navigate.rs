@@ -1940,61 +1940,56 @@ pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
 /// limits and unanswered gates, ignored the stale-supervisor projection the
 /// sidebar renders, and could not reach a blocked pane inside a tab that rolled
 /// up to another state.
-fn blocked_pane_cycle(state: &AppState) -> Vec<((usize, crate::layout::PaneId), bool)> {
-    let entries = crate::ui::all_agent_panel_entries(state);
-    let mut seen = std::collections::HashSet::new();
-    let mut order = Vec::new();
-    let mut push = |entry: &crate::ui::AgentPanelEntry| {
-        let target = (entry.ws_idx, entry.pane_id);
-        if seen.insert(target) {
+fn blocked_pane_cycle(state: &AppState) -> Vec<((usize, usize, crate::layout::PaneId), bool)> {
+    crate::ui::all_agent_panel_entries(state)
+        .into_iter()
+        .map(|entry| {
             let blocked = crate::terminal::counts_as_blocked(
                 entry.state,
                 entry.open_blockers,
                 entry.usage_limited,
             ) && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
-            order.push((target, blocked));
-        }
-    };
-    for row in crate::ui::sidebar_rows(state) {
-        match row {
-            crate::ui::SidebarRow::Tab { entry, .. } => {
-                for candidate in entries.iter().filter(|candidate| {
-                    candidate.ws_idx == entry.ws_idx && candidate.tab_idx == entry.tab_idx
-                }) {
-                    push(candidate);
-                }
-            }
-            crate::ui::SidebarRow::Agent { entry, .. } => push(&entry),
-            _ => {}
-        }
-    }
-    for entry in &entries {
-        push(entry);
-    }
-    order
+            ((entry.ws_idx, entry.tab_idx, entry.pane_id), blocked)
+        })
+        .collect()
 }
 
 fn next_blocked_window_target(state: &AppState) -> Option<(usize, crate::layout::PaneId)> {
-    let windows = blocked_pane_cycle(state);
-    if windows.is_empty() {
+    let panes = blocked_pane_cycle(state);
+    if panes.is_empty() {
         return None;
     }
+    let active_window = state
+        .active
+        .and_then(|ws_idx| Some((ws_idx, state.workspaces.get(ws_idx)?.active_tab_index())));
     let focused = state.active.and_then(|ws_idx| {
         state
             .workspaces
-            .get(ws_idx)?
-            .focused_pane_id()
+            .get(ws_idx)
+            .and_then(|workspace| workspace.focused_pane_id())
             .map(|pane_id| (ws_idx, pane_id))
     });
+    // Walking forward from where the operator stands, rather than restarting at
+    // the first blocked pane, is what keeps every blocked pane reachable when
+    // one is skipped instead of answered. The active window is the fallback
+    // anchor: a pane that carries no agent panel entry still has a position.
     let start = focused
-        .and_then(|focused| windows.iter().position(|(entry, _)| *entry == focused))
+        .and_then(|focused| {
+            panes
+                .iter()
+                .position(|((ws_idx, _, pane_id), _)| (*ws_idx, *pane_id) == focused)
+        })
+        .or_else(|| {
+            active_window.and_then(|window| {
+                panes
+                    .iter()
+                    .rposition(|((ws_idx, tab_idx, _), _)| (*ws_idx, *tab_idx) == window)
+            })
+        })
         .map_or(0, |current| current + 1);
-    // Walking forward from the focused pane preserves reachability after
-    // skipped blockers, so one `prefix+b` hop can never make the next blocked
-    // pane unreachable.
-    (0..windows.len()).find_map(|offset| {
-        let target = &windows[(start + offset) % windows.len()];
-        target.1.then_some(target.0)
+    (0..panes.len()).find_map(|offset| {
+        let ((ws_idx, _, pane_id), blocked) = panes[(start + offset) % panes.len()];
+        blocked.then_some((ws_idx, pane_id))
     })
 }
 
