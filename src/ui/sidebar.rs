@@ -1504,7 +1504,10 @@ fn compact_sidebar_rows_inner(
     }
     let mut rows = Vec::new();
     append_recently_done_rows(app, &mut rows, recently_done);
-    if app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
+    // A Space is a folder, so this separation must hold even when no pane
+    // resolved a repository.
+    if app.sidebar_group_mode == SidebarGroupMode::Spaces
+        || app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
         || (app.sidebar_group_mode == SidebarGroupMode::Repo
             && !visible_entries
                 .iter()
@@ -1518,10 +1521,11 @@ fn compact_sidebar_rows_inner(
         return rows;
     }
     match app.sidebar_group_mode {
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
             append_repo_group_rows(app, &mut rows, &visible_entries, false);
             append_unassigned_rows(app, &mut rows, &visible_entries);
         }
+        SidebarGroupMode::Spaces => {}
         SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
@@ -1581,7 +1585,12 @@ fn append_legacy_space_rows(
             continue;
         }
         let mut member_entries = Vec::new();
-        for member_idx in sidebar_space_member_indices(app, ws_idx) {
+        let member_indices = if app.sidebar_group_mode == SidebarGroupMode::Spaces {
+            vec![ws_idx]
+        } else {
+            sidebar_space_member_indices(app, ws_idx)
+        };
+        for member_idx in member_indices {
             if let Some(entries) = entries_by_workspace.remove(&member_idx) {
                 member_entries.extend(entries);
             }
@@ -13557,12 +13566,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .collect::<Vec<_>>();
             match mode {
-                // Neither view adds a work-object level: the only nested header
-                // is the section for panes with no branch of their own. Spaces
-                // differs from Repo in the Space rows above it, not here.
-                SidebarGroupMode::Repo | SidebarGroupMode::Spaces => {
-                    assert_eq!(nested, [unlinked_bucket_title()])
-                }
+                SidebarGroupMode::Repo => assert_eq!(nested, [unlinked_bucket_title()]),
+                SidebarGroupMode::Spaces => assert!(nested.is_empty()),
                 SidebarGroupMode::RepoPr => {
                     assert_eq!(
                         nested,
@@ -13707,6 +13712,29 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .collect::<Vec<_>>(),
             vec![(0, false), (1, false), (2, false), (3, false)],
         );
+    }
+
+    #[test]
+    fn spaces_view_without_repositories_keeps_one_row_per_space() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+
+        let rows = sidebar_rows(&app);
+        let spaces = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(spaces, [0, 1]);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { title, .. } if *title == unlinked_bucket_title()
+        )));
     }
 
     #[test]
