@@ -162,6 +162,32 @@ fn render_ticket_picker(app: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// The detail layout the dock is drawing, so the input layer can number the
+/// section digits and hit-test the headers against the same geometry.
+pub(crate) fn focused_ticket_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<crate::ui::work_view::DetailLayout> {
+    let item = focused_ticket_item(app)?;
+    let view = focused_ticket_key(app)
+        .and_then(|key| app.dock_object_views.get(&key).cloned())
+        .unwrap_or_default();
+    Some(crate::ui::work_view::ticket_detail_layout(
+        app,
+        &item,
+        &view,
+        &crate::ui::work_view::TicketDetailControls {
+            start_menu: app.dock_ticket_start_menu,
+            action_menu: app.dock_ticket_action_menu,
+            transition_menu: None,
+            comment_draft: app.dock_ticket_comment_draft.as_deref(),
+            pending_write: app.dock_pending_write.as_ref(),
+            notice: app.dock_write_notice.as_deref(),
+        },
+        area,
+    ))
+}
+
 pub(crate) fn render_linear(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;

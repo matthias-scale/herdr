@@ -12,13 +12,36 @@ use crate::work_index::{
     WorkItemComment, WorkItemDetail as IndexedWorkItemDetail, WorkTicket,
 };
 
-pub(crate) fn section_separator(
+/// A section header that can be folded. `state` carries whether the section is
+/// collapsed and which digit reopens it; `None` renders the plain rule used by
+/// headers that hold nothing to fold.
+///
+/// The reopen hint sits on the collapsed header only. An expanded section shows
+/// its content, so the reader has no question to answer there.
+pub(crate) fn collapsible_section_separator(
     palette: &Palette,
     title: impl AsRef<str>,
     width: u16,
+    collapsed: bool,
+    digit: Option<char>,
+) -> [Line<'static>; 2] {
+    section_rule(palette, title, width, collapsed, digit)
+}
+
+fn section_rule(
+    palette: &Palette,
+    title: impl AsRef<str>,
+    width: u16,
+    collapsed: bool,
+    digit: Option<char>,
 ) -> [Line<'static>; 2] {
     let width = usize::from(width);
-    let label = truncate_end(&format!("─ {} ", title.as_ref()), width);
+    let glyph = if collapsed { "▸" } else { "▾" };
+    let label = match (collapsed, digit) {
+        (true, Some(digit)) => format!("─ {glyph} {} · alt+{digit} to expand ", title.as_ref()),
+        _ => format!("─ {glyph} {} ", title.as_ref()),
+    };
+    let label = truncate_end(&label, width);
     let rule = format!(
         "{label}{}",
         "─".repeat(width.saturating_sub(display_width(&label)))
@@ -1371,7 +1394,7 @@ mod tests {
     #[test]
     fn section_separator_is_blank_then_a_dim_named_rule() {
         let palette = Palette::catppuccin();
-        let [blank, rule] = section_separator(&palette, "Description", 24);
+        let [blank, rule] = collapsible_section_separator(&palette, "Description", 24, false, None);
 
         assert!(blank.spans.is_empty());
         assert_eq!(rule.width(), 24);
@@ -1385,6 +1408,44 @@ mod tests {
             span.style.fg == Some(palette.subtext0)
                 && span.style.add_modifier.contains(Modifier::DIM)
         }));
+    }
+
+    #[test]
+    fn a_collapsed_section_header_names_the_key_that_reopens_it() {
+        let palette = Palette::catppuccin();
+        let text = |line: &Line<'static>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        let [_, expanded] = collapsible_section_separator(&palette, "Checks", 48, false, Some('2'));
+        assert!(
+            text(&expanded).contains("\u{25be} Checks"),
+            "{}",
+            text(&expanded)
+        );
+        assert!(
+            !text(&expanded).contains("alt+"),
+            "an expanded section shows its content, so it has no question to answer"
+        );
+
+        let [_, collapsed] = collapsible_section_separator(&palette, "Checks", 48, true, Some('2'));
+        assert!(
+            text(&collapsed).contains("\u{25b8} Checks \u{b7} alt+2 to expand"),
+            "{}",
+            text(&collapsed)
+        );
+
+        // Past the ninth section there is no digit left to name.
+        let [_, undigited] = collapsible_section_separator(&palette, "Checks", 48, true, None);
+        assert!(
+            text(&undigited).starts_with("\u{2500} \u{25b8} Checks "),
+            "{}",
+            text(&undigited)
+        );
+        assert!(!text(&undigited).contains("alt+"));
     }
 
     fn comment(body: &str) -> WorkItemComment {

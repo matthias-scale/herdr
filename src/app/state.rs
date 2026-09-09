@@ -3973,6 +3973,34 @@ impl PrDetailTab {
     }
 }
 
+/// A named section of a work-object detail. Collapse state is keyed on this
+/// rather than on the header text, which carries a count that changes.
+///
+/// A section keeps its identity across the sub-tabs that show it: collapsing
+/// checks on the overview collapses them on the checks sub-tab too, because
+/// the reader collapsed "checks", not "this copy of checks".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum DetailSection {
+    LinkedPrs,
+    Description,
+    AcceptanceCriteria,
+    Checks,
+    Comments,
+    Files,
+    Timeline,
+}
+
+impl DetailSection {
+    /// Digit that toggles the section at `index` among the ones on screen,
+    /// pressed with alt. Only the first nine get one.
+    pub(crate) fn toggle_digit(index: usize) -> Option<char> {
+        if index >= 9 {
+            return None;
+        }
+        char::from_digit(index as u32 + 1, 10)
+    }
+}
+
 /// Host-independent state for a rich work-object detail. Both the full work
 /// view and the dock store this exact type and call the same renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3986,6 +4014,9 @@ pub(crate) struct ObjectViewState {
     /// the comment list is rebuilt on every observation, and a new comment
     /// shifts the index of every older one.
     pub(crate) expanded_comments: std::collections::BTreeSet<u64>,
+    /// Sections the reader collapsed. Empty is the default, so a detail opens
+    /// showing everything it has.
+    pub(crate) collapsed_sections: std::collections::BTreeSet<DetailSection>,
 }
 
 impl ObjectViewState {
@@ -3996,6 +4027,16 @@ impl ObjectViewState {
     pub(crate) fn toggle_comment(&mut self, identity: u64) {
         if !self.expanded_comments.remove(&identity) {
             self.expanded_comments.insert(identity);
+        }
+    }
+
+    pub(crate) fn section_is_collapsed(&self, section: DetailSection) -> bool {
+        self.collapsed_sections.contains(&section)
+    }
+
+    pub(crate) fn toggle_section(&mut self, section: DetailSection) {
+        if !self.collapsed_sections.remove(&section) {
+            self.collapsed_sections.insert(section);
         }
     }
 

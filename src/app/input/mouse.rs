@@ -1158,6 +1158,22 @@ impl AppState {
                         return Some(MouseAction::OpenUrl { url });
                     }
                 }
+                // A section header folds on click. This runs before the plain
+                // focus fallback below, which would otherwise swallow it.
+                if in_dock {
+                    if let Some((object_key, section)) =
+                        self.dock_detail_section_at(mouse.column, mouse.row)
+                    {
+                        self.dock_pr_focused = self.dock_tab == Some(crate::app::DockSurface::Pr);
+                        self.dock_linear_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Linear);
+                        self.dock_object_views
+                            .entry(object_key)
+                            .or_default()
+                            .toggle_section(section);
+                        return None;
+                    }
+                }
                 if in_dock {
                     self.dock_editor_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Editor);
@@ -2144,6 +2160,40 @@ impl AppState {
         let idx = self.tab_at(col, row)?;
         let rect = self.view.tab_hit_areas.get(idx)?;
         (rect.width > 1 && col == rect.x).then_some(idx)
+    }
+
+    /// The section whose header sits under this screen row in a dock detail,
+    /// accounting for the scroll offset the render applies.
+    fn dock_detail_section_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        crate::app::state::DetailSection,
+    )> {
+        let area = super::dock_detail_area(self);
+        if !self.point_in_rect(area, column, row) {
+            return None;
+        }
+        let (object_key, layout) = match self.dock_tab {
+            Some(crate::app::DockSurface::Pr) => (
+                crate::ui::dock::pr::focused_pr_key(self)?,
+                crate::ui::dock::pr::focused_pr_layout(self, area)?,
+            ),
+            Some(crate::app::DockSurface::Linear) => (
+                crate::ui::dock::linear::focused_ticket_key(self)?,
+                crate::ui::dock::linear::focused_ticket_layout(self, area)?,
+            ),
+            _ => return None,
+        };
+        let view = self
+            .dock_object_views
+            .get(&object_key)
+            .cloned()
+            .unwrap_or_default();
+        let section = super::section_at_row(&layout, &view, area, row)?;
+        Some((object_key, section))
     }
 
     pub(super) fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {

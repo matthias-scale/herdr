@@ -12,9 +12,9 @@ use crate::{
         WorkViewState,
     },
     ui::work_list_detail::{
-        comment_body_lines, comment_header, comment_identity, section_separator,
-        sorted_filtered_conversations, sorted_filtered_prs, sorted_filtered_tickets,
-        ConversationItem, TicketItem, WorkItem as _, WorkRow,
+        comment_body_lines, comment_header, comment_identity, sorted_filtered_conversations,
+        sorted_filtered_prs, sorted_filtered_tickets, ConversationItem, TicketItem, WorkItem as _,
+        WorkRow,
     },
     work_projection::{project_review_queue, WorkReviewQueueRow},
 };
@@ -1101,16 +1101,56 @@ pub(crate) struct TicketDetailControls<'a> {
     pub(crate) notice: Option<&'a str>,
 }
 
-pub(crate) fn render_ticket_detail(
+/// A detail's rendered lines together with where its foldable section headers
+/// landed. The input layer rebuilds this to hit-test and to number the alt
+/// digits, so the render stays the only place that decides which sections a
+/// view shows and in what order.
+pub(crate) struct DetailLayout {
+    pub(crate) lines: Vec<Line<'static>>,
+    /// One entry per foldable section in render order: the line index of its
+    /// header rule, and the section that rule folds.
+    pub(crate) sections: Vec<(usize, crate::app::state::DetailSection)>,
+    /// Rows the action buttons occupy, for anchoring the menus over them.
+    pub(crate) action_rows: usize,
+    /// Line the action row starts on, for the same anchoring.
+    pub(crate) action_row: usize,
+    /// Line the sub-tab row sits on, for anchoring its narrow-width picker.
+    pub(crate) tab_row: usize,
+    /// Where the reviewer picker opens, when the view has one.
+    pub(crate) reviewer_anchor: Option<Rect>,
+}
+
+/// Push a foldable section header. Returns whether its body should follow.
+fn push_section(
+    lines: &mut Vec<Line<'static>>,
+    sections: &mut Vec<(usize, crate::app::state::DetailSection)>,
+    palette: &Palette,
+    title: impl AsRef<str>,
+    width: u16,
+    section: crate::app::state::DetailSection,
+    view: &ObjectViewState,
+) -> bool {
+    let digit = crate::app::state::DetailSection::toggle_digit(sections.len());
+    let collapsed = view.section_is_collapsed(section);
+    let [blank, rule] = crate::ui::work_list_detail::collapsible_section_separator(
+        palette, title, width, collapsed, digit,
+    );
+    lines.push(blank);
+    sections.push((lines.len(), section));
+    lines.push(rule);
+    !collapsed
+}
+
+pub(crate) fn ticket_detail_layout(
     app: &AppState,
     item: &TicketItem<'_>,
     view: &ObjectViewState,
-    controls: TicketDetailControls<'_>,
+    controls: &TicketDetailControls<'_>,
     area: Rect,
-    frame: &mut Frame,
-) {
+) -> DetailLayout {
     let palette = &app.palette;
     let detail = item.detail();
+    let mut sections = Vec::new();
     let mut lines = vec![Line::from(vec![ratatui::text::Span::styled(
         format!(" {}", detail.heading),
         Style::default()
@@ -1130,37 +1170,58 @@ pub(crate) fn render_ticket_detail(
             Style::default().fg(palette.subtext0),
         ),
     ]);
-    lines.extend(section_separator(
+    if push_section(
+        &mut lines,
+        &mut sections,
         palette,
         format!("Linked PRs  {}", detail.linked_prs.len()),
         area.width,
-    ));
-    for pr in &detail.linked_prs {
-        let check = match pr.check_state {
-            crate::work_index::PrCheckState::Passing => "✓",
-            crate::work_index::PrCheckState::Failing => "✗",
-            crate::work_index::PrCheckState::Pending => "◌",
-            crate::work_index::PrCheckState::Unknown => "—",
-        };
-        lines.push(Line::styled(
-            format!("  ⑂ #{} {}  {check}", pr.number, pr.title),
-            Style::default().fg(palette.subtext0),
+        crate::app::state::DetailSection::LinkedPrs,
+        view,
+    ) {
+        for pr in &detail.linked_prs {
+            let check = match pr.check_state {
+                crate::work_index::PrCheckState::Passing => "✓",
+                crate::work_index::PrCheckState::Failing => "✗",
+                crate::work_index::PrCheckState::Pending => "◌",
+                crate::work_index::PrCheckState::Unknown => "—",
+            };
+            lines.push(Line::styled(
+                format!("  ⑂ #{} {}  {check}", pr.number, pr.title),
+                Style::default().fg(palette.subtext0),
+            ));
+        }
+    }
+    if push_section(
+        &mut lines,
+        &mut sections,
+        palette,
+        "Description",
+        area.width,
+        crate::app::state::DetailSection::Description,
+        view,
+    ) {
+        lines.extend(crate::ui::markdown::body_lines(
+            palette,
+            crate::ui::work_list_detail::description_without_checklist(
+                detail.description.as_deref(),
+            )
+            .as_deref(),
+            usize::from(area.width.saturating_sub(2)),
+            " ",
         ));
     }
-    lines.extend(section_separator(palette, "Description", area.width));
-    lines.extend(crate::ui::markdown::body_lines(
-        palette,
-        crate::ui::work_list_detail::description_without_checklist(detail.description.as_deref())
-            .as_deref(),
-        usize::from(area.width.saturating_sub(2)),
-        " ",
-    ));
-    if !detail.checks.is_empty() {
-        lines.extend(section_separator(
+    if !detail.checks.is_empty()
+        && push_section(
+            &mut lines,
+            &mut sections,
             palette,
             "Acceptance criteria",
             area.width,
-        ));
+            crate::app::state::DetailSection::AcceptanceCriteria,
+            view,
+        )
+    {
         for (text, state) in &detail.checks {
             lines.push(Line::styled(
                 format!("  {} {text}", if state == "done" { "✓" } else { "✗" }),
@@ -1168,29 +1229,25 @@ pub(crate) fn render_ticket_detail(
             ));
         }
     }
-    lines.extend(section_separator(
+    if push_section(
+        &mut lines,
+        &mut sections,
         palette,
         format!("Comments  {}  newest first", detail.comments.len()),
         area.width,
-    ));
-    for (index, comment) in detail.comments.iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::default());
-        }
-        lines.push(Line::styled(
-            format!("  {}", comment_header(comment, item.observed_at)),
-            Style::default()
-                .fg(palette.subtext0)
-                .add_modifier(Modifier::DIM),
-        ));
-        lines.extend(comment_body_lines(
+        crate::app::state::DetailSection::Comments,
+        view,
+    ) {
+        push_comment_lines(
+            &mut lines,
             palette,
-            comment,
-            index,
-            usize::from(area.width.saturating_sub(4)),
-            "    ",
-            view.comment_is_expanded(comment_identity(comment)),
-        ));
+            &detail.comments,
+            item.observed_at,
+            view,
+            area.width,
+            "  ",
+            None,
+        );
     }
     if let Some(draft) = controls.comment_draft {
         lines.push(Line::styled(
@@ -1211,9 +1268,99 @@ pub(crate) fn render_ticket_detail(
             Style::default().fg(palette.subtext0),
         ));
     }
-    let max_scroll = lines.len().saturating_sub(usize::from(area.height));
+    DetailLayout {
+        lines,
+        sections,
+        action_rows,
+        action_row: 0,
+        tab_row: 0,
+        reviewer_anchor: None,
+    }
+}
+
+/// One comment block per comment: a dim header then its body, cut to a
+/// readable head unless the reader expanded it. `decoration` is the glyph and
+/// trailing tag the pull-request host puts around its headers.
+#[allow(clippy::too_many_arguments)]
+fn push_comment_lines(
+    lines: &mut Vec<Line<'static>>,
+    palette: &Palette,
+    comments: &[crate::work_index::WorkItemComment],
+    observed_at: std::time::SystemTime,
+    view: &ObjectViewState,
+    width: u16,
+    indent: &str,
+    decoration: Option<(&str, &str)>,
+) {
+    for (index, comment) in comments.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
+        let header = match decoration {
+            Some((badge, tag)) => format!(
+                "{indent}{badge} {}  {tag}",
+                comment_header(comment, observed_at)
+            ),
+            None => format!("{indent}{}", comment_header(comment, observed_at)),
+        };
+        lines.push(Line::styled(
+            header,
+            Style::default()
+                .fg(palette.subtext0)
+                .add_modifier(Modifier::DIM),
+        ));
+        lines.extend(comment_body_lines(
+            palette,
+            comment,
+            index,
+            usize::from(width.saturating_sub(4)),
+            "    ",
+            view.comment_is_expanded(comment_identity(comment)),
+        ));
+    }
+}
+
+/// One line per check. The overview and the checks sub-tab differ only in what
+/// they say when there are none, which the overview leaves out entirely.
+fn push_check_lines(
+    lines: &mut Vec<Line<'static>>,
+    palette: &Palette,
+    checks: &[(String, String)],
+    say_when_empty: bool,
+) {
+    for (name, status) in checks {
+        let glyph = match status.as_str() {
+            "SUCCESS" => "✓",
+            "FAILURE" => "✗",
+            _ => "◌",
+        };
+        lines.push(Line::styled(
+            format!("  {glyph} {name}  {status}"),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    if say_when_empty && checks.is_empty() {
+        lines.push(Line::styled(
+            " no checks reported",
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+}
+
+pub(crate) fn render_ticket_detail(
+    app: &AppState,
+    item: &TicketItem<'_>,
+    view: &ObjectViewState,
+    controls: TicketDetailControls<'_>,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let palette = &app.palette;
+    let layout = ticket_detail_layout(app, item, view, &controls, area);
+    let action_rows = layout.action_rows;
+    let max_scroll = layout.lines.len().saturating_sub(usize::from(area.height));
     let scroll = usize::from(view.scroll).min(max_scroll) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+    frame.render_widget(Paragraph::new(layout.lines).scroll((scroll, 0)), area);
 
     if let Some(choice) = controls.start_menu {
         render_ticket_start_menu(app, frame, area, item, choice);
@@ -1271,14 +1418,13 @@ pub(crate) struct PrDetailControls<'a> {
 
 /// Render one pull request. The full-screen work view and dock call this exact
 /// function with the same object state, so width is the only host difference.
-pub(crate) fn render_pr_detail(
+pub(crate) fn pr_detail_layout(
     app: &AppState,
     item: &crate::ui::work_list_detail::PrItem<'_>,
     view: &ObjectViewState,
-    controls: PrDetailControls<'_>,
+    controls: &PrDetailControls<'_>,
     area: Rect,
-    frame: &mut Frame,
-) {
+) -> DetailLayout {
     let palette = &app.palette;
     let detail = item.detail();
     let checkout_available = detail.open_url.is_some()
@@ -1334,6 +1480,7 @@ pub(crate) fn render_pr_detail(
             Style::default().fg(palette.subtext0),
         ),
     ];
+    let mut sections = Vec::new();
     let mut action_row = lines.len();
     let action_rows = push_pr_action_rows(
         &mut lines,
@@ -1377,57 +1524,52 @@ pub(crate) fn render_pr_detail(
                 format!(" Reviewers  {}  ✦ +", detail.reviewers),
                 Style::default().fg(palette.text),
             ));
-            lines.extend(section_separator(palette, "Description", area.width));
-            lines.extend(crate::ui::markdown::body_lines(
+            if push_section(
+                &mut lines,
+                &mut sections,
                 palette,
-                detail.description.as_deref(),
-                usize::from(area.width.saturating_sub(2)),
-                " ",
-            ));
-            lines.extend(section_separator(
+                "Description",
+                area.width,
+                crate::app::state::DetailSection::Description,
+                view,
+            ) {
+                lines.extend(crate::ui::markdown::body_lines(
+                    palette,
+                    detail.description.as_deref(),
+                    usize::from(area.width.saturating_sub(2)),
+                    " ",
+                ));
+            }
+            if push_section(
+                &mut lines,
+                &mut sections,
                 palette,
                 format!("Checks  {}", detail.checks.len()),
                 area.width,
-            ));
-            for (name, status) in &detail.checks {
-                let glyph = if status == "SUCCESS" {
-                    "✓"
-                } else if status == "FAILURE" {
-                    "✗"
-                } else {
-                    "◌"
-                };
-                lines.push(Line::styled(
-                    format!("  {glyph} {name}  {status}"),
-                    Style::default().fg(palette.subtext0),
-                ));
+                crate::app::state::DetailSection::Checks,
+                view,
+            ) {
+                push_check_lines(&mut lines, palette, &detail.checks, false);
             }
-            lines.extend(section_separator(
+            if push_section(
+                &mut lines,
+                &mut sections,
                 palette,
                 format!("Comments  {}  newest first", detail.comments.len()),
                 area.width,
-            ));
-            for (index, comment) in detail.comments.iter().enumerate() {
-                if index > 0 {
-                    lines.push(Line::default());
-                }
-                lines.push(Line::styled(
-                    format!(
-                        "  ✦ {}  [Fix in a thread]",
-                        comment_header(comment, item.observed_at)
-                    ),
-                    Style::default()
-                        .fg(palette.subtext0)
-                        .add_modifier(Modifier::DIM),
-                ));
-                lines.extend(comment_body_lines(
+                crate::app::state::DetailSection::Comments,
+                view,
+            ) {
+                push_comment_lines(
+                    &mut lines,
                     palette,
-                    comment,
-                    index,
-                    usize::from(area.width.saturating_sub(4)),
-                    "    ",
-                    view.comment_is_expanded(comment_identity(comment)),
-                ));
+                    &detail.comments,
+                    item.observed_at,
+                    view,
+                    area.width,
+                    "  ",
+                    Some(("✦", "[Fix in a thread]")),
+                );
             }
         }
         PrDetailTab::Files => {
@@ -1435,109 +1577,110 @@ pub(crate) fn render_pr_detail(
                 .cached_detail
                 .map(|detail| detail.files.as_slice())
                 .unwrap_or_default();
-            lines.extend(section_separator(
+            if push_section(
+                &mut lines,
+                &mut sections,
                 palette,
                 format!("Files  {}", files.len()),
                 area.width,
-            ));
-            for file in files {
-                lines.push(Line::styled(
-                    format!("  {}  +{} −{}", file.path, file.additions, file.deletions),
-                    Style::default().fg(palette.text),
-                ));
-            }
-            if files.is_empty() {
-                lines.push(Line::styled(
-                    " no changed files indexed",
-                    Style::default().fg(palette.subtext0),
-                ));
+                crate::app::state::DetailSection::Files,
+                view,
+            ) {
+                for file in files {
+                    lines.push(Line::styled(
+                        format!("  {}  +{} −{}", file.path, file.additions, file.deletions),
+                        Style::default().fg(palette.text),
+                    ));
+                }
+                if files.is_empty() {
+                    lines.push(Line::styled(
+                        " no changed files indexed",
+                        Style::default().fg(palette.subtext0),
+                    ));
+                }
             }
         }
         PrDetailTab::Diff => {}
         PrDetailTab::Checks => {
-            lines.extend(section_separator(
+            if push_section(
+                &mut lines,
+                &mut sections,
                 palette,
                 format!("Checks  {}", detail.checks.len()),
                 area.width,
-            ));
-            for (name, status) in &detail.checks {
-                let glyph = match status.as_str() {
-                    "SUCCESS" => "✓",
-                    "FAILURE" => "✗",
-                    _ => "◌",
-                };
-                lines.push(Line::styled(
-                    format!("  {glyph} {name}  {status}"),
-                    Style::default().fg(palette.subtext0),
-                ));
-            }
-            if detail.checks.is_empty() {
-                lines.push(Line::styled(
-                    " no checks reported",
-                    Style::default().fg(palette.subtext0),
-                ));
+                crate::app::state::DetailSection::Checks,
+                view,
+            ) {
+                push_check_lines(&mut lines, palette, &detail.checks, true);
             }
         }
         PrDetailTab::Timeline => {
-            lines.extend(section_separator(
+            if !push_section(
+                &mut lines,
+                &mut sections,
                 palette,
                 "Timeline · newest first",
                 area.width,
-            ));
-            if let Some(message) = item
-                .cached_detail
-                .and_then(|detail| detail.timeline_unavailable.as_deref())
-            {
-                lines.push(Line::styled(
-                    format!(" {message}"),
-                    Style::default().fg(palette.red),
-                ));
-            }
-            let timeline = item
-                .cached_detail
-                .map(|detail| detail.timeline.as_slice())
-                .unwrap_or_default();
-            for (index, event) in timeline.iter().enumerate() {
-                if index > 0 {
-                    lines.push(Line::default());
-                }
-                let age = event
-                    .created_at
-                    .map(|created_at| {
-                        comment_header(
-                            &crate::work_index::WorkItemComment {
-                                author: event.actor.clone(),
-                                body: String::new(),
-                                created_at: Some(created_at),
-                            },
-                            item.observed_at,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        format!("{} · —", event.actor.as_deref().unwrap_or("unknown"))
-                    });
-                lines.push(Line::styled(
-                    format!("  {} · {}", event.kind.replace('_', " "), age),
-                    Style::default()
-                        .fg(palette.subtext0)
-                        .add_modifier(Modifier::DIM),
-                ));
-                lines.extend(crate::ui::markdown::body_lines(
-                    palette,
-                    Some(&event.summary),
-                    usize::from(area.width.saturating_sub(4)),
-                    "    ",
-                ));
-            }
-            if timeline.is_empty()
-                && item
+                crate::app::state::DetailSection::Timeline,
+                view,
+            ) {
+                // Collapsed: the header is the whole section.
+            } else {
+                if let Some(message) = item
                     .cached_detail
-                    .is_some_and(|detail| detail.timeline_unavailable.is_none())
-            {
-                lines.push(Line::styled(
-                    " no timeline events",
-                    Style::default().fg(palette.subtext0),
-                ));
+                    .and_then(|detail| detail.timeline_unavailable.as_deref())
+                {
+                    lines.push(Line::styled(
+                        format!(" {message}"),
+                        Style::default().fg(palette.red),
+                    ));
+                }
+                let timeline = item
+                    .cached_detail
+                    .map(|detail| detail.timeline.as_slice())
+                    .unwrap_or_default();
+                for (index, event) in timeline.iter().enumerate() {
+                    if index > 0 {
+                        lines.push(Line::default());
+                    }
+                    let age = event
+                        .created_at
+                        .map(|created_at| {
+                            comment_header(
+                                &crate::work_index::WorkItemComment {
+                                    author: event.actor.clone(),
+                                    body: String::new(),
+                                    created_at: Some(created_at),
+                                },
+                                item.observed_at,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!("{} · —", event.actor.as_deref().unwrap_or("unknown"))
+                        });
+                    lines.push(Line::styled(
+                        format!("  {} · {}", event.kind.replace('_', " "), age),
+                        Style::default()
+                            .fg(palette.subtext0)
+                            .add_modifier(Modifier::DIM),
+                    ));
+                    lines.extend(crate::ui::markdown::body_lines(
+                        palette,
+                        Some(&event.summary),
+                        usize::from(area.width.saturating_sub(4)),
+                        "    ",
+                    ));
+                }
+                if timeline.is_empty()
+                    && item
+                        .cached_detail
+                        .is_some_and(|detail| detail.timeline_unavailable.is_none())
+                {
+                    lines.push(Line::styled(
+                        " no timeline events",
+                        Style::default().fg(palette.subtext0),
+                    ));
+                }
             }
         }
     }
@@ -1554,6 +1697,40 @@ pub(crate) fn render_pr_detail(
             Style::default().fg(palette.subtext0),
         ));
     }
+    DetailLayout {
+        lines,
+        sections,
+        action_rows,
+        action_row,
+        tab_row,
+        reviewer_anchor,
+    }
+}
+
+pub(crate) fn render_pr_detail(
+    app: &AppState,
+    item: &crate::ui::work_list_detail::PrItem<'_>,
+    view: &ObjectViewState,
+    controls: PrDetailControls<'_>,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let palette = &app.palette;
+    let detail = item.detail();
+    let checkout_available = detail.open_url.is_some()
+        && item
+            .cached_detail
+            .and_then(|detail| detail.head_ref_name.as_ref())
+            .is_some();
+    let actions = item.action_table(app.pr_merge_method, checkout_available);
+    let DetailLayout {
+        lines,
+        sections: _,
+        action_rows,
+        action_row,
+        tab_row,
+        reviewer_anchor,
+    } = pr_detail_layout(app, item, view, &controls, area);
     if view.tab == PrDetailTab::Diff {
         let header_height = u16::try_from(lines.len())
             .unwrap_or(u16::MAX)
@@ -2908,6 +3085,159 @@ mod tests {
         state.snapshot.as_mut().expect("snapshot").unavailable = None;
         let empty = rendered_text(&state);
         assert!(empty.contains("no matching conversations"), "{empty}");
+    }
+
+    fn pr_layout_fixture(view: &ObjectViewState) -> DetailLayout {
+        let summary = pr("owner/repo", 206, &[]);
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.number = Some(206);
+        detail.title = Some("rich dock view".into());
+        detail.body = Some("A description that has to disappear when folded.".into());
+        detail.actions = vec![crate::work_index::WorkItemAction {
+            name: "tests".into(),
+            state: "SUCCESS".into(),
+        }];
+        let item = crate::ui::work_list_detail::PrItem {
+            summary: &summary,
+            cached_detail: Some(&detail),
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        let app = AppState::test_new();
+        pr_detail_layout(
+            &app,
+            &item,
+            view,
+            &PrDetailControls::default(),
+            Rect::new(0, 0, 72, 24),
+        )
+    }
+
+    fn layout_text(layout: &DetailLayout) -> String {
+        layout
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_collapsed_section_drops_its_body_and_keeps_its_header() {
+        let expanded = pr_layout_fixture(&ObjectViewState::default());
+        assert!(
+            layout_text(&expanded).contains("has to disappear when folded"),
+            "{}",
+            layout_text(&expanded)
+        );
+
+        let mut view = ObjectViewState::default();
+        view.toggle_section(crate::app::state::DetailSection::Description);
+        let collapsed = pr_layout_fixture(&view);
+        let text = layout_text(&collapsed);
+        assert!(!text.contains("has to disappear when folded"), "{text}");
+        assert!(text.contains("Description"), "the header stays: {text}");
+        assert!(
+            collapsed.lines.len() < expanded.lines.len(),
+            "folding has to reclaim rows"
+        );
+        assert_eq!(
+            collapsed.sections.len(),
+            expanded.sections.len(),
+            "a folded section is still foldable, so it keeps its digit"
+        );
+    }
+
+    #[test]
+    fn every_section_header_index_points_at_its_own_rule() {
+        let layout = pr_layout_fixture(&ObjectViewState::default());
+        assert!(!layout.sections.is_empty());
+        for (header, _) in &layout.sections {
+            let text = layout.lines[*header]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(
+                text.starts_with('\u{2500}'),
+                "line {header} is not a section rule: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn ticket_section_digits_stay_contiguous_without_acceptance_criteria() {
+        let ticket = crate::work_index::WorkTicket {
+            identifier: "ENG-1".into(),
+            title: Some("a ticket".into()),
+            description: Some("a body".into()),
+            state: Some("In Progress".into()),
+            assignee: None,
+            creator: None,
+            priority: None,
+            cycle: None,
+            group: crate::work_index::TicketGroup::default(),
+            created_at: None,
+            updated_at: None,
+            branch: None,
+            labels: Vec::new(),
+            url: None,
+            parent: None,
+            relations: Vec::new(),
+        };
+        let app = AppState::test_new();
+        let view = ObjectViewState::default();
+        // A ticket's acceptance criteria are the checklist in its description,
+        // so a description without one drops the section entirely.
+        let sections = |description: &str| {
+            let ticket = crate::work_index::WorkTicket {
+                description: Some(description.into()),
+                ..ticket.clone()
+            };
+            let item = crate::ui::work_list_detail::TicketItem {
+                summary: &ticket,
+                cached_detail: None,
+                linked_prs: Vec::new(),
+                observed_at: SystemTime::UNIX_EPOCH,
+                has_context_pr: false,
+            };
+            ticket_detail_layout(
+                &app,
+                &item,
+                &view,
+                &TicketDetailControls::default(),
+                Rect::new(0, 0, 72, 24),
+            )
+            .sections
+            .iter()
+            .map(|(_, section)| *section)
+            .collect::<Vec<_>>()
+        };
+
+        use crate::app::state::DetailSection;
+        assert_eq!(
+            sections("a body\n- [x] ships\n- [ ] left"),
+            vec![
+                DetailSection::LinkedPrs,
+                DetailSection::Description,
+                DetailSection::AcceptanceCriteria,
+                DetailSection::Comments,
+            ]
+        );
+        // With no acceptance criteria the section is absent entirely, so alt+3
+        // names comments rather than leaving a hole in the numbering.
+        assert_eq!(
+            sections("a body with no checklist"),
+            vec![
+                DetailSection::LinkedPrs,
+                DetailSection::Description,
+                DetailSection::Comments,
+            ]
+        );
     }
 
     fn render_pr_detail_fixture(tab: PrDetailTab, width: u16) -> String {
