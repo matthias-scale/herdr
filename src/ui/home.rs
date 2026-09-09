@@ -413,6 +413,14 @@ fn chip_specs(
     if let Some(context) = &home.context_window {
         specs.push((HomeFocus::Context, format!("{context} ▾")));
     }
+    if home.project_visible() {
+        if let Some(project) = home.project() {
+            specs.push((HomeFocus::Project, format!("{} ▾", project.label)));
+        }
+    }
+    if home.repo_visible() {
+        specs.push((HomeFocus::Repo, format!("{} ▾", home.repo_label())));
+    }
     if target_in_chip_row(app, home, composer) {
         specs.push((HomeFocus::Target, target_chip_label(app, home)));
     }
@@ -869,6 +877,16 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|context| (*context).to_string())
             .collect(),
+        HomePicker::Project => home
+            .projects()
+            .iter()
+            .map(|project| project.label.clone())
+            .collect(),
+        HomePicker::Repo => home
+            .repo_options()
+            .iter()
+            .map(|repo| repo.name.clone())
+            .collect(),
         HomePicker::Directory => match home.browse.as_ref() {
             // Browsing replaces the options with what is under the typed path.
             Some(browse) => browse.children.clone(),
@@ -1292,6 +1310,8 @@ pub(super) fn home_hit_areas(
                     HomeFocus::Effort => HomeHitTarget::Effort,
                     HomeFocus::Access => HomeHitTarget::Access,
                     HomeFocus::Context => HomeHitTarget::Context,
+                    HomeFocus::Project => HomeHitTarget::Project,
+                    HomeFocus::Repo => HomeHitTarget::Repo,
                     HomeFocus::Directory => HomeHitTarget::Directory,
                     HomeFocus::Workspace => HomeHitTarget::Workspace,
                     HomeFocus::Ref => HomeHitTarget::Ref,
@@ -2079,6 +2099,8 @@ mod tests {
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Access => HomeHitTarget::Access,
                 HomeFocus::Context => HomeHitTarget::Context,
+                HomeFocus::Project => HomeHitTarget::Project,
+                HomeFocus::Repo => HomeHitTarget::Repo,
                 HomeFocus::Directory => HomeHitTarget::Directory,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
@@ -2301,6 +2323,8 @@ mod tests {
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Access => HomeHitTarget::Access,
                 HomeFocus::Context => HomeHitTarget::Context,
+                HomeFocus::Project => HomeHitTarget::Project,
+                HomeFocus::Repo => HomeHitTarget::Repo,
                 HomeFocus::Directory => HomeHitTarget::Directory,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
