@@ -381,27 +381,24 @@ mod tests {
             ]
             .join("\n")
         );
-        assert_eq!(body_text(&app, DockSurface::Shortcuts), {
-            let mut lines = vec![
-                " global                      \u{2590}",
-                " ctrl+b                      \u{2595}",
-                " prefix mode                 \u{2595}",
-                " prefix+?                    \u{2595}",
-                " keybinds                    \u{2595}",
-                " prefix+s                    \u{2595}",
-                " settings                    \u{2595}",
-                " ctrl+alt+p / super+p        \u{2595}",
-                " command palette             \u{2595}",
-                " prefix+q                    \u{2595}",
-                " detach                      \u{2595}",
-                " prefix+shift+r              \u{2595}",
+        assert_eq!(
+            body_text(&app, DockSurface::Shortcuts),
+            [
+                " global                      \u{2590}".to_string(),
+                " ctrl+b                      \u{2595}".to_string(),
+                " prefix mode                 \u{2595}".to_string(),
+                " prefix+?                    \u{2595}".to_string(),
+                " keybinds                    \u{2595}".to_string(),
+                " prefix+s                    \u{2595}".to_string(),
+                " settings                    \u{2595}".to_string(),
+                format!(" {palette_chord:<28}\u{2595}"),
+                " command palette             \u{2595}".to_string(),
+                " prefix+q                    \u{2595}".to_string(),
+                " detach                      \u{2595}".to_string(),
+                " prefix+shift+r              \u{2595}".to_string(),
             ]
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<String>>();
-            lines[7] = format!(" {palette_chord:<28}\u{2595}");
-            lines.join("\n")
-        },);
+            .join("\n")
+        );
         assert_eq!(
             body_text(&app, DockSurface::Context)
                 .lines()
