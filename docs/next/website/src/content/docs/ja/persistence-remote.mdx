@@ -91,6 +91,30 @@ HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
 herdr --remote workbox --session agents
 ```
 
+## ドックのフリートホスト
+
+`[[remote.fleet.hosts]]` のエントリーを追加すると、そのホストが Hosts ドック
+サーフェスに表示されます。herdr は到達性、バージョン、エージェントの一覧を
+バックグラウンドで更新します。到達可能なリモートホストを選択すると、新しい
+ローカルペインで `herdr --remote` が開きます。
+
+```toml
+[remote.fleet]
+refresh_interval_ms = 15000
+timeout_ms = 5000
+heartbeat_stale_ms = 1800000
+
+[[remote.fleet.hosts]]
+name = "workbox"
+target = "workbox"
+session = "agents"
+```
+
+省略可能な `session` の値は、ホストを開くときに `--session` を追加します。
+`local = true` を指定したホストは、一覧の取得にローカルの API ソケットを使い、
+SSH でのポーリングは行いません。Hosts サーフェスが空のときは
+`[[remote.fleet.hosts]]` を案内します。
+
 ## ダイレクトターミナルアタッチ
 
 完全な Herdr アタッチはワークスペース UI 全体を開きます。ダイレクトアタッチは、サーバーが所有するターミナルをひとつだけ、現在のターミナルに開きます。
