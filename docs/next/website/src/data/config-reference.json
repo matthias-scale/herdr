@@ -1934,6 +1934,12 @@
           "description": "Settle a pane when the work it is linked to finishes, such as its pull request merging or its ticket reaching Done."
         },
         {
+          "key": "session.settle_finished_after_minutes",
+          "type": "integer",
+          "default": "10",
+          "description": "Wait this many minutes after the linked work first reads as finished before settling the pane, and settle only if it still reads finished and the pane stayed quiet."
+        },
+        {
           "key": "session.auto_settle_inactive",
           "type": "boolean",
           "default": "true",

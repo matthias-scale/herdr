@@ -34,6 +34,7 @@ SKIPPED_SUBTREES = (
     "actions",
     "keys.command",
     "launch_profiles",
+    "projects",
     "remote.fleet.hosts",
 )
 
