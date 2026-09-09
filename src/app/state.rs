@@ -2858,6 +2858,19 @@ impl PaneMenuWorkLink {
         }
     }
 
+    /// Short human label for this link, as it appears in the link toast.
+    pub fn short_label(&self) -> String {
+        match self {
+            Self::PullRequest(url) => url
+                .rsplit('/')
+                .next()
+                .filter(|segment| !segment.is_empty())
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| url.clone()),
+            Self::Ticket(id) => id.clone(),
+        }
+    }
+
     /// Whether a work context already carries this exact binding.
     pub fn is_bound_in(&self, context: &crate::work_context::PaneWorkContext) -> bool {
         match self {
@@ -2942,6 +2955,7 @@ pub enum ToastKind {
     NeedsAttention,
     Finished,
     UpdateInstalled,
+    WorkLinked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

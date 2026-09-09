@@ -4861,6 +4861,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn linking_a_pull_request_shows_a_toast() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+
+        right_click_link(&mut app, &info, line, "github");
+        click_menu_item(&mut app, crate::app::state::LINK_PR_TO_WINDOW_ITEM);
+
+        let toast = app.state.toast.as_ref().expect("link toast");
+        assert_eq!(toast.kind, crate::app::state::ToastKind::WorkLinked);
+        assert_eq!(toast.title, "linked #398");
+        assert!(
+            toast.context.ends_with(&format!("· {} panes", panes.len())),
+            "unexpected toast context: {}",
+            toast.context
+        );
+        assert!(toast.target.is_none());
+    }
+
+    #[tokio::test]
+    async fn linking_a_ticket_shows_a_toast_naming_the_ticket() {
+        let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "linear");
+        click_menu_item(&mut app, crate::app::state::LINK_TICKET_TO_WINDOW_ITEM);
+
+        let toast = app.state.toast.as_ref().expect("link toast");
+        assert_eq!(toast.title, "linked SCA-412");
+        assert!(
+            toast.context.ends_with("· 1 pane"),
+            "unexpected toast context: {}",
+            toast.context
+        );
+    }
+
+    #[tokio::test]
     async fn clicking_link_ticket_binds_the_ticket_to_every_pane_of_the_window() {
         let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
         let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);

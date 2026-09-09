@@ -67,6 +67,7 @@ fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
         app::state::ToastKind::NeedsAttention => "needs attention",
         app::state::ToastKind::Finished => "finished",
         app::state::ToastKind::UpdateInstalled => "updated",
+        app::state::ToastKind::WorkLinked => "linked",
     }
 }
 
