@@ -15,11 +15,14 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "experimental",
     "files",
     "keys",
+    "launch_profiles",
+    "linear",
     "missive",
     "notepad",
     "onboarding",
     "panel",
     "pomodoro",
+    "projects",
     "remote",
     "server",
     "session",
@@ -1394,5 +1397,35 @@ mouse_capture = false
             1
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every field on `Config` is a top-level section a user can write, so one
+    /// missing from the allowlist makes `herdr config check` tell them their
+    /// valid config is being ignored. That has now happened twice, so this
+    /// reads the struct rather than trusting anyone to update two lists.
+    #[test]
+    fn every_config_field_is_a_known_top_level_section() {
+        let model = include_str!("model.rs");
+        let start = model
+            .find("pub struct Config {")
+            .expect("Config struct in model.rs");
+        let body = &model[start..];
+        let end = body.find("\n}").expect("end of the Config struct");
+        let fields: Vec<&str> = body[..end]
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|line| line.split(':').next())
+            .collect();
+        assert!(fields.len() > 20, "parsed too few fields: {fields:?}");
+
+        let missing: Vec<&&str> = fields
+            .iter()
+            .filter(|field| !KNOWN_TOP_LEVEL_CONFIG_KEYS.contains(field))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config sections missing from KNOWN_TOP_LEVEL_CONFIG_KEYS: {missing:?}"
+        );
     }
 }
