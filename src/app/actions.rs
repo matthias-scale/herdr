@@ -4463,7 +4463,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn a_path_token_keeps_its_colons_unless_they_are_a_line_number() {
         assert_eq!(split_path_line_suffix("src/ui.rs"), ("src/ui.rs", None));
         assert_eq!(
