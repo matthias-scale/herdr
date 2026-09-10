@@ -895,21 +895,84 @@ mod tests {
         assert_eq!(drain(&mut rx), "\r");
     }
 
+    /// Pins a real runtime status report to reset a stalled nudge episode budget.
     #[tokio::test]
     async fn fresh_status_report_resets_the_runtime_stall_episode() {
         let now = Instant::now();
-        let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx).contains("/status"));
         assert!(app.stall_nudge_episodes.contains_key(&terminal_id));
 
+        app.handle_internal_event_with_prefix_sync(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+        });
+        let report_at = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("root terminal")
+            .status_reported_at()
+            .expect("runtime status report timestamp");
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        assert!(!app.tick_auto_nudges(now + Duration::from_secs(1)));
+        assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
+
+        let stale_at = report_at
+            .checked_add(crate::terminal::state::AGENT_STALE_SILENCE)
+            .expect("watchdog deadline");
+        app.handle_scheduled_tasks(stale_at, false);
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
+        assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 1);
+        assert!(drain(&mut rx).contains("/status"));
+    }
+
+    /// Pins stale detection while the opt-in nudge action remains disabled.
+    #[tokio::test]
+    async fn disabled_auto_nudge_keeps_stall_detection_active() {
+        let now = Instant::now();
+        let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.state.auto_nudge_stalled_agents = false;
         app.state
             .terminals
             .get_mut(&terminal_id)
             .expect("root terminal")
-            .supervisor_stale = false;
-        assert!(!app.tick_auto_nudges(now + Duration::from_secs(1)));
-        assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
+            .set_hook_authority_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Idle,
+                None,
+                None,
+                Some(1),
+                now,
+            );
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_active_subagents(Some(1));
+
+        assert_eq!(
+            app.state.next_agent_watchdog_deadline(),
+            now.checked_add(crate::terminal::state::AGENT_STALE_SILENCE)
+        );
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        app.handle_scheduled_tasks(now + crate::terminal::state::AGENT_STALE_SILENCE, false);
+
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(app.stall_nudge_episodes.is_empty());
+        assert_eq!(drain(&mut rx), "");
     }
 
     #[tokio::test]

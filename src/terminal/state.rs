@@ -5466,6 +5466,58 @@ mod tests {
         terminal
     }
 
+    /// Pins the live active-subagent count as a watchdog claim, while zero stays unarmed.
+    #[test]
+    fn live_active_subagent_count_arms_watchdog_only_when_positive() {
+        let now = Instant::now();
+        let mut active = test_terminal();
+        active.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        active.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        active.set_active_subagents(Some(1));
+
+        assert!(active.metadata_tokens.get("closing_agents").is_none());
+        assert!(active.declares_running_subagents());
+        assert_eq!(
+            active.agent_status_watchdog_deadline(),
+            now.checked_add(AGENT_STALE_SILENCE)
+        );
+        assert!(active
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .is_none());
+        assert!(active
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_some());
+        assert!(active.supervisor_stale);
+
+        let mut zero = test_terminal();
+        zero.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        zero.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        zero.set_active_subagents(Some(0));
+
+        assert!(!zero.declares_running_subagents());
+        assert!(zero.agent_status_watchdog_deadline().is_none());
+        assert!(zero
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_none());
+        assert!(!zero.supervisor_stale);
+    }
+
     #[test]
     fn a_subagent_claim_goes_stale_when_the_silence_runs_out() {
         let now = Instant::now();
