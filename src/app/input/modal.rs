@@ -1466,6 +1466,40 @@ impl App {
             }
             (
                 ContextMenuKind::Pane {
+                    link: Some(link), ..
+                },
+                Some(crate::app::state::OPEN_LINK_ITEM),
+            ) => {
+                self.open_pane_link(link);
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    path: Some(path),
+                    open_with,
+                    ..
+                },
+                Some(item),
+            ) if open_with
+                .iter()
+                .any(|target| item == target.file_item() || item == target.directory_item()) =>
+            {
+                let Some((target, directory)) = open_with.iter().find_map(|target| {
+                    if item == target.file_item() {
+                        Some((*target, false))
+                    } else if item == target.directory_item() {
+                        Some((*target, true))
+                    } else {
+                        None
+                    }
+                }) else {
+                    return;
+                };
+                self.open_pane_path_with(target, &path, directory);
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
                     ws_idx, pane_id, ..
                 },
                 Some("Clear pane name"),
@@ -2557,6 +2591,8 @@ mod tests {
                 right_click_passthrough: false,
                 linkable_work_link: None,
                 link: None,
+                path: None,
+                open_with: Vec::new(),
             },
             x: 0,
             y: 0,
@@ -2607,6 +2643,8 @@ mod tests {
                 right_click_passthrough: false,
                 linkable_work_link: None,
                 link: None,
+                path: None,
+                open_with: Vec::new(),
             },
             x: 0,
             y: 0,
@@ -2720,6 +2758,8 @@ mod tests {
                 right_click_passthrough: false,
                 linkable_work_link: None,
                 link: None,
+                path: None,
+                open_with: Vec::new(),
             },
             x: 0,
             y: 0,

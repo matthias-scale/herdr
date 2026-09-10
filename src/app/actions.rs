@@ -2548,6 +2548,64 @@ impl AppState {
         url_at_column(line, logical_cell.logical_col).map(str::to_owned)
     }
 
+    /// The file or directory the clicked cell names, resolved against the
+    /// pane's own cwd and confirmed to exist.
+    ///
+    /// A token that names nothing is not a path: offering to open it would put
+    /// an empty buffer in front of the operator and blame the editor for it.
+    pub(crate) fn path_at_pane_cell(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        viewport_row: u16,
+        col: u16,
+    ) -> Option<crate::app::state::PaneMenuPath> {
+        let ws_idx = self
+            .active
+            .filter(|idx| self.workspaces.get(*idx).is_some())?;
+        let info = self.pane_info_by_id(pane_id)?;
+        if viewport_row >= info.inner_rect.height || col >= info.inner_rect.width {
+            return None;
+        }
+        let rt = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)?;
+        let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
+        let visible_selection = Selection::line_range(
+            pane_id,
+            Selection::absolute_row_for_viewport(0, metrics),
+            Selection::absolute_row_for_viewport(info.inner_rect.height.saturating_sub(1), metrics),
+            info.inner_rect.width.saturating_sub(1),
+        );
+        let visible_text = rt.extract_selection(&visible_selection)?;
+        let logical_cell =
+            logical_cell_for_visible_cell(&visible_text, info.inner_rect.width, viewport_row, col)?;
+        let line_start = visible_text[..logical_cell.byte_index]
+            .rfind('\n')
+            .map_or(0, |idx| idx + 1);
+        let line_end = visible_text[logical_cell.byte_index..]
+            .find('\n')
+            .map_or(visible_text.len(), |idx| logical_cell.byte_index + idx);
+        let row = visible_text.get(line_start..line_end)?;
+        let (token, line) = path_token_at_column(row, logical_cell.logical_col)?;
+        let cwd = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.pane_state(pane_id))
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| terminal.cwd.clone())?;
+        let expanded = expand_leading_tilde(token)?;
+        let candidate = if expanded.is_absolute() {
+            expanded
+        } else {
+            cwd.join(expanded)
+        };
+        let metadata = std::fs::metadata(&candidate).ok()?;
+        Some(crate::app::state::PaneMenuPath {
+            path: candidate,
+            line,
+            is_dir: metadata.is_dir(),
+        })
+    }
+
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
         let mut sel = match self.selection.take() {
             Some(sel) => sel,
@@ -2573,6 +2631,22 @@ impl AppState {
         }
 
         self.clear_selection();
+    }
+}
+
+/// `~` and `~/x` name the home directory; a bare `~user` does not, because
+/// resolving another account's home is guesswork.
+fn expand_leading_tilde(token: &str) -> Option<std::path::PathBuf> {
+    if token.is_empty() {
+        return None;
+    }
+    let Some(rest) = token.strip_prefix('~') else {
+        return Some(std::path::PathBuf::from(token));
+    };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    match rest {
+        "" => Some(home),
+        rest => Some(home.join(rest.strip_prefix('/')?)),
     }
 }
 
@@ -2632,6 +2706,45 @@ pub(crate) fn url_at_column(row: &str, col: u16) -> Option<&str> {
     let start_byte = byte_index_for_cell(row, span.start);
     let end_byte = byte_index_after_cell(row, span.end);
     safe_web_url(row.get(start_byte..end_byte)?)
+}
+
+/// The path-shaped token the clicked cell sits in, with the `:line` suffix a
+/// compiler, a linter or `rg` puts after it split off.
+///
+/// This resolves text, not the filesystem: the caller decides whether the token
+/// names anything that exists.
+pub(crate) fn path_token_at_column(row: &str, col: u16) -> Option<(&str, Option<u32>)> {
+    let cells = text_cells(row);
+    let clicked_idx = cell_index_at_column(&cells, col)?;
+    let span = quoted_path_span_at_column(&cells, clicked_idx)
+        .or_else(|| token_span_at_column(&cells, clicked_idx))?;
+    let start_byte = byte_index_for_cell(row, span.start);
+    let end_byte = byte_index_after_cell(row, span.end);
+    let token = row.get(start_byte..end_byte)?;
+    Some(split_path_line_suffix(token))
+}
+
+/// `src/ui.rs:120:4` is a path and a line; `C:\\src\\ui.rs` is only a path. A
+/// suffix counts only when every character after the colon is a digit, so a
+/// drive letter or a URL-looking token keeps its colon.
+fn split_path_line_suffix(token: &str) -> (&str, Option<u32>) {
+    let mut rest = token;
+    let mut line = None;
+    // `path:line:col` ends with the column; the line is the one worth keeping.
+    for _ in 0..2 {
+        let Some((head, tail)) = rest.rsplit_once(':') else {
+            break;
+        };
+        if head.is_empty() || tail.is_empty() || !tail.chars().all(|ch| ch.is_ascii_digit()) {
+            break;
+        }
+        let Ok(number) = tail.parse::<u32>() else {
+            break;
+        };
+        line = Some(number);
+        rest = head;
+    }
+    (rest, line)
 }
 
 fn url_spans(cells: &[TextCell]) -> Vec<CellSpan> {
@@ -4347,6 +4460,41 @@ mod tests {
         ] {
             assert_selects_nothing(row, click);
         }
+    }
+
+    #[test]
+    fn a_path_token_keeps_its_colons_unless_they_are_a_line_number() {
+        assert_eq!(split_path_line_suffix("src/ui.rs"), ("src/ui.rs", None));
+        assert_eq!(
+            split_path_line_suffix("src/ui.rs:120"),
+            ("src/ui.rs", Some(120))
+        );
+        // `path:line:col` reports the line; the column is not a place to jump.
+        assert_eq!(
+            split_path_line_suffix("src/ui.rs:120:4"),
+            ("src/ui.rs", Some(120))
+        );
+        // A Windows drive letter and a trailing colon are not line numbers.
+        assert_eq!(
+            split_path_line_suffix("C:\\src\\ui.rs"),
+            ("C:\\src\\ui.rs", None)
+        );
+        assert_eq!(split_path_line_suffix("src/ui.rs:"), ("src/ui.rs:", None));
+    }
+
+    #[test]
+    fn the_path_token_under_a_column_is_the_whole_path() {
+        assert_eq!(
+            path_token_at_column("  --> src/app/state.rs:3041:9", 12),
+            Some(("src/app/state.rs", Some(3041)))
+        );
+        assert_eq!(
+            path_token_at_column("open \"my notes/todo.md\" now", 10),
+            Some(("my notes/todo.md", None))
+        );
+        assert_eq!(path_token_at_column("all clear", 1), Some(("all", None)));
+        // A separator is not in any token.
+        assert_eq!(path_token_at_column("all clear", 3), None);
     }
 
     #[test]

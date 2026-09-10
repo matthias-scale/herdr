@@ -2113,6 +2113,30 @@ impl AppState {
                         mouse.row.saturating_sub(info.inner_rect.y),
                         mouse.column.saturating_sub(info.inner_rect.x),
                     );
+                    // A link wins the cell: `https://…/src/ui.rs` is not a file
+                    // on this host, and offering to open it as one would lie.
+                    let path = link
+                        .is_none()
+                        .then(|| {
+                            self.path_at_pane_cell(
+                                terminal_runtimes,
+                                info.id,
+                                mouse.row.saturating_sub(info.inner_rect.y),
+                                mouse.column.saturating_sub(info.inner_rect.x),
+                            )
+                        })
+                        .flatten();
+                    let open_with = path
+                        .as_ref()
+                        .map(|_| {
+                            crate::app::state::PaneOpenWith::ALL
+                                .into_iter()
+                                .filter(|target| {
+                                    crate::integration::command_available(target.command())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
                             ws_idx,
@@ -2123,6 +2147,8 @@ impl AppState {
                             right_click_passthrough,
                             linkable_work_link,
                             link,
+                            path,
+                            open_with,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -5582,6 +5608,52 @@ mod tests {
         assert!(!menu.items().contains(&crate::app::state::COPY_LINK_ITEM));
     }
 
+    /// A path only earns editor entries once it resolves to something on disk,
+    /// against the cwd of the pane that printed it.
+    #[tokio::test]
+    async fn right_click_on_a_printed_path_resolves_it_against_the_pane_cwd() {
+        let dir = std::env::temp_dir().join(format!("herdr-open-with-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("notes.md");
+        std::fs::write(&file, b"x").expect("temp file");
+
+        let line = format!("  --> {}:12:3 needs a look", file.display());
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+        for terminal in app.state.terminals.values_mut() {
+            terminal.cwd = dir.clone();
+        }
+
+        right_click_link(&mut app, &info, &line, "notes.md");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        let ContextMenuKind::Pane {
+            path: Some(path), ..
+        } = &menu.kind
+        else {
+            panic!("no path on the menu: {:?}", menu.kind);
+        };
+        assert_eq!(path.path, file);
+        assert_eq!(path.line, Some(12));
+        assert!(!path.is_dir);
+        assert_eq!(path.directory(), Some(dir.as_path()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_token_that_names_nothing_on_disk_is_not_a_path() {
+        let line = "thread 'main' panicked at nowhere/at/all.rs:3";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "nowhere");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane { path: None, .. }
+        ));
+    }
+
     #[tokio::test]
     async fn right_click_on_a_pr_the_window_already_carries_offers_no_link_item() {
         let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
@@ -6833,6 +6905,8 @@ mod tests {
                 right_click_passthrough: false,
                 linkable_work_link: None,
                 link: None,
+                path: None,
+                open_with: Vec::new(),
             },
             x: 2,
             y: 2,

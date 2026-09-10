@@ -2910,11 +2910,86 @@ pub enum ContextMenuKind {
         /// Whatever link the clicked cell carries, matched to no pattern. A
         /// pull request and a paste-bin URL are equally copyable.
         link: Option<String>,
+        /// The path the clicked cell names, when it names one that exists.
+        path: Option<PaneMenuPath>,
+        /// Editors on this host, in menu order. Resolved when the menu opens so
+        /// the entries never promise a command that is not installed.
+        open_with: Vec<PaneOpenWith>,
     },
 }
 
+/// Label of the pane menu entry that opens the clicked link in a browser.
+pub const OPEN_LINK_ITEM: &str = "Open link";
 /// Label of the pane menu entry that copies the clicked link.
 pub const COPY_LINK_ITEM: &str = "Copy link";
+
+/// A path a pane printed, resolved against that pane's cwd and known to exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneMenuPath {
+    pub path: std::path::PathBuf,
+    /// The `:line` a compiler or `rg` put after the path, when there was one.
+    pub line: Option<u32>,
+    pub is_dir: bool,
+}
+
+impl PaneMenuPath {
+    /// The folder this path belongs to: itself when it is one, its parent
+    /// otherwise. A path with no parent has no folder worth opening.
+    pub fn directory(&self) -> Option<&std::path::Path> {
+        if self.is_dir {
+            Some(self.path.as_path())
+        } else {
+            // A bare filename's parent is the empty path, which is not a
+            // folder anything can be opened in.
+            self.path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+        }
+    }
+}
+
+/// An editor the pane menu can hand a path to.
+///
+/// Each one gets two entries, because opening the file and opening the folder
+/// around it are different jobs: one is "read this line", the other is "work
+/// here".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneOpenWith {
+    Nvim,
+    Vellum,
+    Zed,
+}
+
+impl PaneOpenWith {
+    pub const ALL: [Self; 3] = [Self::Nvim, Self::Vellum, Self::Zed];
+
+    pub fn file_item(self) -> &'static str {
+        match self {
+            Self::Nvim => "Open file in nvim",
+            Self::Vellum => "Open file in Vellum",
+            Self::Zed => "Open file in Zed",
+        }
+    }
+
+    pub fn directory_item(self) -> &'static str {
+        match self {
+            Self::Nvim => "Open folder in nvim",
+            Self::Vellum => "Open folder in Vellum",
+            Self::Zed => "Open folder in Zed",
+        }
+    }
+
+    /// The command that has to exist before the entry is worth offering. Zed
+    /// runs on the Mac, so what this host needs is the wrapper that sends it
+    /// there, not Zed itself.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Nvim => "nvim",
+            Self::Vellum => "vellum",
+            Self::Zed => "zedr",
+        }
+    }
+}
 /// Labels of the session-star entries in the tab context menu.
 pub const STAR_ITEM: &str = "Star";
 pub const UNSTAR_ITEM: &str = "Unstar";
@@ -3085,14 +3160,29 @@ impl ContextMenuState {
                 right_click_passthrough,
                 linkable_work_link,
                 link,
+                path,
+                open_with,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
                 if let Some(action) = linkable_work_link {
                     items.push(action.menu_item());
                 }
-                if link.is_some() {
+                if let Some(link) = link {
+                    if crate::app::actions::safe_web_url(link).is_some() {
+                        items.push(OPEN_LINK_ITEM);
+                    }
                     items.push(COPY_LINK_ITEM);
+                }
+                if let Some(path) = path {
+                    for target in open_with {
+                        if !path.is_dir {
+                            items.push(target.file_item());
+                        }
+                        if path.directory().is_some() {
+                            items.push(target.directory_item());
+                        }
+                    }
                 }
                 if *has_manual_label {
                     items.push("Clear pane name");
@@ -6893,6 +6983,109 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::SHIFT,
         ));
+    }
+
+    fn pane_menu(link: Option<&str>, path: Option<PaneMenuPath>) -> ContextMenuState {
+        let open_with = path
+            .as_ref()
+            .map(|_| PaneOpenWith::ALL.to_vec())
+            .unwrap_or_default();
+        ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::alloc(),
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+                linkable_work_link: None,
+                link: link.map(str::to_string),
+                path,
+                open_with,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+    }
+
+    #[test]
+    fn a_clicked_file_offers_both_the_file_and_its_folder_to_every_editor() {
+        let menu = pane_menu(
+            None,
+            Some(PaneMenuPath {
+                path: std::path::PathBuf::from("/repo/src/ui.rs"),
+                line: Some(12),
+                is_dir: false,
+            }),
+        );
+
+        let items = menu.items();
+        for target in PaneOpenWith::ALL {
+            assert!(items.contains(&target.file_item()), "{items:?}");
+            assert!(items.contains(&target.directory_item()), "{items:?}");
+        }
+        assert!(!items.contains(&COPY_LINK_ITEM), "{items:?}");
+    }
+
+    #[test]
+    fn a_clicked_folder_offers_no_file_entry() {
+        let menu = pane_menu(
+            None,
+            Some(PaneMenuPath {
+                path: std::path::PathBuf::from("/repo/src"),
+                line: None,
+                is_dir: true,
+            }),
+        );
+
+        let items = menu.items();
+        for target in PaneOpenWith::ALL {
+            assert!(!items.contains(&target.file_item()), "{items:?}");
+            assert!(items.contains(&target.directory_item()), "{items:?}");
+        }
+    }
+
+    /// A folder is what you open, not what you jump into: the file entry only
+    /// exists when there is a file, and the folder entry only when the path has
+    /// one to name.
+    #[test]
+    fn a_root_directory_offers_nothing_to_open() {
+        let menu = pane_menu(
+            None,
+            Some(PaneMenuPath {
+                path: std::path::PathBuf::from("/repo/src/ui.rs"),
+                line: None,
+                is_dir: false,
+            }),
+        );
+        assert!(menu.items().contains(&PaneOpenWith::Nvim.directory_item()));
+
+        let orphan = pane_menu(
+            None,
+            Some(PaneMenuPath {
+                path: std::path::PathBuf::from("ui.rs"),
+                line: None,
+                is_dir: false,
+            }),
+        );
+        let items = orphan.items();
+        assert!(items.contains(&PaneOpenWith::Nvim.file_item()), "{items:?}");
+        assert!(
+            !items.contains(&PaneOpenWith::Nvim.directory_item()),
+            "{items:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_web_link_is_worth_opening_but_any_link_is_worth_copying() {
+        let web = pane_menu(Some("https://example.com/a"), None);
+        assert!(web.items().contains(&OPEN_LINK_ITEM));
+        assert!(web.items().contains(&COPY_LINK_ITEM));
+
+        let other = pane_menu(Some("ftp://example.com/a"), None);
+        assert!(!other.items().contains(&OPEN_LINK_ITEM));
+        assert!(other.items().contains(&COPY_LINK_ITEM));
     }
 
     #[test]
