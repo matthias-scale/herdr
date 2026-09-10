@@ -139,6 +139,10 @@ impl AppState {
         !self.dock_collapsed && rect_contains(self.view.dock_maximize_rect, col, row)
     }
 
+    pub(crate) fn on_dock_auto_open(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_auto_open_rect, col, row)
+    }
+
     /// Card of the empty-dock grid under the cursor, available or not. The
     /// caller decides what an unavailable card does, so the geometry stays a
     /// pure function of the rect.

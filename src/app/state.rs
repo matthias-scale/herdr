@@ -2246,6 +2246,7 @@ pub struct ViewState {
     pub dock_plus_rect: Rect,
     /// The `⤢` that maximises the dock.
     pub dock_maximize_rect: Rect,
+    pub dock_auto_open_rect: Rect,
     /// One rect per `DockSurface::CARDS` entry of the empty-dock grid.
     pub dock_surface_card_hit_areas: Vec<Rect>,
     /// Geometry of the open `+` menu.
@@ -4022,6 +4023,7 @@ pub(crate) enum ControlId {
     DockTab(usize),
     DockClose,
     DockAdd,
+    DockAutoOpen,
     TopBarScrollLeft,
     TopBarScrollRight,
     TopBarNewTab,
@@ -5146,6 +5148,9 @@ impl AppState {
                 })
                 .flatten()
         }) {
+            // The context tab is always adopted; only revealing the dock is
+            // opt-in. Without this gate every focus change on a pane that knows
+            // its PR would take width from the panes being read.
             if self.open_dock_on_work_link {
                 self.dock_collapsed = false;
             }
@@ -5856,6 +5861,7 @@ impl AppState {
                 dock_tab_close_rect: Rect::default(),
                 dock_plus_rect: Rect::default(),
                 dock_maximize_rect: Rect::default(),
+                dock_auto_open_rect: Rect::default(),
                 dock_surface_card_hit_areas: Vec::new(),
                 dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
@@ -7122,6 +7128,9 @@ mod tests {
     #[test]
     fn f20_context_tabs_follow_objects_and_bare_panes_stay_empty() {
         let (mut state, object_pane, bare_pane) = app_with_object_and_bare_panes();
+        // Adopting the context tabs is unconditional; revealing the dock is the
+        // opt-in half, so this case turns it on and the next one leaves it off.
+        state.open_dock_on_work_link = true;
         state.reconcile_dock_context_tabs();
         assert_eq!(
             (0..state.dock_open_surfaces.len())

@@ -1012,6 +1012,7 @@ impl App {
                 dock_tab_close_rect: Rect::default(),
                 dock_plus_rect: Rect::default(),
                 dock_maximize_rect: Rect::default(),
+                dock_auto_open_rect: Rect::default(),
                 dock_surface_card_hit_areas: Vec::new(),
                 dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),

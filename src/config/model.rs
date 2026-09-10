@@ -1717,8 +1717,8 @@ pub struct UiConfig {
     pub show_pull_button: bool,
     /// Open the dock automatically when the focused pane carries a pull
     /// request, ticket, or conversation. Off by default: the status row names
-    /// the link beside the title instead, and clicking that name opens it.
-    /// Default: false.
+    /// the link beside the title instead, and clicking that name opens it. The
+    /// dock tab strip's `◧` toggle writes this setting too. Default: false.
     pub open_dock_on_work_link: bool,
     /// Show the split-below and split-right buttons in the top-right action
     /// row. Default: false.

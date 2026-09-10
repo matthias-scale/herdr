@@ -1108,6 +1108,18 @@ impl AppState {
                         return None;
                     }
                 }
+                if self.on_dock_auto_open(mouse.column, mouse.row) {
+                    // The strip toggle writes the same `ui.open_dock_on_work_link`
+                    // setting the settings screen edits, so the two surfaces
+                    // cannot disagree and the choice survives a config reload.
+                    return Some(MouseAction::Settings(SettingsAction::SaveConfigEdit(
+                        crate::app::settings_general::ConfigEdit::Bool {
+                            section: "ui",
+                            key: "open_dock_on_work_link",
+                            value: !self.open_dock_on_work_link,
+                        },
+                    )));
+                }
                 if self.on_dock_maximize(mouse.column, mouse.row) {
                     self.toggle_dock_maximized();
                     self.mark_session_dirty();
@@ -5008,6 +5020,57 @@ mod tests {
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.dock_home_selection, Some(second_key));
         assert!(app.state.dock_home_focused);
+    }
+
+    /// Clicking the strip's auto-open glyph writes the `ui.open_dock_on_work_link`
+    /// setting and takes effect immediately, and does not open, close, or
+    /// maximise the dock.
+    #[test]
+    fn clicking_the_auto_open_toggle_writes_the_config_setting() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-dock-auto-open-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "[ui]\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let toggle = app.state.view.dock_auto_open_rect;
+        assert!(toggle.width > 0);
+        assert!(!app.state.open_dock_on_work_link);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(app.state.open_dock_on_work_link);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid saved config");
+        assert!(saved.ui.open_dock_on_work_link);
+        assert!(!app.state.dock_maximized);
+        assert!(!app.state.dock_collapsed);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(!app.state.open_dock_on_work_link);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(directory).expect("remove temp config");
     }
 
     #[test]

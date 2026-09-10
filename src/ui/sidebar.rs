@@ -493,10 +493,17 @@ pub(super) fn sidebar_workspace_labels(
     let mut labels = std::collections::HashMap::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         let members = sidebar_space_member_indices(app, ws_idx);
-        let manual = members
-            .iter()
-            .filter_map(|member| app.workspaces.get(*member))
-            .find_map(|member| member.custom_name.clone());
+        // Members of a worktree group share one checkout identity, so a name any
+        // of them carries names the group. Repository groups collect Spaces that
+        // only share a repo, and one member's rename must not retitle the row.
+        let manual = if ws.worktree_space().is_some() {
+            members
+                .iter()
+                .filter_map(|member| app.workspaces.get(*member))
+                .find_map(|member| member.custom_name.clone())
+        } else {
+            ws.custom_name.clone()
+        };
         let label = manual.map(|label| (label, false)).unwrap_or_else(|| {
             (
                 ws.display_name_from(&app.terminals, terminal_runtimes),
@@ -1220,24 +1227,114 @@ pub(crate) fn project_group_key(
         .unwrap_or_else(|| space.key.clone())
 }
 
+/// Repository a Space belongs to when it carries no worktree membership.
+///
+/// The declaration wins: a bound Space names its repository directly. Only an
+/// unbound Space falls back to what its panes resolved, and the scan stops at
+/// the first pane that knows a repository, so an unbound Space of shells costs
+/// one pass over panes that have nothing to say.
+/// Returns the repository and whether the Space declared it. Borrowed, because
+/// this runs per Space for every Space the Repo view lays out: building a key
+/// string here would allocate quadratically for a view that needs one key per
+/// group.
+fn workspace_declared_repo(app: &AppState, ws_idx: usize) -> Option<(&str, bool)> {
+    let workspace = app.workspaces.get(ws_idx)?;
+    if let Some(repo) = workspace.repo_binding.as_deref() {
+        return Some((repo, true));
+    }
+    // Every pane that resolved a repository must name the same one. A Space
+    // holding two checkouts stays ungrouped rather than nesting under whichever
+    // pane the map happened to yield first, which is the rule repo routing
+    // already applies when it places panes.
+    let mut resolved: Option<&str> = None;
+    for pane in workspace.tabs.iter().flat_map(|tab| tab.panes.values()) {
+        let Some(repo) = app
+            .terminals
+            .get(&pane.attached_terminal_id)
+            .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+        else {
+            continue;
+        };
+        match resolved {
+            Some(seen) if !seen.eq_ignore_ascii_case(repo) => return None,
+            Some(_) => {}
+            None => resolved = Some(repo),
+        }
+    }
+    resolved.map(|repo| (repo, false))
+}
+
+/// What a Space groups by in the Repo view.
+///
+/// Borrowed and compared rather than formatted: only the row that heads a group
+/// turns its identity into a key, and the Repo view compares every Space against
+/// every group on each render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupIdent<'a> {
+    /// Worktree membership, already keyed by `project_group_key`.
+    Worktree(String),
+    /// Repository slug, compared the way GitHub treats owner casing.
+    Repo(&'a str),
+}
+
+impl GroupIdent<'_> {
+    fn key(&self) -> String {
+        match self {
+            Self::Worktree(key) => key.clone(),
+            Self::Repo(repo) => format!("{REPO_GROUP_PREFIX}{}", repo.to_ascii_lowercase()),
+        }
+    }
+}
+
+/// Group key for a Space in the Repo view, and whether it can be the group's
+/// home row.
+///
+/// Worktree membership is the established key and keeps its exact meaning. A
+/// Space without one is not repo-less: a Space created for a checkout of a repo
+/// another Space is bound to, which is how agent tooling makes them, still
+/// belongs under that repo. Such a Space groups by repository, and only a bound
+/// Space can be the home row, so two loose checkouts never invent a header for
+/// a repository no Space claims.
+fn workspace_group_ident(app: &AppState, ws_idx: usize) -> Option<(GroupIdent<'_>, bool)> {
+    let workspace = app.workspaces.get(ws_idx)?;
+    if let Some(space) = workspace.worktree_space() {
+        return Some((
+            GroupIdent::Worktree(project_group_key(app, space)),
+            !space.is_linked_worktree,
+        ));
+    }
+    let (repo, declared) = workspace_declared_repo(app, ws_idx)?;
+    Some((GroupIdent::Repo(repo), declared))
+}
+
+/// Whether `ws_idx` belongs under `group`. A Space with worktree membership is
+/// only ever compared against worktree groups, so the established path stays
+/// exactly as cheap as it was: no pane is inspected for it.
+fn workspace_joins_group(app: &AppState, ws_idx: usize, group: &GroupIdent<'_>) -> bool {
+    let Some(workspace) = app.workspaces.get(ws_idx) else {
+        return false;
+    };
+    match (workspace.worktree_space(), group) {
+        (Some(space), GroupIdent::Worktree(key)) => project_group_key(app, space) == *key,
+        (Some(_), GroupIdent::Repo(_)) | (None, GroupIdent::Worktree(_)) => false,
+        (None, GroupIdent::Repo(repo)) => workspace_declared_repo(app, ws_idx)
+            .is_some_and(|(candidate, _)| candidate.eq_ignore_ascii_case(repo)),
+    }
+}
+
 pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
 ) -> Option<(String, bool)> {
-    let space = app.workspaces.get(ws_idx)?.worktree_space()?;
-    if space.is_linked_worktree {
+    let (ident, home) = workspace_group_ident(app, ws_idx)?;
+    if !home {
         return None;
     }
-    let key = project_group_key(app, space);
-    let member_count = app
-        .workspaces
-        .iter()
-        .filter(|ws| {
-            ws.worktree_space()
-                .is_some_and(|member| project_group_key(app, member) == key)
-        })
+    let member_count = (0..app.workspaces.len())
+        .filter(|idx| workspace_joins_group(app, *idx, &ident))
         .count();
     (member_count >= 2).then(|| {
+        let key = ident.key();
         let collapsed = app.collapsed_space_keys.contains(&key);
         (key, collapsed)
     })
@@ -1847,7 +1944,13 @@ fn append_object_group_rows(
             group.key.clone()
         };
         let collapsed = section_is_collapsed(app, &collapse_key);
-        let action_key = (!group.unlinked).then(|| group.key.clone());
+        // Only provider objects have object actions. A branch group names a
+        // branch, so the `…` affordance would open an empty menu.
+        let action_key = (!group.unlinked
+            && ["github:", "linear:", "missive:"]
+                .iter()
+                .any(|prefix| group.key.starts_with(prefix)))
+        .then(|| group.key.clone());
         mark_redundant_space_labels(&mut group.entries, &group.title);
         rows.push(SidebarRow::NestedHeader {
             key: collapse_key,
@@ -2052,7 +2155,19 @@ fn sidebar_tab_groups(
                 // pull request as well.
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
-                    push_unlinked_tab_group(app, &mut groups, entry);
+                    match context.and_then(|context| context.branch.as_deref()) {
+                        Some(branch) => push_sidebar_tab_group(
+                            &mut groups,
+                            branch_group_key(
+                                context.and_then(|context| context.repo.as_deref()),
+                                branch,
+                            ),
+                            branch_group_title(branch),
+                            entry,
+                            false,
+                        ),
+                        None => push_unlinked_tab_group(app, &mut groups, entry),
+                    }
                     continue;
                 }
                 for url in &urls {
@@ -2103,6 +2218,11 @@ fn sidebar_tab_groups(
         },
         |group| &mut group.title,
     );
+    disambiguate_branch_titles(
+        &mut groups,
+        |group| group.key.clone(),
+        |group| &mut group.title,
+    );
     groups.sort_by_key(|group| {
         (
             group.unlinked,
@@ -2147,6 +2267,12 @@ pub(crate) struct SidebarWorkGroupActivation {
 }
 
 const UNLINKED_GROUP_KEY: &str = "unlinked";
+/// Namespaces the repository-derived Repo view keys away from the worktree keys,
+/// which are checkout paths or directory names.
+const REPO_GROUP_PREFIX: &str = "repo:";
+/// Sessions with no work item but a branch of the repo group under the branch.
+/// Namespaced so a branch called `unlinked` cannot land in the unlinked bucket.
+const BRANCH_GROUP_PREFIX: &str = "branch:";
 /// Namespaced away from the raw branch keys the worktree view still uses.
 const UNLINKED_DIR_PREFIX: &str = "unlinked-dir:";
 
@@ -2591,6 +2717,93 @@ fn disambiguate_unlinked_titles<T>(
     }
 }
 
+/// Keyed by repository and branch: `main` is the most common branch name there
+/// is, so a bare branch key would fold a session on one repository's `main` into
+/// another repository's group.
+fn branch_group_key(repo: Option<&str>, branch: &str) -> String {
+    match repo {
+        Some(repo) => format!(
+            "{BRANCH_GROUP_PREFIX}{}\u{1f}{branch}",
+            repo.to_ascii_lowercase()
+        ),
+        None => format!("{BRANCH_GROUP_PREFIX}\u{1f}{branch}"),
+    }
+}
+
+fn branch_group_title(branch: &str) -> String {
+    format!("⎇ {branch}")
+}
+
+/// Repository a branch group key was built from, for titles that have to tell
+/// two same-named branches apart.
+fn branch_group_repo(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix(BRANCH_GROUP_PREFIX)?;
+    let repo = rest.split('\u{1f}').next()?;
+    (!repo.is_empty()).then_some(repo)
+}
+
+/// `⎇ main` twice tells the operator nothing, so branch groups that share a
+/// title name their repository. Groups are few and this runs once per
+/// projection, after every group exists.
+fn disambiguate_branch_titles<T>(
+    groups: &mut [T],
+    key: impl Fn(&T) -> String,
+    title: impl Fn(&mut T) -> &mut String,
+) {
+    let branch_keys = groups
+        .iter()
+        .map(|group| {
+            let key = key(group);
+            key.starts_with(BRANCH_GROUP_PREFIX).then_some(key)
+        })
+        .collect::<Vec<_>>();
+    let titles = (0..groups.len())
+        .map(|index| title(&mut groups[index]).clone())
+        .collect::<Vec<_>>();
+    let mut shared = std::collections::HashMap::<&str, usize>::new();
+    for (index, group_title) in titles.iter().enumerate() {
+        if branch_keys[index].is_some() {
+            *shared.entry(group_title.as_str()).or_default() += 1;
+        }
+    }
+    for index in 0..groups.len() {
+        let Some(key) = branch_keys[index].as_deref() else {
+            continue;
+        };
+        if shared.get(titles[index].as_str()).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        if let Some(repo) = branch_group_repo(key) {
+            *title(&mut groups[index]) = format!("{} · {repo}", titles[index]);
+        }
+    }
+}
+
+/// A session on a branch of this repo with no pull request yet. It is repo work
+/// like any other, so it groups under its branch beside the PR groups instead
+/// of sinking into the directory-named unlinked bucket, where a worktree that
+/// has not opened a PR reads as work on nothing.
+fn push_branch_entry(
+    groups: &mut Vec<SidebarWorkGroup>,
+    repo: Option<&str>,
+    branch: &str,
+    entry: AgentPanelEntry,
+) {
+    let key = branch_group_key(repo, branch);
+    match work_group_index(groups, &key) {
+        Some(index) => groups[index].entries.push(entry),
+        None => groups.push(SidebarWorkGroup {
+            key,
+            title: branch_group_title(branch),
+            entries: vec![entry],
+            unlinked: false,
+            status: None,
+            created_at: None,
+            activation: None,
+        }),
+    }
+}
+
 fn push_unlinked_entry(app: &AppState, groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
     let (key, title) = unlinked_group_key_and_title(app, &entry);
     match work_group_index(groups, &key) {
@@ -2752,7 +2965,15 @@ pub(crate) fn sidebar_work_groups(
             SidebarGroupMode::RepoPr => {
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
-                    push_unlinked_entry(app, &mut groups, entry);
+                    match context.and_then(|context| context.branch.as_deref()) {
+                        Some(branch) => push_branch_entry(
+                            &mut groups,
+                            context.and_then(|context| context.repo.as_deref()),
+                            branch,
+                            entry,
+                        ),
+                        None => push_unlinked_entry(app, &mut groups, entry),
+                    }
                     continue;
                 }
                 for url in urls {
@@ -2910,6 +3131,11 @@ pub(crate) fn sidebar_work_groups(
                 .flatten()
                 .and_then(|entry| unlinked_group_directory(app, entry))
         },
+        |group| &mut group.title,
+    );
+    disambiguate_branch_titles(
+        &mut groups,
+        |group| group.key.clone(),
         |group| &mut group.title,
     );
     groups.sort_by_key(unlinked_sort_key);
@@ -3569,18 +3795,17 @@ fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) ->
 }
 
 pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
-    let Some((key, _)) = workspace_parent_group_state(app, root_idx) else {
+    if workspace_parent_group_state(app, root_idx).is_none() {
+        return vec![root_idx];
+    }
+    // Resolve the group once and compare against it. This runs per Space inside
+    // render-path loops, so a per-member group lookup would make the sidebar's
+    // label pass cubic in the number of Spaces.
+    let Some((ident, _)) = workspace_group_ident(app, root_idx) else {
         return vec![root_idx];
     };
-    app.workspaces
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, workspace)| {
-            workspace
-                .worktree_space()
-                .is_some_and(|space| project_group_key(app, space) == key)
-                .then_some(idx)
-        })
+    (0..app.workspaces.len())
+        .filter(|idx| workspace_joins_group(app, *idx, &ident))
         .collect()
 }
 
@@ -3679,13 +3904,13 @@ fn workspace_list_entries_inner(
 }
 
 fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
+    let keys = (0..app.workspaces.len())
+        .map(|ws_idx| workspace_group_ident(app, ws_idx).map(|(ident, home)| (ident.key(), home)))
+        .collect::<Vec<_>>();
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        if let Some(space) = ws.worktree_space() {
-            members_by_key
-                .entry(project_group_key(app, space))
-                .or_default()
-                .push(ws_idx);
+    for (ws_idx, key) in keys.iter().enumerate() {
+        if let Some((key, _)) = key {
+            members_by_key.entry(key.clone()).or_default().push(ws_idx);
         }
     }
     let grouped_keys = members_by_key
@@ -3693,10 +3918,9 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
         .filter(|(_, members)| {
             members.len() >= 2
                 && members.iter().any(|idx| {
-                    app.workspaces
-                        .get(*idx)
-                        .and_then(|ws| ws.worktree_space())
-                        .is_some_and(|space| !space.is_linked_worktree)
+                    keys.get(*idx)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|(_, home)| *home)
                 })
         })
         .map(|(key, _)| key.clone())
@@ -3707,19 +3931,17 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
     } else {
         app.active
     };
-    let active_group = visible_group_idx.and_then(|idx| {
-        app.workspaces
-            .get(idx)
-            .and_then(|ws| ws.worktree_space())
-            .map(|space| project_group_key(app, space))
-    });
+    let active_group = visible_group_idx
+        .and_then(|idx| keys.get(idx).cloned().flatten())
+        .map(|(key, _)| key);
 
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        let Some(group_key) = ws
-            .worktree_space()
-            .map(|space| project_group_key(app, space))
+    for ws_idx in 0..app.workspaces.len() {
+        let Some(group_key) = keys
+            .get(ws_idx)
+            .and_then(Option::as_ref)
+            .map(|(key, _)| key.clone())
             .filter(|key| grouped_keys.contains(key))
         else {
             entries.push(WorkspaceListEntry::Workspace {
@@ -3737,10 +3959,9 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
             continue;
         };
         let Some(parent_idx) = members.iter().copied().find(|idx| {
-            app.workspaces
-                .get(*idx)
-                .and_then(|member| member.worktree_space())
-                .is_some_and(|member_space| !member_space.is_linked_worktree)
+            keys.get(*idx)
+                .and_then(Option::as_ref)
+                .is_some_and(|(_, home)| *home)
         }) else {
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
@@ -7159,6 +7380,215 @@ pub(crate) mod tests {
             groups.iter().map(|group| &group.key).collect::<Vec<_>>()
         );
         assert!(groups.iter().all(|group| group.unlinked));
+    }
+
+    /// `main` is the most common branch name there is, so two repositories on it
+    /// must stay two groups, and the titles have to say which is which.
+    #[test]
+    fn same_branch_in_two_repos_stays_two_named_groups() {
+        let mut app = app_with_agents(&["herdr", "scalablev2"]);
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        for (ws_idx, repo) in [(0usize, "herdrdev/herdr"), (1, "scalable-so/scalablev2")] {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    branch: Some("main".into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.title.as_str(), group.entries.len()))
+                .collect::<Vec<_>>(),
+            [
+                ("⎇ main · herdrdev/herdr", 1),
+                ("⎇ main · scalable-so/scalablev2", 1),
+            ],
+            "{:?}",
+            groups.iter().map(|group| &group.key).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+                .iter()
+                .map(|group| group.title.clone())
+                .collect::<Vec<_>>(),
+            [
+                "⎇ main · herdrdev/herdr".to_string(),
+                "⎇ main · scalable-so/scalablev2".to_string(),
+            ]
+        );
+    }
+
+    /// A Space holding panes on two repositories names neither: guessing one
+    /// would file the Space under a repository half its work is not in, and the
+    /// choice would flip as panes open and close.
+    #[test]
+    fn a_space_with_two_repos_joins_no_repo_group() {
+        let mut app = app_with_agents(&["bound", "mixed"]);
+        app.workspaces[0].repo_binding = Some("scalable-so/scalablev2".into());
+        app.workspaces[1].test_add_tab(Some("second"));
+        app.ensure_test_terminals();
+        for (tab_idx, repo) in [(0usize, "scalable-so/scalablev2"), (1, "scalable-so/other")] {
+            replace_tab_context(
+                &mut app,
+                1,
+                tab_idx,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+
+        assert_eq!(workspace_parent_group_state(&app, 0), None);
+        assert_eq!(sidebar_space_member_indices(&app, 0), [0]);
+        assert!(workspace_list_entries(&app).iter().all(|entry| matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                indented: false,
+                ..
+            }
+        )));
+    }
+
+    /// Agent tooling creates a Space per checkout without worktree membership,
+    /// so the Repo view used to list them flat, away from the Space bound to the
+    /// repository they are checkouts of. A Space that resolves the bound repo now
+    /// nests under it, and the bound Space is the home row.
+    #[test]
+    fn unbound_checkout_spaces_nest_under_the_space_bound_to_their_repo() {
+        let mut app = app_with_agents(&["scalablev2", "ccm-scalablev2-worktree", "elsewhere"]);
+        app.workspaces[0].repo_binding = Some("scalable-so/scalablev2".into());
+        for (ws_idx, repo) in [(1usize, "scalable-so/scalablev2"), (2, "scalable-so/other")] {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            [
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: true,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: false,
+                },
+            ]
+        );
+        assert_eq!(sidebar_space_member_indices(&app, 0), [0, 1]);
+        let (key, collapsed) =
+            workspace_parent_group_state(&app, 0).expect("the bound Space heads the group");
+        assert_eq!(key, "repo:scalable-so/scalablev2");
+        assert!(!collapsed);
+        // A checkout Space is never the home row, even alone with its repo.
+        assert_eq!(workspace_parent_group_state(&app, 1), None);
+
+        // Two loose checkouts of a repo no Space is bound to stay flat: the view
+        // does not invent a header for a repository nobody claims.
+        app.workspaces[0].repo_binding = None;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("scalable-so/scalablev2".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        assert!(workspace_list_entries(&app).iter().all(|entry| matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                indented: false,
+                ..
+            }
+        )));
+    }
+
+    /// A worktree session that has not opened a pull request is still work on
+    /// the repo. In the GitHub view it groups under its branch, beside the PR
+    /// groups, instead of landing in the trailing unlinked bucket. Only a
+    /// session with no branch at all stays unlinked.
+    #[test]
+    fn repo_sessions_without_a_pull_request_group_under_their_branch() {
+        let mut app = app_with_agents(&["reviewed", "worktree", "bare"]);
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdrdev/herdr".into()),
+                branch: Some("fix/strip".into()),
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/12".into()],
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdrdev/herdr".into()),
+                branch: Some("feat/dock-toggle".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.title.as_str(), group.entries.len(), group.unlinked))
+                .collect::<Vec<_>>(),
+            [
+                ("#12", 1, false),
+                ("⎇ feat/dock-toggle", 1, false),
+                (unlinked_bucket_title().as_str(), 1, true),
+            ],
+            "{:?}",
+            groups.iter().map(|group| &group.key).collect::<Vec<_>>()
+        );
+
+        // The same fallback applies to the groups nested under a repo header.
+        assert_eq!(
+            sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+                .iter()
+                .map(|group| (group.title.as_str(), group.unlinked))
+                .collect::<Vec<_>>(),
+            [
+                ("#12", false),
+                ("⎇ feat/dock-toggle", false),
+                (unlinked_bucket_title().as_str(), true),
+            ]
+        );
     }
 
     /// The unlinked bucket is named after the pane's working directory, and

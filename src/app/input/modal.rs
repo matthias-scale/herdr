@@ -817,12 +817,10 @@ pub(super) fn apply_context_menu_action(
             },
             Some("Collapse" | "Expand"),
         ) => {
-            if let Some(key) = state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .map(|space| space.key.clone())
-            {
+            // The key has to be the one the sidebar reads back, which is the
+            // group key, not the raw worktree key: a Space grouped by repository
+            // has no worktree membership and would silently collapse nothing.
+            if let Some((key, _)) = crate::ui::workspace_parent_group_state(state, ws_idx) {
                 if collapsed {
                     state.collapsed_space_keys.remove(&key);
                 } else {
@@ -1356,12 +1354,7 @@ impl App {
                 },
                 Some("Collapse" | "Expand"),
             ) => {
-                if let Some(key) = self
-                    .state
-                    .workspaces
-                    .get(ws_idx)
-                    .and_then(|ws| ws.worktree_space())
-                    .map(|space| space.key.clone())
+                if let Some((key, _)) = crate::ui::workspace_parent_group_state(&self.state, ws_idx)
                 {
                     if collapsed {
                         self.state.collapsed_space_keys.remove(&key);
@@ -1647,6 +1640,60 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    /// The Repo view groups a bound Space with the checkout Spaces of its
+    /// repository, and those Spaces carry no worktree membership. Collapse has to
+    /// write the key the sidebar reads back, or the menu item does nothing.
+    #[test]
+    fn collapsing_a_repository_group_writes_the_key_the_sidebar_reads() {
+        let mut app = app_with_test_workspaces(&["scalablev2", "checkout"]);
+        app.state.workspaces[0].repo_binding = Some("scalable-so/scalablev2".into());
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[1].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("checkout terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("scalable-so/scalablev2".into()),
+                ..Default::default()
+            })
+            .expect("work context");
+
+        let (key, collapsed) = crate::ui::workspace_parent_group_state(&app.state, 0)
+            .expect("the bound Space heads the group");
+        assert_eq!(key, "repo:scalable-so/scalablev2");
+        assert!(!collapsed);
+
+        let mut menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: true,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let collapse_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Collapse")
+            .expect("collapse item");
+        menu.list.highlighted = collapse_idx;
+        app.state.context_menu = Some(menu);
+
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(app.state.collapsed_space_keys.contains(&key));
+        assert_eq!(
+            crate::ui::workspace_parent_group_state(&app.state, 0),
+            Some((key, true))
+        );
     }
 
     #[test]
