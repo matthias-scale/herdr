@@ -47,6 +47,27 @@ impl WorkGroupStatus {
         }
     }
 
+    /// Human-readable status, in the vocabulary of the source system. This is
+    /// what the glyph means, spelled out for a hover tooltip.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::TicketBacklog => "Backlog",
+            Self::TicketTodo => "Todo",
+            Self::TicketInProgress => "In Progress",
+            Self::TicketInReview => "In Review",
+            Self::TicketDone => "Done",
+            Self::TicketCanceled => "Canceled",
+            Self::TicketTriage => "Triage",
+            Self::PullRequestOpen => "PR open",
+            Self::PullRequestMerged => "PR merged",
+            Self::PullRequestDraft => "PR draft",
+            Self::PullRequestClosed => "PR closed",
+            Self::ConversationOpen => "Conversation open",
+            Self::ConversationClosed => "Conversation closed",
+            Self::ConversationUnassigned => "Conversation unassigned",
+        }
+    }
+
     pub(crate) fn color(self, palette: &Palette) -> Color {
         match self {
             Self::TicketBacklog

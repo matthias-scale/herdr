@@ -1020,6 +1020,16 @@ pub struct AgentCardArea {
     pub row_idx: usize,
 }
 
+/// A sub-cell of a sidebar row that explains itself on hover: a status glyph,
+/// an agent dot, or a work-item title the row was too narrow to show in full.
+/// The label is resolved while the frame is laid out, so the tooltip never has
+/// to walk the sidebar rows again at render time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarHoverTarget {
+    pub rect: Rect,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabCardArea {
     pub ws_idx: usize,
@@ -2182,6 +2192,10 @@ pub struct ViewState {
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
+    /// Hover-only explanations for sidebar row internals (status glyphs, agent
+    /// dots, truncated work titles), in the order `ControlId::SidebarHover`
+    /// indexes them.
+    pub(crate) sidebar_hover_targets: Vec<SidebarHoverTarget>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -3938,6 +3952,7 @@ pub(crate) enum ControlId {
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
+    SidebarHover(usize),
     DockTab(usize),
     DockClose,
     DockAdd,
@@ -5713,6 +5728,7 @@ impl AppState {
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
