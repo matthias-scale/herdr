@@ -773,17 +773,14 @@ fn render_compact_agent_row_with_prefix(
         .activity_age
         .as_deref()
         .map_or_else(String::new, |age| pad_left(age, widths.age));
-    let is_active = entry.local_target.is_some_and(|target| {
-        tab && app.active == Some(target.ws_idx)
-            && app
-                .workspaces
-                .get(target.ws_idx)
-                .is_some_and(|ws| ws.active_tab_index() == target.tab_idx)
-    });
-    let is_active_local_pane = entry
-        .local_target
-        .is_some_and(|target| app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id));
-    let title_style = if is_active || is_active_local_pane {
+    let is_active = tab
+        && app.active == Some(entry.ws_idx)
+        && app
+            .workspaces
+            .get(entry.ws_idx)
+            .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
+    let title_style = if is_active || app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
+    {
         Style::default()
             .fg(active_sidebar_title_color(p))
             .add_modifier(Modifier::BOLD)
@@ -876,10 +873,6 @@ pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct AgentPanelEntry {
-    pub agent_ref: crate::api::schema::AgentRef,
-    /// Present only when this client owns the pane. Remote rows deliberately
-    /// carry no local focus or settlement target until remote control exists.
-    pub local_target: Option<AgentPanelLocalTarget>,
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
@@ -937,6 +930,7 @@ pub(crate) struct AgentPanelEntry {
 
 #[derive(Clone)]
 pub(crate) struct RemoteAgentPanelEntry {
+    pub agent_ref: crate::api::schema::AgentRef,
     pub entry: AgentPanelEntry,
     render_dot: &'static str,
     render_title: String,
@@ -951,16 +945,17 @@ pub(crate) struct RemoteAgentPanelEntry {
 
 impl RemoteAgentPanelEntry {
     #[cfg(test)]
-    pub(crate) fn new(entry: AgentPanelEntry) -> Self {
-        let narrow_host = middle_elide(
-            entry.agent_ref.host.as_str(),
-            SIDEBAR_HOST_TOKEN_NARROW_WIDTH,
-        );
-        Self::new_with_narrow_host(entry, narrow_host)
+    pub(crate) fn new(agent_ref: crate::api::schema::AgentRef, entry: AgentPanelEntry) -> Self {
+        let narrow_host = middle_elide(agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH);
+        Self::new_with_narrow_host(agent_ref, entry, narrow_host)
     }
 
-    fn new_with_narrow_host(entry: AgentPanelEntry, narrow_host: String) -> Self {
-        let host = entry.agent_ref.host.as_str();
+    fn new_with_narrow_host(
+        agent_ref: crate::api::schema::AgentRef,
+        entry: AgentPanelEntry,
+        narrow_host: String,
+    ) -> Self {
+        let host = agent_ref.host.as_str();
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
         let render_provider = compact_provider(&entry);
@@ -969,14 +964,15 @@ impl RemoteAgentPanelEntry {
         let narrow_host_suffix = format!(" · {narrow_host}");
         let search_key_lowercase = format!(
             "{} {} {} {} {}",
-            entry.agent_ref.host,
-            entry.agent_ref.agent,
+            agent_ref.host,
+            agent_ref.agent,
             entry.primary_tab_label.as_deref().unwrap_or_default(),
             entry.terminal_title.as_deref().unwrap_or_default(),
             entry.agent_label.as_deref().unwrap_or_default(),
         )
         .to_ascii_lowercase();
         Self {
+            agent_ref,
             render_dot,
             render_title,
             render_provider,
@@ -1065,6 +1061,57 @@ pub(crate) struct AgentPanelLocalTarget {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentPanelLocalIdentity {
+    pub(crate) agent_ref: crate::api::schema::AgentRef,
+    pub(crate) local_target: AgentPanelLocalTarget,
+}
+
+pub(crate) fn local_agent_panel_identities(
+    workspaces: &[crate::workspace::Workspace],
+    host: &str,
+) -> std::collections::HashMap<crate::layout::PaneId, AgentPanelLocalIdentity> {
+    workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(ws_idx, workspace)| {
+            workspace
+                .tabs
+                .iter()
+                .enumerate()
+                .flat_map(move |(tab_idx, tab)| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            let agent_id = workspace
+                                .public_pane_number(pane_id)
+                                .map(|number| {
+                                    crate::workspace::public_pane_id_for_number(
+                                        &workspace.id,
+                                        number,
+                                    )
+                                })
+                                .unwrap_or_else(|| pane_id.raw().to_string());
+                            let agent_ref =
+                                crate::api::schema::AgentRef::new(host, agent_id).ok()?;
+                            Some((
+                                pane_id,
+                                AgentPanelLocalIdentity {
+                                    agent_ref,
+                                    local_target: AgentPanelLocalTarget {
+                                        ws_idx,
+                                        tab_idx,
+                                        pane_id,
+                                    },
+                                },
+                            ))
+                        })
+                })
+        })
+        .collect()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1228,16 +1275,7 @@ fn collect_agent_panel_entries_with_runtimes(
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
-                .filter_map(move |detail| {
-                    let local_target = AgentPanelLocalTarget {
-                        ws_idx,
-                        tab_idx: detail.tab_idx,
-                        pane_id: detail.pane_id,
-                    };
-                    let agent_id = ws
-                        .public_pane_number(detail.pane_id)
-                        .map(|number| crate::workspace::public_pane_id_for_number(&ws.id, number))
-                        .unwrap_or_else(|| detail.pane_id.raw().to_string());
+                .map(move |detail| {
                     let space_label = workspace_label.clone();
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
                     let tab_has_custom_name = ws
@@ -1274,12 +1312,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         detail.holds_shell,
                         has_closing_block_tokens,
                     );
-                    let agent_ref =
-                        crate::api::schema::AgentRef::new(app.agent_host_name.clone(), agent_id)
-                            .ok()?;
-                    Some(AgentPanelEntry {
-                        agent_ref,
-                        local_target: Some(local_target),
+                    AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
@@ -1315,7 +1348,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         holds_shell: detail.holds_shell,
                         gate_count: detail.gate_count,
                         tab_first_pane: false,
-                    })
+                    }
                 })
         })
         .collect()
@@ -1432,12 +1465,10 @@ pub(crate) fn remote_agent_panel_entries(
                 });
             Some(std::sync::Arc::new(
                 RemoteAgentPanelEntry::new_with_narrow_host(
+                    row.agent_ref.clone(),
                     AgentPanelEntry {
-                        agent_ref: row.agent_ref.clone(),
-                        local_target: None,
                         // Remote entries use a distinct SidebarRow variant. These
-                        // placeholders never enter local focus, hit testing, or settle
-                        // APIs; `local_target` is the authority for ownership.
+                        // placeholders never enter local focus, hit testing, or settle APIs.
                         ws_idx: 0,
                         tab_idx: 0,
                         pane_id: crate::layout::PaneId::from_raw(0),
@@ -1941,8 +1972,13 @@ fn compact_sidebar_rows_inner(
     } else {
         active_entries
     };
-    let (remote_terms, _) = sidebar_query_parts(&app.sidebar_work_filter.query);
-    let has_remote_entries = include_remote
+    let has_remote_rows = include_remote && !app.remote_agent_panel_entries.is_empty();
+    let remote_terms = if has_remote_rows {
+        sidebar_query_parts(&app.sidebar_work_filter.query).0
+    } else {
+        Vec::new()
+    };
+    let has_remote_entries = has_remote_rows
         && app.remote_agent_panel_entries.iter().any(|entry| {
             remote_sidebar_entry_matches_query(entry, &remote_terms)
                 && (!app.blocked_filter || entry_is_blocked(entry))
@@ -1974,7 +2010,7 @@ fn compact_sidebar_rows_inner(
     {
         append_legacy_space_rows(app, &mut rows, visible_entries, expand_worktrees);
         append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-        if include_remote {
+        if has_remote_rows {
             append_remote_rows(app, &mut rows, &remote_terms);
         }
         return rows;
@@ -1990,7 +2026,7 @@ fn compact_sidebar_rows_inner(
         }
     }
     append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-    if include_remote {
+    if has_remote_rows {
         append_remote_rows(app, &mut rows, &remote_terms);
     }
     rows
@@ -7375,7 +7411,9 @@ pub(crate) mod tests {
                 "remote-a::ra-windowless"
             ]
         );
-        assert!(entries.iter().all(|entry| entry.local_target.is_none()));
+        assert!(entries
+            .iter()
+            .all(|entry| entry.entry.pane_id == crate::layout::PaneId::from_raw(0)));
         assert!(!entry_is_blocked(&entries[0]));
         assert!(entry_is_blocked(&entries[1]));
         assert!(entry_is_blocked(&entries[2]));
@@ -8111,11 +8149,10 @@ pub(crate) mod tests {
 
     #[test]
     fn remote_rows_render_the_host_token_at_narrow_and_normal_widths() {
-        let mut entry = compact_test_entry("remote task", Some(Agent::Codex));
-        entry.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
+        let entry = compact_test_entry("remote task", Some(Agent::Codex));
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
             .expect("valid remote agent reference");
-        entry.local_target = None;
-        let remote = RemoteAgentPanelEntry::new(entry);
+        let remote = RemoteAgentPanelEntry::new(agent_ref, entry);
         let app = AppState::test_new();
 
         for width in [18, 40] {
@@ -8222,6 +8259,7 @@ pub(crate) mod tests {
         let mut app = AppState::test_new();
         app.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
         app.ensure_test_terminals();
+        app.refresh_local_agent_panel_identities();
         for workspace in &app.workspaces {
             for tab in &workspace.tabs {
                 for pane in tab.panes.values() {
@@ -8235,6 +8273,32 @@ pub(crate) mod tests {
         app.selected = 0;
         app.reconcile_sidebar_presentation();
         app
+    }
+
+    #[test]
+    fn local_identity_cache_tracks_targets_and_host_changes() {
+        let mut app = app_with_agents(&["local"]);
+        app.agent_host_name = "laptop".into();
+        app.refresh_local_agent_panel_identities();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let cached = &app.local_agent_panel_identities[&pane_id];
+        assert_eq!(cached.agent_ref.host, "laptop");
+        assert_eq!(
+            cached.local_target,
+            AgentPanelLocalTarget {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+            }
+        );
+        assert_eq!(agent_panel_entries(&app).len(), 1);
+        let cached_agent = cached.agent_ref.agent.clone();
+
+        app.agent_host_name = "desktop".into();
+        app.mark_sidebar_projection_changed();
+        let refreshed = &app.local_agent_panel_identities[&pane_id];
+        assert_eq!(refreshed.agent_ref.host, "desktop");
+        assert_eq!(refreshed.agent_ref.agent, cached_agent);
     }
 
     fn set_active_subagents(app: &mut AppState, ws_idx: usize, value: Option<u32>) {
@@ -8540,13 +8604,6 @@ pub(crate) mod tests {
             state_label.to_string(),
         );
         AgentPanelEntry {
-            agent_ref: crate::api::schema::AgentRef::new("localhost", "p1")
-                .expect("valid local agent reference"),
-            local_target: Some(AgentPanelLocalTarget {
-                ws_idx: 0,
-                tab_idx: 0,
-                pane_id: crate::layout::PaneId::from_raw(1),
-            }),
             usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,

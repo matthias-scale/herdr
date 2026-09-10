@@ -221,13 +221,6 @@ mod tests {
 
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
-            agent_ref: crate::api::schema::AgentRef::new("localhost", "p1")
-                .expect("valid local agent reference"),
-            local_target: Some(super::super::AgentPanelLocalTarget {
-                ws_idx: 0,
-                tab_idx: 0,
-                pane_id: crate::layout::PaneId::from_raw(1),
-            }),
             usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,

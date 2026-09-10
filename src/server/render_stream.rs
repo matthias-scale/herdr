@@ -681,6 +681,7 @@ mod render_scale_benchmark {
         app.mode = Mode::Terminal;
         app.pane_scrollbars = true;
         app.workspaces = workspaces;
+        app.refresh_local_agent_panel_identities();
         app.active = Some(0);
         app.selected = 0;
         app

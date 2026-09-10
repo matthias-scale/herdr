@@ -1963,21 +1963,20 @@ enum BlockedPaneTarget {
 fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let mut panes = crate::ui::all_agent_panel_entries(state)
         .into_iter()
-        .filter_map(|entry| {
-            let target = entry.local_target?;
+        .map(|entry| {
             let blocked = crate::terminal::counts_as_blocked(
                 entry.state,
                 entry.open_blockers,
                 entry.usage_limited,
-            ) && !state.pane_is_settled(target.ws_idx, target.pane_id);
-            Some((
+            ) && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
+            (
                 BlockedPaneTarget::Local {
-                    ws_idx: target.ws_idx,
-                    tab_idx: target.tab_idx,
-                    pane_id: target.pane_id,
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                    pane_id: entry.pane_id,
                 },
                 blocked,
-            ))
+            )
         })
         .collect::<Vec<_>>();
     panes.extend(state.remote_agent_panel_entries.iter().map(|entry| {
@@ -3503,13 +3502,12 @@ mod tests {
             .into_iter()
             .next()
             .expect("agent panel fixture");
-        remote.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
-            .expect("valid remote agent reference");
-        remote.local_target = None;
         remote.state = crate::detect::AgentState::Idle;
         remote.open_blockers = true;
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
+            .expect("valid remote agent reference");
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
-            crate::ui::RemoteAgentPanelEntry::new(remote),
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, remote),
         )];
 
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);

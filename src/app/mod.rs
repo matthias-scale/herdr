@@ -697,6 +697,9 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let agent_host_name = config.remote.fleet.resolved_self_name();
+        let local_agent_panel_identities =
+            crate::ui::local_agent_panel_identities(&workspaces, &agent_host_name);
         let dock_default_surfaces = dock_surfaces_from_config(&config.panel);
         let dock_tab = dock_default_surfaces.first().copied();
 
@@ -803,7 +806,8 @@ impl App {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
-            agent_host_name: config.remote.fleet.resolved_self_name(),
+            agent_host_name,
+            local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,

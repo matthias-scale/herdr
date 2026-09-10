@@ -127,6 +127,7 @@ use self::user_actions::render_add_action_overlay;
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
+pub(crate) use self::sidebar::local_agent_panel_identities;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -159,8 +160,8 @@ pub(crate) use self::{
         workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem,
-        SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        AgentPanelEntry, AgentPanelLocalIdentity, RemoteAgentPanelEntry, SidebarFilterOption,
+        SidebarObjectMenuItem, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;

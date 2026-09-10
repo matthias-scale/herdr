@@ -405,11 +405,21 @@ impl App {
             return None;
         }
         let pane = self.pane_info(ws_idx, pane_id)?;
-        let agent_ref = crate::api::schema::AgentRef::new(
-            self.state.agent_host_name.clone(),
-            pane.pane_id.clone(),
-        )
-        .ok()?;
+        let agent_ref = self
+            .state
+            .local_agent_panel_identities
+            .get(&pane_id)
+            .filter(|identity| {
+                identity.local_target.ws_idx == ws_idx && identity.local_target.pane_id == pane_id
+            })
+            .map(|identity| identity.agent_ref.clone())
+            .or_else(|| {
+                crate::api::schema::AgentRef::new(
+                    self.state.agent_host_name.clone(),
+                    pane.pane_id.clone(),
+                )
+                .ok()
+            })?;
         Some(crate::api::schema::AgentInfo {
             agent_ref: Some(agent_ref),
             terminal_id: pane.terminal_id,
