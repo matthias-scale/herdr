@@ -3,6 +3,8 @@
 //! Centralizes OS-dependent behavior behind a clean boundary so core
 //! modules don't scatter `#[cfg]` branches through product logic.
 
+use std::path::{Path, PathBuf};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,
@@ -472,9 +474,111 @@ pub(crate) fn test_spawn_budget(base: std::time::Duration) -> std::time::Duratio
     }
 }
 
+/// How far a symlink chain is followed before it is treated as a loop.
+const MAX_WRITE_TARGET_SYMLINK_HOPS: usize = 16;
+
+/// Resolve `path` through any symlink chain so an atomic replace lands on the
+/// file the symlink points at instead of replacing the link itself.
+///
+/// Herdr's config and session files are commonly symlinks into a dotfiles or
+/// stow checkout. Renaming a temp file over the link detaches it: the managed
+/// file becomes an unmanaged regular file, later dotfiles changes never reach
+/// it, and a reinstall can relink over it and lose the edit.
+///
+/// Symlinks are followed manually rather than with `fs::canonicalize`, which
+/// requires the target to exist and so excludes the dangling-link case a stow
+/// user hits on the very first save. A dangling link resolves to its missing
+/// target, so the write creates the managed file. A loop or a non-symlink path
+/// returns the last path reached.
+pub(crate) fn resolve_write_target(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_WRITE_TARGET_SYMLINK_HOPS {
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return current;
+        };
+        if !metadata.file_type().is_symlink() {
+            return current;
+        }
+        let Ok(link) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = if link.is_absolute() {
+            link
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link)
+        };
+    }
+    tracing::warn!(
+        path = %path.display(),
+        "symlink chain too deep; writing to the path itself"
+    );
+    path.to_path_buf()
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn symlink_scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-write-target-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn resolve_write_target_returns_a_plain_path_unchanged() {
+        let dir = symlink_scratch_dir();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "onboarding = false\n").expect("seed");
+
+        assert_eq!(resolve_write_target(&path), path);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_write_target_follows_a_relative_link() {
+        let dir = symlink_scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "onboarding = false\n").expect("seed");
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+
+        assert_eq!(resolve_write_target(&link), target);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A dangling link resolves to its missing target, so the write recreates
+    /// the managed file instead of replacing the link with a stub.
+    #[test]
+    fn resolve_write_target_resolves_a_dangling_link_to_its_target() {
+        let dir = symlink_scratch_dir();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink("never-generated.toml", &link).expect("symlink");
+
+        assert_eq!(
+            resolve_write_target(&link),
+            dir.join("never-generated.toml")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_write_target_gives_up_on_a_symlink_loop() {
+        let dir = symlink_scratch_dir();
+        let first = dir.join("config.toml");
+        let second = dir.join("other.toml");
+        std::os::unix::fs::symlink("other.toml", &first).expect("symlink");
+        std::os::unix::fs::symlink("config.toml", &second).expect("symlink");
+
+        assert_eq!(resolve_write_target(&first), first);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_process(pid: u32) -> ForegroundProcess {

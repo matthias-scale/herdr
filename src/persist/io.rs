@@ -30,30 +30,10 @@ fn next_save_generation() -> String {
     format!("{:x}-{:x}-{sequence:x}", std::process::id(), nanos)
 }
 
-// Follow symlinks manually so a write through a (possibly dangling) symlink
-// lands on the target. `fs::canonicalize` requires the target to exist, which
-// excludes the dangling-symlink case stow users hit on the very first save.
+// Writes follow a (possibly dangling) symlink to its target so a stow-managed
+// session file keeps its link. The resolver is shared with the config writer.
 fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
-    let mut current = path.to_path_buf();
-    for _ in 0..16 {
-        let meta = match std::fs::symlink_metadata(&current) {
-            Ok(meta) => meta,
-            Err(_) => return Ok(current),
-        };
-        if !meta.file_type().is_symlink() {
-            return Ok(current);
-        }
-        let link = std::fs::read_link(&current)?;
-        current = if link.is_absolute() {
-            link
-        } else {
-            current
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(link)
-        };
-    }
-    Ok(current)
+    Ok(crate::platform::resolve_write_target(path))
 }
 
 #[cfg(test)]

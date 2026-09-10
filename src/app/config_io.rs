@@ -9,6 +9,11 @@ use super::App;
 fn write_config_atomically(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
 
+    // Follow a symlinked config to its target first. Renaming over the link
+    // would replace it with a regular file and detach the config from the
+    // dotfiles checkout that owns it.
+    let resolved = crate::platform::resolve_write_target(path);
+    let path = resolved.as_path();
     let directory = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let file_name = path
         .file_name()
@@ -289,6 +294,37 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(leftovers, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A dotfiles-managed config is a symlink. Renaming the temp file over the
+    /// link would leave an unmanaged regular file behind, and the next
+    /// dotfiles run could relink over it and lose the edit; observed live when
+    /// a stub config dropped `prefix = "ctrl+a"`.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_follows_a_symlink_instead_of_replacing_it() {
+        let dir = scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "[ui]\nconfirm_close = true\n").expect("seed");
+        // Relative link target: the resolver has to join it against the link's
+        // own directory, not the process cwd.
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+
+        write_config_atomically(&link, "[ui]\nconfirm_close = false\n").expect("write");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "config write replaced the managed symlink with a regular file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "[ui]\nconfirm_close = false\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
