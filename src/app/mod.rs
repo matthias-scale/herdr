@@ -285,6 +285,10 @@ pub struct App {
     /// Runtime-only nudge budgets for currently stale agent declarations.
     pub(crate) stall_nudge_episodes:
         std::collections::HashMap<crate::terminal::TerminalId, auto_nudge::StallNudgeEpisode>,
+    pub(crate) pending_stall_nudge_submissions: std::collections::HashMap<
+        crate::terminal::TerminalId,
+        auto_nudge::PendingStallNudgeSubmission,
+    >,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -1199,9 +1203,7 @@ impl App {
             nudge_resumed_agents: config.session.nudge_resumed_agents,
             resume_nudge_message: config.session.resume_nudge_message.clone(),
             auto_nudge_stalled_agents: config.session.auto_nudge_stalled_agents,
-            nudge_after: std::time::Duration::from_secs(
-                config.session.nudge_after_minutes.saturating_mul(60),
-            ),
+            nudge_after: auto_nudge::nudge_after_duration(config.session.nudge_after_minutes),
             max_nudges: config.session.max_nudges,
             stall_nudge_message: config.session.stall_nudge_message.clone(),
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
@@ -1448,6 +1450,7 @@ impl App {
             pending_agent_resume_deadline: None,
             pending_resume_nudges: std::collections::HashMap::new(),
             stall_nudge_episodes: std::collections::HashMap::new(),
+            pending_stall_nudge_submissions: std::collections::HashMap::new(),
             session_save_deadline: None,
             session_save_scheduled_revision: None,
             session_save_thread: None,
@@ -1513,6 +1516,16 @@ impl App {
                     .map(|import| (editor.clone(), import))
             })
             .collect();
+        let imported_stall_nudges = imports
+            .iter()
+            .filter_map(|(pane_id, import)| {
+                import
+                    .state
+                    .stall_nudge
+                    .clone()
+                    .map(|state| (*pane_id, state))
+            })
+            .collect();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1539,11 +1552,12 @@ impl App {
             app.next_agent_manifest_update_check = Some(now + AUTO_UPDATE_CHECK_INTERVAL);
         }
         app.state.detach_exits = false;
-        app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
         app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.restore_stall_nudge_episodes(imported_stall_nudges, &pane_id_aliases, now);
+        app.state.pane_id_aliases = pane_id_aliases;
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());
@@ -2342,9 +2356,8 @@ impl App {
                 .resume_nudge_message
                 .clone_from(&config.session.resume_nudge_message);
             self.state.auto_nudge_stalled_agents = config.session.auto_nudge_stalled_agents;
-            self.state.nudge_after = std::time::Duration::from_secs(
-                config.session.nudge_after_minutes.saturating_mul(60),
-            );
+            self.state.nudge_after =
+                auto_nudge::nudge_after_duration(config.session.nudge_after_minutes);
             self.state.max_nudges = config.session.max_nudges;
             self.state
                 .stall_nudge_message

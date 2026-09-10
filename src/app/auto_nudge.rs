@@ -5,6 +5,8 @@ use bytes::Bytes;
 use super::App;
 
 const STALL_NUDGE_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+const STALL_NUDGE_SCHEDULE_FAILED: &str =
+    "stalled-agent nudge scheduling overflowed; waiting for a fresh status report";
 
 #[derive(Debug, Clone)]
 pub(crate) struct StallNudgeEpisode {
@@ -13,6 +15,15 @@ pub(crate) struct StallNudgeEpisode {
     next_nudge_at: Option<Instant>,
     declaration_kind: &'static str,
     last_drop_reason: Option<&'static str>,
+    schedule_failed: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingStallNudgeSubmission {
+    pane_id: crate::layout::PaneId,
+    enter: Bytes,
+    submit_at: Instant,
+    draft_at_send: Option<String>,
 }
 
 /// Everything the stalled-pane nudge decision needs, read in one pass.
@@ -33,6 +44,7 @@ struct AutoNudgeFacts {
     nudges_sent: u32,
     max_nudges: u32,
     next_nudge_at: Option<Instant>,
+    schedule_failed: bool,
     now: Instant,
 }
 
@@ -47,6 +59,9 @@ enum AutoNudgeDecision {
 fn auto_nudge_decision(facts: &AutoNudgeFacts) -> AutoNudgeDecision {
     if !facts.supervisor_stale {
         return AutoNudgeDecision::Reset("a fresh status report cleared the stale mark");
+    }
+    if facts.schedule_failed {
+        return AutoNudgeDecision::Drop(STALL_NUDGE_SCHEDULE_FAILED);
     }
     if !facts.enabled {
         return AutoNudgeDecision::Drop("automatic stalled-agent nudges are disabled");
@@ -79,8 +94,10 @@ fn auto_nudge_decision(facts: &AutoNudgeFacts) -> AutoNudgeDecision {
         return AutoNudgeDecision::Drop("the stall episode exhausted its nudge budget");
     }
     if facts.quiet_for < facts.nudge_after {
-        return AutoNudgeDecision::RetryAt(
-            facts.now + facts.nudge_after.saturating_sub(facts.quiet_for),
+        let wait = facts.nudge_after.saturating_sub(facts.quiet_for);
+        return facts.now.checked_add(wait).map_or(
+            AutoNudgeDecision::Drop(STALL_NUDGE_SCHEDULE_FAILED),
+            AutoNudgeDecision::RetryAt,
         );
     }
     if let Some(next_nudge_at) = facts.next_nudge_at.filter(|due| *due > facts.now) {
@@ -96,12 +113,33 @@ fn next_stall_nudge_delay(
     nudge_after: Duration,
     nudges_sent_after_send: u32,
     max_nudges: u32,
-) -> Option<Duration> {
+) -> Result<Option<Duration>, ()> {
     if nudges_sent_after_send >= max_nudges {
-        return None;
+        return Ok(None);
     }
-    let multiplier = 1_u32.checked_shl(nudges_sent_after_send)?;
-    nudge_after.checked_mul(multiplier)
+    let multiplier = 1_u32.checked_shl(nudges_sent_after_send).ok_or(())?;
+    nudge_after.checked_mul(multiplier).ok_or(()).map(Some)
+}
+
+fn next_stall_nudge_at(
+    now: Instant,
+    nudge_after: Duration,
+    nudges_sent_after_send: u32,
+    max_nudges: u32,
+) -> Result<Option<Instant>, ()> {
+    let Some(delay) = next_stall_nudge_delay(nudge_after, nudges_sent_after_send, max_nudges)?
+    else {
+        return Ok(None);
+    };
+    now.checked_add(delay).map(Some).ok_or(())
+}
+
+pub(crate) fn nudge_after_duration(minutes: u64) -> Duration {
+    let bounded_minutes = minutes.min(crate::config::MAX_NUDGE_AFTER_MINUTES);
+    let Some(seconds) = bounded_minutes.checked_mul(60) else {
+        return Duration::from_secs(u64::MAX);
+    };
+    Duration::from_secs(seconds)
 }
 
 struct AutoNudgeTarget {
@@ -113,24 +151,114 @@ struct AutoNudgeTarget {
 }
 
 impl App {
+    pub(crate) fn note_human_key(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        key: &crate::input::TerminalKey,
+    ) {
+        self.cancel_pending_stall_nudge_for_pane(pane_id);
+        self.state.note_human_key(pane_id, key);
+    }
+
+    pub(crate) fn note_human_text(&mut self, pane_id: crate::layout::PaneId, text: &str) {
+        self.cancel_pending_stall_nudge_for_pane(pane_id);
+        self.state.note_human_text(pane_id, text);
+    }
+
+    fn cancel_pending_stall_nudge_for_pane(&mut self, pane_id: crate::layout::PaneId) {
+        self.pending_stall_nudge_submissions
+            .retain(|_, pending| pending.pane_id != pane_id);
+    }
+
     pub(crate) fn next_auto_nudge_deadline(&self, now: Instant) -> Option<Instant> {
         if !self.state.auto_nudge_stalled_agents || self.state.stall_nudge_message.trim().is_empty()
         {
             return None;
         }
-        self.auto_nudge_targets(now, false)
-            .into_iter()
-            .filter_map(|target| match target.decision {
-                AutoNudgeDecision::Nudge => self
-                    .stall_nudge_episodes
-                    .get(&target.terminal_id)
-                    .and_then(|episode| episode.last_drop_reason)
-                    .is_none()
-                    .then_some(now),
-                AutoNudgeDecision::RetryAt(deadline) => Some(deadline),
-                AutoNudgeDecision::Reset(_) | AutoNudgeDecision::Drop(_) => None,
-            })
+        self.pending_stall_nudge_submissions
+            .values()
+            .map(|pending| pending.submit_at)
+            .chain(
+                self.auto_nudge_targets(now, false)
+                    .into_iter()
+                    .filter_map(|target| match target.decision {
+                        AutoNudgeDecision::Nudge => self
+                            .stall_nudge_episodes
+                            .get(&target.terminal_id)
+                            .and_then(|episode| episode.last_drop_reason)
+                            .is_none()
+                            .then_some(now),
+                        AutoNudgeDecision::RetryAt(deadline) => Some(deadline),
+                        AutoNudgeDecision::Reset(_) | AutoNudgeDecision::Drop(_) => None,
+                    }),
+            )
             .min()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn stall_nudge_handoff_state(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+        now: Instant,
+    ) -> Option<crate::handoff_runtime::StallNudgeHandoffState> {
+        self.stall_nudge_episodes.get(terminal_id).map(|episode| {
+            crate::handoff_runtime::StallNudgeHandoffState {
+                nudges_sent: episode.nudges_sent,
+                next_nudge_in: episode
+                    .next_nudge_at
+                    .map(|deadline| deadline.saturating_duration_since(now)),
+                schedule_failed: episode.schedule_failed,
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_stall_nudge_episodes(
+        &mut self,
+        imported: std::collections::HashMap<u32, crate::handoff_runtime::StallNudgeHandoffState>,
+        pane_id_aliases: &std::collections::HashMap<u32, crate::layout::PaneId>,
+        now: Instant,
+    ) {
+        for (old_pane_id, state) in imported {
+            let pane_id = pane_id_aliases
+                .get(&old_pane_id)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(old_pane_id));
+            let Some((_, pane)) = self.find_pane(pane_id) else {
+                continue;
+            };
+            let terminal_id = pane.attached_terminal_id.clone();
+            let Some(terminal) = self.state.terminals.get(&terminal_id) else {
+                continue;
+            };
+            if !terminal.supervisor_stale {
+                continue;
+            }
+            let mut schedule_failed = state.schedule_failed;
+            let next_nudge_at = state.next_nudge_in.and_then(|delay| {
+                let next = now.checked_add(delay);
+                if next.is_none() {
+                    schedule_failed = true;
+                }
+                next
+            });
+            let declaration_kind = if terminal.declares_running_subagents() {
+                "running_subagents"
+            } else {
+                "agent_status"
+            };
+            self.stall_nudge_episodes.insert(
+                terminal_id,
+                StallNudgeEpisode {
+                    pane_id,
+                    nudges_sent: state.nudges_sent,
+                    next_nudge_at,
+                    declaration_kind,
+                    last_drop_reason: schedule_failed.then_some(STALL_NUDGE_SCHEDULE_FAILED),
+                    schedule_failed,
+                },
+            );
+        }
     }
 
     pub(crate) fn tick_auto_nudges(&mut self, now: Instant) -> bool {
@@ -141,9 +269,11 @@ impl App {
             } else {
                 "automatic stalled-agent nudges are disabled"
             };
+            self.pending_stall_nudge_submissions.clear();
             self.clear_stall_nudge_episodes(now, reason);
             return false;
         }
+        let mut changed = self.finish_pending_stall_nudges(now);
         self.prune_stall_nudge_episodes(now);
 
         let targets = self.auto_nudge_targets(now, true);
@@ -169,6 +299,7 @@ impl App {
                             next_nudge_at: None,
                             declaration_kind: target.declaration_kind,
                             last_drop_reason: None,
+                            schedule_failed: false,
                         });
                     episode.pane_id = target.pane_id;
                     episode.declaration_kind = target.declaration_kind;
@@ -194,6 +325,7 @@ impl App {
                             next_nudge_at: None,
                             declaration_kind: target.declaration_kind,
                             last_drop_reason: None,
+                            schedule_failed: false,
                         });
                     episode.pane_id = target.pane_id;
                     episode.declaration_kind = target.declaration_kind;
@@ -203,7 +335,6 @@ impl App {
             }
         }
 
-        let mut changed = false;
         for target in fire {
             self.stall_nudge_episodes
                 .entry(target.terminal_id.clone())
@@ -213,10 +344,13 @@ impl App {
                     next_nudge_at: None,
                     declaration_kind: target.declaration_kind,
                     last_drop_reason: None,
+                    schedule_failed: false,
                 });
             if !self.send_stall_nudge(&target, now) {
                 if let Some(episode) = self.stall_nudge_episodes.get_mut(&target.terminal_id) {
-                    episode.last_drop_reason = Some("failed to write the stalled-agent nudge");
+                    if !episode.schedule_failed {
+                        episode.last_drop_reason = Some("failed to write the stalled-agent nudge");
+                    }
                 }
                 continue;
             }
@@ -227,10 +361,24 @@ impl App {
                 continue;
             };
             episode.nudges_sent = episode.nudges_sent.saturating_add(1);
-            episode.next_nudge_at =
-                next_stall_nudge_delay(nudge_after, episode.nudges_sent, max_nudges)
-                    .and_then(|delay| now.checked_add(delay));
-            episode.last_drop_reason = None;
+            match next_stall_nudge_at(now, nudge_after, episode.nudges_sent, max_nudges) {
+                Ok(next_nudge_at) => {
+                    episode.next_nudge_at = next_nudge_at;
+                    episode.last_drop_reason = None;
+                }
+                Err(()) => {
+                    episode.next_nudge_at = None;
+                    episode.schedule_failed = true;
+                    episode.last_drop_reason = Some(STALL_NUDGE_SCHEDULE_FAILED);
+                    tracing::warn!(
+                        pane = target.pane_id.raw(),
+                        terminal = %target.terminal_id,
+                        nudge = episode.nudges_sent,
+                        max_nudges,
+                        "dropping stalled-agent nudge episode after scheduling overflow"
+                    );
+                }
+            }
             tracing::info!(
                 pane = target.pane_id.raw(),
                 terminal = %target.terminal_id,
@@ -240,6 +388,59 @@ impl App {
                 max_nudges,
                 "nudged a stalled agent pane"
             );
+            changed = true;
+        }
+        changed
+    }
+
+    fn finish_pending_stall_nudges(&mut self, now: Instant) -> bool {
+        let due = self
+            .pending_stall_nudge_submissions
+            .iter()
+            .filter_map(|(terminal_id, pending)| {
+                (pending.submit_at <= now).then_some(terminal_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for terminal_id in due {
+            let Some(pending) = self.pending_stall_nudge_submissions.remove(&terminal_id) else {
+                continue;
+            };
+            let current_draft = self
+                .state
+                .pending_human_drafts
+                .get(&pending.pane_id)
+                .cloned();
+            let stale = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .is_some_and(|terminal| terminal.supervisor_stale);
+            if current_draft != pending.draft_at_send
+                || current_draft
+                    .as_deref()
+                    .is_some_and(|draft| !draft.is_empty())
+                || !stale
+            {
+                tracing::debug!(
+                    pane = pending.pane_id.raw(),
+                    terminal = %terminal_id,
+                    "abandoning delayed stalled-agent nudge submission"
+                );
+                continue;
+            }
+            let Some(runtime) = self.terminal_runtimes.get(&terminal_id) else {
+                continue;
+            };
+            if let Err(err) = runtime.try_send_bytes(pending.enter) {
+                tracing::warn!(
+                    pane = pending.pane_id.raw(),
+                    terminal = %terminal_id,
+                    err = %err,
+                    "failed to send delayed stalled-agent nudge submission"
+                );
+                continue;
+            }
             changed = true;
         }
         changed
@@ -288,6 +489,7 @@ impl App {
                         nudges_sent,
                         max_nudges: self.state.max_nudges,
                         next_nudge_at,
+                        schedule_failed: episode.is_some_and(|episode| episode.schedule_failed),
                         now,
                     };
                     let mut decision = auto_nudge_decision(&facts);
@@ -383,6 +585,18 @@ impl App {
 
     fn send_stall_nudge(&mut self, target: &AutoNudgeTarget, now: Instant) -> bool {
         let message = self.state.stall_nudge_message.clone();
+        let Some(submit_at) = now.checked_add(STALL_NUDGE_SUBMIT_DELAY) else {
+            if let Some(episode) = self.stall_nudge_episodes.get_mut(&target.terminal_id) {
+                episode.schedule_failed = true;
+                episode.last_drop_reason = Some(STALL_NUDGE_SCHEDULE_FAILED);
+            }
+            tracing::warn!(
+                pane = target.pane_id.raw(),
+                terminal = %target.terminal_id,
+                "dropping stalled-agent nudge because its submit deadline overflowed"
+            );
+            return false;
+        };
         let Some(runtime) = self.terminal_runtimes.get(&target.terminal_id) else {
             return false;
         };
@@ -398,7 +612,19 @@ impl App {
             );
             return false;
         }
-        runtime.send_bytes_after(Bytes::from(enter), STALL_NUDGE_SUBMIT_DELAY);
+        self.pending_stall_nudge_submissions.insert(
+            target.terminal_id.clone(),
+            PendingStallNudgeSubmission {
+                pane_id: target.pane_id,
+                enter: Bytes::from(enter),
+                submit_at,
+                draft_at_send: self
+                    .state
+                    .pending_human_drafts
+                    .get(&target.pane_id)
+                    .cloned(),
+            },
+        );
         self.retire_blocked_hook_authority_for_pane(target.pane_id, now);
         true
     }
@@ -429,6 +655,7 @@ mod tests {
             nudges_sent: 0,
             max_nudges: 3,
             next_nudge_at: None,
+            schedule_failed: false,
             now,
         }
     }
@@ -541,9 +768,44 @@ mod tests {
     #[test]
     fn successful_nudges_back_off_and_stop_at_the_episode_cap() {
         let base = Duration::from_secs(20 * 60);
-        assert_eq!(next_stall_nudge_delay(base, 1, 3), Some(base * 2));
-        assert_eq!(next_stall_nudge_delay(base, 2, 3), Some(base * 4));
-        assert_eq!(next_stall_nudge_delay(base, 3, 3), None);
+        assert_eq!(next_stall_nudge_delay(base, 1, 3), Ok(Some(base * 2)));
+        assert_eq!(next_stall_nudge_delay(base, 2, 3), Ok(Some(base * 4)));
+        assert_eq!(next_stall_nudge_delay(base, 3, 3), Ok(None));
+    }
+
+    #[test]
+    fn nudge_schedule_arithmetic_failures_fail_closed() {
+        let now = Instant::now();
+        assert_eq!(
+            next_stall_nudge_delay(Duration::from_secs(1), 32, 33),
+            Err(())
+        );
+        assert_eq!(
+            next_stall_nudge_delay(Duration::from_secs(u64::MAX), 1, 3),
+            Err(())
+        );
+        assert_eq!(
+            next_stall_nudge_at(now, Duration::from_secs(u64::MAX), 0, 3),
+            Err(())
+        );
+
+        let overflow = AutoNudgeFacts {
+            quiet_for: Duration::ZERO,
+            nudge_after: Duration::from_secs(u64::MAX),
+            ..ready_facts(now)
+        };
+        assert!(matches!(
+            auto_nudge_decision(&overflow),
+            AutoNudgeDecision::Drop(STALL_NUDGE_SCHEDULE_FAILED)
+        ));
+        let failed_episode = AutoNudgeFacts {
+            schedule_failed: true,
+            ..ready_facts(now)
+        };
+        assert!(matches!(
+            auto_nudge_decision(&failed_episode),
+            AutoNudgeDecision::Drop(STALL_NUDGE_SCHEDULE_FAILED)
+        ));
     }
 
     fn app_with_stalled_pane(
@@ -601,6 +863,8 @@ mod tests {
 
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx).contains("/status"));
+        assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
+        assert_eq!(drain(&mut rx), "\r");
 
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(39 * 60)));
         assert_eq!(drain(&mut rx), "");
@@ -609,9 +873,26 @@ mod tests {
 
         assert!(app.tick_auto_nudges(now + Duration::from_secs(120 * 60)));
         assert!(drain(&mut rx).contains("/status"));
+        assert!(
+            app.tick_auto_nudges(now + Duration::from_secs(120 * 60) + STALL_NUDGE_SUBMIT_DELAY)
+        );
+        assert_eq!(drain(&mut rx), "\r");
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(1_000 * 60)));
         assert_eq!(drain(&mut rx), "");
         assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 3);
+    }
+
+    #[tokio::test]
+    async fn delayed_stall_nudge_submission_sends_enter_only_when_due() {
+        let now = Instant::now();
+        let (mut app, _pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
+
+        assert!(app.tick_auto_nudges(now));
+        assert_eq!(drain(&mut rx), "/status");
+        assert!(!app.tick_auto_nudges(now + Duration::from_millis(299)));
+        assert_eq!(drain(&mut rx), "");
+        assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
+        assert_eq!(drain(&mut rx), "\r");
     }
 
     #[tokio::test]
@@ -644,6 +925,51 @@ mod tests {
         assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 0);
     }
 
+    #[tokio::test]
+    async fn a_human_draft_cancels_the_delayed_stall_nudge_submission() {
+        let now = Instant::now();
+        let (mut app, pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
+
+        assert!(app.tick_auto_nudges(now));
+        assert!(drain(&mut rx).contains("/status"));
+
+        app.note_human_text(pane_id, "human input");
+        tokio::time::sleep(STALL_NUDGE_SUBMIT_DELAY + Duration::from_millis(50)).await;
+
+        assert_eq!(drain(&mut rx), "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_restores_stall_nudge_budget_without_refilling_it() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.stall_nudge_episodes.insert(
+            terminal_id.clone(),
+            StallNudgeEpisode {
+                pane_id,
+                nudges_sent: 2,
+                next_nudge_at: Some(now + Duration::from_secs(40 * 60)),
+                declaration_kind: "agent_status",
+                last_drop_reason: None,
+                schedule_failed: false,
+            },
+        );
+        let persisted = app
+            .stall_nudge_handoff_state(&terminal_id, now)
+            .expect("stalled episode");
+        app.stall_nudge_episodes.clear();
+        app.restore_stall_nudge_episodes(
+            std::collections::HashMap::from([(pane_id.raw(), persisted)]),
+            &std::collections::HashMap::new(),
+            now,
+        );
+
+        assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 2);
+        assert!(!app.tick_auto_nudges(now));
+        assert_eq!(drain(&mut rx), "");
+    }
+
     #[test]
     fn app_projects_and_reloads_stalled_agent_nudge_config() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -667,5 +993,12 @@ mod tests {
         assert_eq!(app.state.nudge_after, Duration::from_secs(7 * 60));
         assert_eq!(app.state.max_nudges, 2);
         assert_eq!(app.state.stall_nudge_message, "still working?");
+
+        config.session.nudge_after_minutes = u64::MAX;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.nudge_after,
+            Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)
+        );
     }
 }

@@ -1046,6 +1046,27 @@ mod tests {
             }
         }
 
+        let hide_whitespace = crate::app::settings_general::GeneralRow::ALL
+            .iter()
+            .position(|row| *row == crate::app::settings_general::GeneralRow::HideWhitespace)
+            .expect("row");
+        let (offset, _) = crate::ui::general_row_offsets()[hide_whitespace];
+        let action = app
+            .state
+            .handle_settings_mouse(mouse_down(area.x + 1, area.y + 2 + offset));
+
+        assert_eq!(app.state.settings.list.selected, hide_whitespace);
+        assert_eq!(
+            action,
+            Some(SettingsAction::SaveConfigEdit(
+                crate::app::settings_general::ConfigEdit::Bool {
+                    section: "ui",
+                    key: "hide_whitespace_in_diff",
+                    value: true,
+                }
+            ))
+        );
+
         let auto_nudge = crate::app::settings_general::GeneralRow::ALL
             .iter()
             .position(|row| {

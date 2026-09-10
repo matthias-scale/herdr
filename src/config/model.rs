@@ -13,6 +13,7 @@ use super::{
 };
 
 pub const MAX_TOAST_DELAY_SECONDS: u64 = 3600;
+pub(crate) const MAX_NUDGE_AFTER_MINUTES: u64 = 7 * 24 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -422,6 +423,15 @@ pub struct Config {
     pub actions: Vec<ActionConfig>,
     pub launch_profiles: Vec<LaunchProfileConfig>,
     pub projects: Vec<ProjectConfig>,
+}
+
+impl Config {
+    pub(crate) fn clamp_safety_bounds(&mut self) {
+        self.session.nudge_after_minutes = self
+            .session
+            .nudge_after_minutes
+            .min(MAX_NUDGE_AFTER_MINUTES);
+    }
 }
 
 /// One named group of checkouts the home composer can dispatch into.

@@ -1,6 +1,16 @@
 #[cfg(unix)]
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StallNudgeHandoffState {
+    pub nudges_sent: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_nudge_in: Option<std::time::Duration>,
+    #[serde(default)]
+    pub schedule_failed: bool,
+}
+
 /// Long-lived pane runtime transferred during server replacement.
 ///
 /// Handoff preserves server-owned session state such as PTYs, processes, agent
@@ -31,6 +41,8 @@ pub(crate) struct HandoffRuntimeState {
     pub agent_activity: Option<crate::terminal::AgentActivityHandoffState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<crate::terminal::TerminalAgentHandoffState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_nudge: Option<StallNudgeHandoffState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_seen: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1517,6 +1517,9 @@ impl HeadlessServer {
                 .and_then(|terminal| terminal.agent_activity_handoff_state(handoff_captured_at));
             handoff_runtime.agent_state = terminal
                 .and_then(|terminal| terminal.terminal_agent_handoff_state(handoff_captured_at));
+            handoff_runtime.stall_nudge = self
+                .app
+                .stall_nudge_handoff_state(terminal_id, handoff_captured_at);
             handoff_runtime.pane_seen = Some(pane_seen);
             handoff_runtime.pane_done_for_ms = pane_done_since.map(|done_since| {
                 handoff_captured_at

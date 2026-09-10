@@ -9,6 +9,7 @@ mod tab_bar;
 mod theme;
 mod window_title;
 
+pub(crate) use self::model::MAX_NUDGE_AFTER_MINUTES;
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
