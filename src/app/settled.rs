@@ -928,6 +928,67 @@ mod tests {
     }
 
     #[test]
+    fn refresh_never_settles_remote_row_with_colliding_local_pane_id() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        state.agent_host_name = "local".into();
+        state.settle_after = Duration::ZERO;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("local terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Blocked);
+        let remote_agent: crate::api::schema::AgentInfo =
+            serde_json::from_value(serde_json::json!({
+                "agent_ref": format!("remote::{}", pane_id.raw()),
+                "terminal_id": "remote-term",
+                "name": "remote reviewer",
+                "agent": "codex",
+                "agent_status": "idle",
+                "workspace_id": "remote-workspace",
+                "tab_id": "remote-tab",
+                "pane_id": pane_id.raw().to_string(),
+                "focused": false,
+                "state_change_seq": 1,
+                "revision": 1
+            }))
+            .expect("remote agent fixture");
+        state.remote_agent_panel_entries =
+            crate::ui::remote_agent_panel_entries(&crate::fleet::Snapshot {
+                hosts: vec![crate::fleet::HostSnapshot {
+                    name: "remote".into(),
+                    target: "remote".into(),
+                    local: false,
+                    session: None,
+                    state: crate::fleet::HostState::Reachable,
+                    version: None,
+                    protocol: None,
+                    error: None,
+                    entries: vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "remote",
+                        remote_agent,
+                    )],
+                }],
+                ..crate::fleet::Snapshot::default()
+            });
+
+        assert_eq!(state.remote_agent_panel_entries.len(), 1);
+        assert_eq!(
+            state.remote_agent_panel_entries[0].agent_ref.agent,
+            pane_id.raw().to_string()
+        );
+        assert!(state.remote_agent_panel_entries[0].local_target.is_none());
+        assert_eq!(
+            state.refresh_settled_panes_at(None, Instant::now(), 1_725_000_003),
+            0
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert!(state.pending_pane_settlement_changes.is_empty());
+    }
+
+    #[test]
     fn redraw_only_screen_update_keeps_settled_pane_and_inactivity_clock() {
         let (mut state, pane_id) = state_with_context(Default::default());
         let now = Instant::now();
