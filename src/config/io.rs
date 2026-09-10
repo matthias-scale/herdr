@@ -312,6 +312,22 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
+        "notepad",
+        "notepad config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.notepad = section,
+    );
+    load_live_section(
+        table,
+        "pomodoro",
+        "break timer config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.pomodoro = section,
+    );
+    load_live_section(
+        table,
         "session",
         "session config",
         &mut diagnostics,
@@ -1195,6 +1211,29 @@ agent_panel_sort = "priority"
             loaded.config.ui.agent_panel_sort,
             super::super::AgentPanelSortConfig::Priority
         );
+    }
+
+    #[test]
+    fn load_live_config_reads_the_notepad_and_break_timer_sections() {
+        let loaded = load_live_config_from_str(
+            r#"
+[notepad]
+enabled = true
+height = 12
+
+[pomodoro]
+enabled = true
+work_minutes = 20
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+        assert!(loaded.config.notepad.enabled);
+        assert_eq!(loaded.config.notepad.height, 12);
+        assert!(loaded.config.pomodoro.enabled);
+        assert_eq!(loaded.config.pomodoro.work_minutes, 20);
     }
 
     #[test]

@@ -2451,8 +2451,16 @@ impl App {
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
-                self.apply_notepad_and_pomodoro_config(config);
             }
+        }
+
+        // Their own gates: the notepad and the break timer read nothing out of
+        // `[ui]`, so a broken `[ui]` section must not freeze either of them.
+        if !invalid_section("notepad") {
+            self.apply_notepad_config(&config.notepad);
+        }
+        if !invalid_section("pomodoro") {
+            self.apply_pomodoro_config(&config.pomodoro);
         }
 
         if !invalid_section("experimental") {
@@ -2768,6 +2776,15 @@ impl App {
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
+                            // Before the pane-context decision below: a focused
+                            // notepad and a due break reminder outrank the pane.
+                            if self.intercept_notepad_key(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             if self.handle_dock_surface_menu_key(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
@@ -2885,7 +2902,7 @@ impl App {
                         || self.state.work_view.is_some()
                         || self.try_route_paste_to_popup(&text)
                     {
-                    } else if self.state.mode != Mode::Terminal {
+                    } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
                         self.paste_into_active_text_input(&text);
                     } else {
                         if let Some(ws_idx) = self.state.active {
@@ -8187,6 +8204,37 @@ last_pane = "prefix+tab"
             bytes::Bytes::from_static(b"\x1b[106;1:3u")
         );
         assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_focused_notepad_takes_client_keys_before_the_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.notepad.enabled = true;
+        app.state.notepad.focused = true;
+
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+
+        assert_eq!(app.state.notepad.body(), "j\n");
+        assert!(
+            rx.try_recv().is_err(),
+            "the pane must not see keys typed into the notepad"
+        );
     }
 
     #[tokio::test]
