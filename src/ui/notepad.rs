@@ -202,15 +202,22 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
             Rect::new(body.x, y, body.width, 1),
         );
     }
+}
 
-    if !app.notepad.focused {
-        return;
+/// Where the note's caret belongs on screen, or `None` when the notepad does
+/// not hold it. The caret carries the IME composition preview, so it has to be
+/// a real host cursor rather than a highlighted cell.
+pub(crate) fn notepad_caret_position(app: &AppState, panel: Rect) -> Option<(u16, u16)> {
+    if !app.notepad.focused || app.notepad.error.is_some() {
+        return None;
     }
-    // The caret carries the IME composition preview, so it has to be a real host
-    // cursor rather than a highlighted cell.
+    let body = notepad_body_rect(panel);
+    if body.width == 0 || body.height == 0 {
+        return None;
+    }
     let row = app.notepad.cursor_line.saturating_sub(app.notepad.scroll);
-    if row >= visible {
-        return;
+    if row >= usize::from(body.height) {
+        return None;
     }
     let prefix: String = app
         .notepad
@@ -222,7 +229,18 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
         .x
         .saturating_add(display_width_u16(&prefix))
         .min(body.right().saturating_sub(1));
-    frame.set_cursor_position((x, body.y.saturating_add(row as u16)));
+    Some((x, body.y.saturating_add(row as u16)))
+}
+
+/// Place the caret after every other surface has drawn. The focused pane, the
+/// home composer and the sidebar all claim the one host cursor, and the last
+/// claim wins; the notepad takes keys ahead of all of them, so it has to be the
+/// one that speaks last. Only the break prompt, which takes keys ahead of the
+/// notepad, may still overwrite it.
+pub(crate) fn render_notepad_caret(app: &AppState, frame: &mut Frame) {
+    if let Some(position) = notepad_caret_position(app, app.view.notepad_rect) {
+        frame.set_cursor_position(position);
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +377,66 @@ mod render_tests {
         let with = crate::ui::workspace_list_rect_for_app(&app, sidebar);
         assert_eq!(without.height - with.height, 8);
         assert_eq!(with.y, without.y);
+    }
+    /// The focused pane, the home composer and the notepad all claim the one
+    /// host cursor, and the last claim of the frame wins. The notepad takes
+    /// keys ahead of both, so it has to win.
+    #[test]
+    fn the_notepad_caret_outranks_every_other_cursor_claim() {
+        const WIDTH: u16 = 120;
+        const HEIGHT: u16 = 40;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.notepad.enabled = true;
+        app.notepad.height = 6;
+        app.notepad.set_files(vec![crate::notepad::NotepadFile {
+            path: "/notes/todo.md".into(),
+            name: "todo".into(),
+        }]);
+        app.notepad.set_body("- ship the caret");
+        app.notepad.focused = true;
+        app.notepad.cursor_line = 0;
+        app.notepad.cursor_col = "- ship".chars().count();
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, WIDTH, HEIGHT));
+        let expected = notepad_caret_position(&app, app.view.notepad_rect).expect("caret");
+        let body = notepad_body_rect(app.view.notepad_rect);
+        assert_eq!(expected, (body.x + 6, body.y));
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app, frame))
+            .expect("render");
+        let caret = terminal.get_cursor_position().expect("host cursor");
+        assert_eq!((caret.x, caret.y), expected);
+    }
+
+    #[test]
+    fn an_unfocused_or_unreachable_notepad_claims_no_caret() {
+        let mut app = AppState::test_new();
+        app.notepad.enabled = true;
+        app.notepad.height = 8;
+        app.notepad.set_body("note");
+        let panel = notepad_panel_rect(&app, Rect::new(0, 1, 26, 40));
+
+        assert!(notepad_caret_position(&app, panel).is_none());
+
+        app.notepad.focused = true;
+        assert!(notepad_caret_position(&app, panel).is_some());
+
+        // A caret scrolled out of the panel's rows is not drawn at its edge.
+        app.notepad.cursor_line = 99;
+        assert!(notepad_caret_position(&app, panel).is_none());
+
+        // The error row replaces the body, so there is nothing to point at.
+        app.notepad.cursor_line = 0;
+        app.notepad.error = Some("cannot save".into());
+        assert!(notepad_caret_position(&app, panel).is_none());
+
+        // No panel, no caret.
+        app.notepad.error = None;
+        assert!(notepad_caret_position(&app, Rect::default()).is_none());
     }
 }

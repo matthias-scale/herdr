@@ -2095,6 +2095,12 @@ impl AppState {
                         ws_idx,
                         tab_idx,
                     );
+                    let link = self.url_at_pane_cell(
+                        terminal_runtimes,
+                        info.id,
+                        mouse.row.saturating_sub(info.inner_rect.y),
+                        mouse.column.saturating_sub(info.inner_rect.x),
+                    );
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
                             ws_idx,
@@ -2104,6 +2110,7 @@ impl AppState {
                             has_manual_label,
                             right_click_passthrough,
                             linkable_work_link,
+                            link,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -5465,6 +5472,53 @@ mod tests {
             .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
     }
 
+    /// A link Herdr has no pattern for is still a link: the menu has to let it
+    /// leave the pane.
+    #[tokio::test]
+    async fn right_click_on_any_link_copies_it_to_the_clipboard() {
+        let line = "see https://example.com/build/logs?run=42 for the failure";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "example");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane {
+                linkable_work_link: None,
+                link: Some(url),
+                ..
+            } if url == "https://example.com/build/logs?run=42"
+        ));
+        assert!(menu.items().contains(&crate::app::state::COPY_LINK_ITEM));
+
+        click_menu_item(&mut app, crate::app::state::COPY_LINK_ITEM);
+        let copied = match app.event_rx.try_recv().expect("clipboard write event") {
+            crate::events::AppEvent::ClipboardWrite { content } => content,
+            event => panic!("unexpected event: {event:?}"),
+        };
+        assert_eq!(
+            String::from_utf8(copied).expect("utf8"),
+            "https://example.com/build/logs?run=42"
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn right_click_away_from_any_link_offers_nothing_to_copy() {
+        let line = "the build failed twice in a row";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "failed");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane { link: None, .. }
+        ));
+        assert!(!menu.items().contains(&crate::app::state::COPY_LINK_ITEM));
+    }
+
     #[tokio::test]
     async fn right_click_on_a_pr_the_window_already_carries_offers_no_link_item() {
         let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
@@ -6715,6 +6769,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 2,
             y: 2,

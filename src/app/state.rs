@@ -1020,6 +1020,16 @@ pub struct AgentCardArea {
     pub row_idx: usize,
 }
 
+/// A sub-cell of a sidebar row that explains itself on hover: a status glyph,
+/// an agent dot, or a work-item title the row was too narrow to show in full.
+/// The label is resolved while the frame is laid out, so the tooltip never has
+/// to walk the sidebar rows again at render time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarHoverTarget {
+    pub rect: Rect,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabCardArea {
     pub ws_idx: usize,
@@ -2189,6 +2199,10 @@ pub struct ViewState {
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
+    /// Hover-only explanations for sidebar row internals (status glyphs, agent
+    /// dots, truncated work titles), in the order `ControlId::SidebarHover`
+    /// indexes them.
+    pub(crate) sidebar_hover_targets: Vec<SidebarHoverTarget>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -2892,9 +2906,14 @@ pub enum ContextMenuKind {
         /// Work link under the click, when the clicked cell carries one that is
         /// not already bound to every pane of this window.
         linkable_work_link: Option<PaneMenuWorkLinkAction>,
+        /// Whatever link the clicked cell carries, matched to no pattern. A
+        /// pull request and a paste-bin URL are equally copyable.
+        link: Option<String>,
     },
 }
 
+/// Label of the pane menu entry that copies the clicked link.
+pub const COPY_LINK_ITEM: &str = "Copy link";
 /// Labels of the session-star entries in the tab context menu.
 pub const STAR_ITEM: &str = "Star";
 pub const UNSTAR_ITEM: &str = "Unstar";
@@ -3064,11 +3083,15 @@ impl ContextMenuState {
                 has_manual_label,
                 right_click_passthrough,
                 linkable_work_link,
+                link,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
                 if let Some(action) = linkable_work_link {
                     items.push(action.menu_item());
+                }
+                if link.is_some() {
+                    items.push(COPY_LINK_ITEM);
                 }
                 if *has_manual_label {
                     items.push("Clear pane name");
@@ -3994,6 +4017,7 @@ pub(crate) enum ControlId {
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
+    SidebarHover(usize),
     SidebarAnimationPause,
     DockTab(usize),
     DockClose,
@@ -5793,6 +5817,7 @@ impl AppState {
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),

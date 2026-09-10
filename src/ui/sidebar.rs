@@ -4183,14 +4183,22 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    nested_header_areas_from_rows(app, &rows, body, scroll_skip)
+}
+
+/// Header geometry from rows a caller already walked, so a frame that needs
+/// both the headers and something else from the same rows pays for one build.
+fn nested_header_areas_from_rows(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body: Rect,
+    scroll_skip: usize,
+) -> Vec<NestedHeaderArea> {
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
-    for (idx, row) in rows
-        .iter()
-        .enumerate()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
-    {
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
             break;
@@ -4220,9 +4228,160 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
         }
         y = y
             .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+            .saturating_add(sidebar_row_gap(app, rows, idx));
     }
     out
+}
+
+/// What an agent dot is saying, in the row's own vocabulary. A pane can
+/// override the words per status, so an operator who renamed "blocked" sees
+/// their own label here rather than ours.
+fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
+    if !entry.has_agent {
+        return "No agent".to_string();
+    }
+    // A usage limit outranks every lifecycle label: no answer releases the
+    // pane, only the reset window. A gate blocks only once work has stopped.
+    let key = if entry.usage_limited {
+        "usage"
+    } else if entry_has_gate(entry) && entry.state != AgentState::Working {
+        "blocked"
+    } else {
+        agent_panel_status_key(entry.state, entry.seen)
+    };
+    if let Some(label) = entry.state_labels.get(key) {
+        return label.clone();
+    }
+    match key {
+        "usage" => "Usage limit",
+        "blocked" => "Blocked, waiting on you",
+        "working" => "Working",
+        "done" => "Done, unread",
+        "idle" => "Idle",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+/// Hover explanations for the parts of a sidebar row that are a glyph or a
+/// truncation rather than words: status glyphs, agent dots, and work titles the
+/// row was too narrow to spell out.
+///
+/// One walk of the visible rows per frame, on the same geometry the row
+/// renderers use, so an anchor cannot drift from what it explains.
+pub(crate) fn compute_sidebar_hover_targets(
+    app: &AppState,
+    area: Rect,
+) -> Vec<crate::app::state::SidebarHoverTarget> {
+    let ws_area = workspace_list_rect_for_app(app, area);
+    if ws_area == Rect::default() {
+        return Vec::new();
+    }
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+
+    let rows = sidebar_rows(app);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    let mut visible = Vec::new();
+    let mut y = body.y;
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        visible.push((row, y));
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, &rows, idx));
+    }
+
+    // The narrow-view prefix is a property of the whole list, and the row
+    // renderers only apply it when a tab card asked for it.
+    let narrow_prefix = visible
+        .iter()
+        .any(|(row, _)| matches!(row, SidebarRow::Tab { .. }))
+        .then(|| narrow_view_tab_prefix_from_rows(&rows, usize::from(body.width)))
+        .flatten();
+
+    let mut targets = Vec::new();
+    for (row, row_y) in visible {
+        match row {
+            SidebarRow::Agent { entry, depth } | SidebarRow::Tab { entry, depth } => {
+                let tab = matches!(row, SidebarRow::Tab { .. });
+                let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth) * 3 + 1);
+                let provider = compact_provider(entry);
+                let title = compact_row_title_for_width(
+                    compact_row_title(entry, tab),
+                    &provider,
+                    usize::from(body.width),
+                    requested_prefix,
+                );
+                let prefix =
+                    compact_row_widths(title, &provider, usize::from(body.width), requested_prefix)
+                        .prefix;
+                let Some(rect) = clamp_row_cells(body, row_y, prefix, SIDEBAR_DOT_FIELD_WIDTH)
+                else {
+                    continue;
+                };
+                targets.push(crate::app::state::SidebarHoverTarget {
+                    rect,
+                    label: agent_dot_tooltip(entry),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for header in nested_header_areas_from_rows(app, &rows, body, scroll_skip) {
+        let spans = nested_header_spans(&header);
+        if let (Some(glyph), Some(status)) = (spans.glyph, header.status) {
+            if let Some(rect) = clamp_row_cells(
+                body,
+                header.rect.y,
+                spans.prefix_width,
+                display_width(glyph),
+            ) {
+                targets.push(crate::app::state::SidebarHoverTarget {
+                    rect,
+                    label: status.label().to_string(),
+                });
+            }
+        }
+        // The full `<id> · <title>` is only worth a tooltip when the row could
+        // not show it; an untruncated title would repeat itself.
+        if spans.title_truncated {
+            if let Some(rect) = clamp_row_cells(
+                body,
+                header.rect.y,
+                spans.prefix_width + spans.glyph_width,
+                display_width(&spans.title),
+            ) {
+                targets.push(crate::app::state::SidebarHoverTarget {
+                    rect,
+                    label: header.title.clone(),
+                });
+            }
+        }
+    }
+
+    targets
+}
+
+/// A cell span inside a sidebar row, clipped to the list body. `None` once the
+/// span starts past the right edge or has no width left.
+fn clamp_row_cells(body: Rect, row_y: u16, offset: usize, width: usize) -> Option<Rect> {
+    if width == 0 || row_y < body.y || row_y >= body.bottom() {
+        return None;
+    }
+    let x = body.x.saturating_add(u16::try_from(offset).ok()?);
+    if x >= body.right() {
+        return None;
+    }
+    let width = u16::try_from(width).ok()?.min(body.right() - x);
+    (width > 0).then(|| Rect::new(x, row_y, width, 1))
 }
 
 pub(crate) fn sidebar_nested_header_at(app: &AppState, row: u16) -> Option<String> {
@@ -5611,31 +5770,55 @@ fn render_section_header(
     );
 }
 
-fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
-    if header.rect.width == 0 || header.rect.height == 0 {
-        return;
-    }
-    let p = &app.palette;
-    let count_label = (!header.dim).then(|| format!(" ({})", header.count));
-    let count_width = count_label
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
+/// Where a nested header's cells land inside its row. Render and hover both
+/// read this, so a tooltip anchor can never drift from the glyph or title it
+/// points at.
+struct NestedHeaderSpans {
+    prefix_width: usize,
+    glyph: Option<&'static str>,
+    /// Cells the glyph occupies including its trailing gap, `0` without one.
+    glyph_width: usize,
+    title: String,
+    title_truncated: bool,
+}
+
+fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
+    let count_width = if header.dim {
+        0
+    } else {
+        display_width(&format!(" ({})", header.count))
+    };
     let action_width = usize::from(header.action_key.is_some()) * 2;
     let spawn_width = usize::from(header.spawn) * 2;
-    let prefix = if header.dim { "   " } else { "  ▸ " };
+    let prefix_width = display_width(if header.dim { "   " } else { "  ▸ " });
     // The status glyph sits before the id, so it costs the title its width.
     let glyph = header.status.map(WorkGroupStatus::glyph);
     let glyph_width = glyph.map(|glyph| display_width(glyph) + 1).unwrap_or(0);
     let title = truncate_end(
         &header.title,
         usize::from(header.rect.width)
-            .saturating_sub(display_width(prefix))
+            .saturating_sub(prefix_width)
             .saturating_sub(glyph_width)
             .saturating_sub(count_width)
             .saturating_sub(action_width)
             .saturating_sub(spawn_width),
     );
+    NestedHeaderSpans {
+        prefix_width,
+        glyph,
+        glyph_width,
+        title_truncated: display_width(&title) < display_width(&header.title),
+        title,
+    }
+}
+
+fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
+    if header.rect.width == 0 || header.rect.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let count_label = (!header.dim).then(|| format!(" ({})", header.count));
+    let NestedHeaderSpans { glyph, title, .. } = nested_header_spans(header);
     // A dim header carries no live state colour: nothing is running under it.
     let color = if header.dim { p.overlay0 } else { p.subtext0 };
     let mut spans = vec![Span::raw(if header.dim {
@@ -16671,5 +16854,147 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(compute_tab_card_areas(&app, area)
             .iter()
             .all(|card| card.rect.y != job_row.rect.y));
+    }
+
+    fn test_nested_header(
+        title: &str,
+        status: Option<WorkGroupStatus>,
+        width: u16,
+    ) -> NestedHeaderArea {
+        NestedHeaderArea {
+            key: "key".into(),
+            action_key: Some("key".into()),
+            title: title.into(),
+            count: 2,
+            collapsed: false,
+            dim: false,
+            status,
+            spawn: false,
+            rect: Rect::new(0, 0, width, 1),
+        }
+    }
+
+    #[test]
+    fn nested_header_spans_place_the_glyph_before_the_title() {
+        let header = test_nested_header(
+            "SCA-1 \u{b7} short",
+            Some(WorkGroupStatus::TicketInProgress),
+            60,
+        );
+        let spans = nested_header_spans(&header);
+
+        assert_eq!(spans.prefix_width, 4);
+        assert_eq!(spans.glyph, Some("\u{25d0}"));
+        assert_eq!(spans.glyph_width, 2);
+        assert_eq!(spans.title, header.title);
+        assert!(!spans.title_truncated);
+    }
+
+    #[test]
+    fn a_narrow_header_reports_its_title_as_truncated() {
+        let header = test_nested_header(
+            "SCA-3296 \u{b7} enhance text tool to preserve stored ratio",
+            Some(WorkGroupStatus::TicketInReview),
+            24,
+        );
+        let spans = nested_header_spans(&header);
+
+        assert!(spans.title_truncated);
+        assert!(display_width(&spans.title) < display_width(&header.title));
+    }
+
+    #[test]
+    fn agent_dot_tooltip_says_what_the_dot_means() {
+        let mut entry = compact_test_entry("task", Some(Agent::Claude));
+        entry.state = AgentState::Working;
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
+
+        entry.state = AgentState::Blocked;
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        // A gate on a working pane does not steal the working label; a gate on
+        // a stopped pane is the thing blocking it.
+        entry.state = AgentState::Working;
+        entry.open_blockers = true;
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
+        entry.state = AgentState::Idle;
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        // A usage limit outranks every lifecycle label.
+        entry.usage_limited = true;
+        assert_eq!(agent_dot_tooltip(&entry), "Usage limit");
+
+        // A pane that renamed its own status is quoted, not overridden.
+        entry
+            .state_labels
+            .insert("usage".into(), "resets 14:00".into());
+        assert_eq!(agent_dot_tooltip(&entry), "resets 14:00");
+
+        let shell = compact_test_entry("terminal", None);
+        assert_eq!(agent_dot_tooltip(&shell), "No agent");
+    }
+
+    #[test]
+    fn hover_targets_anchor_on_the_agent_dot_a_row_actually_drew() {
+        let app = app_with_agents(&["alpha"]);
+        let area = Rect::new(0, 0, 32, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let target = compute_sidebar_hover_targets(&app, area)
+            .into_iter()
+            .find(|target| target.rect.y == card.rect.y)
+            .expect("dot target on the agent row");
+
+        assert_eq!(target.label, "Working");
+        assert_eq!(target.rect.height, 1);
+        // The anchor sits on the dot the row drew, not on its left edge.
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.width);
+        assert_eq!(
+            rendered.chars().nth(usize::from(target.rect.x)),
+            Some('\u{25cf}'),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_truncated_work_header_offers_its_full_title_on_hover() {
+        let header = test_nested_header(
+            "SCA-3296 \u{b7} enhance text tool to preserve stored ratio",
+            Some(WorkGroupStatus::TicketInReview),
+            24,
+        );
+        let spans = nested_header_spans(&header);
+        let glyph = clamp_row_cells(header.rect, header.rect.y, spans.prefix_width, 1)
+            .expect("glyph anchor");
+        let title = clamp_row_cells(
+            header.rect,
+            header.rect.y,
+            spans.prefix_width + spans.glyph_width,
+            display_width(&spans.title),
+        )
+        .expect("title anchor");
+
+        // The two anchors explain different things and must not overlap.
+        assert!(glyph.right() <= title.x);
+        assert!(title.right() <= header.rect.right());
+        assert_eq!(WorkGroupStatus::TicketInReview.label(), "In Review");
+    }
+
+    #[test]
+    fn a_row_span_past_the_right_edge_has_no_anchor() {
+        let body = Rect::new(0, 0, 10, 3);
+
+        assert!(clamp_row_cells(body, 0, 10, 3).is_none());
+        assert!(clamp_row_cells(body, 0, 0, 0).is_none());
+        assert!(clamp_row_cells(body, 9, 0, 3).is_none());
+        assert_eq!(
+            clamp_row_cells(body, 0, 8, 3),
+            Some(Rect::new(8, 0, 2, 1)),
+            "a span is clipped to the body, never past it"
+        );
     }
 }

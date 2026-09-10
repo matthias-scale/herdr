@@ -130,6 +130,14 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
                     rect_contains(*rect, col, row).then_some(ControlId::DockTab(index))
                 })
         })
+        .or_else(|| {
+            view.sidebar_hover_targets
+                .iter()
+                .enumerate()
+                .find_map(|(index, target)| {
+                    rect_contains(target.rect, col, row).then_some(ControlId::SidebarHover(index))
+                })
+        })
 }
 
 fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
@@ -180,6 +188,10 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
             view.dock_tab_hit_areas.get(index).copied()?,
             app.dock_tab_title(index),
         ),
+        ControlId::SidebarHover(index) => {
+            let target = view.sidebar_hover_targets.get(index)?;
+            (target.rect, target.label.clone())
+        }
         ControlId::DockClose => (view.dock_tab_close_rect, "Close tab".into()),
         ControlId::DockAdd => (view.dock_plus_rect, "Open surface".into()),
         ControlId::TopBarScrollLeft => (view.tab_scroll_left_hit_area, "Scroll tabs left".into()),
@@ -318,5 +330,40 @@ mod tests {
             tooltip_target(&app, ControlId::SidebarNewMenu).map(|(_, label)| label),
             Some("New…".to_string())
         );
+    }
+    #[test]
+    fn a_sidebar_row_glyph_resolves_to_its_own_explanation() {
+        let mut app = AppState::test_new();
+        app.view.sidebar_rect = Rect::new(0, 0, 26, 24);
+        app.view.sidebar_hover_targets = vec![
+            crate::app::state::SidebarHoverTarget {
+                rect: Rect::new(1, 4, 3, 1),
+                label: "Blocked, waiting on you".into(),
+            },
+            crate::app::state::SidebarHoverTarget {
+                rect: Rect::new(4, 5, 1, 1),
+                label: "In Review".into(),
+            },
+        ];
+
+        assert_eq!(
+            hovered_control_at(&app, 2, 4),
+            Some(ControlId::SidebarHover(0))
+        );
+        assert_eq!(
+            hovered_control_at(&app, 4, 5),
+            Some(ControlId::SidebarHover(1))
+        );
+        assert_eq!(hovered_control_at(&app, 9, 5), None);
+
+        let (anchor, label) =
+            tooltip_target(&app, ControlId::SidebarHover(1)).expect("status tooltip");
+        assert_eq!(anchor, Rect::new(4, 5, 1, 1));
+        assert_eq!(label, "In Review");
+
+        // A row that scrolled away between hover and render explains nothing
+        // rather than explaining the wrong row.
+        app.view.sidebar_hover_targets.clear();
+        assert!(tooltip_target(&app, ControlId::SidebarHover(1)).is_none());
     }
 }

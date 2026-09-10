@@ -944,6 +944,15 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Pane {
+                link: Some(link), ..
+            },
+            Some(crate::app::state::COPY_LINK_ITEM),
+        ) => {
+            state.request_clipboard_write = Some(link.into_bytes());
+            state.mode = Mode::Terminal;
+        }
+        (
+            ContextMenuKind::Pane {
                 ws_idx, pane_id, ..
             },
             Some("Clear pane name"),
@@ -1451,6 +1460,15 @@ impl App {
                 if linked > 0 {
                     self.show_work_linked_toast(&action, ws_idx, linked);
                 }
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    link: Some(link), ..
+                },
+                Some(crate::app::state::COPY_LINK_ITEM),
+            ) => {
+                self.state.request_clipboard_write = Some(link.into_bytes());
                 self.state.mode = Mode::Terminal;
             }
             (
@@ -2491,6 +2509,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 0,
             y: 0,
@@ -2540,6 +2559,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 0,
             y: 0,
@@ -2652,6 +2672,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 0,
             y: 0,

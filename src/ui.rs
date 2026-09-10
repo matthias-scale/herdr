@@ -565,6 +565,11 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
+    let sidebar_hover_targets = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_sidebar_hover_targets(app, sidebar_area)
+    };
     let sidebar_footer_work_hit_area = if app.sidebar_collapsed {
         Rect::default()
     } else {
@@ -758,6 +763,7 @@ fn compute_view_internal(
         sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
+        sidebar_hover_targets,
         visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -1048,6 +1054,7 @@ fn compute_mobile_view(
         sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
+        sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -1292,6 +1299,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
+    notepad::render_notepad_caret(app, frame);
     // Last, and over everything: a due break reminder outranks whatever the
     // operator was looking at, which is the point of it.
     pomodoro::render_overlay(app, frame, frame.area());
