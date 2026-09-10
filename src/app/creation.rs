@@ -300,6 +300,16 @@ impl App {
     }
 
     pub(crate) fn open_fleet_host(&mut self, name: &str) {
+        self.open_fleet_host_focused(name, None);
+    }
+
+    /// Attach to a fleet host, optionally focusing one of its agents first.
+    ///
+    /// The remote focus is a server-side fact, so it is asked for over the same
+    /// ssh path the fleet poller already uses rather than through the attached
+    /// client. Asking before the attach means the session is already on that
+    /// pane by the time the first frame arrives.
+    pub(crate) fn open_fleet_host_focused(&mut self, name: &str, focus_agent: Option<&str>) {
         let Some(host) = self
             .state
             .fleet_snapshot
@@ -326,6 +336,9 @@ impl App {
                 return;
             }
         };
+        if let Some(agent) = focus_agent {
+            crate::fleet::focus_remote_agent(&host, agent);
+        }
         // A host session is one thing. Clicking its row again must return to the
         // pane already attached to it rather than dial a second ssh connection
         // and leave the operator with two views of the same server.
@@ -948,6 +961,7 @@ mod tests {
             target: "ub2".to_string(),
             local: false,
             session: None,
+            socket: None,
             state: crate::fleet::HostState::Unreachable,
             version: None,
             protocol: None,

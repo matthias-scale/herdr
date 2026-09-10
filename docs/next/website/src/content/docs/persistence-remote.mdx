@@ -128,6 +128,11 @@ The optional `session` value adds `--session` when the host opens. Hosts marked
 `local = true` use the local API socket for inventory reads and never poll over SSH.
 An empty Hosts surface points back to `[[remote.fleet.hosts]]`.
 
+Fleet agents also appear in the sidebar, grouped under one collapsible header
+per host. Clicking one attaches to that host and focuses the agent you clicked,
+so the session opens on its pane. A host that is already attached is focused
+rather than dialled again, so repeated clicks return to the same pane.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.

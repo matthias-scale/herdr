@@ -5002,9 +5002,9 @@ impl App {
                         self.state.clear_home();
                         self.open_symphony_workflow_at(index);
                     }
-                    MouseAction::OpenFleetHost { name } => {
+                    MouseAction::OpenFleetHost { name, focus_agent } => {
                         self.state.clear_home();
-                        self.open_fleet_host(&name);
+                        self.open_fleet_host_focused(&name, focus_agent.as_deref());
                     }
                     MouseAction::FocusToastTarget => {
                         self.state.clear_home();

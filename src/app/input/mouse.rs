@@ -100,6 +100,10 @@ pub(super) enum MouseAction {
     /// Open a configured fleet host in a normal local tab.
     OpenFleetHost {
         name: String,
+        /// The agent the operator clicked, focused on the remote host before
+        /// the attach lands so the session opens on that pane. `None` when the
+        /// host itself was the target.
+        focus_agent: Option<String>,
     },
     /// Hand a link to the desktop browser.
     OpenUrl {
@@ -1311,7 +1315,10 @@ impl AppState {
                 }
                 if in_dock && self.dock_tab == Some(crate::app::DockSurface::Hosts) {
                     if let Some(name) = self.click_dock_host_row(mouse.column, mouse.row) {
-                        return Some(MouseAction::OpenFleetHost { name });
+                        return Some(MouseAction::OpenFleetHost {
+                            name,
+                            focus_agent: None,
+                        });
                     }
                 }
                 // The ticket buttons and their dropdowns sit above the section
@@ -1532,6 +1539,7 @@ impl AppState {
                         self.mark_sidebar_projection_changed();
                         return Some(MouseAction::OpenFleetHost {
                             name: agent_ref.host.clone(),
+                            focus_agent: Some(agent_ref.agent.clone()),
                         });
                     }
                     if let Some(key) =
@@ -3675,6 +3683,47 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_fleet_row_carries_the_agent_the_remote_should_focus() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub1", "w3K:p11")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let row =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .next()
+                .expect("the fleet row owns a hit area");
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                row.rect.x + 2,
+                row.rect.y,
+            ),
+        );
+
+        // The host alone would land the operator wherever that session was last
+        // left; the pane id is what makes the attach open on the clicked agent.
+        let Some(MouseAction::OpenFleetHost { name, focus_agent }) = action else {
+            panic!("a fleet row click must ask for an attach");
+        };
+        assert_eq!(name, "ub1");
+        assert_eq!(focus_agent.as_deref(), Some("w3K:p11"));
+    }
+
+    #[test]
     fn attaching_to_a_host_twice_returns_to_the_pane_already_open() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
@@ -3688,6 +3737,7 @@ mod tests {
                 target: "ub1".into(),
                 local: false,
                 session: None,
+                socket: None,
                 state: crate::fleet::HostState::Reachable,
                 version: None,
                 protocol: None,

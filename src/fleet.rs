@@ -15,6 +15,9 @@ use crate::config::{FleetConfig, FleetHostConfig};
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+/// One focus command is a single request against a server that is already
+/// answering the poller, so it gets the same budget as a default poll.
+const FOCUS_TIMEOUT_MS: u64 = 5_000;
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
@@ -227,6 +230,11 @@ pub(crate) struct HostSnapshot {
     pub(crate) target: String,
     pub(crate) local: bool,
     pub(crate) session: Option<String>,
+    /// How to reach the host's server once ssh lands. It is connection detail
+    /// rather than a runtime fact, so it stays out of the published snapshot
+    /// while the local commands that dial the host can still read it.
+    #[serde(skip)]
+    pub(crate) socket: Option<String>,
     pub(crate) state: HostState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) version: Option<String>,
@@ -288,6 +296,7 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
                         target: host.target.clone(),
                         local: host.local,
                         session: host.session.clone(),
+                        socket: host.socket.clone(),
                         state: HostState::Unreachable,
                         version: None,
                         protocol: None,
@@ -455,6 +464,7 @@ fn snapshot_from_evidence(
             target: evidence.host.target,
             local: evidence.host.local,
             session: evidence.host.session,
+            socket: evidence.host.socket,
             state,
             version: evidence.runtime.version,
             protocol: evidence.runtime.protocol,
@@ -622,6 +632,43 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
         .unwrap_or_default();
     format!(
         "set -u\n{socket}{session}herdr agent list || exit $?\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  find \"$HOME/.agents/runs\" -mindepth 2 -maxdepth 2 -type f -name state.json -exec cat {{}} \\; -exec printf '\\n' \\;\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n"
+    )
+}
+
+/// Focus one agent on a remote host so an attach lands on that pane instead of
+/// wherever the remote session was last left.
+///
+/// This runs on its own thread. The click that asks for it is handled on the
+/// render path, and an ssh round trip there would stall every pane on the
+/// screen until the remote answered.
+pub(crate) fn focus_remote_agent(host: &HostSnapshot, agent: &str) {
+    if host.local || host.target.trim().is_empty() || agent.trim().is_empty() {
+        return;
+    }
+    if cfg!(test) {
+        return;
+    }
+    let target = host.target.clone();
+    let name = host.name.clone();
+    let script = remote_focus_script(host.socket.as_deref(), host.session.as_deref(), agent);
+    std::thread::spawn(move || {
+        let timeout = Duration::from_millis(FOCUS_TIMEOUT_MS);
+        if let Err(error) = run_ssh_with_timeout(&target, &script, timeout) {
+            tracing::warn!(host = %name, %error, "could not focus the remote agent");
+        }
+    });
+}
+
+fn remote_focus_script(socket: Option<&str>, session: Option<&str>, agent: &str) -> String {
+    let socket = socket
+        .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
+        .unwrap_or_default();
+    let session = session
+        .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
+        .unwrap_or_default();
+    format!(
+        "set -u\n{socket}{session}herdr agent focus {}\n",
+        shell_quote(agent)
     )
 }
 
@@ -1947,12 +1994,34 @@ mod tests {
     }
 
     #[test]
+    fn remote_focus_script_carries_the_socket_session_and_quoted_target() {
+        let script = remote_focus_script(
+            Some("/home/ubuntu/.config/herdr/herdr.sock"),
+            Some("agents"),
+            "w3K:p11",
+        );
+
+        assert_eq!(
+            script,
+            "set -u\nexport HERDR_SOCKET_PATH='/home/ubuntu/.config/herdr/herdr.sock'\nexport HERDR_SESSION='agents'\nherdr agent focus 'w3K:p11'\n"
+        );
+    }
+
+    #[test]
+    fn remote_focus_script_quotes_a_target_that_carries_a_quote() {
+        let script = remote_focus_script(None, None, "pane'; rm -rf /");
+
+        assert_eq!(script, "set -u\nherdr agent focus 'pane'\\''; rm -rf /'\n");
+    }
+
+    #[test]
     fn host_attach_argv_includes_configured_session() {
         let host = HostSnapshot {
             name: "workbox".to_string(),
             target: "you@workbox".to_string(),
             local: false,
             session: Some("agents".to_string()),
+            socket: None,
             state: HostState::Reachable,
             version: None,
             protocol: None,
