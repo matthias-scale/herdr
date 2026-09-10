@@ -6374,33 +6374,35 @@ fn render_workspace_list(
         };
         render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
-    let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
-    let mut row_y = body.y;
-    for (row_idx, row) in row_entries
-        .iter()
-        .enumerate()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
-    {
-        let height = sidebar_row_height(app, row, body.height);
-        if row_y.saturating_add(height) > body.bottom() {
-            break;
-        }
-        if let SidebarRow::RemoteAgent { entry, depth } = row {
-            render_remote_compact_agent_row_with_prefix(
+    if !app.remote_agent_panel_entries.is_empty() {
+        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        let mut row_y = body.y;
+        for (row_idx, row) in row_entries
+            .iter()
+            .enumerate()
+            .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+        {
+            let height = sidebar_row_height(app, row, body.height);
+            if row_y.saturating_add(height) > body.bottom() {
+                break;
+            }
+            if let SidebarRow::RemoteAgent { entry, depth } = row {
+                render_remote_compact_agent_row_with_prefix(
+                    app,
+                    frame,
+                    entry,
+                    Rect::new(body.x, row_y, body.width, height),
+                    *depth,
+                    None,
+                    narrow_prefix,
+                );
+            }
+            row_y = row_y.saturating_add(height).saturating_add(sidebar_row_gap(
                 app,
-                frame,
-                entry,
-                Rect::new(body.x, row_y, body.width, height),
-                *depth,
-                None,
-                narrow_prefix,
-            );
+                &row_entries,
+                row_idx,
+            ));
         }
-        row_y = row_y.saturating_add(height).saturating_add(sidebar_row_gap(
-            app,
-            &row_entries,
-            row_idx,
-        ));
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
