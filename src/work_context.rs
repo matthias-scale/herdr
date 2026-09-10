@@ -619,13 +619,18 @@ impl PaneWorkContextState {
         .find_map(|context| context.role.map(|role| (Some(role), context.active_owner)))
         .unwrap_or((None, false));
         self.effective = PaneWorkContext {
-            ticket_ids: stable_merge([
+            // Declaration beats observation for the link fields, the same way
+            // it does for `repo` and `branch` below. A union let the git tier
+            // pin the branch's pull request on every pane of a checkout with
+            // no way to override it, so a window linked to one pull request
+            // stayed filed under the branch's as well.
+            ticket_ids: first_declared([
                 &self.manual.ticket_ids,
                 &self.hook_turn.ticket_ids,
                 &self.git_observation.ticket_ids,
                 &self.restored_fallback.ticket_ids,
             ]),
-            pr_urls: stable_merge([
+            pr_urls: first_declared([
                 &self.manual.pr_urls,
                 &self.hook_turn.pr_urls,
                 &self.git_observation.pr_urls,
@@ -686,6 +691,17 @@ impl PaneWorkContextState {
 
 fn first_present<const N: usize>(values: [Option<&String>; N]) -> Option<String> {
     values.into_iter().flatten().next().cloned()
+}
+
+/// The highest tier that names anything, deduped. Unlike `stable_merge` this
+/// never mixes tiers: an observation is a guess about a pane, and a pane that
+/// has declared its work must be able to replace that guess outright.
+fn first_declared<const N: usize>(sources: [&Vec<String>; N]) -> Vec<String> {
+    sources
+        .into_iter()
+        .find(|source| !source.is_empty())
+        .map(|source| stable_merge([source]))
+        .unwrap_or_default()
 }
 
 fn stable_merge<const N: usize>(sources: [&Vec<String>; N]) -> Vec<String> {
@@ -1710,10 +1726,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            state.effective().ticket_ids,
-            vec!["MAT-2", "SCA-1", "SCA-3"]
-        );
+        // The declaration replaces the tiers below it rather than stacking on
+        // them, so the git-observed SCA-3 is gone; dedupe still applies within
+        // the winning tier.
+        assert_eq!(state.effective().ticket_ids, vec!["MAT-2", "SCA-1"]);
         assert_eq!(state.effective().branch.as_deref(), Some("feat/work"));
         assert_eq!(
             state.effective().preview_urls,
@@ -1733,12 +1749,23 @@ mod tests {
             .unwrap();
         assert_eq!(
             state.effective().ticket_ids,
-            vec!["MAT-2", "SCA-1", "MAT-9", "SCA-3"]
+            vec!["MAT-2", "SCA-1"],
+            "a new hook turn does not outrank the human's declaration"
         );
         assert_eq!(
             state.effective().preview_urls,
             vec!["https://second.vercel.app"]
         );
+
+        // Dropping the declaration hands the field back to the tier below,
+        // deduped across the values that tier reported.
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::TicketIds],
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+        assert_eq!(state.effective().ticket_ids, vec!["MAT-9"]);
     }
 
     #[test]
@@ -1782,12 +1809,93 @@ mod tests {
             })
             .unwrap();
 
+        // The hook does not merely sort ahead of the observation, it replaces
+        // it: the pane said which pull request it is on, so the branch guess
+        // has nothing left to contribute.
         assert_eq!(
             state.effective().pr_urls,
-            vec![
-                "https://github.com/o/r/pull/2",
-                "https://github.com/o/r/pull/1"
-            ]
+            vec!["https://github.com/o/r/pull/2"]
+        );
+    }
+
+    #[test]
+    fn manual_pr_link_replaces_the_git_observed_pull_request() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                branch: Some("feature".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.effective().pr_urls,
+            vec!["https://github.com/o/r/pull/2"],
+            "a window linked to one pull request must not stay filed under the branch's"
+        );
+        // Only the declared field is replaced; the observation still supplies
+        // everything the declaration is silent about.
+        assert_eq!(state.effective().branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn clearing_a_manual_pr_link_restores_the_git_observed_pull_request() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::PrUrls],
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.effective().pr_urls,
+            vec!["https://github.com/o/r/pull/1"],
+            "unlinking must fall back to the observation, not to nothing"
+        );
+    }
+
+    #[test]
+    fn a_manual_ticket_link_leaves_an_observed_pull_request_alone() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                ticket_ids: vec!["MAT-1".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-2".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().ticket_ids, vec!["MAT-2"]);
+        assert_eq!(
+            state.effective().pr_urls,
+            vec!["https://github.com/o/r/pull/1"],
+            "precedence is per field, not per tier"
         );
     }
 

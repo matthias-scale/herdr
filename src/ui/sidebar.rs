@@ -2100,11 +2100,16 @@ fn sidebar_tab_groups(
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
-                let Some(context) = context.filter(|context| !context.pr_urls.is_empty()) else {
+                // Same source as the work view's groups: a declared pull
+                // request is what the window is working on, and grouping it by
+                // the effective union filed a linked window under the branch's
+                // pull request as well.
+                let urls = preferred_pr_urls(app, &entry);
+                if urls.is_empty() {
                     push_unlinked_tab_group(app, &mut groups, entry);
                     continue;
-                };
-                for url in &context.pr_urls {
+                }
+                for url in &urls {
                     let title_suffix = app
                         .work_index_snapshot
                         .as_ref()
@@ -2115,8 +2120,8 @@ fn sidebar_tab_groups(
                                 .find(|item| item.pr_url.as_deref() == Some(url.as_str()))
                         })
                         .and_then(|item| item.pr_title.as_deref())
-                        .or(context.work_title.as_deref())
-                        .or(context.session_name.as_deref());
+                        .or_else(|| context.and_then(|context| context.work_title.as_deref()))
+                        .or_else(|| context.and_then(|context| context.session_name.as_deref()));
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
                     push_sidebar_tab_group(&mut groups, url.clone(), title, entry.clone(), false);
@@ -7065,6 +7070,53 @@ pub(crate) mod tests {
             .map(|group| group.title)
             .collect::<Vec<_>>();
         assert_eq!(tab_titles, ["▫ alpha", "▫ beta"]);
+    }
+
+    #[test]
+    fn linking_a_pull_request_regroups_only_the_window_it_was_linked_to() {
+        let mut app = app_with_unlinked_tab_directories(&[Some("/work/repo"), Some("/work/repo")]);
+        // Both windows sit in one checkout, so the git tier observes the
+        // branch's pull request for each of them.
+        for tab_idx in 0..2 {
+            let terminal_id = {
+                let tab = &app.workspaces[0].tabs[tab_idx];
+                tab.panes[&tab.root_pane].attached_terminal_id.clone()
+            };
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .replace_git_work_context(crate::work_context::PaneWorkContext {
+                    pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                    ..Default::default()
+                })
+                .expect("git observation");
+        }
+        let linked_terminal_id = {
+            let tab = &app.workspaces[0].tabs[0];
+            tab.panes[&tab.root_pane].attached_terminal_id.clone()
+        };
+        app.terminals
+            .get_mut(&linked_terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                ..Default::default()
+            })
+            .expect("manual link");
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+            .into_iter()
+            .map(|group| (group.key, group.entries.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups,
+            vec![
+                ("https://github.com/o/r/pull/2".to_string(), 1),
+                ("https://github.com/o/r/pull/1".to_string(), 1),
+            ],
+            "the linked window leaves the branch's group instead of joining both"
+        );
     }
 
     #[test]
