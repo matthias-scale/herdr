@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
@@ -184,7 +184,7 @@ pub(crate) use self::{
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::ViewLayout;
+use crate::app::state::{Palette, ViewLayout};
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -1388,6 +1388,30 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
         && b.x < a.x.saturating_add(a.width)
         && a.y < b.y.saturating_add(b.height)
         && b.y < a.y.saturating_add(a.height)
+}
+
+/// Opaque backdrop for a modal that has to be answered before work resumes.
+/// `dim_background` only adds the DIM modifier, which several terminals render
+/// as no change at all, so a blocking prompt gets a real veil instead: the
+/// cells behind it are blanked so the work underneath cannot be read past the
+/// dialog.
+fn veil_background(frame: &mut Frame, area: Rect, palette: &Palette) {
+    // The 16-colour theme leaves `surface0` as the terminal's own background,
+    // which would make the veil invisible; `surface1` is a concrete colour in
+    // every bundled theme.
+    let bg = match palette.surface0 {
+        Color::Reset => palette.surface1,
+        color => color,
+    };
+    let style = Style::default().bg(bg).fg(palette.overlay0);
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            cell.reset();
+            cell.set_style(style);
+        }
+    }
 }
 
 fn dim_background(frame: &mut Frame, area: Rect) {
