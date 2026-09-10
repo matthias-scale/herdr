@@ -379,6 +379,42 @@ fn request_round_trips_for_agent_explain() {
 }
 
 #[test]
+fn agent_focus_requests_support_legacy_target_and_agent_ref_forms() {
+    let legacy = serde_json::json!({
+        "id": "focus-target",
+        "method": "agent.focus",
+        "params": {"target": "w1:p3"}
+    });
+    let request: Request = serde_json::from_value(legacy.clone()).expect("legacy focus request");
+    assert_eq!(
+        serde_json::to_value(request).expect("legacy request JSON"),
+        legacy
+    );
+
+    let remote = serde_json::json!({
+        "id": "focus-ref",
+        "method": "agent.focus",
+        "params": {"agent_ref": "buildbox::w1:p3"}
+    });
+    let request: Request = serde_json::from_value(remote.clone()).expect("agent ref request");
+    assert_eq!(
+        serde_json::to_value(request).expect("agent ref request JSON"),
+        remote
+    );
+
+    let status = serde_json::json!({
+        "id": "focus-status",
+        "method": "agent.focus.status",
+        "params": {"operation_id": "remote-focus-1"}
+    });
+    let request: Request = serde_json::from_value(status.clone()).expect("focus status request");
+    assert_eq!(
+        serde_json::to_value(request).expect("focus status request JSON"),
+        status
+    );
+}
+
+#[test]
 fn notification_show_request_parses() {
     let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
     let request: Request = serde_json::from_str(json).unwrap();

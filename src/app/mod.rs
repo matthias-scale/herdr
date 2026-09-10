@@ -40,6 +40,7 @@ mod pane_send;
 mod popup;
 pub(crate) mod probes;
 pub(crate) mod projects;
+pub(crate) mod remote_focus;
 mod repo_editor;
 mod repo_routing;
 mod runtime;
@@ -161,6 +162,11 @@ pub struct App {
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    /// Server-owned remote focus operations. This state is touched only by
+    /// API requests and transport events, never by render or pane loops.
+    pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
+    pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
+    pub(crate) configured_remote_focus_hosts: HashSet<String>,
     /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -1341,6 +1347,11 @@ impl App {
             connectivity_probed_at: cfg!(test).then(Instant::now),
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
+            remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
+            remote_focus_transport: Box::new(remote_focus::StubRemoteFocusTransport),
+            configured_remote_focus_hosts: remote_focus::configured_remote_hosts(
+                &config.remote.fleet,
+            ),
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
@@ -2367,6 +2378,8 @@ impl App {
         }
 
         if !invalid_section("remote") {
+            self.configured_remote_focus_hosts =
+                remote_focus::configured_remote_hosts(&config.remote.fleet);
             let agent_host_name = config.remote.fleet.resolved_self_name();
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;

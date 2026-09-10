@@ -108,7 +108,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.work_context.set`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.focus.status`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Fleet | `fleet.list` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -131,6 +131,13 @@ each configured host's reachability, version, protocol, error, and agents.
 Every fleet agent has an `agent_ref` string in `host::agent` form. `agent.list`
 returns the same field for local agents, using `remote.fleet.self_name` as its
 host component.
+
+`agent.focus` keeps the existing `target` form for local focus and also accepts
+an `agent_ref`. A self-host reference follows the synchronous local path. A
+configured remote host returns an operation in `connecting` state; poll it with
+`agent.focus.status` using the returned `operation_id`. Remote transport is not
+available until the remote-control protocol slice lands, so the current stub
+settles those operations as `failed` with `host_unreachable`.
 
 ```json
 {"id":"fleet","method":"fleet.list","params":{}}
