@@ -1839,6 +1839,11 @@ impl crate::app::state::AppState {
         directory: PathBuf,
         workspace: HomeWorkspace,
     ) {
+        // The composer is a typing surface, so it takes the keyboard the same
+        // way a pane does. The picker that opens it hands the sidebar keyboard
+        // focus first, and a sidebar that still owns bare keys answers Enter
+        // and `n` itself instead of letting them reach the prompt.
+        self.release_surface_focus_to_pane();
         let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt.clear();
         home.directory = directory;
@@ -2772,6 +2777,42 @@ mod tests {
     use super::*;
     use crate::layout::PaneId;
     use crate::terminal::TerminalId;
+
+    #[test]
+    fn opening_the_new_thread_composer_takes_the_keyboard_off_the_sidebar() {
+        use crate::app::SidebarWorkGroupKeyAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut state = crate::app::state::AppState::test_new();
+        // What `prefix+c` leaves behind: the picker takes sidebar keyboard
+        // focus, and the row the operator clicked before it is still selected.
+        state.sidebar_focused = true;
+        state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
+        let workspace = state.default_home_workspace();
+
+        state.open_home_composer_in_directory(std::path::PathBuf::from("/tmp"), workspace);
+
+        assert!(!state.sidebar_focused);
+        assert_eq!(state.sidebar_selected_work_group, None);
+        assert!(matches!(
+            state.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::empty()
+            )),
+            SidebarWorkGroupKeyAction::Ignored
+        ));
+        assert!(matches!(
+            state.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::empty()
+            )),
+            SidebarWorkGroupKeyAction::Ignored
+        ));
+        assert_eq!(
+            state.home.as_ref().and_then(|home| home.focus),
+            Some(HomeFocus::Prompt)
+        );
+    }
 
     fn queue(n: usize) -> Vec<BlockedAgent> {
         (0..n)

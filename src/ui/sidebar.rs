@@ -590,7 +590,11 @@ fn render_remote_compact_agent_row_with_prefix(
             + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH
             + display_width(" · "),
     );
-    let host_suffix = remote.host_suffix_for_width(max_host_width);
+    // Inside a host group the header already names the host, so the row spends
+    // those cells on the provider and age tokens instead of repeating it.
+    let host_suffix = (depth == 0)
+        .then(|| remote.host_suffix_for_width(max_host_width))
+        .flatten();
     let provider_width = host_suffix.map_or(widths.provider, |_| 0);
     let age_width = host_suffix.map_or(widths.age, |_| 0);
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + provider_width + age_width;
@@ -2212,19 +2216,52 @@ fn take_remote_sidebar_row_visits() -> usize {
     REMOTE_SIDEBAR_ROW_VISITS.with(|visits| visits.replace(0))
 }
 
+/// Collapse key for a fleet host's group. Namespaced so a host can never
+/// collide with a repository, branch, or provider object of the same name.
+pub(crate) fn remote_host_collapse_key(host: &str) -> String {
+    format!("host:{host}")
+}
+
+/// Remote agents are grouped under one collapsible header per host. The host
+/// is then the group's identity, so the rows below it drop their own host
+/// token (see `depth`-gated suffix in the row renderer) and read as densely as
+/// the local list.
 fn append_remote_rows(app: &AppState, rows: &mut Vec<SidebarRow>, terms: &[&str]) {
-    rows.extend(
-        app.remote_agent_panel_entries
-            .iter()
-            .filter(|entry| {
-                remote_sidebar_entry_matches_query(entry, terms)
-                    && (!app.blocked_filter || entry_is_blocked(entry))
-            })
-            .map(|entry| SidebarRow::RemoteAgent {
-                entry: std::sync::Arc::clone(entry),
-                depth: 0,
-            }),
-    );
+    // The projection already emits hosts in configured order, so a group is a
+    // contiguous run. Grouping on the run keeps that order instead of imposing
+    // an alphabetical one the operator never chose.
+    let mut groups: Vec<(&str, Vec<&std::sync::Arc<RemoteAgentPanelEntry>>)> = Vec::new();
+    for entry in app.remote_agent_panel_entries.iter().filter(|entry| {
+        remote_sidebar_entry_matches_query(entry, terms)
+            && (!app.blocked_filter || entry_is_blocked(entry))
+    }) {
+        let host = entry.agent_ref.host.as_str();
+        match groups.last_mut() {
+            Some((current, entries)) if *current == host => entries.push(entry),
+            _ => groups.push((host, vec![entry])),
+        }
+    }
+    for (host, entries) in groups {
+        let collapse_key = remote_host_collapse_key(host);
+        let collapsed = section_is_collapsed(app, &collapse_key);
+        rows.push(SidebarRow::NestedHeader {
+            key: collapse_key,
+            action_key: None,
+            title: host.to_string(),
+            count: entries.len(),
+            collapsed,
+            dim: false,
+            status: None,
+            spawn: false,
+        });
+        if collapsed {
+            continue;
+        }
+        rows.extend(entries.into_iter().map(|entry| SidebarRow::RemoteAgent {
+            entry: std::sync::Arc::clone(entry),
+            depth: 1,
+        }));
+    }
 }
 
 fn pane_context_has_sidebar_metadata(context: &crate::work_context::PaneWorkContext) -> bool {
@@ -4714,9 +4751,9 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (_, SidebarRow::Workspace { indented: true, .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Agent { .. }) => app.sidebar_agents.row_gap,
-        (SidebarRow::RemoteAgent { .. }, SidebarRow::RemoteAgent { .. }) => {
-            app.sidebar_agents.row_gap
-        }
+        // Remote rows sit inside a host group, so they hug each other exactly
+        // like the local rows under a repository header do.
+        (SidebarRow::RemoteAgent { .. }, SidebarRow::RemoteAgent { .. }) => 0,
         (SidebarRow::Agent { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Tab { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Tab { .. }) => 0,
@@ -5050,6 +5087,77 @@ fn nested_header_areas_from_rows(
             .saturating_add(sidebar_row_gap(app, rows, idx));
     }
     out
+}
+
+/// Hit area for a remote agent row. A fleet agent owns no local pane, so it is
+/// deliberately absent from `AgentCardArea`; this is the only geometry a click
+/// can resolve it through, and it carries the row index so the renderer and the
+/// hit test read the same row.
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteAgentRowArea {
+    pub agent_ref: crate::api::schema::AgentRef,
+    pub rect: Rect,
+    pub row_idx: usize,
+}
+
+pub(crate) fn compute_remote_agent_row_areas(
+    app: &AppState,
+    area: Rect,
+) -> Vec<RemoteAgentRowArea> {
+    // Scalar gate first: a fleet-less sidebar must not pay for a row build on
+    // every mouse event.
+    if app.remote_agent_panel_entries.is_empty() {
+        return Vec::new();
+    }
+    let ws_area = workspace_list_rect_for_app(app, area);
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    remote_agent_row_areas_from_rows(app, &rows, body, scroll_skip)
+}
+
+/// Remote row geometry from rows a caller already walked, so the render pass
+/// and the hit test cannot drift apart.
+fn remote_agent_row_areas_from_rows(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body: Rect,
+    scroll_skip: usize,
+) -> Vec<RemoteAgentRowArea> {
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+    let mut y = body.y;
+    let mut out = Vec::new();
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        if let SidebarRow::RemoteAgent { entry, .. } = row {
+            out.push(RemoteAgentRowArea {
+                agent_ref: entry.agent_ref.clone(),
+                rect: Rect::new(body.x, y, body.width, height),
+                row_idx: idx,
+            });
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, rows, idx));
+    }
+    out
+}
+
+/// The fleet agent on a sidebar row, for a click that lands on it.
+pub(crate) fn remote_agent_row_at(
+    app: &AppState,
+    row: u16,
+) -> Option<crate::api::schema::AgentRef> {
+    compute_remote_agent_row_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|area| row >= area.rect.y && row < area.rect.bottom())
+        .map(|area| area.agent_ref)
 }
 
 /// What an agent dot is saying, in the row's own vocabulary. A pane can
@@ -6951,32 +7059,27 @@ fn render_workspace_list(
     }
     if !app.remote_agent_panel_entries.is_empty() {
         let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
-        let mut row_y = body.y;
-        for (row_idx, row) in row_entries
-            .iter()
-            .enumerate()
-            .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
-        {
-            let height = sidebar_row_height(app, row, body.height);
-            if row_y.saturating_add(height) > body.bottom() {
-                break;
-            }
-            if let SidebarRow::RemoteAgent { entry, depth } = row {
-                render_remote_compact_agent_row_with_prefix(
-                    app,
-                    frame,
-                    entry,
-                    Rect::new(body.x, row_y, body.width, height),
-                    *depth,
-                    None,
-                    narrow_prefix,
-                );
-            }
-            row_y = row_y.saturating_add(height).saturating_add(sidebar_row_gap(
+        let scroll = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+        for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
+            let Some(SidebarRow::RemoteAgent { entry, depth }) = row_entries.get(row_area.row_idx)
+            else {
+                continue;
+            };
+            // A clicked row has to look picked, so selection paints the same
+            // active background a focused local row gets.
+            let selected = app
+                .sidebar_selected_remote_agent
+                .as_ref()
+                .is_some_and(|selected| selected == &entry.agent_ref);
+            render_remote_compact_agent_row_with_prefix(
                 app,
-                &row_entries,
-                row_idx,
-            ));
+                frame,
+                entry,
+                row_area.rect,
+                *depth,
+                selected.then_some(p.active_row_bg),
+                narrow_prefix,
+            );
         }
     }
 
@@ -8077,6 +8180,167 @@ pub(crate) mod tests {
             error: None,
             entries,
         }
+    }
+
+    fn app_with_two_remote_hosts() -> AppState {
+        let snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote-b".into(), "remote-a".into()],
+            hosts: vec![
+                fleet_host_snapshot(
+                    "remote-b",
+                    false,
+                    vec![
+                        crate::fleet::FleetRow::test_agent_info_row(
+                            "remote-b",
+                            remote_agent_info(
+                                "pane/1",
+                                "first",
+                                crate::api::schema::AgentStatus::Working,
+                                false,
+                                false,
+                            ),
+                        ),
+                        crate::fleet::FleetRow::test_agent_info_row(
+                            "remote-b",
+                            remote_agent_info(
+                                "pane/2",
+                                "second",
+                                crate::api::schema::AgentStatus::Idle,
+                                false,
+                                false,
+                            ),
+                        ),
+                    ],
+                ),
+                fleet_host_snapshot(
+                    "remote-a",
+                    false,
+                    vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "remote-a",
+                        remote_agent_info(
+                            "pane/4",
+                            "third",
+                            crate::api::schema::AgentStatus::Idle,
+                            false,
+                            false,
+                        ),
+                    )],
+                ),
+            ],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = app_with_agents(&["local"]);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app
+    }
+
+    fn remote_row_shape(app: &AppState) -> Vec<String> {
+        sidebar_rows(app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader {
+                    key,
+                    title,
+                    count,
+                    collapsed,
+                    ..
+                } if key.starts_with("host:") => {
+                    Some(format!("host {title} ({count}) collapsed={collapsed}"))
+                }
+                SidebarRow::RemoteAgent { entry, depth } => {
+                    Some(format!("agent {} depth={depth}", entry.agent_ref))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remote_rows_group_under_one_collapsible_header_per_host() {
+        let mut app = app_with_two_remote_hosts();
+
+        assert_eq!(
+            remote_row_shape(&app),
+            [
+                "host remote-b (2) collapsed=false",
+                "agent remote-b::pane/1 depth=1",
+                "agent remote-b::pane/2 depth=1",
+                "host remote-a (1) collapsed=false",
+                "agent remote-a::pane/4 depth=1",
+            ]
+        );
+
+        app.collapsed_sidebar_groups.insert(format!(
+            "{}:{}",
+            app.sidebar_group_mode.collapse_namespace(),
+            remote_host_collapse_key("remote-b")
+        ));
+
+        assert_eq!(
+            remote_row_shape(&app),
+            [
+                "host remote-b (2) collapsed=true",
+                "host remote-a (1) collapsed=false",
+                "agent remote-a::pane/4 depth=1",
+            ],
+            "a collapsed host keeps its header and its count, and gives back its rows"
+        );
+    }
+
+    #[test]
+    fn grouped_remote_rows_hug_each_other_like_local_rows() {
+        let mut app = app_with_two_remote_hosts();
+        // The configured agent gap is what made the fleet list twice as tall as
+        // the local one; inside a host group the rows must ignore it.
+        app.sidebar_agents.row_gap = 1;
+        let rows = sidebar_rows(&app);
+        let idx = rows
+            .iter()
+            .zip(rows.iter().skip(1))
+            .position(|(row, next)| {
+                matches!(
+                    (row, next),
+                    (
+                        SidebarRow::RemoteAgent { .. },
+                        SidebarRow::RemoteAgent { .. }
+                    )
+                )
+            })
+            .expect("two adjacent remote rows");
+
+        assert_eq!(sidebar_row_gap(&app, &rows, idx), 0);
+    }
+
+    #[test]
+    fn a_grouped_remote_row_drops_the_host_token_the_header_already_carries() {
+        let entry = compact_test_entry("remote task", Some(Agent::Codex));
+        let agent_ref = crate::api::schema::AgentRef::new("remote-b", "pane/1")
+            .expect("valid remote agent reference");
+        let remote = RemoteAgentPanelEntry::new(agent_ref, entry);
+        let app = AppState::test_new();
+
+        let row_at_depth = |depth: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_remote_compact_agent_row(
+                        &app,
+                        frame,
+                        &remote,
+                        Rect::new(0, 0, 40, 1),
+                        depth,
+                        None,
+                    )
+                })
+                .unwrap();
+            row_text(terminal.backend().buffer(), 0, 40)
+        };
+        let grouped = row_at_depth(1);
+        let ungrouped = row_at_depth(0);
+
+        assert!(!grouped.contains("remote-b"), "{grouped}");
+        assert!(ungrouped.contains("remote-b"), "{ungrouped}");
     }
 
     #[test]
