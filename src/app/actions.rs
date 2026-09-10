@@ -2606,6 +2606,24 @@ impl AppState {
         })
     }
 
+    /// The pane's finished selection as text, without consuming it. The pane
+    /// menu reads this so a right-click can act on what the user highlighted.
+    pub(crate) fn pane_selection_text(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Option<String> {
+        let selection = self
+            .selection
+            .as_ref()
+            .filter(|selection| selection.pane_id == pane_id && selection.is_finalized())?;
+        let text = self
+            .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+            .and_then(|runtime| runtime.extract_selection(selection))?;
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
         let mut sel = match self.selection.take() {
             Some(sel) => sel,
