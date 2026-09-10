@@ -1277,6 +1277,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
+    notepad::render_notepad_caret(app, frame);
     // Last, and over everything: a due break reminder outranks whatever the
     // operator was looking at, which is the point of it.
     pomodoro::render_overlay(app, frame, frame.area());
