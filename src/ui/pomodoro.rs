@@ -77,8 +77,8 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(prompt) = app.pomodoro.prompt.as_ref() else {
         return;
     };
-    super::dim_background(frame, area);
     let palette = &app.palette;
+    super::veil_background(frame, area, palette);
     let Some(inner) = render_modal_shell(frame, area, 62, 10, palette) else {
         return;
     };
@@ -203,6 +203,70 @@ mod tests {
 mod render_tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn prompted() -> AppState {
+        use crate::pomodoro::{PomodoroPhase, PomodoroPrompt};
+        let mut app = AppState::test_new();
+        app.pomodoro.enabled = true;
+        app.pomodoro.prompt = Some(PomodoroPrompt {
+            ended: PomodoroPhase::Work,
+            next: PomodoroPhase::ShortBreak,
+            input: String::new(),
+            error: None,
+        });
+        app
+    }
+
+    /// Draws work first, like the panes are, then the prompt over it.
+    fn veiled_frame(app: &AppState, area: Rect) -> ratatui::buffer::Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new("cargo test --all"),
+                    Rect::new(0, 0, area.width, 1),
+                );
+                render_overlay(app, frame, area);
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// A break reminder is only blocking if the work behind it stops competing
+    /// for attention. The DIM modifier alone is a no-op on several terminals.
+    #[test]
+    fn the_confirm_overlay_veils_the_work_behind_it() {
+        let app = prompted();
+        let area = Rect::new(0, 0, 80, 24);
+        let buffer = veiled_frame(&app, area);
+
+        let veiled = &buffer[(0, 0)];
+        assert_eq!(veiled.symbol(), " ", "work behind the prompt is blanked");
+        assert_eq!(veiled.style().bg, Some(app.palette.surface0));
+
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            !text.contains("cargo test"),
+            "veil hides the work: {text:?}"
+        );
+        assert!(
+            text.contains("time for a break"),
+            "modal draws above the veil"
+        );
+    }
+
+    /// `surface0` follows the terminal's own background in the 16-colour theme,
+    /// so using it there would leave no veil at all.
+    #[test]
+    fn the_veil_falls_back_to_a_concrete_colour_on_the_terminal_theme() {
+        let mut app = prompted();
+        app.palette = crate::app::state::Palette::terminal();
+        assert_eq!(app.palette.surface0, ratatui::style::Color::Reset);
+
+        let buffer = veiled_frame(&app, Rect::new(0, 0, 80, 24));
+        assert_eq!(buffer[(0, 0)].style().bg, Some(app.palette.surface1));
+    }
 
     /// The reminder is only a reminder if it reaches the frame on top of
     /// whatever else was being drawn.
