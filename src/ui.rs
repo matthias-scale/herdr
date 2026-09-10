@@ -37,7 +37,7 @@ pub(crate) mod pr_actions;
 mod release_notes;
 mod scrollbar;
 mod settings;
-mod sidebar;
+pub(crate) mod sidebar;
 pub(crate) use dock::symphony::dashboard_link_rect as dock_symphony_dashboard_link_rect;
 pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// Exposed so the inbox tests can assert the queue and the sidebar answer the
@@ -51,6 +51,7 @@ mod tab_surface;
 mod tabs;
 mod tooltip;
 pub(crate) use tooltip::hovered_control_at;
+mod agent_picker;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;
@@ -62,6 +63,7 @@ mod work_status;
 pub(crate) mod work_view;
 
 use self::add_project::render_add_project_overlay;
+use self::agent_picker::render_agent_picker;
 use self::command_palette::render_command_palette;
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
@@ -1296,6 +1298,7 @@ fn render_with_runtime_registry_inner(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::CommandPalette => render_command_palette(app, frame),
         Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
+        Mode::AgentPicker => render_agent_picker(app, frame, frame.area()),
         Mode::Terminal => {}
     }
     if app

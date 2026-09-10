@@ -2325,6 +2325,23 @@ pub(crate) enum WorkLinkPickerAction {
     Copy,
 }
 
+/// One running agent a pane's clicked text can be handed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentPickerCandidate {
+    pub ws_idx: usize,
+    pub pane_id: PaneId,
+    /// What the sidebar calls this agent, so the picker names it the same way.
+    pub label: String,
+}
+
+/// The second step of "Send to agent...": which running agent gets the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentPickerState {
+    pub candidates: Vec<AgentPickerCandidate>,
+    pub text: String,
+    pub return_mode: Mode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkLinkPickerState {
     pub candidates: Vec<crate::work_context::WorkLinkCandidate>,
@@ -2358,6 +2375,7 @@ pub enum Mode {
     Navigator,
     CommandPalette,
     WorkLinkPicker,
+    AgentPicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2442,6 +2460,7 @@ impl Mode {
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
                 | Mode::WorkLinkPicker
+                | Mode::AgentPicker
         )
     }
 }
@@ -2915,6 +2934,12 @@ pub enum ContextMenuKind {
         /// Editors on this host, in menu order. Resolved when the menu opens so
         /// the entries never promise a command that is not installed.
         open_with: Vec<PaneOpenWith>,
+        /// The text the clicked cell offers an agent: the pane's selection when
+        /// there is one, otherwise the link or path under the cursor.
+        send_text: Option<String>,
+        /// Whether any agent other than this pane is running, so the menu only
+        /// offers a picker that would have something to pick.
+        has_agent_targets: bool,
     },
 }
 
@@ -2922,6 +2947,11 @@ pub enum ContextMenuKind {
 pub const OPEN_LINK_ITEM: &str = "Open link";
 /// Label of the pane menu entry that copies the clicked link.
 pub const COPY_LINK_ITEM: &str = "Copy link";
+/// Label of the pane menu entry that spawns an agent on the clicked text.
+pub const SEND_TO_NEW_AGENT_ITEM: &str = "Send to new agent";
+/// Label of the pane menu entry that hands the clicked text to a running
+/// agent. The trailing ellipsis is the promise of a second step.
+pub const SEND_TO_EXISTING_AGENT_ITEM: &str = "Send to agent...";
 
 /// A path a pane printed, resolved against that pane's cwd and known to exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3162,6 +3192,8 @@ impl ContextMenuState {
                 link,
                 path,
                 open_with,
+                send_text,
+                has_agent_targets,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
@@ -3182,6 +3214,12 @@ impl ContextMenuState {
                         if path.directory().is_some() {
                             items.push(target.directory_item());
                         }
+                    }
+                }
+                if send_text.is_some() {
+                    items.push(SEND_TO_NEW_AGENT_ITEM);
+                    if *has_agent_targets {
+                        items.push(SEND_TO_EXISTING_AGENT_ITEM);
                     }
                 }
                 if *has_manual_label {
@@ -3538,6 +3576,7 @@ pub struct AppState {
     pub navigator: NavigatorState,
     pub command_palette: CommandPaletteState,
     pub work_link_picker: Option<WorkLinkPickerState>,
+    pub(crate) agent_picker: Option<AgentPickerState>,
     pub(crate) add_action: Option<AddActionState>,
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
@@ -5885,6 +5924,7 @@ impl AppState {
             navigator: NavigatorState::default(),
             command_palette: CommandPaletteState::default(),
             work_link_picker: None,
+            agent_picker: None,
             add_action: None,
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
@@ -6985,6 +7025,41 @@ mod tests {
         ));
     }
 
+    fn pane_menu_sending(text: &str, has_agent_targets: bool) -> ContextMenuState {
+        let mut menu = pane_menu(None, None);
+        if let ContextMenuKind::Pane {
+            send_text,
+            has_agent_targets: targets,
+            ..
+        } = &mut menu.kind
+        {
+            *send_text = Some(text.to_string());
+            *targets = has_agent_targets;
+        }
+        menu
+    }
+
+    /// A pane with nothing to send offers neither agent entry, so the menu
+    /// never promises to hand an agent an empty prompt.
+    #[test]
+    fn a_pane_with_no_clicked_text_offers_no_agent_entries() {
+        let items = pane_menu(None, None).items();
+        assert!(!items.contains(&SEND_TO_NEW_AGENT_ITEM));
+        assert!(!items.contains(&SEND_TO_EXISTING_AGENT_ITEM));
+    }
+
+    /// A new agent can always be started; an existing one needs to exist.
+    #[test]
+    fn clicked_text_always_offers_a_new_agent_and_only_sometimes_a_running_one() {
+        let alone = pane_menu_sending("cargo test", false).items();
+        assert!(alone.contains(&SEND_TO_NEW_AGENT_ITEM));
+        assert!(!alone.contains(&SEND_TO_EXISTING_AGENT_ITEM));
+
+        let with_peers = pane_menu_sending("cargo test", true).items();
+        assert!(with_peers.contains(&SEND_TO_NEW_AGENT_ITEM));
+        assert!(with_peers.contains(&SEND_TO_EXISTING_AGENT_ITEM));
+    }
+
     fn pane_menu(link: Option<&str>, path: Option<PaneMenuPath>) -> ContextMenuState {
         let open_with = path
             .as_ref()
@@ -7002,6 +7077,8 @@ mod tests {
                 link: link.map(str::to_string),
                 path,
                 open_with,
+                send_text: None,
+                has_agent_targets: false,
             },
             x: 0,
             y: 0,

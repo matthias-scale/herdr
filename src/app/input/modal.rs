@@ -1475,6 +1475,31 @@ impl App {
             }
             (
                 ContextMenuKind::Pane {
+                    ws_idx,
+                    send_text: Some(text),
+                    ..
+                },
+                Some(crate::app::state::SEND_TO_NEW_AGENT_ITEM),
+            ) => {
+                self.state.mode = Mode::Terminal;
+                if let Err(error) = self.send_text_to_new_agent(ws_idx, &text) {
+                    self.show_work_link_notice(&error);
+                }
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx,
+                    pane_id,
+                    send_text: Some(text),
+                    ..
+                },
+                Some(crate::app::state::SEND_TO_EXISTING_AGENT_ITEM),
+            ) => {
+                self.state.mode = Mode::Terminal;
+                self.send_text_to_chosen_agent(ws_idx, pane_id, text);
+            }
+            (
+                ContextMenuKind::Pane {
                     path: Some(path),
                     open_with,
                     ..
@@ -2593,6 +2618,8 @@ mod tests {
                 link: None,
                 path: None,
                 open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
             },
             x: 0,
             y: 0,
@@ -2645,6 +2672,8 @@ mod tests {
                 link: None,
                 path: None,
                 open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
             },
             x: 0,
             y: 0,
@@ -2760,6 +2789,8 @@ mod tests {
                 link: None,
                 path: None,
                 open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
             },
             x: 0,
             y: 0,

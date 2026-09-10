@@ -36,6 +36,7 @@ pub(crate) use input::SidebarWorkGroupKeyAction;
 mod notepad;
 pub(crate) mod pane_graphics;
 mod pane_lifecycle;
+mod pane_send;
 mod popup;
 pub(crate) mod probes;
 pub(crate) mod projects;
@@ -788,6 +789,7 @@ impl App {
         let sidebar_work_filter = state::SidebarWorkFilter::default();
 
         let mut state = AppState {
+            agent_picker: None,
             collapsed_sidebar_groups: std::iter::once(format!(
                 "{}:{}",
                 sidebar_group_mode.collapse_namespace(),
@@ -3072,6 +3074,9 @@ impl App {
             Mode::CommandPalette => self.handle_command_palette_key(key_event),
             Mode::WorkLinkPicker => {
                 self.handle_work_link_picker_key(key_event);
+            }
+            Mode::AgentPicker => {
+                self.handle_agent_picker_key(key_event);
             }
             Mode::Terminal => {
                 // Should not be called in terminal mode.
