@@ -1941,15 +1941,24 @@ next_tab = "prefix+n"
     }
 
     #[test]
-    fn new_thread_defaults_to_prefix_alt_c() {
+    fn new_thread_defaults_to_prefix_c_and_new_tab_moves_to_prefix_alt_c() {
         let kb = Config::default().keybinds();
         assert_eq!(
             binding_triggers(&kb.new_thread),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('c'),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.new_tab),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('c'),
                 KeyModifiers::ALT
             ))]
         );
+        // The Missive view gave up its shortcut rather than share the letter.
+        assert!(binding_triggers(&kb.missive).is_empty());
     }
 
     #[test]

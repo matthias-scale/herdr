@@ -4361,12 +4361,23 @@ mod tests {
     }
 
     #[test]
-    fn default_missive_keybinding_opens_missive_projection() {
+    fn configured_missive_keybinding_opens_missive_projection() {
         let mut state = app_with_test_workspaces(&["one"]).state;
+        // Unbound by default: the Missive view released `c` to the spawn flow,
+        // so only a configured binding reaches it.
         assert_eq!(
             action_for_key(
                 &state,
                 TerminalKey::new(KeyCode::Char('c'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            None
+        );
+        state.keybinds.missive = crate::config::ActionKeybinds::prefix("m");
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()),
                 BindingDispatch::Prefix,
             ),
             Some(NavigateAction::OpenMissiveView)

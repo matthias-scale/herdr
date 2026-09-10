@@ -561,7 +561,7 @@
         {
           "key": "keys.new_thread",
           "type": "keybinding",
-          "default": "\"prefix+alt+c\"",
+          "default": "\"prefix+c\"",
           "description": "Open the project picker and start a new Home thread in the project it selects."
         },
         {
@@ -753,7 +753,7 @@
         {
           "key": "keys.new_tab",
           "type": "keybinding",
-          "default": "\"prefix+c\"",
+          "default": "\"prefix+alt+c\"",
           "description": "Create a new tab in the active workspace."
         },
         {
@@ -1167,7 +1167,7 @@
         {
           "key": "keys.missive",
           "type": "keybinding",
-          "default": "\"prefix+shift+c\"",
+          "default": "unset",
           "description": "Open the read-only Missive conversations view."
         },
         {

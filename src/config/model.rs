@@ -820,7 +820,7 @@ pub struct KeysConfig {
     /// Create a new workspace. Default: "prefix+shift+n"
     pub new_workspace: BindingConfig,
     /// Open the project picker and start a new Home thread in the project it
-    /// selects. Default: "prefix+alt+c"
+    /// selects. Default: "prefix+c"
     pub new_thread: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
     pub new_worktree: BindingConfig,
@@ -886,7 +886,7 @@ pub struct KeysConfig {
     pub focus_agent: BindingConfig,
     /// Local-client shortcut that sends a clipboard image to a remote Herdr session. Default: "ctrl+v".
     pub remote_image_paste: String,
-    /// Create a new tab in the active workspace. Default: "prefix+c"
+    /// Create a new tab in the active workspace. Default: "prefix+alt+c"
     pub new_tab: BindingConfig,
     /// Rename the active tab. Default: "prefix+shift+t".
     pub rename_tab: BindingConfig,
@@ -1004,7 +1004,7 @@ pub struct KeysConfig {
     pub usage: BindingConfig,
     /// Open the Linear Tickets view. Default: "prefix+ctrl+t"
     pub tickets: BindingConfig,
-    /// Open the read-only Missive conversation view. Default: "prefix+shift+c"
+    /// Open the read-only Missive conversation view. Unset by default.
     pub missive: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
@@ -1959,7 +1959,7 @@ impl Default for KeysConfig {
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
-            new_thread: BindingConfig::one("prefix+alt+c"),
+            new_thread: BindingConfig::one("prefix+c"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),
@@ -1992,7 +1992,7 @@ impl Default for KeysConfig {
             next_review_agent: BindingConfig::one("prefix+ctrl+r"),
             focus_agent: BindingConfig::empty(),
             remote_image_paste: "ctrl+v".into(),
-            new_tab: BindingConfig::one("prefix+c"),
+            new_tab: BindingConfig::one("prefix+alt+c"),
             rename_tab: BindingConfig::one("prefix+shift+t"),
             toggle_tab_prio: BindingConfig::one("prefix+shift+f"),
             toggle_prio_panel: BindingConfig::empty(),
@@ -2050,7 +2050,7 @@ impl Default for KeysConfig {
             work: BindingConfig::one("prefix+ctrl+w"),
             usage: BindingConfig::one("prefix+ctrl+y"),
             tickets: BindingConfig::one("prefix+ctrl+t"),
-            missive: BindingConfig::one("prefix+shift+c"),
+            missive: BindingConfig::empty(),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             git_pull: BindingConfig::empty(),
