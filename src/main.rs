@@ -71,6 +71,7 @@ mod files;
 mod fleet;
 mod ghostty;
 mod handoff_runtime;
+mod hyperspace;
 mod input;
 mod integration;
 mod ipc;
@@ -359,6 +360,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Start with the sidebar collapsed. Changes take effect on the next launch.
 # sidebar_start_collapsed = false
+
+# Idle star-field animation at the bottom of the sidebar. It also has a pause
+# button; this switch removes the panel and gives its rows back to the list.
+# sidebar_animation = true
 
 # Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
 # sidebar_collapsed_mode = "compact"

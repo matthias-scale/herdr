@@ -175,6 +175,12 @@ impl AppState {
                 _ => {}
             }
         }
+        if rect_contains(self.view.hyperspace_pause_hit_area, mouse.column, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.hyperspace.toggle_paused(std::time::Instant::now());
+            return None;
+        }
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
@@ -3201,6 +3207,60 @@ mod tests {
             .expect("pane laid out")
             .inner_rect;
         (app, pane_id, rect)
+    }
+
+    #[test]
+    fn clicking_the_sidebar_animation_button_toggles_its_pause() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.hyperspace.enabled = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let button = app.state.view.hyperspace_pause_hit_area;
+        assert!(button.width > 0, "the panel offers a pause button");
+        assert_eq!(
+            button.x, app.state.view.sidebar_rect.x,
+            "the button sits in the sidebar's left column"
+        );
+        assert!(!app.state.hyperspace.paused());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+        assert!(app.state.hyperspace.paused(), "one click stops the field");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+        assert!(
+            !app.state.hyperspace.paused(),
+            "a second click starts it again"
+        );
+    }
+
+    #[test]
+    fn a_click_next_to_the_animation_button_leaves_it_alone() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.hyperspace.enabled = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let button = app.state.view.hyperspace_pause_hit_area;
+        assert!(button.width > 0);
+        // The footer icon row is one row below the panel, and it owns its own
+        // clicks; a near miss must not toggle the animation.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.right(),
+            button.y,
+        ));
+        assert!(!app.state.hyperspace.paused());
     }
 
     #[test]

@@ -1654,6 +1654,9 @@ pub enum TabBarPositionConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub sidebar_width: u16,
+    /// Whether the sidebar draws its idle animation. The panel also has a pause
+    /// button; this is the switch that removes it entirely.
+    pub sidebar_animation: bool,
     /// Minimum sidebar width (columns) when expanded. Default: 18.
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
@@ -2060,6 +2063,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             sidebar_width: 26,
+            sidebar_animation: true,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,
