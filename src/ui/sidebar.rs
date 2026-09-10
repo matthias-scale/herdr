@@ -755,9 +755,9 @@ pub(crate) struct AgentPanelEntry {
     /// Server-owned Space label. Grouping views render this in the existing
     /// trailing tag cell instead of deriving a label from the pane title.
     pub space_label: String,
-    /// The current Spaces/RepoWorktree header has the same label, so repeating
-    /// it in the row adds no information. A disambiguating header suffix keeps
-    /// this false and preserves the raw Space tag.
+    /// The enclosing group repeats this Space label, or the projection has no
+    /// second Space label to distinguish. Disambiguated headers preserve the
+    /// raw tag when another distinct Space label is present.
     pub space_label_redundant: bool,
     pub primary_tab_label: Option<String>,
     pub tab_has_custom_name: bool,
@@ -960,21 +960,11 @@ fn collect_agent_panel_entries_with_runtimes(
             &empty_runtimes
         }
     };
-    let workspace_labels = matches!(
-        app.sidebar_group_mode,
-        SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree
-    )
-    .then(|| sidebar_workspace_labels(app, terminal_runtimes));
-
     app.workspaces
         .iter()
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
-            let space_label_redundant = workspace_labels
-                .as_ref()
-                .and_then(|labels| labels.get(&ws_idx))
-                .is_some_and(|(header_label, _)| header_label == &workspace_label);
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
@@ -1020,7 +1010,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         space_label: space_label.clone(),
-                        space_label_redundant,
+                        space_label_redundant: false,
                         primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
@@ -1491,13 +1481,23 @@ fn compact_sidebar_rows_inner(
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
     expand_worktrees: bool,
 ) -> Vec<SidebarRow> {
-    let entries = match terminal_runtimes {
+    let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
     }
     .into_iter()
     .filter(|entry| sidebar_entry_matches_query(app, entry))
     .collect::<Vec<_>>();
+    let has_one_space_label = entries.first().is_some_and(|first| {
+        entries
+            .iter()
+            .all(|entry| entry.space_label == first.space_label)
+    });
+    if has_one_space_label {
+        for entry in &mut entries {
+            entry.space_label_redundant = true;
+        }
+    }
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
@@ -1534,7 +1534,13 @@ fn compact_sidebar_rows_inner(
                 entry_work_context(app, entry).is_some_and(pane_context_has_sidebar_metadata)
             }))
     {
-        append_legacy_space_rows(app, &mut rows, visible_entries, expand_worktrees);
+        append_legacy_space_rows(
+            app,
+            &mut rows,
+            visible_entries,
+            expand_worktrees,
+            terminal_runtimes,
+        );
         append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
@@ -1567,7 +1573,17 @@ fn append_legacy_space_rows(
     rows: &mut Vec<SidebarRow>,
     entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) {
+    let empty_runtimes;
+    let terminal_runtimes = match terminal_runtimes {
+        Some(terminal_runtimes) => terminal_runtimes,
+        None => {
+            empty_runtimes = TerminalRuntimeRegistry::new();
+            &empty_runtimes
+        }
+    };
+    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let workspaces = workspace_list_entries_for_mode(app, expand_worktrees, app.sidebar_group_mode);
     rows.push(SidebarRow::SectionHeader {
         title: SPACES_SECTION_TITLE,
@@ -1613,6 +1629,9 @@ fn append_legacy_space_rows(
                 member_entries.extend(entries);
             }
         }
+        if let Some((header_label, _)) = workspace_labels.get(&ws_idx) {
+            mark_redundant_space_labels(&mut member_entries, header_label);
+        }
         if !app.sidebar_work_filter.query.is_empty() && member_entries.is_empty() {
             continue;
         }
@@ -1626,9 +1645,10 @@ fn append_legacy_space_rows(
             continue;
         }
         if app.sidebar_group_mode == SidebarGroupMode::RepoWorktree {
-            for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
+            for mut group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
                 let key = format!("{ws_idx}:{}", group.key);
                 let collapsed = section_is_collapsed(app, &key);
+                mark_redundant_space_labels(&mut group.entries, &group.title);
                 rows.push(SidebarRow::NestedHeader {
                     key,
                     action_key: None,
@@ -1727,13 +1747,20 @@ fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, de
     }));
 }
 
+fn mark_redundant_space_labels(entries: &mut [AgentPanelEntry], group_title: &str) {
+    for entry in entries {
+        entry.space_label_redundant |= entry.space_label == group_title;
+    }
+}
+
 fn append_repo_group_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     entries: &[AgentPanelEntry],
     settled: bool,
 ) {
-    for group in sidebar_repo_groups(app, entries) {
+    for mut group in sidebar_repo_groups(app, entries) {
+        mark_redundant_space_labels(&mut group.entries, &group.title);
         if !group.unlinked {
             let Some(ws_idx) = group.entries.first().map(|entry| entry.ws_idx) else {
                 continue;
@@ -1801,10 +1828,13 @@ fn append_repo_group_rows(
                 key
             };
             let collapsed = section_is_collapsed(app, &collapse_key);
+            let title = branch.map_or_else(|| "unlinked".into(), |branch| format!("⎇ {branch}"));
+            let mut entries = entries;
+            mark_redundant_space_labels(&mut entries, &title);
             rows.push(SidebarRow::NestedHeader {
                 key: collapse_key,
                 action_key: None,
-                title: branch.map_or_else(|| "unlinked".into(), |branch| format!("⎇ {branch}")),
+                title,
                 count: entries.len(),
                 collapsed,
                 dim: false,
@@ -1824,7 +1854,7 @@ fn append_object_group_rows(
     entries: &[AgentPanelEntry],
     settled: bool,
 ) {
-    for group in sidebar_work_groups(app, entries, app.sidebar_group_mode)
+    for mut group in sidebar_work_groups(app, entries, app.sidebar_group_mode)
         .into_iter()
         .filter(|group| !group.entries.is_empty())
     {
@@ -1835,6 +1865,7 @@ fn append_object_group_rows(
         };
         let collapsed = section_is_collapsed(app, &collapse_key);
         let action_key = (!group.unlinked).then(|| group.key.clone());
+        mark_redundant_space_labels(&mut group.entries, &group.title);
         rows.push(SidebarRow::NestedHeader {
             key: collapse_key,
             action_key,
@@ -7395,6 +7426,84 @@ pub(crate) mod tests {
         row_text(terminal.backend().buffer(), card.rect.y, card.rect.width)
     }
 
+    #[derive(Clone, Copy)]
+    enum SpaceTagFixture {
+        MatchingHeaders,
+        DivergentHeaders,
+        SingleSpace,
+    }
+
+    fn space_tag_fixture(mode: SidebarGroupMode, fixture: SpaceTagFixture) -> AppState {
+        let group_titles = match mode {
+            SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree => {
+                vec!["alpha".to_string(), "beta".to_string()]
+            }
+            SidebarGroupMode::Repo => vec!["repo-alpha".into(), "repo-beta".into()],
+            SidebarGroupMode::RepoPr => vec!["#101 · alpha".into(), "#102 · beta".into()],
+            SidebarGroupMode::LinearTeam => vec!["SCA-101".into(), "SCA-102".into()],
+            SidebarGroupMode::Missive => {
+                vec!["message-101 · alpha".into(), "message-102 · beta".into()]
+            }
+        };
+        let labels = match fixture {
+            SpaceTagFixture::MatchingHeaders => group_titles.clone(),
+            SpaceTagFixture::DivergentHeaders => match mode {
+                SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree => {
+                    vec!["same".into(), "same".into(), "other".into()]
+                }
+                _ => vec!["space-alpha".into(), "space-beta".into()],
+            },
+            SpaceTagFixture::SingleSpace => vec!["only-space".into()],
+        };
+        let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app = app_with_agents(&label_refs);
+        app.sidebar_group_mode = mode;
+
+        for ws_idx in 0..app.workspaces.len() {
+            let suffix = if ws_idx == 0 { "alpha" } else { "beta" };
+            let context = match mode {
+                SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree => continue,
+                SidebarGroupMode::Repo => crate::work_context::PaneWorkContext {
+                    repo: Some(format!("repo-{suffix}")),
+                    ..Default::default()
+                },
+                SidebarGroupMode::RepoPr => crate::work_context::PaneWorkContext {
+                    pr_urls: vec![format!(
+                        "https://github.com/scalable-so/herdr/pull/{}",
+                        101 + ws_idx
+                    )],
+                    work_title: Some(suffix.into()),
+                    ..Default::default()
+                },
+                SidebarGroupMode::LinearTeam => crate::work_context::PaneWorkContext {
+                    ticket_ids: vec![format!("SCA-{}", 101 + ws_idx)],
+                    ..Default::default()
+                },
+                SidebarGroupMode::Missive => crate::work_context::PaneWorkContext {
+                    missive_urls: vec![format!(
+                        "https://mail.missiveapp.com/#inbox/conversations/message-{}",
+                        101 + ws_idx
+                    )],
+                    work_title: Some(suffix.into()),
+                    ..Default::default()
+                },
+            };
+            replace_tab_context(&mut app, ws_idx, 0, context, Default::default());
+        }
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    fn sidebar_tab_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+        sidebar_rows(app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(*entry),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn sidebar_entry_shows_only_positive_active_subagent_counts() {
         for (value, expected) in [(None, None), (Some(0), None), (Some(3), Some(3))] {
@@ -9467,7 +9576,8 @@ row_gap = 1
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("●"), "{busy_text:?}");
-        assert!(busy_text.ends_with("one"), "{busy_text:?}");
+        assert!(busy_text.ends_with('—'), "{busy_text:?}");
+        assert!(!busy_text.contains(" · one"), "{busy_text:?}");
         let dot_x = find_symbol_x(busy.backend().buffer(), tab_row, 49, "●");
         assert_eq!(
             busy.backend().buffer()[(dot_x, tab_row)].style().fg,
@@ -9499,7 +9609,8 @@ row_gap = 1
             .unwrap();
         let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
         assert!(idle_text.contains("○"), "{idle_text:?}");
-        assert!(idle_text.ends_with("one"), "{idle_text:?}");
+        assert!(idle_text.ends_with("5m"), "{idle_text:?}");
+        assert!(!idle_text.contains(" · one"), "{idle_text:?}");
     }
 
     #[test]
@@ -9559,7 +9670,8 @@ row_gap = 1
         let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
 
         assert!(rendered.contains("Review release"), "{rendered:?}");
-        assert!(rendered.ends_with("one"), "{rendered:?}");
+        assert!(rendered.ends_with("1m"), "{rendered:?}");
+        assert!(!rendered.contains(" · one"), "{rendered:?}");
         assert!(!rendered.contains("idle"), "{rendered:?}");
         assert!(!rendered.contains("done"), "{rendered:?}");
         assert!(rendered.contains("○  Review release"), "{rendered:?}");
@@ -9612,7 +9724,8 @@ row_gap = 1
         let card = &compute_tab_card_areas(&app, area)[0];
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
 
-        assert!(rendered.ends_with("one"), "{rendered:?}");
+        assert!(rendered.ends_with("5m"), "{rendered:?}");
+        assert!(!rendered.contains(" · one"), "{rendered:?}");
         assert_eq!(compute_tab_card_areas(&app, area).len(), 1);
     }
 
@@ -10598,8 +10711,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn f19_1a_keeps_age_and_appends_divergent_space_suffix_when_wide() {
-        let mut app = app_with_agents(&["one"]);
+        let mut app = app_with_agents(&["one", "two"]);
         app.workspaces[0].custom_name = Some("t3-sample".into());
+        app.workspaces[1].custom_name = Some("other-space".into());
         app.workspaces[0].tabs[0].custom_name = Some("sample-pr".into());
         app.sidebar_group_mode = SidebarGroupMode::Repo;
         replace_tab_context(
@@ -10608,6 +10722,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             0,
             crate::work_context::PaneWorkContext {
                 repo: Some("herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("growth".into()),
                 ..Default::default()
             },
             Default::default(),
@@ -10713,70 +10837,137 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn compact_rows_hide_space_suffix_when_it_matches_spaces_header() {
-        let mut app = app_with_agents(&["herdr-improve"]);
-
-        for mode in [SidebarGroupMode::Spaces, SidebarGroupMode::RepoWorktree] {
-            app.sidebar_group_mode = mode;
-            let entry = sidebar_thread_entries(&app)
-                .into_iter()
-                .next()
-                .expect("thread entry");
-            assert!(entry.space_label_redundant, "mode {mode:?}");
-            let rendered = render_first_tab_row(&app, 80);
+    fn compact_rows_hide_space_suffix_when_group_header_repeats_it_in_every_mode() {
+        for mode in SidebarGroupMode::ALL {
+            let app = space_tag_fixture(mode, SpaceTagFixture::MatchingHeaders);
+            let entries = sidebar_tab_entries(&app);
+            assert!(!entries.is_empty(), "mode {mode:?}");
+            let labels = entries
+                .iter()
+                .map(|entry| (entry.space_label.as_str(), entry.space_label_redundant))
+                .collect::<Vec<_>>();
             assert!(
-                !rendered.contains(" · herdr-improve"),
+                entries.iter().all(|entry| entry.space_label_redundant),
+                "mode {mode:?}: {labels:?}"
+            );
+            let first_label = &entries[0].space_label;
+            let rendered = render_first_tab_row(&app, 120);
+            assert!(
+                !rendered.contains(&format!(" · {first_label}")),
                 "{mode:?}: {rendered:?}"
             );
         }
     }
 
     #[test]
-    fn compact_rows_keep_space_suffix_when_repo_header_differs() {
-        let mut app = app_with_agents(&["growth"]);
-        app.sidebar_group_mode = SidebarGroupMode::Repo;
-        replace_tab_context(
-            &mut app,
-            0,
-            0,
-            crate::work_context::PaneWorkContext {
-                repo: Some("herdr".into()),
-                ..Default::default()
-            },
-            Default::default(),
-        );
+    fn compact_rows_keep_space_suffix_when_group_header_differs_in_every_mode() {
+        for mode in SidebarGroupMode::ALL {
+            let app = space_tag_fixture(mode, SpaceTagFixture::DivergentHeaders);
+            let entries = sidebar_tab_entries(&app);
+            assert!(!entries.is_empty(), "mode {mode:?}");
+            let first = &entries[0];
+            assert!(!first.space_label_redundant, "mode {mode:?}");
+            let rendered = render_first_tab_row(&app, 120);
+            assert!(
+                rendered.contains(&format!(" · {}", first.space_label)),
+                "{mode:?}: {rendered:?}"
+            );
+        }
+    }
 
-        let header = sidebar_rows(&app)
-            .into_iter()
-            .find_map(|row| match row {
-                SidebarRow::Workspace { title, .. } => Some(title),
-                _ => None,
-            })
-            .expect("repo group header");
-        assert_eq!(header, "herdr");
+    #[test]
+    fn compact_rows_hide_space_suffix_for_a_single_space_in_every_mode() {
+        for mode in SidebarGroupMode::ALL {
+            let app = space_tag_fixture(mode, SpaceTagFixture::SingleSpace);
+            let entries = sidebar_tab_entries(&app);
+            assert!(!entries.is_empty(), "mode {mode:?}");
+            assert!(
+                entries.iter().all(|entry| entry.space_label_redundant),
+                "mode {mode:?}"
+            );
+            let rendered = render_first_tab_row(&app, 120);
+            assert!(
+                !rendered.contains(" · only-space"),
+                "{mode:?}: {rendered:?}"
+            );
+        }
+    }
 
-        let entry = sidebar_thread_entries(&app)
+    #[test]
+    fn space_suffix_header_matching_covers_legacy_unlinked_branch_and_settled_groups() {
+        let mut legacy = app_with_agents(&["alpha", "beta"]);
+        legacy.sidebar_group_mode = SidebarGroupMode::Repo;
+        assert!(sidebar_tab_entries(&legacy)
+            .iter()
+            .all(|entry| entry.space_label_redundant));
+
+        let mut unlinked = app_with_agents(&["▫ alpha", "▫ beta"]);
+        unlinked.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        for (ws_idx, directory) in ["/work/alpha", "/work/beta"].into_iter().enumerate() {
+            let pane_id = unlinked.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = unlinked.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            unlinked
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("unlinked terminal")
+                .cwd = directory.into();
+        }
+        assert!(sidebar_tab_entries(&unlinked)
+            .iter()
+            .all(|entry| entry.space_label_redundant));
+
+        let mut branched = app_with_agents(&["⎇ main", "other"]);
+        branched.sidebar_group_mode = SidebarGroupMode::Repo;
+        for (ws_idx, branch) in ["main", "other"].into_iter().enumerate() {
+            replace_tab_context(
+                &mut branched,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some("herdr".into()),
+                    branch: Some(branch.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+        let branch_entry = sidebar_tab_entries(&branched)
             .into_iter()
-            .next()
-            .expect("thread entry");
-        assert!(!entry.space_label_redundant);
-        let rendered = render_first_tab_row(&app, 80);
-        assert!(rendered.contains(" · growth"), "{rendered:?}");
+            .find(|entry| entry.ws_idx == 0)
+            .expect("main branch entry");
+        assert!(branch_entry.space_label_redundant);
+
+        let mut settled =
+            space_tag_fixture(SidebarGroupMode::RepoPr, SpaceTagFixture::MatchingHeaders);
+        let settled_pane = settled.workspaces[0].tabs[0].root_pane;
+        settled.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_pane)
+            .expect("settled pane")
+            .settled_at = Some(1_725_000_000);
+        let settled_entry = sidebar_tab_entries(&settled)
+            .into_iter()
+            .find(|entry| entry.pane_id == settled_pane)
+            .expect("settled entry");
+        assert!(settled_entry.space_label_redundant);
     }
 
     #[test]
     fn duplicate_space_headers_keep_space_suffix_for_disambiguation() {
-        let mut app = app_with_agents(&["first", "second"]);
-        for workspace in &mut app.workspaces {
-            workspace.custom_name = Some("same".into());
-        }
+        let mut app = app_with_agents(&["first", "second", "third"]);
+        app.workspaces[0].custom_name = Some("same".into());
+        app.workspaces[1].custom_name = Some("same".into());
+        app.workspaces[2].custom_name = Some("other".into());
         app.sidebar_group_mode = SidebarGroupMode::Spaces;
 
         let labels = sidebar_workspace_labels(&app, &TerminalRuntimeRegistry::new());
         assert_eq!(labels[&0].0, "same¹");
         assert_eq!(labels[&1].0, "same²");
-        assert!(sidebar_thread_entries(&app)
+        assert!(sidebar_tab_entries(&app)
             .into_iter()
+            .filter(|entry| entry.space_label == "same")
             .all(|entry| !entry.space_label_redundant));
         assert!(render_first_tab_row(&app, 80).contains(" · same"));
     }
