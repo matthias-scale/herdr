@@ -600,6 +600,7 @@ impl App {
                 .map(|projection| projection.full_label())
                 .unwrap_or_else(|| (tab_idx + 1).to_string()),
             prio: tab.prio,
+            starred: tab.starred,
             focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
             pane_count: tab.panes.len(),
             agent_status: aggregate_tab_agent_status(tab, &self.state.terminals, agg_state, seen),

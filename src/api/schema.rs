@@ -123,6 +123,8 @@ pub enum Method {
     TabPrio(TabPrioParams),
     #[serde(rename = "tab.pin")]
     TabPin(TabPinParams),
+    #[serde(rename = "tab.star")]
+    TabStar(TabStarParams),
     #[serde(rename = "tab.move")]
     TabMove(TabMoveParams),
     #[serde(rename = "tab.close")]
