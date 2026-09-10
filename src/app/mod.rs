@@ -1028,6 +1028,7 @@ impl App {
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
+                status_segments: Vec::new(),
             },
             drag: None,
             workspace_presses: HashMap::new(),

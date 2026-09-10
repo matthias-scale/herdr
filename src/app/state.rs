@@ -2255,6 +2255,9 @@ pub struct ViewState {
     /// Ticket and pull-request links of the focused pane, drawn after the
     /// status-row title. Clicking one opens it in the dock.
     pub(crate) status_work_links: Vec<StatusWorkLink>,
+    /// The status row's right-aligned segments, fitted once per frame so the
+    /// title and the links can be laid out beside what will actually be drawn.
+    pub(crate) status_segments: Vec<crate::ui::status::Segment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5845,6 +5848,7 @@ impl AppState {
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
+                status_segments: Vec::new(),
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),

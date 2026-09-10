@@ -44,15 +44,6 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     let bg = Style::default().bg(p.panel_bg);
     frame.render_widget(Paragraph::new("").style(bg), area);
 
-    let unavailable = StatusMetrics {
-        hostname: "--".into(),
-        ..StatusMetrics::default()
-    };
-    let metrics = app
-        .status_metrics
-        .as_ref()
-        .map(|snapshot| &snapshot.metrics)
-        .unwrap_or(&unavailable);
     // The pane toggles sit at the far right of this row when the tab row is
     // hidden, so the segments must stop short of them instead of underlapping.
     let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
@@ -60,15 +51,24 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if usize::from(content_width) < minimum_required_status_width(app) {
         return;
     }
-    let segments = status_row_segments(app, metrics, p, area, content_width);
+    // The fitted row normally arrives on the view. A render that never went
+    // through view computation, which the unit tests and any future direct
+    // draw do, fits it here instead of drawing an empty row.
+    let fitted;
+    let segments = if app.view.status_segments.is_empty() {
+        fitted = fitted_status_segments(app, area);
+        &fitted
+    } else {
+        &app.view.status_segments
+    };
 
-    let used = segment_width(&segments);
+    let used = segment_width(segments);
     let pad = (content_width as usize).saturating_sub(used);
     let mut spans: Vec<Span> = Vec::new();
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
     }
-    for seg in &segments {
+    for seg in segments {
         let style = if seg.preserve_bg {
             seg.style
         } else {
@@ -133,6 +133,41 @@ struct TitleLayout {
     links: Vec<StatusWorkLink>,
 }
 
+/// Whether a lowercased title already names this link, as a whole word rather
+/// than as any substring.
+fn title_names(lowercased_title: &str, label: &str) -> bool {
+    let label = label.to_lowercase();
+    let boundary = |character: char| !character.is_alphanumeric() && character != '-';
+    lowercased_title
+        .match_indices(&label)
+        .any(|(index, matched)| {
+            let before = lowercased_title[..index].chars().next_back();
+            let after = lowercased_title[index + matched.len()..].chars().next();
+            before.is_none_or(boundary) && after.is_none_or(boundary)
+        })
+}
+
+/// The right-aligned segments this frame will draw. Built once during view
+/// computation because the title and its links are laid out against them, and
+/// building them twice would repeat the per-pane agent scan behind the dots.
+pub(crate) fn fitted_status_segments(app: &AppState, area: Rect) -> Vec<Segment> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
+    let content_width = area.width.saturating_sub(reserved);
+    if usize::from(content_width) < minimum_required_status_width(app) {
+        return Vec::new();
+    }
+    status_row_segments(
+        app,
+        metrics_or_unavailable(app),
+        &app.palette,
+        area,
+        content_width,
+    )
+}
+
 /// Ticket and pull-request links of the focused pane, as rendered in the status
 /// row. Computed during view computation so the hit areas belong to the same
 /// frame as the labels, and empty whenever the title itself does not fit.
@@ -141,13 +176,10 @@ pub(crate) fn status_work_links(app: &AppState, area: Rect) -> Vec<StatusWorkLin
         return Vec::new();
     }
     let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
-    let content_width = area.width.saturating_sub(reserved);
-    if usize::from(content_width) < minimum_required_status_width(app) {
+    if usize::from(area.width.saturating_sub(reserved)) < minimum_required_status_width(app) {
         return Vec::new();
     }
-    let metrics = metrics_or_unavailable(app);
-    let segments = status_row_segments(app, metrics, &app.palette, area, content_width);
-    let segments_used = segment_width(&segments) + usize::from(reserved);
+    let segments_used = segment_width(&app.view.status_segments) + usize::from(reserved);
     focused_pane_title_layout(app, area, segments_used)
         .map(|layout| layout.links)
         .unwrap_or_default()
@@ -178,18 +210,18 @@ fn focused_pane_title_layout(
     );
     let mut links_width = 0usize;
     let mut kept: Vec<(crate::app::state::DockObjectRef, String)> = Vec::new();
-    let title_of_record = fit_focused_pane_title(&repo, &thread, usize::MAX).unwrap_or_default();
+    let title_of_record = fit_focused_pane_title(&repo, &thread, usize::MAX)
+        .unwrap_or_default()
+        .to_lowercase();
     for object in &app.dock_context_objects {
         let label = app.dock_object_label(object);
         if label.is_empty() {
             continue;
         }
         // The title already carries the ticket it was derived from. Naming it
-        // twice on one row buys nothing, and the title stays clickable-free.
-        if title_of_record
-            .to_lowercase()
-            .contains(&label.to_lowercase())
-        {
+        // twice on one row buys nothing. Matched on whole words, so `#159`
+        // is not swallowed by a title that happens to mention `#1592`.
+        if title_names(&title_of_record, &label) {
             continue;
         }
         let cost = WORK_LINK_GAP + display_width(&label);
@@ -422,7 +454,7 @@ fn metrics_or_unavailable(app: &AppState) -> &crate::platform::status_metrics::S
         })
 }
 
-struct Segment {
+pub(crate) struct Segment {
     text: String,
     style: Style,
     /// When true, `style` already carries its own background (prefix pill).
@@ -2106,6 +2138,14 @@ mod tests {
             let end = start + usize::from(link.rect.width);
             assert_eq!(columns[start..end].concat(), link.label, "{rendered:?}");
         }
+    }
+
+    #[test]
+    fn a_title_names_a_link_only_on_a_whole_word() {
+        assert!(title_names("sca-3165 · fix billing", "SCA-3165"));
+        assert!(title_names("#159 review", "#159"));
+        assert!(!title_names("#1592 review", "#159"));
+        assert!(!title_names("sca-31650 · fix billing", "SCA-3165"));
     }
 
     #[test]
