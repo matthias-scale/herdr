@@ -823,6 +823,7 @@ impl AppState {
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
                 crate::ui::SidebarRow::Agent { .. }
+                | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
@@ -847,6 +848,7 @@ impl AppState {
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. }
+                | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
                 | crate::ui::SidebarRow::SymphonyJob { .. }
@@ -1477,6 +1479,9 @@ mod tests {
                         entry.tab_idx,
                         entry.pane_id.raw()
                     )
+                }
+                crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
+                    format!("remote:{}", entry.agent_ref)
                 }
                 crate::ui::SidebarRow::SectionHeader { title, .. } => {
                     format!("section:{title}")

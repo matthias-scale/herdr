@@ -86,7 +86,9 @@ pub(super) enum MouseAction {
     RenameModal(ModalAction),
     ConfirmCloseAccept,
     ContextMenu {
-        menu: ContextMenuState,
+        /// Boxed: the pane menu carries the clicked link, path and text, and
+        /// that payload would otherwise set the size of every mouse action.
+        menu: Box<ContextMenuState>,
         idx: usize,
     },
     /// Open a Symphony job: its checkout terminal plus the dock surface bound
@@ -1090,7 +1092,10 @@ impl AppState {
                     let item_idx = self.context_menu_item_at(mouse.column, mouse.row);
                     if let Some(menu) = self.context_menu.take() {
                         if let Some(idx) = item_idx {
-                            return Some(MouseAction::ContextMenu { menu, idx });
+                            return Some(MouseAction::ContextMenu {
+                                menu: Box::new(menu),
+                                idx,
+                            });
                         } else {
                             leave_modal(self);
                         }
@@ -2168,6 +2173,14 @@ impl AppState {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    // What the user highlighted beats what happens to sit
+                    // under the cursor; a selection is a deliberate choice.
+                    let send_text = self
+                        .pane_selection_text(terminal_runtimes, ws_idx, info.id)
+                        .or_else(|| link.clone())
+                        .or_else(|| path.as_ref().map(|path| path.path.display().to_string()));
+                    let has_agent_targets =
+                        send_text.is_some() && self.has_agent_other_than(ws_idx, info.id);
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
                             ws_idx,
@@ -2180,6 +2193,8 @@ impl AppState {
                             link,
                             path,
                             open_with,
+                            send_text,
+                            has_agent_targets,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -3610,6 +3625,10 @@ mod tests {
         app.state.dock_pr_focused = true;
         app.state.dock_chooser_focused = true;
         app.state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
+        app.state.sidebar_selected_remote_agent = Some(
+            crate::api::schema::AgentRef::new("ub2", "remote-pane")
+                .expect("valid remote agent reference"),
+        );
         app.state.sidebar_selected_settled = Some(crate::app::state::PaneFocusTarget {
             workspace_id: app.state.workspaces[0].id.clone(),
             pane_id: _pane_id,
@@ -3625,6 +3644,7 @@ mod tests {
         assert!(!app.state.dock_pr_focused, "dock pr kept focus");
         assert!(!app.state.dock_chooser_focused, "dock chooser kept focus");
         assert_eq!(app.state.sidebar_selected_work_group, None);
+        assert!(app.state.sidebar_selected_remote_agent.is_none());
         assert!(app.state.sidebar_object_menu.is_none());
         assert!(app.state.sidebar_selected_settled.is_none());
         assert!(
@@ -5671,6 +5691,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The clicked link is what an agent would need, so it becomes the text
+    /// the send entries carry.
+    #[tokio::test]
+    async fn a_clicked_link_is_the_text_the_agent_entries_would_send() {
+        let line = "see https://example.com/report for the failure";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "example.com");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        let ContextMenuKind::Pane { send_text, .. } = &menu.kind else {
+            panic!("not a pane menu: {:?}", menu.kind);
+        };
+        assert_eq!(send_text.as_deref(), Some("https://example.com/report"));
+        assert!(menu
+            .items()
+            .contains(&crate::app::state::SEND_TO_NEW_AGENT_ITEM));
+    }
+
     #[tokio::test]
     async fn a_token_that_names_nothing_on_disk_is_not_a_path() {
         let line = "thread 'main' panicked at nowhere/at/all.rs:3";
@@ -6938,6 +6977,8 @@ mod tests {
                 link: None,
                 path: None,
                 open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
             },
             x: 2,
             y: 2,

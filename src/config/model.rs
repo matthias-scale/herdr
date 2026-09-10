@@ -1846,6 +1846,9 @@ impl Default for RemoteConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct FleetConfig {
+    /// Stable name for this server in cross-host agent references.
+    /// Defaults to the system hostname.
+    pub self_name: Option<String>,
     /// Fleet inventory refresh interval. Default: 15000 milliseconds.
     pub refresh_interval_ms: u64,
     /// Per-host read deadline. Default: 5000 milliseconds.
@@ -1860,11 +1863,27 @@ pub struct FleetConfig {
 impl Default for FleetConfig {
     fn default() -> Self {
         Self {
+            self_name: None,
             refresh_interval_ms: 15_000,
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
             hosts: Vec::new(),
         }
+    }
+}
+
+impl FleetConfig {
+    pub(crate) fn resolved_self_name(&self) -> String {
+        self.resolved_self_name_with_hostname(crate::platform::hostname())
+    }
+
+    pub(crate) fn resolved_self_name_with_hostname(&self, hostname: Option<String>) -> String {
+        self.self_name
+            .clone()
+            .filter(|name| !name.trim().is_empty() && !name.contains("::"))
+            .or(hostname)
+            .filter(|name| !name.trim().is_empty() && !name.contains("::"))
+            .unwrap_or_else(|| "localhost".to_string())
     }
 }
 
@@ -2444,12 +2463,15 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
     #[test]
     fn fleet_polling_and_named_session_parse_with_defaults() {
         let defaults = Config::default().remote.fleet;
+        assert!(defaults.self_name.is_none());
+        assert!(!defaults.resolved_self_name().is_empty());
         assert_eq!(defaults.refresh_interval_ms, 15_000);
         assert!(defaults.hosts.is_empty());
 
         let config: Config = toml::from_str(
             r#"
 [remote.fleet]
+self_name = "laptop"
 refresh_interval_ms = 30000
 
 [[remote.fleet.hosts]]
@@ -2459,6 +2481,7 @@ session = "agents"
 "#,
         )
         .expect("fleet config");
+        assert_eq!(config.remote.fleet.self_name.as_deref(), Some("laptop"));
         assert_eq!(config.remote.fleet.refresh_interval_ms, 30_000);
         assert_eq!(
             config.remote.fleet.hosts[0].session.as_deref(),

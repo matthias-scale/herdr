@@ -1514,23 +1514,17 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
         }
     }
 
-    // The client should receive a ServerShutdown message (variant 4)
-    // before the connection is closed, not just an abrupt EOF.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let result = read_server_message(&mut stream);
-    match result {
-        Ok((variant, _payload)) => {
-            assert_eq!(
-                variant, 4,
-                "expected ServerShutdown (variant 4), got variant {variant}"
-            );
-        }
-        Err(e) => {
-            panic!("expected ServerShutdown message before connection close, got error: {e}");
-        }
-    }
+    // The client should receive a ServerShutdown message (variant 4) before the
+    // connection is closed, not just an abrupt EOF. It need not be the next
+    // frame: a render the server had already queued, or one a shutdown-time
+    // animation tick produces, can arrive between the drain above and the
+    // shutdown broadcast, so read until the shutdown frame rather than
+    // asserting on the first frame that happens to arrive.
+    assert!(
+        wait_for_message_variant(&mut stream, Duration::from_secs(10), 4)
+            .expect("read from client socket"),
+        "expected ServerShutdown (variant 4) before the connection closed"
+    );
 
     // Wait for the server to exit.
     spawned.close_master();

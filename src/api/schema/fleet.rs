@@ -10,7 +10,7 @@ pub enum FleetHostStateInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FleetAgentInfo {
-    pub host: String,
+    pub agent_ref: super::AgentRef,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,

@@ -316,6 +316,7 @@ impl App {
                 }
                 Mode::CommandPalette => self.handle_command_palette_key(key_event),
                 Mode::WorkLinkPicker => self.handle_work_link_picker_key(key_event),
+                Mode::AgentPicker => self.handle_agent_picker_key(key_event),
                 Mode::Terminal => unreachable!(),
             },
         }
@@ -5041,6 +5042,7 @@ impl App {
                     }
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                     MouseAction::ContextMenu { menu, idx } => {
+                        let menu = *menu;
                         self.apply_context_menu_action_via_api(menu, idx)
                     }
                 }

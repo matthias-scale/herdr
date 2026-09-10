@@ -37,7 +37,7 @@ pub(crate) mod pr_actions;
 mod release_notes;
 mod scrollbar;
 mod settings;
-mod sidebar;
+pub(crate) mod sidebar;
 pub(crate) use dock::symphony::dashboard_link_rect as dock_symphony_dashboard_link_rect;
 pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// Exposed so the inbox tests can assert the queue and the sidebar answer the
@@ -51,6 +51,7 @@ mod tab_surface;
 mod tabs;
 mod tooltip;
 pub(crate) use tooltip::hovered_control_at;
+mod agent_picker;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;
@@ -62,6 +63,7 @@ mod work_status;
 pub(crate) mod work_view;
 
 use self::add_project::render_add_project_overlay;
+use self::agent_picker::render_agent_picker;
 use self::command_palette::render_command_palette;
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
@@ -130,6 +132,7 @@ use self::user_actions::render_add_action_overlay;
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
+pub(crate) use self::sidebar::local_agent_panel_identities;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -147,9 +150,9 @@ pub(crate) use self::{
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
-        sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
-        sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
+        relative_agent_navigation_entry, remote_agent_panel_entries, sidebar_dim_header_at,
+        sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
+        sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
         sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
         sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
@@ -163,8 +166,8 @@ pub(crate) use self::{
         sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
         workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
-        WorkspaceListEntry, SETTLED_MENU_LABELS,
+        AgentPanelEntry, AgentPanelLocalIdentity, RemoteAgentPanelEntry, SidebarFilterOption,
+        SidebarObjectMenuItem, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -1297,6 +1300,7 @@ fn render_with_runtime_registry_inner(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::CommandPalette => render_command_palette(app, frame),
         Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
+        Mode::AgentPicker => render_agent_picker(app, frame, frame.area()),
         Mode::Terminal => {}
     }
     if app

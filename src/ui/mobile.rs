@@ -12,8 +12,9 @@ use super::sidebar::agent_panel_entries;
 use super::sidebar::AgentPanelEntry;
 use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout, render_compact_agent_row,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
-    sidebar_workspace_labels, SidebarRow, RECENTLY_DONE_SECTION_TITLE,
+    render_remote_compact_agent_row, sidebar_row_belongs_to_workspace,
+    sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
+    SidebarRow, RECENTLY_DONE_SECTION_TITLE,
 };
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width, display_width_u16, truncate_end};
@@ -144,7 +145,8 @@ fn mobile_switcher_target_for_row(
             ws_idx: entry.ws_idx,
             tab_idx: entry.tab_idx,
         },
-        SidebarRow::SectionHeader { .. }
+        SidebarRow::RemoteAgent { .. }
+        | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty => return None,
@@ -169,8 +171,9 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
-        | SidebarRow::SymphonyEmpty => 1,
-        SidebarRow::Agent { .. } => 1,
+        | SidebarRow::SymphonyEmpty
+        | SidebarRow::Agent { .. }
+        | SidebarRow::RemoteAgent { .. } => 1,
     }
 }
 
@@ -746,6 +749,23 @@ fn render_mobile_switcher_content(
                         Rect::new(content.x, y, content.width, 1),
                         *depth,
                         false,
+                        Some(bg),
+                    );
+                }
+            }
+            SidebarRow::RemoteAgent { entry, depth } => {
+                let selected = app
+                    .sidebar_selected_remote_agent
+                    .as_ref()
+                    .is_some_and(|agent_ref| agent_ref == &entry.agent_ref);
+                let bg = mobile_item_bg(selected, false, p);
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    render_remote_compact_agent_row(
+                        app,
+                        frame,
+                        entry,
+                        Rect::new(content.x, y, content.width, 1),
+                        *depth,
                         Some(bg),
                     );
                 }

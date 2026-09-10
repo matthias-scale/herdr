@@ -326,6 +326,7 @@ impl AppState {
             workspace_id: ws.id.clone(),
             pane_id,
         };
+        self.sidebar_selected_remote_agent = None;
         if previous.as_ref() != Some(&target) {
             self.previous_pane_focus = previous;
         }
@@ -370,6 +371,7 @@ impl AppState {
         // Released before the already-focused early return: re-focusing the
         // current pane is still the operator saying "type here now".
         self.release_dock_focus_to_pane();
+        self.sidebar_selected_remote_agent = None;
         if previous.as_ref() == Some(&target) {
             return false;
         }
@@ -1277,6 +1279,7 @@ impl AppState {
 
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
+            self.sidebar_selected_remote_agent = None;
             let previous_focus = self.current_pane_focus_target();
             self.active = Some(idx);
             self.selected = idx;
@@ -1316,6 +1319,7 @@ impl AppState {
         }
 
         let previous_focus = self.current_pane_focus_target();
+        self.sidebar_selected_remote_agent = None;
         let workspace_changed = self.active != Some(ws_idx);
         self.active = Some(ws_idx);
         self.selected = ws_idx;
@@ -1419,6 +1423,7 @@ impl AppState {
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let previous_focus = self.current_pane_focus_target();
+            self.sidebar_selected_remote_agent = None;
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
             };
@@ -1854,6 +1859,7 @@ impl AppState {
         }
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
+            self.local_agent_panel_identities.remove(&pane_id);
         }
     }
 
@@ -2604,6 +2610,24 @@ impl AppState {
             line,
             is_dir: metadata.is_dir(),
         })
+    }
+
+    /// The pane's finished selection as text, without consuming it. The pane
+    /// menu reads this so a right-click can act on what the user highlighted.
+    pub(crate) fn pane_selection_text(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> Option<String> {
+        let selection = self
+            .selection
+            .as_ref()
+            .filter(|selection| selection.pane_id == pane_id && selection.is_finalized())?;
+        let text = self
+            .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+            .and_then(|runtime| runtime.extract_selection(selection))?;
+        (!text.trim().is_empty()).then_some(text)
     }
 
     pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
@@ -7369,6 +7393,48 @@ mod tests {
         assert!(!state.terminals.contains_key(&terminal_id));
         assert!(!state.plugin_panes.contains_key(&pane_id));
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn local_identity_cache_does_not_accumulate_after_topology_closes() {
+        let mut state = app_with_workspaces(&["baseline"]);
+        state.refresh_local_agent_panel_identities();
+        assert_eq!(state.local_agent_panel_identities.len(), 1);
+
+        for _ in 0..3 {
+            let pane_id = state.workspaces[0].test_split(Direction::Horizontal);
+            state.ensure_test_terminals();
+            state.refresh_local_agent_panel_identities();
+            assert!(state.local_agent_panel_identities.contains_key(&pane_id));
+
+            assert!(!state.close_pane());
+            assert_eq!(state.local_agent_panel_identities.len(), 1);
+        }
+
+        for index in 0..3 {
+            let tab_idx = state.workspaces[0].test_add_tab(Some(&format!("tab-{index}")));
+            state.workspaces[0].switch_tab(tab_idx);
+            state.ensure_test_terminals();
+            state.refresh_local_agent_panel_identities();
+            assert_eq!(state.local_agent_panel_identities.len(), 2);
+
+            assert!(!state.close_tab());
+            assert_eq!(state.local_agent_panel_identities.len(), 1);
+        }
+
+        for index in 0..3 {
+            state
+                .workspaces
+                .push(Workspace::test_new(&format!("workspace-{index}")));
+            state.active = Some(1);
+            state.selected = 1;
+            state.ensure_test_terminals();
+            state.refresh_local_agent_panel_identities();
+            assert_eq!(state.local_agent_panel_identities.len(), 2);
+
+            state.close_selected_workspace();
+            assert_eq!(state.local_agent_panel_identities.len(), 1);
+        }
     }
 
     #[test]

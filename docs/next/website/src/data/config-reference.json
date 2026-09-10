@@ -2131,6 +2131,12 @@
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
         },
         {
+          "key": "remote.fleet.self_name",
+          "type": "string",
+          "default": "system hostname",
+          "description": "Name for this server in cross-host agent references. Must be non-empty and must not contain `::`."
+        },
+        {
           "key": "remote.fleet.refresh_interval_ms",
           "type": "integer",
           "default": "15000",

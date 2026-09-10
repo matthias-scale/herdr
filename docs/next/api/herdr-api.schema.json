@@ -7404,6 +7404,17 @@
                 "null"
               ]
             },
+            "agent_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Cross-host identity. Older remote servers may omit this while fleet\ninventory remains version-skew tolerant."
+            },
             "agent_session": {
               "anyOf": [
                 {
@@ -7539,6 +7550,9 @@
               },
               "type": "object"
             },
+            "usage_limited": {
+              "type": "boolean"
+            },
             "wait": {
               "type": [
                 "string",
@@ -7629,6 +7643,10 @@
             "local_override_shadowing_remote"
           ],
           "type": "object"
+        },
+        "AgentRef": {
+          "description": "Cross-host identity for a pane-backed agent or windowless run.",
+          "type": "string"
         },
         "AgentSessionInfo": {
           "properties": {
@@ -8577,8 +8595,8 @@
                 "null"
               ]
             },
-            "host": {
-              "type": "string"
+            "agent_ref": {
+              "$ref": "#/schemas/success_response/$defs/AgentRef"
             },
             "name": {
               "type": "string"
@@ -8591,7 +8609,7 @@
             }
           },
           "required": [
-            "host",
+            "agent_ref",
             "name",
             "state",
             "source"

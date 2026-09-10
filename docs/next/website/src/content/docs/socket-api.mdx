@@ -128,6 +128,9 @@ Raw socket method names use dot notation:
 read-only and never waits for SSH. The response distinguishes an inventory that
 has never been polled from a completed poll with no running agents, and includes
 each configured host's reachability, version, protocol, error, and agents.
+Every fleet agent has an `agent_ref` string in `host::agent` form. `agent.list`
+returns the same field for local agents, using `remote.fleet.self_name` as its
+host component.
 
 ```json
 {"id":"fleet","method":"fleet.list","params":{}}
