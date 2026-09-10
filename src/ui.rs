@@ -798,6 +798,7 @@ fn compute_view_internal(
         } else {
             Vec::new()
         },
+        status_work_links: Vec::new(),
         scratchpad_link_rows: if !app.dock_collapsed
             && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
         {
@@ -838,6 +839,13 @@ fn compute_view_internal(
     // The menu anchors on the `+`, so its geometry needs the strip already
     // stored on the view.
     app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
+    // The links follow the title, and the title starts at the sidebar's right
+    // edge, so they are laid out only once this frame's sidebar is on the view.
+    app.view.status_work_links = if status_bar_is_renderable(app, area) {
+        status::status_work_links(app, status_bar_rect)
+    } else {
+        Vec::new()
+    };
     app.sync_copy_mode_search_geometry();
 }
 
@@ -1062,6 +1070,7 @@ fn compute_mobile_view(
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),
         status_buttons: Vec::new(),
+        status_work_links: Vec::new(),
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,

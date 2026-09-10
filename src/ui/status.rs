@@ -13,7 +13,8 @@ use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{
-        CopyFeedback, Palette, StatusButton, StatusButtonAction, ToastKind, ToastNotification,
+        CopyFeedback, Palette, StatusButton, StatusButtonAction, StatusWorkLink, ToastKind,
+        ToastNotification,
     },
     app::AppState,
     config::{StatusIndicatorStyle, ToastClipboardPosition, ToastHerdrPosition},
@@ -59,19 +60,7 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if usize::from(content_width) < minimum_required_status_width(app) {
         return;
     }
-    let title_segment_budget = focused_pane_title_parts(app).and_then(|(repo, _)| {
-        let start = focused_pane_title_start(app, area);
-        let budget = area
-            .x
-            .saturating_add(content_width)
-            .saturating_sub(start)
-            .saturating_sub(display_width_u16(&repo));
-        (usize::from(budget) >= minimum_title_companion_width()).then_some(usize::from(budget))
-    });
-    let segments = match title_segment_budget {
-        Some(budget) => fitted_segments_beside_title(status_segments(app, metrics, p), budget),
-        None => fitted_segments(status_segments(app, metrics, p), usize::from(content_width)),
-    };
+    let segments = status_row_segments(app, metrics, p, area, content_width);
 
     let used = segment_width(&segments);
     let pad = (content_width as usize).saturating_sub(used);
@@ -92,6 +81,15 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         Rect::new(area.x, area.y, content_width, area.height),
     );
     render_focused_pane_title(app, frame, area, used + usize::from(reserved));
+    for link in &app.view.status_work_links {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                link.label.clone(),
+                Style::default().fg(p.accent).bg(p.panel_bg),
+            ))),
+            link.rect,
+        );
+    }
 
     for button in &app.view.status_buttons {
         let style = if button.active {
@@ -114,9 +112,59 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 /// with the column the pane itself occupies below, and it yields to both the
 /// left-hand buttons and the right-aligned segments rather than overlapping.
 fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segments_used: usize) {
-    let Some((repo, thread)) = focused_pane_title_parts(app) else {
+    let Some(layout) = focused_pane_title_layout(app, area, segments_used) else {
         return;
     };
+    let style = Style::default()
+        .fg(app.palette.subtext0)
+        .bg(app.palette.panel_bg);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(layout.text, style))),
+        layout.rect,
+    );
+}
+
+/// Blank columns between the title and the first link, and between links.
+const WORK_LINK_GAP: usize = 2;
+
+struct TitleLayout {
+    text: String,
+    rect: Rect,
+    links: Vec<StatusWorkLink>,
+}
+
+/// Ticket and pull-request links of the focused pane, as rendered in the status
+/// row. Computed during view computation so the hit areas belong to the same
+/// frame as the labels, and empty whenever the title itself does not fit.
+pub(crate) fn status_work_links(app: &AppState, area: Rect) -> Vec<StatusWorkLink> {
+    if app.dock_context_objects.is_empty() {
+        return Vec::new();
+    }
+    let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
+    let content_width = area.width.saturating_sub(reserved);
+    if usize::from(content_width) < minimum_required_status_width(app) {
+        return Vec::new();
+    }
+    let metrics = metrics_or_unavailable(app);
+    let segments = status_row_segments(app, metrics, &app.palette, area, content_width);
+    let segments_used = segment_width(&segments) + usize::from(reserved);
+    focused_pane_title_layout(app, area, segments_used)
+        .map(|layout| layout.links)
+        .unwrap_or_default()
+}
+
+/// Title text, its rect, and the links that follow it.
+///
+/// The links are paid for before the title is fitted: an identifier the human
+/// clicks is worth more than the tail of a thread name they are already
+/// reading. Links that would leave no room for the repository are dropped
+/// rather than shown over a clipped title.
+fn focused_pane_title_layout(
+    app: &AppState,
+    area: Rect,
+    segments_used: usize,
+) -> Option<TitleLayout> {
+    let (repo, thread) = focused_pane_title_parts(app)?;
     let start = focused_pane_title_start(app, area);
     let segments_start = area
         .x
@@ -125,17 +173,77 @@ fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segm
     let raw_width = segments_start.saturating_sub(start);
     // Keep a separator when space permits, but at 80 columns the repository is
     // more useful than a blank cell.
-    let width = raw_width.saturating_sub(u16::from(usize::from(raw_width) > display_width(&repo)));
-    let Some(text) = fit_focused_pane_title(&repo, &thread, usize::from(width)) else {
-        return;
-    };
-    let style = Style::default()
-        .fg(app.palette.subtext0)
-        .bg(app.palette.panel_bg);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(text, style))),
-        Rect::new(start, area.y, width, 1),
+    let width = usize::from(
+        raw_width.saturating_sub(u16::from(usize::from(raw_width) > display_width(&repo))),
     );
+    let mut links_width = 0usize;
+    let mut kept: Vec<(crate::app::state::DockObjectRef, String)> = Vec::new();
+    for object in &app.dock_context_objects {
+        let label = app.dock_object_label(object);
+        if label.is_empty() {
+            continue;
+        }
+        let cost = WORK_LINK_GAP + display_width(&label);
+        if width.saturating_sub(links_width + cost) < display_width(&repo) {
+            break;
+        }
+        links_width += cost;
+        kept.push((object.clone(), label));
+    }
+    let title_width = width.saturating_sub(links_width);
+    let text = fit_focused_pane_title(&repo, &thread, title_width)?;
+    let mut cursor = start.saturating_add(display_width_u16(&text));
+    let links = kept
+        .into_iter()
+        .map(|(object, label)| {
+            let label_width = display_width_u16(&label);
+            let rect = Rect::new(
+                cursor.saturating_add(u16::try_from(WORK_LINK_GAP).unwrap_or(u16::MAX)),
+                area.y,
+                label_width,
+                1,
+            );
+            cursor = rect.x.saturating_add(label_width);
+            StatusWorkLink {
+                rect,
+                label,
+                object,
+            }
+        })
+        .collect();
+    Some(TitleLayout {
+        text,
+        rect: Rect::new(
+            start,
+            area.y,
+            u16::try_from(title_width).unwrap_or(u16::MAX),
+            1,
+        ),
+        links,
+    })
+}
+
+/// The right-aligned segments, fitted to whatever the title left them.
+fn status_row_segments(
+    app: &AppState,
+    metrics: &StatusMetrics,
+    p: &Palette,
+    area: Rect,
+    content_width: u16,
+) -> Vec<Segment> {
+    let title_segment_budget = focused_pane_title_parts(app).and_then(|(repo, _)| {
+        let start = focused_pane_title_start(app, area);
+        let budget = area
+            .x
+            .saturating_add(content_width)
+            .saturating_sub(start)
+            .saturating_sub(display_width_u16(&repo));
+        (usize::from(budget) >= minimum_title_companion_width()).then_some(usize::from(budget))
+    });
+    match title_segment_budget {
+        Some(budget) => fitted_segments_beside_title(status_segments(app, metrics, p), budget),
+        None => fitted_segments(status_segments(app, metrics, p), usize::from(content_width)),
+    }
 }
 
 fn focused_pane_title_start(app: &AppState, area: Rect) -> u16 {
@@ -1921,6 +2029,80 @@ mod tests {
             ' ',
             "nothing may run into the title column: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn work_links_follow_the_title_with_clickable_labels() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        const WIDTH: u16 = 120;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_collapsed = false;
+        app.sidebar_width = 30;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal");
+        terminal.set_terminal_title(Some("Fix billing".into()));
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            repo: Some("herdrdev/herdr".into()),
+            pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
+            ticket_ids: vec!["SCA-3165".into()],
+            ..Default::default()
+        });
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, WIDTH, 20),
+        );
+
+        assert!(
+            app.dock_open_surfaces.is_empty(),
+            "the links belong to the status row, not to an uninvited dock tab"
+        );
+        assert_eq!(
+            app.view
+                .status_work_links
+                .iter()
+                .map(|link| link.label.as_str())
+                .collect::<Vec<_>>(),
+            ["#159", "SCA-3165"]
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("status terminal");
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, WIDTH, 1)))
+            .expect("render status");
+        let columns = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<Vec<_>>();
+        let rendered = columns.concat();
+        assert!(
+            rendered.contains("herdr / Fix billing  #159  SCA-3165"),
+            "links follow the title with a gap between them: {rendered:?}"
+        );
+
+        // Every label is clickable exactly where it was drawn.
+        for link in &app.view.status_work_links {
+            let start = usize::from(link.rect.x);
+            let end = start + usize::from(link.rect.width);
+            assert_eq!(columns[start..end].concat(), link.label, "{rendered:?}");
+        }
     }
 
     #[test]
