@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
     TabMoveParams, TabPinMode, TabPinParams, TabPrioMode, TabPrioParams, TabPrioResult,
-    TabRenameParams, TabTarget,
+    TabRenameParams, TabStarMode, TabStarParams, TabTarget,
 };
 use crate::app::{App, Mode};
 use crate::workspace::TabPrioAction as StateTabPrioAction;
@@ -241,6 +241,27 @@ impl App {
             TabPinMode::Pin => true,
             TabPinMode::Unpin => false,
             TabPinMode::Toggle => !tab.pinned,
+        };
+        self.schedule_session_save();
+        tab_info_response(id, &params.tab_id, self.tab_info(ws_idx, tab_idx))
+    }
+
+    pub(super) fn handle_tab_star(&mut self, id: String, params: TabStarParams) -> String {
+        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        let Some(tab) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        tab.starred = match params.mode {
+            TabStarMode::Star => true,
+            TabStarMode::Unstar => false,
+            TabStarMode::Toggle => !tab.starred,
         };
         self.schedule_session_save();
         tab_info_response(id, &params.tab_id, self.tab_info(ws_idx, tab_idx))
@@ -752,6 +773,78 @@ mod tests {
             },
         );
         assert!(app.state.workspaces[0].tabs[0].pinned);
+    }
+
+    #[test]
+    fn api_tab_star_toggles_sets_and_clears_the_focus_star() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        assert!(!app.state.workspaces[0].tabs[0].starred);
+
+        let response = app.handle_tab_star(
+            "req".into(),
+            TabStarParams {
+                tab_id: tab_id.clone(),
+                mode: TabStarMode::Toggle,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        match success.result {
+            ResponseResult::TabInfo { tab } => assert!(tab.starred, "response reports the star"),
+            other => panic!("expected tab info, got {other:?}"),
+        }
+        assert!(app.state.workspaces[0].tabs[0].starred);
+
+        app.handle_tab_star(
+            "req2".into(),
+            TabStarParams {
+                tab_id: tab_id.clone(),
+                mode: TabStarMode::Toggle,
+            },
+        );
+        assert!(!app.state.workspaces[0].tabs[0].starred);
+
+        app.handle_tab_star(
+            "req3".into(),
+            TabStarParams {
+                tab_id: tab_id.clone(),
+                mode: TabStarMode::Star,
+            },
+        );
+        assert!(app.state.workspaces[0].tabs[0].starred);
+
+        app.handle_tab_star(
+            "req4".into(),
+            TabStarParams {
+                tab_id,
+                mode: TabStarMode::Unstar,
+            },
+        );
+        assert!(!app.state.workspaces[0].tabs[0].starred);
+    }
+
+    #[test]
+    fn api_tab_star_on_an_unknown_tab_returns_structured_error() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+
+        let response = app.handle_tab_star(
+            "req".into(),
+            TabStarParams {
+                tab_id: "w9_tabs:t9".into(),
+                mode: TabStarMode::Toggle,
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "tab_not_found");
     }
 
     #[test]

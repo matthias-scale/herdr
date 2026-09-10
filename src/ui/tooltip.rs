@@ -74,6 +74,10 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         (ControlId::TopBarPaneBelow, view.pane_toggle_below_hit_area),
         (ControlId::TopBarPaneRight, view.pane_toggle_right_hit_area),
         (
+            ControlId::SidebarStarFilter,
+            super::sidebar_header_star_filter_rect(view.sidebar_rect),
+        ),
+        (
             ControlId::SidebarNewThread,
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
         ),
@@ -131,6 +135,14 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
 fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
     let view = &app.view;
     let target = match control {
+        ControlId::SidebarStarFilter => (
+            super::sidebar_header_star_filter_rect(view.sidebar_rect),
+            if app.sidebar_starred_only {
+                "Show all sessions".into()
+            } else {
+                "Show only starred sessions".into()
+            },
+        ),
         ControlId::SidebarNewThread => (
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
             "New thread".into(),
