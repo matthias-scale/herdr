@@ -656,6 +656,7 @@ mod render_scale_benchmark {
                 target: "bench-remote".into(),
                 local: false,
                 session: None,
+                socket: None,
                 state: crate::fleet::HostState::Reachable,
                 version: None,
                 protocol: None,
