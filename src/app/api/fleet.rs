@@ -148,7 +148,7 @@ mod tests {
                 version: None,
                 protocol: None,
                 error: None,
-                entries: vec![crate::fleet::FleetRow::test_agent_info_row(
+                entries: vec![crate::fleet::FleetRow::test_local_agent_info_row(
                     "local",
                     agents[0].clone(),
                 )],

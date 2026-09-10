@@ -408,11 +408,9 @@ fn snapshot_from_evidence(
         let mut entries = Vec::new();
         match evidence.agents {
             Ok(agents) => {
-                entries.extend(
-                    agents.into_iter().filter_map(|agent| {
-                        FleetRow::from_agent(&evidence.host.name, agent, now_s)
-                    }),
-                );
+                entries.extend(agents.into_iter().filter_map(|agent| {
+                    FleetRow::from_agent(&evidence.host.name, evidence.host.local, agent, now_s)
+                }));
             }
             Err(error) => {
                 if let Some(row) = FleetRow::host_unknown(&evidence.host.name, error) {
@@ -1026,7 +1024,12 @@ impl FleetRow {
 
     #[cfg(test)]
     pub(crate) fn test_agent_info_row(host: &str, agent: AgentInfo) -> Self {
-        Self::from_agent(host, agent, 0).expect("valid test agent row")
+        Self::from_agent(host, false, agent, 0).expect("valid test agent row")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_local_agent_info_row(host: &str, agent: AgentInfo) -> Self {
+        Self::from_agent(host, true, agent, 0).expect("valid local test agent row")
     }
 
     #[cfg(test)]
@@ -1049,7 +1052,7 @@ impl FleetRow {
         self
     }
 
-    fn from_agent(host: &str, agent: AgentInfo, now_s: u64) -> Option<Self> {
+    fn from_agent(host: &str, host_is_local: bool, agent: AgentInfo, now_s: u64) -> Option<Self> {
         let agent_info = agent.clone();
         let liveness = match agent.agent_status {
             AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
@@ -1077,10 +1080,20 @@ impl FleetRow {
             .collect::<Vec<_>>();
         let gate_summary = gates.first().map(gate_summary);
         let id = agent.name.clone().unwrap_or_else(|| agent.pane_id.clone());
-        let agent_ref = agent
-            .agent_ref
-            .clone()
-            .or_else(|| crate::api::schema::AgentRef::new(host, agent.pane_id.clone()).ok())?;
+        let agent_ref = if host_is_local {
+            agent
+                .agent_ref
+                .clone()
+                .or_else(|| crate::api::schema::AgentRef::new(host, agent.pane_id.clone()).ok())?
+        } else {
+            // The configured alias is authoritative for rows fetched from a
+            // remote host. Its self-reported host name is descriptive only.
+            let agent_id = agent.agent_ref.as_ref().map_or_else(
+                || agent.pane_id.clone(),
+                |agent_ref| agent_ref.agent.clone(),
+            );
+            crate::api::schema::AgentRef::new(host, agent_id).ok()?
+        };
         let handle = agent_ref.to_string();
         let model = agent.tokens.get("model").cloned();
         let effort = agent.tokens.get("effort").cloned();
@@ -1757,7 +1770,8 @@ mod tests {
                 "pr": 42
             }]),
         );
-        let row = FleetRow::from_agent("ub1", agent, 1_777_000_000).expect("valid fleet row");
+        let row =
+            FleetRow::from_agent("ub1", false, agent, 1_777_000_000).expect("valid fleet row");
         assert!(row.blocked);
         assert_eq!(row.liveness, Liveness::Unknown);
         assert_eq!(row.state, "blocked_liveness_unknown");
@@ -1772,13 +1786,33 @@ mod tests {
         let agent = agent(AgentStatus::Idle, serde_json::json!([]));
         assert!(agent.agent_ref.is_none());
 
-        let row = FleetRow::from_agent("configured/alias", agent, 1_777_000_000)
+        let row = FleetRow::from_agent("configured/alias", false, agent, 1_777_000_000)
             .expect("valid fleet row");
 
         assert_eq!(
             row.agent_ref,
             crate::api::schema::AgentRef::new("configured/alias", "p1")
                 .expect("valid expected agent reference")
+        );
+    }
+
+    #[test]
+    fn configured_alias_replaces_the_host_reported_in_agent_identity() {
+        let hosts = vec![host("office", false)];
+        let mut reported = agent(AgentStatus::Idle, serde_json::json!([]));
+        reported.agent_ref = Some(
+            crate::api::schema::AgentRef::new("laptop", "p1")
+                .expect("valid reported agent reference"),
+        );
+        let reader = fake_reader(Ok(vec![reported]), HostRuntime::default());
+
+        let snapshot = collect_snapshot_with(&reader, &hosts, &FleetConfig::default());
+
+        assert_eq!(snapshot.hosts[0].name, "office");
+        assert_eq!(
+            snapshot.hosts[0].entries[0].agent_ref,
+            crate::api::schema::AgentRef::new("office", "p1")
+                .expect("valid configured agent reference")
         );
     }
 
@@ -1890,6 +1924,7 @@ mod tests {
     fn stale_agent_without_gate_is_status_unknown() {
         let row = FleetRow::from_agent(
             "ub1",
+            false,
             agent(AgentStatus::Stale, serde_json::json!([])),
             1_777_000_000,
         )
@@ -1993,6 +2028,7 @@ mod tests {
     fn blocked_rows_sort_before_working_rows() {
         let mut blocked = FleetRow::from_agent(
             "ub1",
+            false,
             agent(
                 AgentStatus::Stale,
                 serde_json::json!([{
@@ -2005,6 +2041,7 @@ mod tests {
         blocked.handle = "ub1/b".into();
         let working = FleetRow::from_agent(
             "mac",
+            false,
             agent(AgentStatus::Working, serde_json::json!([])),
             1_777_000_000,
         )
