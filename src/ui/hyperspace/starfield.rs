@@ -86,6 +86,10 @@ const DENSITY: f32 = 0.155;
 /// Cap on star count, so a very wide sidebar cannot turn this into real work.
 const MAX_STARS: u32 = 64;
 
+/// Floor on star count. The panel is a small square, so density alone would
+/// leave its field too sparse to read as motion.
+const MIN_STARS: u32 = 14;
+
 /// How far past the edge a star travels before wrapping. Above 1.0 so stars
 /// leave the frame instead of piling up on the border.
 const REACH: f32 = 1.15;
@@ -121,7 +125,7 @@ pub(super) fn field(width: u16, height: u16, step: u32) -> Field {
     let rx = width as f32 * 0.5 * REACH;
     let ry = height as f32 * 0.5 * REACH;
     let phase = (step % FRAMES) as f32 / FRAMES as f32;
-    let stars = (((width * height) as f32 * DENSITY) as u32).clamp(1, MAX_STARS);
+    let stars = (((width * height) as f32 * DENSITY) as u32).clamp(MIN_STARS, MAX_STARS);
 
     // Still marker first, so a star that reaches the centre paints over it.
     f.put(cx, cy, '+', Level::Dim);

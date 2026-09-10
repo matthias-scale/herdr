@@ -3830,10 +3830,10 @@ pub(crate) fn sidebar_notepad_rect(app: &AppState, area: Rect) -> Rect {
     crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_body(app, area))
 }
 
-/// The idle animation's rows, at the very bottom of the sidebar's content area
-/// and below the notepad.
+/// The idle animation's box, in the bottom-left corner of the sidebar's content
+/// area and below the notepad.
 pub(crate) fn sidebar_animation_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::hyperspace::animation_panel_rect(app, expanded_sidebar_content(area))
+    crate::ui::hyperspace::animation_box_rect(app, expanded_sidebar_content(area))
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
