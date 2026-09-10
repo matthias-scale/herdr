@@ -2525,7 +2525,9 @@ impl AppState {
             .into_iter()
             .find(|((x, y), _, _)| *x == screen_col && *y == screen_row)
         {
-            return Some(uri);
+            // The emitting application owns an OSC 8 URI. Only discard unmatched
+            // closing delimiters that commonly leak from rendered markup.
+            return Some(trim_unbalanced_trailing_url_closers(uri));
         }
 
         let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
@@ -2843,15 +2845,39 @@ fn trailing_url_closer_is_balanced(
     open: char,
     close: char,
 ) -> bool {
+    trailing_url_closer_is_balanced_in(cells[start..end].iter().map(|cell| cell.ch), open, close)
+}
+
+fn trailing_url_closer_is_balanced_in(
+    chars: impl Iterator<Item = char>,
+    open: char,
+    close: char,
+) -> bool {
     let mut balance = 0i32;
-    for cell in &cells[start..end] {
-        if cell.ch == open {
+    for ch in chars {
+        if ch == open {
             balance += 1;
-        } else if cell.ch == close {
+        } else if ch == close {
             balance -= 1;
         }
     }
     balance > 0
+}
+
+fn trim_unbalanced_trailing_url_closers(mut url: String) -> String {
+    while let Some((closer_start, closer)) = url.char_indices().next_back() {
+        let opener = match closer {
+            ')' => '(',
+            ']' => '[',
+            '}' => '{',
+            _ => break,
+        };
+        if trailing_url_closer_is_balanced_in(url[..closer_start].chars(), opener, closer) {
+            break;
+        }
+        url.truncate(closer_start);
+    }
+    url
 }
 
 fn quoted_path_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {

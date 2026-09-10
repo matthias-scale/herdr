@@ -1358,6 +1358,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pane_cell_url_resolver_trims_soft_wrapped_markdown_closer() {
+        let (_app, info) = app_with_screen_bytes(b"");
+        let markdown_prefix = "[docs](";
+        let url_prefix = "https://example.com/";
+        let padding =
+            "a".repeat(info.inner_rect.width as usize - markdown_prefix.len() - url_prefix.len());
+        let url = format!("{url_prefix}{padding}tail");
+        let screen = format!("{markdown_prefix}{url})");
+        let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 1, 1)
+                .as_deref(),
+            Some(url.as_str())
+        );
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 1, 4),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_trims_closer_at_full_width_row_end() {
+        let (_app, info) = app_with_screen_bytes(b"");
+        let url = "https://example.com/full-width";
+        let padding = " ".repeat(info.inner_rect.width as usize - url.len() - 1);
+        let screen = format!("{padding}{url})");
+        let (app, info) = app_with_screen_bytes(screen.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let url_col = padding.len() as u16 + 8;
+
+        assert_eq!(
+            app.state
+                .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, url_col)
+                .as_deref(),
+            Some(url)
+        );
+        assert_eq!(
+            app.state.url_at_pane_cell(
+                &app.terminal_runtimes,
+                pane_id,
+                0,
+                info.inner_rect.width - 1
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn pane_cell_url_resolver_does_not_shift_after_zero_width_mark() {
         let url = "https://example.com/mark";
         let screen = format!("e\u{301} {url}");
@@ -1474,6 +1526,154 @@ mod tests {
                 .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, 1)
                 .as_deref(),
             Some("https://example.com/hidden-target")
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_trims_unbalanced_osc8_closer() {
+        let uri = "https://example.com/docs)";
+        let screen = format!("\x1b]8;;{uri}\x1b\\docs)\x1b]8;;\x1b\\");
+        let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        for col in [1, 4] {
+            assert_eq!(
+                app.state
+                    .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, col)
+                    .as_deref(),
+                Some("https://example.com/docs"),
+                "click column {col}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_trims_each_unbalanced_osc8_closer() {
+        for (uri, expected) in [
+            ("https://example.com/docs]", "https://example.com/docs"),
+            ("https://example.com/docs}", "https://example.com/docs"),
+            ("https://example.com/docs)]}", "https://example.com/docs"),
+        ] {
+            let screen = format!("\x1b]8;;{uri}\x1b\\link\x1b]8;;\x1b\\");
+            let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+            assert_eq!(
+                app.state
+                    .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, 1)
+                    .as_deref(),
+                Some(expected),
+                "uri={uri:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pane_cell_url_resolver_honors_other_osc8_uri_endings() {
+        for uri in [
+            "https://en.wikipedia.org/wiki/Rust_(lang)",
+            "https://example.com/docs.",
+        ] {
+            let screen = format!("\x1b]8;;{uri}\x1b\\link\x1b]8;;\x1b\\");
+            let (app, _info) = app_with_screen_bytes(screen.as_bytes());
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+            assert_eq!(
+                app.state
+                    .url_at_pane_cell(&app.terminal_runtimes, pane_id, 0, 1)
+                    .as_deref(),
+                Some(uri)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn modified_click_opener_receives_trimmed_osc8_uri() {
+        let uri = "https://example.com/docs)";
+        let screen = format!("\x1b]8;;{uri}\x1b\\docs)\x1b]8;;\x1b\\");
+        let (mut app, info) = app_with_screen_bytes(screen.as_bytes());
+        let mut opened = None;
+
+        let handled = app.handle_modified_url_click_with(
+            41,
+            modified_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                info.inner_rect.x + 1,
+                info.inner_rect.y,
+                KeyModifiers::CONTROL,
+            ),
+            |url| {
+                opened = Some(url.to_owned());
+                Ok(None)
+            },
+        );
+
+        assert!(handled);
+        assert_eq!(opened.as_deref(), Some("https://example.com/docs"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_link_handler_receives_trimmed_osc8_uri() {
+        let uri = "https://github.com/herdrdev/herdr/issues/398)";
+        let screen = format!("\x1b]8;;{uri}\x1b\\issue)\x1b]8;;\x1b\\");
+        let (mut app, info) = app_with_screen_bytes(screen.as_bytes());
+        install_test_link_handler(&mut app);
+        let plugin = app
+            .state
+            .installed_plugins
+            .get_mut("example.links")
+            .expect("test plugin");
+        plugin.actions[0].command = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf '%s' \"$HERDR_PLUGIN_CLICKED_URL\"".into(),
+        ];
+
+        let handled = app.handle_modified_url_click_with(
+            41,
+            modified_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                info.inner_rect.x + 1,
+                info.inner_rect.y,
+                KeyModifiers::CONTROL,
+            ),
+            |_| panic!("matching plugin link handler should replace the system opener"),
+        );
+        assert!(handled);
+
+        let log_id = app
+            .state
+            .plugin_command_logs
+            .last()
+            .expect("plugin command log")
+            .log_id
+            .clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            if app.state.plugin_command_logs.iter().any(|entry| {
+                entry.log_id == log_id
+                    && entry.status != crate::api::schema::PluginCommandStatus::Running
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let finished = app
+            .state
+            .plugin_command_logs
+            .iter()
+            .find(|entry| entry.log_id == log_id)
+            .expect("plugin command log remains available");
+
+        assert_eq!(
+            finished.status,
+            crate::api::schema::PluginCommandStatus::Succeeded
+        );
+        assert_eq!(
+            finished.stdout.as_deref(),
+            Some("https://github.com/herdrdev/herdr/issues/398")
         );
     }
 
