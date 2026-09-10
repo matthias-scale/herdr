@@ -78,6 +78,26 @@ impl AppState {
             .min()
     }
 
+    /// When the next Done pane becomes eligible for the settle trigger. The
+    /// settlement pass itself runs on every tick, so without this the wake that
+    /// carries it would depend on unrelated timers.
+    pub(crate) fn next_done_settle_deadline(&self, now: Instant) -> Option<Instant> {
+        if !self.auto_settle_done {
+            return None;
+        }
+        self.done_panes()
+            .filter(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
+                pane_is_done(pane, terminal)
+                    && crate::app::settled::pane_has_resume_plan(terminal)
+                    && !self.is_active_pane(*ws_idx, *tab_idx, *pane_id)
+                    && !self.workspaces[*ws_idx].tabs[*tab_idx].pinned
+            })
+            .filter_map(|(_, _, _, pane, _)| pane.done_since)
+            .filter_map(|done_since| done_since.checked_add(self.settle_done_after))
+            .map(|deadline| deadline.max(now))
+            .min()
+    }
+
     fn due_done_pane_ids(&self, now: Instant) -> Vec<PaneId> {
         if !self.reap_done_panes {
             return Vec::new();
@@ -203,7 +223,10 @@ impl App {
     }
 }
 
-fn pane_is_done(pane: &crate::pane::PaneState, terminal: &crate::terminal::TerminalState) -> bool {
+pub(crate) fn pane_is_done(
+    pane: &crate::pane::PaneState,
+    terminal: &crate::terminal::TerminalState,
+) -> bool {
     if pane.settled_at.is_some() {
         return false;
     }

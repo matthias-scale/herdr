@@ -1055,6 +1055,7 @@ impl App {
                 .then(|| self.state.next_done_hide_deadline(now))
                 .flatten(),
             self.state.next_done_reap_deadline(now),
+            self.state.next_done_settle_deadline(now),
             self.copy_feedback_deadline,
             // Presentation only: an unattached headless server draws no
             // sidebar, so the animation must never be what wakes it.

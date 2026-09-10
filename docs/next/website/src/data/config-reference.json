@@ -1970,6 +1970,18 @@
           "description": "Settle a pane that has had no activity for settle_after_days."
         },
         {
+          "key": "session.auto_settle_done",
+          "type": "boolean",
+          "default": "true",
+          "description": "Settle a resumable pane whose agent read Done and stayed quiet, instead of leaving it running until reap_done_after_minutes closes it. A pane with no resume plan is left to reaping."
+        },
+        {
+          "key": "session.settle_done_after_minutes",
+          "type": "integer",
+          "default": "30",
+          "description": "How long a Done pane has to stay quiet before auto_settle_done settles it."
+        },
+        {
           "key": "session.settle_stops_agent",
           "type": "boolean",
           "default": "true",

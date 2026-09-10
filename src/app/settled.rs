@@ -68,6 +68,20 @@ fn primary_pr_settled_label(
     (!title.is_empty()).then(|| format!("#{number} {title}"))
 }
 
+/// Whether the pane can be brought back after its agent is stopped. Only a
+/// resumable pane may be settled by the Done trigger: settling one that cannot
+/// resume would file it under Settled with a dead Resume action and hide it
+/// from reaping, which is the path that would otherwise close it.
+pub(crate) fn pane_has_resume_plan(terminal: &crate::terminal::TerminalState) -> bool {
+    terminal
+        .persisted_agent_session
+        .as_ref()
+        .is_some_and(|session| {
+            crate::agent_resume::plan(&session.source, &session.agent, &session.session_ref)
+                .is_some()
+        })
+}
+
 fn derived_pane_label(state: &AppState, ws_idx: usize, pane_id: PaneId) -> Option<String> {
     state
         .workspaces
@@ -188,7 +202,7 @@ impl AppState {
         let mut observed_work_keys = Vec::new();
         let mut arm_writes = Vec::new();
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
-            for tab in &workspace.tabs {
+            for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
                 for (pane_id, pane) in &tab.panes {
                     if pane.settled_at.is_some() {
                         continue;
@@ -226,6 +240,19 @@ impl AppState {
                     let finished_ripe = now.saturating_duration_since(finished_since)
                         >= self.settle_finished_after
                         && quiet_for >= self.settle_finished_after;
+                    // A Done agent is finished work the sidebar already hides,
+                    // and leaving it running only spends context until reaping
+                    // closes it outright. Settling it instead stops the process
+                    // and keeps one Resume click, so the Done trigger applies
+                    // only where that click can actually work.
+                    let done_ripe = self.auto_settle_done
+                        && pane_has_resume_plan(terminal)
+                        && !self.is_active_pane(ws_idx, tab_idx, *pane_id)
+                        && !tab.pinned
+                        && crate::app::pane_lifecycle::pane_is_done(pane, terminal)
+                        && pane.done_since.is_some_and(|done_since| {
+                            now.saturating_duration_since(done_since) >= self.settle_done_after
+                        });
                     let holding = new_work_trigger && !finished_ripe;
                     let armed = holding.then_some(finished_since);
                     if pane.finished_since != armed {
@@ -236,7 +263,7 @@ impl AppState {
                     if !holding {
                         observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
                     }
-                    if inactive || (new_work_trigger && finished_ripe) {
+                    if inactive || done_ripe || (new_work_trigger && finished_ripe) {
                         candidates.push((ws_idx, *pane_id, work_key));
                     }
                 }
@@ -857,6 +884,105 @@ mod tests {
             1
         );
         assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    /// A Done pane the way the lifecycle sees one: an idle detected agent whose
+    /// output nobody has read since it stopped.
+    fn done_state(resumable: bool, done_since: Instant) -> (AppState, PaneId) {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal.state = crate::detect::AgentState::Idle;
+        if resumable {
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("done-session")
+                    .expect("valid session id"),
+            });
+        }
+        let pane = state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane");
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        state.settle_done_after = Duration::from_secs(30 * 60);
+        // Isolate the Done trigger from the other two.
+        state.auto_settle_inactive = false;
+        state.auto_settle_finished = false;
+        (state, pane_id)
+    }
+
+    #[test]
+    fn done_resumable_pane_settles_once_the_done_window_passes() {
+        let now = Instant::now();
+        let (mut state, pane_id) = done_state(true, now - Duration::from_secs(29 * 60));
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_030), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
+
+        let (mut state, pane_id) = done_state(true, now - Duration::from_secs(31 * 60));
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_031), 1);
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn done_pane_without_a_resume_plan_is_left_to_reaping() {
+        let now = Instant::now();
+        let (mut state, pane_id) = done_state(false, now - Duration::from_secs(5 * 60 * 60));
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_032), 0);
+        assert!(
+            !state.pane_is_settled(0, pane_id),
+            "settling a pane that cannot resume would hide it from reaping with a dead Resume"
+        );
+        assert!(state.next_done_settle_deadline(now).is_none());
+    }
+
+    #[test]
+    fn done_settle_skips_the_active_pane_and_pinned_tabs() {
+        let now = Instant::now();
+        let done_since = now - Duration::from_secs(31 * 60);
+        let (mut state, pane_id) = done_state(true, done_since);
+        state.active = Some(0);
+        state.workspaces[0].tabs[0].panes.get_mut(&pane_id);
+        assert!(
+            state.is_active_pane(0, 0, pane_id),
+            "the focused pane is the one the human is looking at"
+        );
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_033), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
+
+        let (mut state, pane_id) = done_state(true, done_since);
+        state.active = None;
+        state.workspaces[0].tabs[0].pinned = true;
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_034), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn done_settle_can_be_turned_off() {
+        let now = Instant::now();
+        let (mut state, pane_id) = done_state(true, now - Duration::from_secs(5 * 60 * 60));
+        state.auto_settle_done = false;
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_035), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert!(state.next_done_settle_deadline(now).is_none());
+    }
+
+    #[test]
+    fn done_settle_deadline_is_the_pane_done_window() {
+        let now = Instant::now();
+        let (state, _) = done_state(true, now - Duration::from_secs(10 * 60));
+        assert_eq!(
+            state.next_done_settle_deadline(now),
+            Some(now + Duration::from_secs(20 * 60))
+        );
     }
 
     #[test]
