@@ -12,9 +12,13 @@ fn write_config_atomically(path: &std::path::Path, content: &str) -> std::io::Re
     // Follow a symlinked config to its target first. Renaming over the link
     // would replace it with a regular file and detach the config from the
     // dotfiles checkout that owns it.
-    let resolved = crate::platform::resolve_write_target(path);
+    let resolved = crate::platform::resolve_write_target(path)?;
     let path = resolved.as_path();
     let directory = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    // The caller only created the config path's own parent. A symlink can point
+    // into a directory that does not exist yet, and the temp file has to land
+    // beside the target so the rename stays on one filesystem.
+    std::fs::create_dir_all(directory)?;
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -23,6 +27,11 @@ fn write_config_atomically(path: &std::path::Path, content: &str) -> std::io::Re
 
     let write = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temp_path)?;
+        // The rename installs a new inode, so the replaced file's mode has to be
+        // carried over or a restrictive config is silently widened to the umask.
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let _ = file.set_permissions(metadata.permissions());
+        }
         file.write_all(content.as_bytes())?;
         file.sync_all()
     })();
@@ -323,6 +332,49 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&target).expect("read target"),
+            "[ui]\nconfirm_close = false\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The rename installs a new inode, so a config restricted to 0600 must not
+    /// come back at the umask default after a settings write.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_preserves_the_target_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "[ui]\nconfirm_close = true\n").expect("seed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+
+        write_config_atomically(&link, "[ui]\nconfirm_close = false\n").expect("write");
+
+        let mode = std::fs::metadata(&target)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "config write widened the target file mode");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A dangling link can point into a directory that does not exist yet; the
+    /// caller only created the link's own parent.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_creates_a_missing_symlink_target_directory() {
+        let dir = scratch_dir();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink("generated/config.toml", &link).expect("symlink");
+
+        write_config_atomically(&link, "[ui]\nconfirm_close = false\n").expect("write");
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("generated/config.toml")).expect("read target"),
             "[ui]\nconfirm_close = false\n"
         );
         std::fs::remove_dir_all(&dir).ok();

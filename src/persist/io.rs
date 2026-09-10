@@ -33,7 +33,7 @@ fn next_save_generation() -> String {
 // Writes follow a (possibly dangling) symlink to its target so a stow-managed
 // session file keeps its link. The resolver is shared with the config writer.
 fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
-    Ok(crate::platform::resolve_write_target(path))
+    crate::platform::resolve_write_target(path)
 }
 
 #[cfg(test)]

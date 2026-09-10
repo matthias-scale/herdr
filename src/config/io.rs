@@ -798,7 +798,7 @@ pub fn write_actions_atomically(
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
     // Keep a dotfiles-managed symlink intact: write to its target.
-    let resolved = crate::platform::resolve_write_target(path);
+    let resolved = crate::platform::resolve_write_target(path)?;
     let path = resolved.as_path();
     let parent = path
         .parent()

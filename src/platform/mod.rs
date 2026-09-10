@@ -488,20 +488,22 @@ const MAX_WRITE_TARGET_SYMLINK_HOPS: usize = 16;
 /// Symlinks are followed manually rather than with `fs::canonicalize`, which
 /// requires the target to exist and so excludes the dangling-link case a stow
 /// user hits on the very first save. A dangling link resolves to its missing
-/// target, so the write creates the managed file. A loop or a non-symlink path
-/// returns the last path reached.
-pub(crate) fn resolve_write_target(path: &Path) -> PathBuf {
+/// target, so the write creates the managed file. A chain still unresolved
+/// after [`MAX_WRITE_TARGET_SYMLINK_HOPS`] hops is treated as a loop and
+/// returns `path` itself; an unreadable link is an error, not a silent
+/// fallback onto the link.
+pub(crate) fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
     let mut current = path.to_path_buf();
     for _ in 0..MAX_WRITE_TARGET_SYMLINK_HOPS {
         let Ok(metadata) = std::fs::symlink_metadata(&current) else {
-            return current;
+            return Ok(current);
         };
         if !metadata.file_type().is_symlink() {
-            return current;
+            return Ok(current);
         }
-        let Ok(link) = std::fs::read_link(&current) else {
-            return current;
-        };
+        // An unreadable link is not a path to write through: fail the save
+        // rather than fall back to replacing the link.
+        let link = std::fs::read_link(&current)?;
         current = if link.is_absolute() {
             link
         } else {
@@ -511,11 +513,18 @@ pub(crate) fn resolve_write_target(path: &Path) -> PathBuf {
                 .join(link)
         };
     }
-    tracing::warn!(
-        path = %path.display(),
-        "symlink chain too deep; writing to the path itself"
-    );
-    path.to_path_buf()
+    // The budget is spent, but the last hop may already have landed on a real
+    // file. Only a path that is still a symlink here is treated as a loop.
+    match std::fs::symlink_metadata(&current) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            tracing::warn!(
+                path = %path.display(),
+                "symlink chain too deep; writing to the path itself"
+            );
+            Ok(path.to_path_buf())
+        }
+        _ => Ok(current),
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -537,7 +546,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "onboarding = false\n").expect("seed");
 
-        assert_eq!(resolve_write_target(&path), path);
+        assert_eq!(resolve_write_target(&path).expect("resolve"), path);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -549,7 +558,7 @@ mod tests {
         std::fs::write(&target, "onboarding = false\n").expect("seed");
         std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
 
-        assert_eq!(resolve_write_target(&link), target);
+        assert_eq!(resolve_write_target(&link).expect("resolve"), target);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -562,9 +571,29 @@ mod tests {
         std::os::unix::fs::symlink("never-generated.toml", &link).expect("symlink");
 
         assert_eq!(
-            resolve_write_target(&link),
+            resolve_write_target(&link).expect("resolve"),
             dir.join("never-generated.toml")
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The hop budget bounds a loop, not a legitimately deep chain: a chain
+    /// that ends on a real file at the last allowed hop must still resolve, or
+    /// the write replaces the first link instead of its target.
+    #[test]
+    fn resolve_write_target_resolves_a_chain_that_ends_on_the_last_hop() {
+        let dir = symlink_scratch_dir();
+        let target = dir.join("generated.toml");
+        std::fs::write(&target, "onboarding = false\n").expect("seed");
+
+        let mut previous = target.clone();
+        for hop in 0..MAX_WRITE_TARGET_SYMLINK_HOPS {
+            let link = dir.join(format!("link-{hop}.toml"));
+            std::os::unix::fs::symlink(&previous, &link).expect("symlink");
+            previous = link;
+        }
+
+        assert_eq!(resolve_write_target(&previous).expect("resolve"), target);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -576,7 +605,7 @@ mod tests {
         std::os::unix::fs::symlink("other.toml", &first).expect("symlink");
         std::os::unix::fs::symlink("config.toml", &second).expect("symlink");
 
-        assert_eq!(resolve_write_target(&first), first);
+        assert_eq!(resolve_write_target(&first).expect("resolve"), first);
         std::fs::remove_dir_all(&dir).ok();
     }
 
