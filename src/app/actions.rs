@@ -1859,6 +1859,7 @@ impl AppState {
         }
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
+            self.local_agent_panel_identities.remove(&pane_id);
         }
     }
 
@@ -7224,6 +7225,48 @@ mod tests {
         assert!(!state.terminals.contains_key(&terminal_id));
         assert!(!state.plugin_panes.contains_key(&pane_id));
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn local_identity_cache_does_not_accumulate_after_topology_closes() {
+        let mut state = app_with_workspaces(&["baseline"]);
+        state.refresh_local_agent_panel_identities();
+        assert_eq!(state.local_agent_panel_identities.len(), 1);
+
+        for _ in 0..3 {
+            let pane_id = state.workspaces[0].test_split(Direction::Horizontal);
+            state.ensure_test_terminals();
+            state.refresh_local_agent_panel_identities();
+            assert!(state.local_agent_panel_identities.contains_key(&pane_id));
+
+            assert!(!state.close_pane());
+            assert_eq!(state.local_agent_panel_identities.len(), 1);
+        }
+
+        for index in 0..3 {
+            let tab_idx = state.workspaces[0].test_add_tab(Some(&format!("tab-{index}")));
+            state.workspaces[0].switch_tab(tab_idx);
+            state.ensure_test_terminals();
+            state.refresh_local_agent_panel_identities();
+            assert_eq!(state.local_agent_panel_identities.len(), 2);
+
+            assert!(!state.close_tab());
+            assert_eq!(state.local_agent_panel_identities.len(), 1);
+        }
+
+        for index in 0..3 {
+            state
+                .workspaces
+                .push(Workspace::test_new(&format!("workspace-{index}")));
+            state.active = Some(1);
+            state.selected = 1;
+            state.ensure_test_terminals();
+            state.refresh_local_agent_panel_identities();
+            assert_eq!(state.local_agent_panel_identities.len(), 2);
+
+            state.close_selected_workspace();
+            assert_eq!(state.local_agent_panel_identities.len(), 1);
+        }
     }
 
     #[test]
