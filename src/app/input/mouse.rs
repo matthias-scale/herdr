@@ -1522,6 +1522,21 @@ impl AppState {
                         self.toggle_sidebar_group(&key);
                         return None;
                     }
+                    // A fleet row cannot take focus here, so the first click
+                    // selects it and a click on the row already selected opens
+                    // its host. No timing is involved, so it behaves the same
+                    // over a slow link as it does locally.
+                    if let Some(agent_ref) = crate::ui::remote_agent_row_at(self, mouse.row) {
+                        self.sidebar_selected_work_group = None;
+                        if self.sidebar_selected_remote_agent.as_ref() == Some(&agent_ref) {
+                            return Some(MouseAction::OpenFleetHost {
+                                name: agent_ref.host.clone(),
+                            });
+                        }
+                        self.sidebar_selected_remote_agent = Some(agent_ref);
+                        self.mark_sidebar_projection_changed();
+                        return None;
+                    }
                     if let Some(key) =
                         crate::ui::sidebar_unassigned_spawn_at(self, mouse.column, mouse.row)
                     {
@@ -3616,6 +3631,61 @@ mod tests {
             button.y,
         ));
         assert!(!app.state.hyperspace.paused());
+    }
+
+    #[test]
+    fn clicking_a_fleet_row_selects_it_then_opens_its_host() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let row =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .next()
+                .expect("the fleet row owns a hit area");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.rect.x + 2,
+            row.rect.y,
+        ));
+
+        assert_eq!(
+            app.state.sidebar_selected_remote_agent.as_ref(),
+            Some(&agent_ref),
+            "the first click picks the fleet row"
+        );
+        assert!(
+            app.state.toast.is_none(),
+            "selecting must not launch a host"
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.rect.x + 2,
+            row.rect.y,
+        ));
+
+        // No fleet inventory is polled in this fixture, so the launch stops at
+        // its own guard -- which is exactly the proof the click reached it.
+        let toast = app.state.toast.clone().expect("the second click attaches");
+        assert_eq!(toast.title, "host launch failed");
+        assert!(
+            toast.context.contains("fleet inventory"),
+            "{}",
+            toast.context
+        );
     }
 
     #[test]

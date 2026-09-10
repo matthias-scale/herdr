@@ -150,17 +150,17 @@ pub(crate) use self::{
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, remote_agent_panel_entries, sidebar_dim_header_at,
-        sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
-        sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
-        sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
-        sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
-        sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
-        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
-        sidebar_object_menu_items, sidebar_project_anchor_rect, sidebar_project_menu_layout,
-        sidebar_project_menu_matches, sidebar_pull_request_actions, sidebar_pull_request_key,
-        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
-        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_row_at,
+        sidebar_dim_header_at, sidebar_filter_anchor_rect, sidebar_filter_menu_layout,
+        sidebar_filter_options, sidebar_group_menu_layout, sidebar_group_mode_anchor_rect,
+        sidebar_header_new_menu_rect, sidebar_header_new_thread_rect, sidebar_header_overflow_rect,
+        sidebar_header_search_rect, sidebar_header_star_filter_rect, sidebar_missive_copy_url,
+        sidebar_nested_header_at, sidebar_new_menu_layout, sidebar_new_thread_layout,
+        sidebar_new_thread_matches, sidebar_object_action_at, sidebar_object_at,
+        sidebar_object_menu_item_at, sidebar_object_menu_items, sidebar_project_anchor_rect,
+        sidebar_project_menu_layout, sidebar_project_menu_matches, sidebar_pull_request_actions,
+        sidebar_pull_request_key, sidebar_row_index_for_workspace, sidebar_row_scroll_for_target,
+        sidebar_rows, sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
         sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
         sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
         sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
@@ -172,6 +172,8 @@ pub(crate) use self::{
 };
 use crate::render_signal::RenderSignal;
 
+#[cfg(test)]
+pub(crate) use self::sidebar::compute_remote_agent_row_areas;
 #[cfg(test)]
 pub(crate) use self::tabs::REPO_EDITOR_BUTTON_WIDTH;
 pub(crate) use self::{
