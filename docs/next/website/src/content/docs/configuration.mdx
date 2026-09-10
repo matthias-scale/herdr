@@ -165,6 +165,8 @@ socket = "/home/you/.config/herdr/herdr.sock"
 
 The per-host timeout applies to the entire read. An unreachable or slow host produces a `STATUS UNKNOWN` host row while reachable hosts still appear. `heartbeat_stale_ms` controls when a non-terminal windowless run loses live status; its default is 30 minutes.
 
+These hosts are also the machines the Home composer can dispatch to. With more than one configured, the composer shows a machine chip; picking a remote machine asks that machine's own Herdr server to create the workspace and start the agent, so the pane belongs to that machine and outlives both this client and the SSH connection. The new pane appears in `herdr fleet status` under its host, not in the local workspace list.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).

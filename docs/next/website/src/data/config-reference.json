@@ -1237,6 +1237,12 @@
           "description": "Default expanded sidebar width in columns. Auto-scales based on workspace names."
         },
         {
+          "key": "ui.sidebar_animation",
+          "type": "boolean",
+          "default": "true",
+          "description": "Whether the sidebar draws its idle animation. The panel also has a pause button; this switch removes the animation entirely."
+        },
+        {
           "key": "ui.sidebar_min_width",
           "type": "integer",
           "default": "18",

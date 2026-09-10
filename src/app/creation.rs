@@ -1132,6 +1132,7 @@ mod tests {
             prompt: "verify identity invariants".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
             env: Vec::new(),
+            remote: None,
         };
 
         app.dispatch_home_composer(plan)
