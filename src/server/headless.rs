@@ -174,6 +174,27 @@ fn work_item_detail_request(
             });
         return Some((crate::app::state::DockHomeSection::Prs, selection, true));
     }
+    // A collapsed dock still renders a sidebar-selected ticket into the pane
+    // area (`ui::dock::render_object_preview`), so that host needs its detail
+    // too.
+    if presentation.collapsed {
+        if let Some(object) = presentation
+            .object_preview
+            .as_ref()
+            .filter(|object| object.surface == crate::app::DockSurface::Linear)
+        {
+            return Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(object.key.clone()),
+                }),
+                true,
+            ));
+        }
+    }
     // The Linear surface owns a ticket detail exactly the way the pull-request
     // surface owns a PR detail. Without this branch the request fell through to
     // the home block, which reports the detail as hidden, so a server-backed
@@ -6441,6 +6462,30 @@ mod tests {
             },
             origin: crate::app::state::DockTabOrigin::Context,
         })];
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some("SCA-3313".into()),
+                }),
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn a_collapsed_linear_preview_requests_its_ticket_detail_too() {
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = true;
+        client.dock_presentation.object_preview = Some(crate::app::state::DockObjectRef {
+            surface: crate::app::DockSurface::Linear,
+            key: "SCA-3313".into(),
+        });
 
         assert_eq!(
             work_item_detail_request(&client),

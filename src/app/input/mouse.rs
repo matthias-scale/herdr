@@ -2304,6 +2304,13 @@ impl AppState {
     /// A click inside the ticket detail: its two buttons and, while one is
     /// open, its dropdown. `None` leaves the click to the callers below.
     fn click_dock_ticket_control(&mut self, column: u16, row: u16) -> Option<TicketClick> {
+        // Same precedence the keyboard uses: a pending write owns the surface
+        // until it is answered, and a comment draft owns it until it is sent or
+        // dropped. Without this a click could reopen the menu over either and
+        // replace a half-typed comment with an empty one.
+        if self.dock_pending_write.is_some() || self.dock_ticket_comment_draft.is_some() {
+            return None;
+        }
         if let Some(state) = self.dock_ticket_action_menu {
             let Some(index) = self.dock_ticket_menu_row_at(column, row) else {
                 self.dock_ticket_action_menu = None;

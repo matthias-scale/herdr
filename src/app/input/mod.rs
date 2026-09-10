@@ -6334,6 +6334,43 @@ mod tests {
     }
 
     #[test]
+    fn a_ticket_button_click_never_overtakes_a_draft_or_a_pending_write() {
+        let mut app = dock_linear_test_app();
+        let area = ratatui::layout::Rect::new(0, 20, 100, 20);
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.dock_rect = area;
+        app.state.view.dock_body_rect = area;
+        let click = |app: &mut App| {
+            app.handle_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: area.x + 3,
+                row: area.y + 1,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+
+        app.state.dock_ticket_comment_draft = Some("half-written".into());
+        click(&mut app);
+        assert_eq!(
+            app.state.dock_ticket_comment_draft.as_deref(),
+            Some("half-written"),
+            "a click must not reopen the menu over a typed draft"
+        );
+        assert!(app.state.dock_ticket_start_menu.is_none());
+
+        app.state.dock_ticket_comment_draft = None;
+        app.state.dock_pending_write = Some(crate::work_index::WorkItemWrite::TransitionTicket {
+            identifier: "SCA-1".into(),
+            state: "Done".into(),
+        });
+        click(&mut app);
+        assert!(
+            app.state.dock_ticket_start_menu.is_none(),
+            "a pending confirmation owns the surface until it is answered"
+        );
+    }
+
+    #[test]
     fn a_section_click_follows_the_scrolled_line_it_lands_on() {
         let mut app = dock_linear_test_app();
         let area = ratatui::layout::Rect::new(0, 20, 100, 6);

@@ -1403,8 +1403,13 @@ pub(crate) fn render_ticket_detail(
 
 /// The two ticket controls the detail draws as buttons. The render and the
 /// input layer share these labels so a click lands on exactly what was drawn.
+/// The rows are spelled out rather than formatted because they are pushed on
+/// every ticket-detail render.
 pub(crate) const TICKET_START_LABEL: &str = "[Start thread ▾]";
 pub(crate) const TICKET_MORE_LABEL: &str = "[⋯]";
+const TICKET_ACTION_ROW: &str = " [Start thread ▾] [⋯]";
+const TICKET_START_ROW: &str = " [Start thread ▾]";
+const TICKET_MORE_ROW: &str = " [⋯]";
 
 /// Which ticket control the pointer is over, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1415,17 +1420,13 @@ pub(crate) enum TicketActionControl {
 
 fn push_ticket_action_rows(lines: &mut Vec<Line<'static>>, palette: &Palette, width: u16) -> usize {
     let style = Style::default().fg(palette.accent);
-    let action_width =
-        crate::ui::text::display_width(&format!(" {TICKET_START_LABEL} {TICKET_MORE_LABEL}"));
+    let action_width = crate::ui::text::display_width(TICKET_ACTION_ROW);
     if width >= 60 && action_width <= usize::from(width) {
-        lines.push(Line::styled(
-            format!(" {TICKET_START_LABEL} {TICKET_MORE_LABEL}"),
-            style,
-        ));
+        lines.push(Line::styled(TICKET_ACTION_ROW, style));
         1
     } else {
-        lines.push(Line::styled(format!(" {TICKET_START_LABEL}"), style));
-        lines.push(Line::styled(format!(" {TICKET_MORE_LABEL}"), style));
+        lines.push(Line::styled(TICKET_START_ROW, style));
+        lines.push(Line::styled(TICKET_MORE_ROW, style));
         2
     }
 }
