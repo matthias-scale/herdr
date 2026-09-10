@@ -5401,6 +5401,10 @@ impl HeadlessServer {
         changed |= self.app.tick_notepad(now);
         if has_app_client {
             changed |= self.app.tick_pomodoro(now);
+            // The sidebar only exists in front of an attached client, and this
+            // loop - not `App::handle_scheduled_tasks` - is the one every
+            // server-backed session actually runs.
+            changed |= self.app.tick_sidebar_animation(now);
         }
         if self.app.status_metrics_visible {
             changed |= self.app.schedule_status_metrics(now);
@@ -8534,6 +8538,62 @@ next_tab = ""
             sent.contains("continue"),
             "expected the nudge to reach the pane, got {sent:?}"
         );
+    }
+
+    /// The animation ships through the server loop, not `App::run`, so this is
+    /// the path that has to advance it. It shipped ticking only in `App::run`,
+    /// which is why the field stood still in front of every real client.
+    #[test]
+    fn an_attached_headless_server_advances_the_sidebar_animation() {
+        let mut server = test_headless_server();
+        server.app.state.hyperspace.enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 40,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+        crate::ui::compute_view(
+            &mut server.app.state,
+            ratatui::layout::Rect::new(0, 0, 120, 40),
+        );
+        assert!(
+            server.app.state.view.hyperspace_rect.height > 0,
+            "the panel has to be on screen for the tick to mean anything"
+        );
+
+        let before = server.app.state.hyperspace.step();
+        let now = Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2;
+        assert!(
+            server.handle_scheduled_tasks_headless(now, false),
+            "advancing the field is a render-worthy change"
+        );
+        assert_ne!(
+            server.app.state.hyperspace.step(),
+            before,
+            "the star field has to move"
+        );
+    }
+
+    #[test]
+    fn a_detached_headless_server_leaves_the_sidebar_animation_alone() {
+        let mut server = test_headless_server();
+        server.app.state.hyperspace.enabled = true;
+        let before = server.app.state.hyperspace.step();
+
+        server.handle_scheduled_tasks_headless(
+            Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2,
+            false,
+        );
+
+        assert_eq!(server.app.state.hyperspace.step(), before);
     }
 
     #[test]
