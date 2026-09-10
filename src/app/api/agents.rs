@@ -315,7 +315,9 @@ fn agent_not_found(id: String, target: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        api::schema::{AgentStatus, SuccessResponse},
+        api::schema::{
+            AgentStatus, PaneMoveDestination, PaneMoveParams, SplitDirection, SuccessResponse,
+        },
         app::Mode,
         config::Config,
         detect::{Agent, AgentState},
@@ -337,6 +339,49 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app
+    }
+
+    fn mark_agent(app: &mut App, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        let terminal_id = app.state.workspaces[ws_idx].tabs[app.state.workspaces[ws_idx]
+            .find_tab_index_for_pane(pane_id)
+            .expect("agent tab")]
+        .panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("agent terminal")
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+    }
+
+    fn assert_agent_list_refs(app: &mut App, expected: &[(usize, crate::layout::PaneId)]) {
+        let mut expected = expected
+            .iter()
+            .map(|(ws_idx, pane_id)| {
+                (
+                    app.state.agent_host_name.clone(),
+                    app.public_pane_id(*ws_idx, *pane_id)
+                        .expect("expected public pane id"),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+
+        let response = app.handle_agent_list("list".into());
+        let success: SuccessResponse = serde_json::from_str(&response).expect("agent list");
+        let ResponseResult::AgentList { agents } = success.result else {
+            panic!("expected agent list response");
+        };
+        let mut actual = agents
+            .into_iter()
+            .map(|agent| {
+                let agent_ref = agent.agent_ref.expect("local agent ref");
+                (agent_ref.host, agent_ref.agent)
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -367,6 +412,174 @@ mod tests {
                     .expect("valid expected agent reference")
             )
         );
+    }
+
+    #[test]
+    fn agent_list_rejects_stale_identity_after_source_workspace_removal() {
+        let mut app = app_with_agent();
+        app.state.workspaces.push(Workspace::test_new("target"));
+        app.state.ensure_test_terminals();
+        app.state.agent_host_name = "laptop".into();
+        let source_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal = app.state.workspaces[0].tabs[0].panes[&source_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&source_terminal)
+            .expect("source terminal")
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        app.state.refresh_local_agent_panel_identities();
+        let stale_ref = app.state.local_agent_panel_identities[&source_pane]
+            .agent_ref
+            .clone();
+        let source_id = app.public_pane_id(0, source_pane).expect("source pane id");
+        let target_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let target_tab = app.public_tab_id(1, 0).expect("target tab id");
+        let target_id = app.public_pane_id(1, target_pane).expect("target pane id");
+
+        let response = app.handle_pane_move(
+            "move".into(),
+            PaneMoveParams {
+                pane_id: source_id,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: target_tab,
+                    target_pane_id: Some(target_id),
+                    split: SplitDirection::Down,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).expect("pane move");
+        assert!(matches!(success.result, ResponseResult::PaneMove { .. }));
+        assert_eq!(app.state.workspaces.len(), 1);
+        let current_ref = crate::api::schema::AgentRef::new(
+            "laptop",
+            app.public_pane_id(0, source_pane).expect("moved pane id"),
+        )
+        .expect("current agent ref");
+        assert_ne!(stale_ref, current_ref);
+
+        let response = app.handle_agent_list("list".into());
+        let success: SuccessResponse = serde_json::from_str(&response).expect("agent list");
+        let ResponseResult::AgentList { agents } = success.result else {
+            panic!("expected agent list response");
+        };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_ref.as_ref(), Some(&current_ref));
+    }
+
+    #[test]
+    fn agent_list_rejects_stale_public_pane_id_in_the_same_workspace() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut app, 0, pane_id);
+        app.state.refresh_local_agent_panel_identities();
+        let stale_ref = app.state.local_agent_panel_identities[&pane_id]
+            .agent_ref
+            .clone();
+
+        app.state.workspaces[0]
+            .public_pane_numbers
+            .insert(pane_id, 2);
+        let current_ref = crate::api::schema::AgentRef::new(
+            "laptop",
+            app.public_pane_id(0, pane_id).expect("current pane id"),
+        )
+        .expect("current agent ref");
+        assert_ne!(stale_ref, current_ref);
+
+        assert_agent_list_refs(&mut app, &[(0, pane_id)]);
+    }
+
+    #[test]
+    fn agent_list_identity_cache_handles_pane_create_and_close() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        let original = app.state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut app, 0, original);
+        app.state.refresh_local_agent_panel_identities();
+
+        let created = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.ensure_test_terminals();
+        mark_agent(&mut app, 0, created);
+        assert_agent_list_refs(&mut app, &[(0, original), (0, created)]);
+
+        assert!(!app.state.workspaces[0].remove_pane(original));
+        assert_agent_list_refs(&mut app, &[(0, created)]);
+    }
+
+    #[test]
+    fn agent_list_identity_cache_handles_pane_move_between_tabs_and_tab_reorder() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        let moved = app.state.workspaces[0].tabs[0].root_pane;
+        let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
+        let target = app.state.workspaces[0].tabs[target_tab].root_pane;
+        app.state.ensure_test_terminals();
+        mark_agent(&mut app, 0, moved);
+        app.state.refresh_local_agent_panel_identities();
+
+        let taken = app.state.workspaces[0]
+            .take_pane_for_move(moved)
+            .expect("movable pane");
+        let target_tab = app.state.workspaces[0]
+            .find_tab_index_for_pane(target)
+            .expect("target tab after source removal");
+        assert!(app.state.workspaces[0]
+            .insert_moved_pane_into_tab(
+                target_tab,
+                target,
+                taken.moved,
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                false,
+                false,
+            )
+            .is_ok());
+        assert_agent_list_refs(&mut app, &[(0, moved)]);
+
+        app.state.workspaces[0].test_add_tab(Some("later"));
+        assert!(app.state.workspaces[0].move_tab(0, 2));
+        assert_agent_list_refs(&mut app, &[(0, moved)]);
+    }
+
+    #[test]
+    fn agent_list_identity_cache_handles_cross_workspace_move_reorder_and_removal() {
+        let mut app = app_with_agent();
+        app.state.workspaces.push(Workspace::test_new("target"));
+        app.state.agent_host_name = "laptop".into();
+        let moved = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        mark_agent(&mut app, 0, moved);
+        app.state.refresh_local_agent_panel_identities();
+
+        let taken = app.state.workspaces[0]
+            .take_pane_for_move(moved)
+            .expect("movable pane");
+        app.state.workspaces[0].unregister_moved_pane(moved);
+        assert!(app.state.workspaces[1]
+            .insert_moved_pane_into_tab(
+                0,
+                target,
+                taken.moved,
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                false,
+                false,
+            )
+            .is_ok());
+        assert_agent_list_refs(&mut app, &[(1, moved)]);
+
+        assert!(app.state.move_workspace(1, 0));
+        assert_agent_list_refs(&mut app, &[(0, moved)]);
+
+        app.state.workspaces.remove(1);
+        assert_agent_list_refs(&mut app, &[(0, moved)]);
     }
 
     #[tokio::test(flavor = "current_thread")]

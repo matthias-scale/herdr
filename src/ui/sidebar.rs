@@ -1066,6 +1066,7 @@ pub(crate) struct AgentPanelLocalTarget {
 #[derive(Clone)]
 pub(crate) struct AgentPanelLocalIdentity {
     pub(crate) agent_ref: crate::api::schema::AgentRef,
+    pub(crate) workspace_id: String,
     pub(crate) local_target: AgentPanelLocalTarget,
 }
 
@@ -1101,6 +1102,7 @@ pub(crate) fn local_agent_panel_identities(
                                 pane_id,
                                 AgentPanelLocalIdentity {
                                     agent_ref,
+                                    workspace_id: workspace.id.clone(),
                                     local_target: AgentPanelLocalTarget {
                                         ws_idx,
                                         tab_idx,

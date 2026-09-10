@@ -410,7 +410,10 @@ impl App {
             .local_agent_panel_identities
             .get(&pane_id)
             .filter(|identity| {
-                identity.local_target.ws_idx == ws_idx && identity.local_target.pane_id == pane_id
+                identity.workspace_id == ws.id
+                    && identity.agent_ref.host == self.state.agent_host_name
+                    && identity.agent_ref.agent == pane.pane_id
+                    && identity.local_target.pane_id == pane_id
             })
             .map(|identity| identity.agent_ref.clone())
             .or_else(|| {

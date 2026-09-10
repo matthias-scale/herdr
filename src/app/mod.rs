@@ -1474,6 +1474,7 @@ impl App {
         app.state.detach_exits = false;
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
@@ -3081,6 +3082,51 @@ mod tests {
             app.state.dock_default_surfaces
         );
         assert_eq!(app.state.dock_tab, Some(state::DockSurface::Files));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn handoff_restoration_warms_local_identity_cache() {
+        let mut source = state::AppState::test_new();
+        source.workspaces = vec![Workspace::test_new("handoff")];
+        source.ensure_test_terminals();
+        source.active = Some(0);
+        source.selected = 0;
+        let snapshot = crate::persist::capture(
+            &source.workspaces,
+            &source.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            source.active,
+            source.selected,
+            source.sidebar_width,
+            source.sidebar_section_split,
+            source.collapsed_space_keys.clone(),
+            source.prio_panel_collapsed,
+        );
+        let mut imports = std::collections::HashMap::new();
+
+        let app = App::new_from_handoff(
+            &Config::default(),
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+            &snapshot,
+            &mut imports,
+            &[],
+        )
+        .expect("restore handoff");
+
+        let workspace = &app.state.workspaces[0];
+        let pane_id = workspace.tabs[0].root_pane;
+        let cached = app
+            .state
+            .local_agent_panel_identities
+            .get(&pane_id)
+            .expect("warm local identity cache");
+        assert_eq!(cached.workspace_id, workspace.id);
+        assert_eq!(cached.local_target.ws_idx, 0);
+        assert_eq!(cached.local_target.tab_idx, 0);
+        assert_eq!(cached.local_target.pane_id, pane_id);
     }
 
     #[cfg(unix)]
