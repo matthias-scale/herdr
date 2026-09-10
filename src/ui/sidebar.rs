@@ -1246,24 +1246,106 @@ pub(crate) fn project_group_key(
         .unwrap_or_else(|| space.key.clone())
 }
 
+/// Repository a Space belongs to when it carries no worktree membership.
+///
+/// The declaration wins: a bound Space names its repository directly. Only an
+/// unbound Space falls back to what its panes resolved, and the scan stops at
+/// the first pane that knows a repository, so an unbound Space of shells costs
+/// one pass over panes that have nothing to say.
+/// Returns the repository and whether the Space declared it. Borrowed, because
+/// this runs per Space for every Space the Repo view lays out: building a key
+/// string here would allocate quadratically for a view that needs one key per
+/// group.
+fn workspace_declared_repo(app: &AppState, ws_idx: usize) -> Option<(&str, bool)> {
+    let workspace = app.workspaces.get(ws_idx)?;
+    if let Some(repo) = workspace.repo_binding.as_deref() {
+        return Some((repo, true));
+    }
+    workspace
+        .tabs
+        .iter()
+        .flat_map(|tab| tab.panes.values())
+        .find_map(|pane| {
+            app.terminals
+                .get(&pane.attached_terminal_id)?
+                .effective_work_context()
+                .repo
+                .as_deref()
+        })
+        .map(|repo| (repo, false))
+}
+
+/// What a Space groups by in the Repo view.
+///
+/// Borrowed and compared rather than formatted: only the row that heads a group
+/// turns its identity into a key, and the Repo view compares every Space against
+/// every group on each render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupIdent<'a> {
+    /// Worktree membership, already keyed by `project_group_key`.
+    Worktree(String),
+    /// Repository slug, compared the way GitHub treats owner casing.
+    Repo(&'a str),
+}
+
+impl GroupIdent<'_> {
+    fn key(&self) -> String {
+        match self {
+            Self::Worktree(key) => key.clone(),
+            Self::Repo(repo) => format!("{REPO_GROUP_PREFIX}{}", repo.to_ascii_lowercase()),
+        }
+    }
+}
+
+/// Group key for a Space in the Repo view, and whether it can be the group's
+/// home row.
+///
+/// Worktree membership is the established key and keeps its exact meaning. A
+/// Space without one is not repo-less: a Space created for a checkout of a repo
+/// another Space is bound to, which is how agent tooling makes them, still
+/// belongs under that repo. Such a Space groups by repository, and only a bound
+/// Space can be the home row, so two loose checkouts never invent a header for
+/// a repository no Space claims.
+fn workspace_group_ident(app: &AppState, ws_idx: usize) -> Option<(GroupIdent<'_>, bool)> {
+    let workspace = app.workspaces.get(ws_idx)?;
+    if let Some(space) = workspace.worktree_space() {
+        return Some((
+            GroupIdent::Worktree(project_group_key(app, space)),
+            !space.is_linked_worktree,
+        ));
+    }
+    let (repo, declared) = workspace_declared_repo(app, ws_idx)?;
+    Some((GroupIdent::Repo(repo), declared))
+}
+
+/// Whether `ws_idx` belongs under `group`. A Space with worktree membership is
+/// only ever compared against worktree groups, so the established path stays
+/// exactly as cheap as it was: no pane is inspected for it.
+fn workspace_joins_group(app: &AppState, ws_idx: usize, group: &GroupIdent<'_>) -> bool {
+    let Some(workspace) = app.workspaces.get(ws_idx) else {
+        return false;
+    };
+    match (workspace.worktree_space(), group) {
+        (Some(space), GroupIdent::Worktree(key)) => project_group_key(app, space) == *key,
+        (Some(_), GroupIdent::Repo(_)) | (None, GroupIdent::Worktree(_)) => false,
+        (None, GroupIdent::Repo(repo)) => workspace_declared_repo(app, ws_idx)
+            .is_some_and(|(candidate, _)| candidate.eq_ignore_ascii_case(repo)),
+    }
+}
+
 pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
 ) -> Option<(String, bool)> {
-    let space = app.workspaces.get(ws_idx)?.worktree_space()?;
-    if space.is_linked_worktree {
+    let (ident, home) = workspace_group_ident(app, ws_idx)?;
+    if !home {
         return None;
     }
-    let key = project_group_key(app, space);
-    let member_count = app
-        .workspaces
-        .iter()
-        .filter(|ws| {
-            ws.worktree_space()
-                .is_some_and(|member| project_group_key(app, member) == key)
-        })
+    let member_count = (0..app.workspaces.len())
+        .filter(|idx| workspace_joins_group(app, *idx, &ident))
         .count();
     (member_count >= 2).then(|| {
+        let key = ident.key();
         let collapsed = app.collapsed_space_keys.contains(&key);
         (key, collapsed)
     })
@@ -2168,6 +2250,9 @@ pub(crate) struct SidebarWorkGroupActivation {
 }
 
 const UNLINKED_GROUP_KEY: &str = "unlinked";
+/// Namespaces the repository-derived Repo view keys away from the worktree keys,
+/// which are checkout paths or directory names.
+const REPO_GROUP_PREFIX: &str = "repo:";
 /// Sessions with no work item but a branch of the repo group under the branch.
 /// Namespaced so a branch called `unlinked` cannot land in the unlinked bucket.
 const BRANCH_GROUP_PREFIX: &str = "branch:";
@@ -3627,14 +3712,13 @@ pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
     let Some((key, _)) = workspace_parent_group_state(app, root_idx) else {
         return vec![root_idx];
     };
-    app.workspaces
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, workspace)| {
-            workspace
-                .worktree_space()
-                .is_some_and(|space| project_group_key(app, space) == key)
-                .then_some(idx)
+    (0..app.workspaces.len())
+        .filter(|idx| {
+            workspace_parent_group_state(app, *idx)
+                .map(|(member, _)| member == key)
+                .unwrap_or_else(|| {
+                    workspace_group_ident(app, *idx).is_some_and(|(ident, _)| ident.key() == key)
+                })
         })
         .collect()
 }
@@ -3734,13 +3818,13 @@ fn workspace_list_entries_inner(
 }
 
 fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
+    let keys = (0..app.workspaces.len())
+        .map(|ws_idx| workspace_group_ident(app, ws_idx).map(|(ident, home)| (ident.key(), home)))
+        .collect::<Vec<_>>();
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        if let Some(space) = ws.worktree_space() {
-            members_by_key
-                .entry(project_group_key(app, space))
-                .or_default()
-                .push(ws_idx);
+    for (ws_idx, key) in keys.iter().enumerate() {
+        if let Some((key, _)) = key {
+            members_by_key.entry(key.clone()).or_default().push(ws_idx);
         }
     }
     let grouped_keys = members_by_key
@@ -3748,10 +3832,9 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
         .filter(|(_, members)| {
             members.len() >= 2
                 && members.iter().any(|idx| {
-                    app.workspaces
-                        .get(*idx)
-                        .and_then(|ws| ws.worktree_space())
-                        .is_some_and(|space| !space.is_linked_worktree)
+                    keys.get(*idx)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|(_, home)| *home)
                 })
         })
         .map(|(key, _)| key.clone())
@@ -3762,19 +3845,17 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
     } else {
         app.active
     };
-    let active_group = visible_group_idx.and_then(|idx| {
-        app.workspaces
-            .get(idx)
-            .and_then(|ws| ws.worktree_space())
-            .map(|space| project_group_key(app, space))
-    });
+    let active_group = visible_group_idx
+        .and_then(|idx| keys.get(idx).cloned().flatten())
+        .map(|(key, _)| key);
 
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        let Some(group_key) = ws
-            .worktree_space()
-            .map(|space| project_group_key(app, space))
+    for ws_idx in 0..app.workspaces.len() {
+        let Some(group_key) = keys
+            .get(ws_idx)
+            .and_then(Option::as_ref)
+            .map(|(key, _)| key.clone())
             .filter(|key| grouped_keys.contains(key))
         else {
             entries.push(WorkspaceListEntry::Workspace {
@@ -3792,10 +3873,9 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
             continue;
         };
         let Some(parent_idx) = members.iter().copied().find(|idx| {
-            app.workspaces
-                .get(*idx)
-                .and_then(|member| member.worktree_space())
-                .is_some_and(|member_space| !member_space.is_linked_worktree)
+            keys.get(*idx)
+                .and_then(Option::as_ref)
+                .is_some_and(|(_, home)| *home)
         }) else {
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
@@ -6954,6 +7034,74 @@ pub(crate) mod tests {
             groups.iter().map(|group| &group.key).collect::<Vec<_>>()
         );
         assert!(groups.iter().all(|group| group.unlinked));
+    }
+
+    /// Agent tooling creates a Space per checkout without worktree membership,
+    /// so the Repo view used to list them flat, away from the Space bound to the
+    /// repository they are checkouts of. A Space that resolves the bound repo now
+    /// nests under it, and the bound Space is the home row.
+    #[test]
+    fn unbound_checkout_spaces_nest_under_the_space_bound_to_their_repo() {
+        let mut app = app_with_agents(&["scalablev2", "ccm-scalablev2-worktree", "elsewhere"]);
+        app.workspaces[0].repo_binding = Some("scalable-so/scalablev2".into());
+        for (ws_idx, repo) in [(1usize, "scalable-so/scalablev2"), (2, "scalable-so/other")] {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            [
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: true,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: false,
+                },
+            ]
+        );
+        assert_eq!(sidebar_space_member_indices(&app, 0), [0, 1]);
+        let (key, collapsed) =
+            workspace_parent_group_state(&app, 0).expect("the bound Space heads the group");
+        assert_eq!(key, "repo:scalable-so/scalablev2");
+        assert!(!collapsed);
+        // A checkout Space is never the home row, even alone with its repo.
+        assert_eq!(workspace_parent_group_state(&app, 1), None);
+
+        // Two loose checkouts of a repo no Space is bound to stay flat: the view
+        // does not invent a header for a repository nobody claims.
+        app.workspaces[0].repo_binding = None;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("scalable-so/scalablev2".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        assert!(workspace_list_entries(&app).iter().all(|entry| matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                indented: false,
+                ..
+            }
+        )));
     }
 
     /// A worktree session that has not opened a pull request is still work on
