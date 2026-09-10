@@ -3623,6 +3623,10 @@ pub struct AppState {
     pub auto_settle_inactive: bool,
     /// Stop resumable agent processes when their pane settles (`session.settle_stops_agent`).
     pub settle_stops_agent: bool,
+    /// Nudge a natively resumed agent to continue (`session.nudge_resumed_agents`).
+    pub nudge_resumed_agents: bool,
+    /// Prompt submitted by the resume nudge (`session.resume_nudge_message`).
+    pub resume_nudge_message: String,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -5911,6 +5915,8 @@ impl AppState {
             auto_settle_finished: true,
             auto_settle_inactive: true,
             settle_stops_agent: true,
+            nudge_resumed_agents: true,
+            resume_nudge_message: "continue".to_string(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,

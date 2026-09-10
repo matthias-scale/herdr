@@ -58,6 +58,26 @@ resume_agents_on_restore = false
 
 Herdr only resumes panes that reported a native session reference through a current official Herdr integration.
 
+### Continuing a resumed agent
+
+Resuming replays the conversation; it does not restart the work. Once a resumed
+agent comes back up at its own idle prompt, Herdr submits one short prompt so it
+picks the work back up. This is on by default:
+
+```toml
+[session]
+nudge_resumed_agents = true
+resume_nudge_message = "continue"
+```
+
+Herdr sends the prompt at most once per resume, and only when the agent is
+genuinely idle and ready. It stays quiet when the agent comes back blocked on a
+question, when the agent resumes straight back into work on its own, and when
+the pane already holds text you typed. If the agent never reaches a ready prompt
+within two minutes, Herdr drops the nudge rather than sending it late.
+
+You can also toggle it from Settings, under **Continue resumed agents**.
+
 After a client attaches and provides terminal size and theme context, Herdr resumes eligible restored agent panes across workspaces and tabs without waiting for each pane to be focused.
 
 Native session restore requires these Herdr integration versions or newer:

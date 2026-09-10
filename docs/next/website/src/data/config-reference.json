@@ -1962,6 +1962,18 @@
           "type": "boolean",
           "default": "true",
           "description": "Stop resumable agent processes when their pane settles. Unsettling the pane resumes the stored agent session."
+        },
+        {
+          "key": "session.nudge_resumed_agents",
+          "type": "boolean",
+          "default": "true",
+          "description": "After a pane resumes into its native agent session, submit resume_nudge_message once so the agent continues its work. Skipped when the agent resumes blocked or already working, and when the pane holds a draft you typed."
+        },
+        {
+          "key": "session.resume_nudge_message",
+          "type": "string",
+          "default": "continue",
+          "description": "The prompt nudge_resumed_agents submits to a resumed agent."
         }
       ]
     },
