@@ -2064,7 +2064,16 @@ fn sidebar_tab_groups(
         match mode {
             SidebarGroupMode::RepoPr => {
                 let Some(context) = context.filter(|context| !context.pr_urls.is_empty()) else {
-                    push_unlinked_tab_group(app, &mut groups, entry);
+                    match context.and_then(|context| context.branch.as_deref()) {
+                        Some(branch) => push_sidebar_tab_group(
+                            &mut groups,
+                            branch_group_key(branch),
+                            branch_group_title(branch),
+                            entry,
+                            false,
+                        ),
+                        None => push_unlinked_tab_group(app, &mut groups, entry),
+                    }
                     continue;
                 };
                 for url in &context.pr_urls {
@@ -2159,6 +2168,9 @@ pub(crate) struct SidebarWorkGroupActivation {
 }
 
 const UNLINKED_GROUP_KEY: &str = "unlinked";
+/// Sessions with no work item but a branch of the repo group under the branch.
+/// Namespaced so a branch called `unlinked` cannot land in the unlinked bucket.
+const BRANCH_GROUP_PREFIX: &str = "branch:";
 /// Namespaced away from the raw branch keys the worktree view still uses.
 const UNLINKED_DIR_PREFIX: &str = "unlinked-dir:";
 
@@ -2603,6 +2615,34 @@ fn disambiguate_unlinked_titles<T>(
     }
 }
 
+fn branch_group_key(branch: &str) -> String {
+    format!("{BRANCH_GROUP_PREFIX}{branch}")
+}
+
+fn branch_group_title(branch: &str) -> String {
+    format!("⎇ {branch}")
+}
+
+/// A session on a branch of this repo with no pull request yet. It is repo work
+/// like any other, so it groups under its branch beside the PR groups instead
+/// of sinking into the directory-named unlinked bucket, where a worktree that
+/// has not opened a PR reads as work on nothing.
+fn push_branch_entry(groups: &mut Vec<SidebarWorkGroup>, branch: &str, entry: AgentPanelEntry) {
+    let key = branch_group_key(branch);
+    match work_group_index(groups, &key) {
+        Some(index) => groups[index].entries.push(entry),
+        None => groups.push(SidebarWorkGroup {
+            key,
+            title: branch_group_title(branch),
+            entries: vec![entry],
+            unlinked: false,
+            status: None,
+            created_at: None,
+            activation: None,
+        }),
+    }
+}
+
 fn push_unlinked_entry(app: &AppState, groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
     let (key, title) = unlinked_group_key_and_title(app, &entry);
     match work_group_index(groups, &key) {
@@ -2764,7 +2804,10 @@ pub(crate) fn sidebar_work_groups(
             SidebarGroupMode::RepoPr => {
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
-                    push_unlinked_entry(app, &mut groups, entry);
+                    match context.and_then(|context| context.branch.as_deref()) {
+                        Some(branch) => push_branch_entry(&mut groups, branch, entry),
+                        None => push_unlinked_entry(app, &mut groups, entry),
+                    }
                     continue;
                 }
                 for url in urls {
@@ -6911,6 +6954,68 @@ pub(crate) mod tests {
             groups.iter().map(|group| &group.key).collect::<Vec<_>>()
         );
         assert!(groups.iter().all(|group| group.unlinked));
+    }
+
+    /// A worktree session that has not opened a pull request is still work on
+    /// the repo. In the GitHub view it groups under its branch, beside the PR
+    /// groups, instead of landing in the trailing unlinked bucket. Only a
+    /// session with no branch at all stays unlinked.
+    #[test]
+    fn repo_sessions_without_a_pull_request_group_under_their_branch() {
+        let mut app = app_with_agents(&["reviewed", "worktree", "bare"]);
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdrdev/herdr".into()),
+                branch: Some("fix/strip".into()),
+                pr_urls: vec!["https://github.com/herdrdev/herdr/pull/12".into()],
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdrdev/herdr".into()),
+                branch: Some("feat/dock-toggle".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.title.as_str(), group.entries.len(), group.unlinked))
+                .collect::<Vec<_>>(),
+            [
+                ("#12", 1, false),
+                ("⎇ feat/dock-toggle", 1, false),
+                (unlinked_bucket_title().as_str(), 1, true),
+            ],
+            "{:?}",
+            groups.iter().map(|group| &group.key).collect::<Vec<_>>()
+        );
+
+        // The same fallback applies to the groups nested under a repo header.
+        assert_eq!(
+            sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+                .iter()
+                .map(|group| (group.title.as_str(), group.unlinked))
+                .collect::<Vec<_>>(),
+            [
+                ("#12", false),
+                ("⎇ feat/dock-toggle", false),
+                (unlinked_bucket_title().as_str(), true),
+            ]
+        );
     }
 
     /// The unlinked bucket is named after the pane's working directory, and
