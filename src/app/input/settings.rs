@@ -1023,6 +1023,10 @@ mod tests {
     #[test]
     fn clicking_a_general_row_selects_it_and_returns_its_edit() {
         let mut app = app_for_mouse_test();
+        // Tall enough for every General row: the mapping this test checks only
+        // holds for rows the screen actually shows.
+        app.state.view.terminal_area = ratatui::layout::Rect::new(26, 0, 80, 44);
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 44);
         open_settings_at(&mut app.state, SettingsSection::General);
 
         let area = app.state.settings_content_rect();

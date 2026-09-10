@@ -25,7 +25,7 @@ The palette includes commands for moving and resizing panes, moving tabs, focusi
 
 | Action | Key |
 | --- | --- |
-| New tab | `prefix+c` |
+| New tab | `prefix+alt+c` |
 | Split right / down | `prefix+v` / `prefix+minus` |
 | Move between panes | `prefix+h/j/k/l` |
 | Workspace navigation | `prefix+w` |
@@ -72,6 +72,7 @@ Workspaces and session:
 | Action | Key |
 | --- | --- |
 | New workspace | `prefix+shift+n` |
+| New thread, picking its project first | `prefix+c` |
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
 | Goto picker | `prefix+g` |
@@ -80,7 +81,8 @@ Workspaces and session:
 | Open read-only Symphony dashboard | `prefix+shift+s` |
 | Open work projections | `prefix+ctrl+w` |
 | Open Linear tickets | `prefix+ctrl+t` |
-| Open Missive conversations | `prefix+shift+c` |
+
+`prefix+c` opens the same project picker the sidebar's new-thread icon opens. It lists the checkouts of every configured `[[projects]]` entry, then the directories this session already used. Type to filter by repository or project name, move with Up and Down, and press Enter or `1`–`9` to open the Home composer in that checkout.
 
 The loop run-history view lists receipt-backed runs across all loops with outcome, gates, human touches, and duration. It refreshes when the receipt file changes. Press Esc or `prefix+ctrl+h` again to close it.
 

@@ -112,7 +112,7 @@ pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicato
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
-    render_sidebar_object_menu, render_sidebar_settled_menu,
+    render_sidebar_object_menu, render_sidebar_project_menu, render_sidebar_settled_menu,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -157,7 +157,8 @@ pub(crate) use self::{
         sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
         sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
         sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
-        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_object_menu_items, sidebar_project_anchor_rect, sidebar_project_menu_layout,
+        sidebar_project_menu_matches, sidebar_pull_request_actions, sidebar_pull_request_key,
         sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
         sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
         sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
@@ -1313,6 +1314,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_filter_menu(app, frame);
     render_sidebar_new_menu(app, frame);
     render_sidebar_new_thread(app, frame);
+    render_sidebar_project_menu(app, frame);
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());

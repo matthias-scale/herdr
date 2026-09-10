@@ -7699,7 +7699,7 @@ new_tab = "prefix+t"
             .new_tab
             .bindings
             .iter()
-            .any(|binding| binding.label == "prefix+c"));
+            .any(|binding| binding.label == "prefix+alt+c"));
     }
 
     #[test]

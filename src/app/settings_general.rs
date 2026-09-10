@@ -12,6 +12,8 @@ pub(crate) enum GeneralRow {
     AutoSettleFinished,
     AutoSettleInactive,
     SettleAfterDays,
+    AutoSettleDone,
+    SettleDoneAfterMinutes,
     NudgeResumedAgents,
     HideWhitespace,
     NewThreadWorkspace,
@@ -29,6 +31,10 @@ pub(crate) enum GeneralRow {
 /// The inactivity thresholds `enter` cycles through on the days row. A settings
 /// screen has no number field, and the useful values are few.
 const SETTLE_DAY_LADDER: [u64; 5] = [1, 3, 7, 14, 30];
+
+/// How long a Done thread may sit before it settles. Shorter than the
+/// inactivity ladder, because Done is already an answer.
+const SETTLE_DONE_MINUTE_LADDER: [u64; 5] = [5, 15, 30, 60, 240];
 
 /// Sidebar rows the notepad may occupy. Small enough to stay a list, large
 /// enough to hold a short to-do list without scrolling.
@@ -54,6 +60,8 @@ impl GeneralRow {
         Self::AutoSettleFinished,
         Self::AutoSettleInactive,
         Self::SettleAfterDays,
+        Self::AutoSettleDone,
+        Self::SettleDoneAfterMinutes,
         Self::NudgeResumedAgents,
         Self::HideWhitespace,
         Self::NewThreadWorkspace,
@@ -74,6 +82,8 @@ impl GeneralRow {
             Self::AutoSettleFinished => "Auto-settle finished threads",
             Self::AutoSettleInactive => "Auto-settle inactive threads",
             Self::SettleAfterDays => "Days of inactivity before auto-settle",
+            Self::AutoSettleDone => "Auto-settle done threads",
+            Self::SettleDoneAfterMinutes => "Minutes done before auto-settle",
             Self::NudgeResumedAgents => "Continue resumed agents",
             Self::HideWhitespace => "Hide whitespace changes in diff",
             Self::NewThreadWorkspace => "New threads default workspace",
@@ -93,6 +103,9 @@ impl GeneralRow {
     pub(crate) fn hint(self) -> Option<&'static str> {
         match self {
             Self::ProjectGrouping => Some("combine matching repos across hosts"),
+            Self::AutoSettleDone => {
+                Some("stop a finished agent and file it under Settled, ready to resume")
+            }
             Self::NudgeResumedAgents => {
                 Some("after a restart, tell an idle resumed agent to carry on")
             }
@@ -109,6 +122,8 @@ impl GeneralRow {
             Self::AutoSettleFinished => ("session", "auto_settle_finished"),
             Self::AutoSettleInactive => ("session", "auto_settle_inactive"),
             Self::SettleAfterDays => ("session", "settle_after_days"),
+            Self::AutoSettleDone => ("session", "auto_settle_done"),
+            Self::SettleDoneAfterMinutes => ("session", "settle_done_after_minutes"),
             Self::NudgeResumedAgents => ("session", "nudge_resumed_agents"),
             Self::HideWhitespace => ("ui", "hide_whitespace_in_diff"),
             Self::NewThreadWorkspace => ("ui", "new_thread_workspace"),
@@ -137,6 +152,8 @@ impl GeneralRow {
                 .as_secs()
                 .div_ceil(24 * 60 * 60)
                 .to_string(),
+            Self::AutoSettleDone => on_off(state.auto_settle_done),
+            Self::SettleDoneAfterMinutes => minutes(state.settle_done_after),
             Self::NudgeResumedAgents => on_off(state.nudge_resumed_agents),
             Self::HideWhitespace => on_off(state.dock_diff_ignore_whitespace),
             Self::NewThreadWorkspace => state.new_thread_workspace.label().to_string(),
@@ -210,6 +227,15 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
         GeneralRow::ProjectGrouping => toggle(state.combine_repos_across_hosts),
         GeneralRow::AutoSettleFinished => toggle(state.auto_settle_finished),
         GeneralRow::AutoSettleInactive => toggle(state.auto_settle_inactive),
+        GeneralRow::AutoSettleDone => toggle(state.auto_settle_done),
+        GeneralRow::SettleDoneAfterMinutes => Some(ConfigEdit::Integer {
+            section,
+            key,
+            value: next_in_ladder(
+                &SETTLE_DONE_MINUTE_LADDER,
+                state.settle_done_after.as_secs().div_ceil(60),
+            ),
+        }),
         GeneralRow::NudgeResumedAgents => toggle(state.nudge_resumed_agents),
         GeneralRow::HideWhitespace => toggle(state.dock_diff_ignore_whitespace),
         GeneralRow::DeleteConfirmation => toggle(state.confirm_close),
@@ -285,7 +311,7 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), total);
-        assert_eq!(total, 16);
+        assert_eq!(total, 18);
     }
 
     #[test]

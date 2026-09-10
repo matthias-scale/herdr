@@ -120,13 +120,17 @@ reap_done_panes = true
 settle_after_days = 3
 auto_settle_finished = true
 auto_settle_inactive = true
+auto_settle_done = true
+settle_done_after_minutes = 30
 ```
 
 Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose status is not Done. When the pane owns a linked Git worktree, Herdr removes that checkout only when it is clean and its commits are present on the configured upstream branch. Set `reap_done_panes = false` to keep automatic reaping disabled while retaining the Recently done section.
 
 Herdr moves panes into the collapsible Settled section when their primary pull request closes or merges, a linked ticket reaches Done, or they have no activity for `settle_after_days`. New pane input, output, or agent-state activity returns a settled pane to the active sidebar without stopping its terminal.
 
-The two triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, and `auto_settle_inactive = false` to stop settling panes that only went quiet. Both are on by default, and both are toggles in **Settings → General**.
+A pane also settles when its agent reads Done and stays quiet for `settle_done_after_minutes`, so a finished thread stops spending context instead of running until reaping closes it. This trigger only applies to panes Herdr can resume into their native agent session; a pane with no resume plan keeps its old path into Recently done and reaping.
+
+The three triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, `auto_settle_inactive = false` to stop settling panes that only went quiet, and `auto_settle_done = false` to stop settling finished agents. All three are on by default and are toggles in **Settings → General**.
 
 Settled panes are also listed in **Settings → Archive**, where `enter` restores one to the active sidebar and `d` closes it. When `ui.confirm_close` is on, `d` asks once before it closes anything.
 
@@ -258,6 +262,20 @@ With no `[[projects]]` configured the composer groups everything under
 `~/Repos`. The project chip appears only when there is more than one group, and
 the repo chip only when the selected group holds at least one checkout.
 Selecting a repo sets the composer's directory.
+
+Projects are also the sidebar's scope. With more than one project configured,
+the header line ends in a project chip: click it, or open it from the sidebar,
+to filter the whole list to one project's threads. Type to narrow the list, move
+with Up and Down, and pick with Enter or `1`–`9`. The first row, **All
+projects**, clears the scope. A thread belongs to a project when its checkout is
+inside one of the project's repositories or when it is a linked worktree of one,
+so worktrees stay with the repository they came from. The scope is per client
+and persists across attaches; a scope whose project later disappears from the
+config reads as no scope rather than an empty sidebar.
+
+`prefix+c` opens the same project list as a spawn target: it starts a new
+Home thread in the project you pick, which is also what the sidebar's
+new-thread icon does.
 
 ## Custom command keybindings
 

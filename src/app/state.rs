@@ -1047,6 +1047,9 @@ pub struct TabCardArea {
 pub(crate) struct SidebarWorkFilter {
     /// Persisted row-search query shared by every sidebar view.
     pub(crate) query: String,
+    /// Id of the `[[projects]]` entry the sidebar is scoped to. `None` shows
+    /// every project, which is what an unconfigured Herdr always shows.
+    pub(crate) project: Option<String>,
     /// Legacy field names preserve existing 2b presentation files.
     pub(crate) team: Option<String>,
     pub(crate) assignee: Option<String>,
@@ -1231,6 +1234,7 @@ impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
+            project: None,
             team: Some("SCA".into()),
             assignee: Some("me".into()),
             linear_ownership: WorkOwnershipFilter::Both,
@@ -1483,6 +1487,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) search_active: bool,
     pub(crate) new_menu: Option<SidebarNewMenuState>,
     pub(crate) new_thread: Option<SidebarNewThreadState>,
+    pub(crate) project_menu: Option<SidebarProjectMenuState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
@@ -1494,6 +1499,14 @@ pub(crate) struct SidebarPresentationState {
 /// Attach-local project picker opened from the sidebar header.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarNewThreadState {
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
+/// Attach-local picker for the sidebar's project scope. Which project a client
+/// is looking at is presentation, not a runtime fact: two attaches to the same
+/// session may hold different scopes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SidebarProjectMenuState {
     pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
 }
 
@@ -3460,6 +3473,9 @@ pub struct AppState {
     /// Grace window a finished work reading must survive before the pane
     /// settles (`session.settle_finished_after_minutes`).
     pub(crate) settle_finished_after: std::time::Duration,
+    /// How long a Done pane stays quiet before `auto_settle_done` settles it
+    /// (`session.settle_done_after_minutes`).
+    pub(crate) settle_done_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -3553,6 +3569,7 @@ pub struct AppState {
     pub(crate) sidebar_new_menu: Option<SidebarNewMenuState>,
     /// Downward recent-project picker. Project paths are derived at render time.
     pub(crate) sidebar_new_thread: Option<SidebarNewThreadState>,
+    pub(crate) sidebar_project_menu: Option<SidebarProjectMenuState>,
     /// Server-owned request and busy state for the sidebar refresh operation.
     /// These fields deliberately stay outside `SidebarPresentationState` so
     /// input from an attached client is visible to the runtime work loop.
@@ -3830,6 +3847,9 @@ pub struct AppState {
     pub auto_settle_finished: bool,
     /// Settle a pane after `settle_after` of inactivity (`session.auto_settle_inactive`).
     pub auto_settle_inactive: bool,
+    /// Settle a resumable Done pane instead of leaving it to be reaped
+    /// (`session.auto_settle_done`).
+    pub auto_settle_done: bool,
     /// Stop resumable agent processes when their pane settles (`session.settle_stops_agent`).
     pub settle_stops_agent: bool,
     /// Nudge a natively resumed agent to continue (`session.nudge_resumed_agents`).
@@ -4845,6 +4865,7 @@ impl AppState {
         std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
         std::mem::swap(&mut self.sidebar_new_menu, &mut other.new_menu);
         std::mem::swap(&mut self.sidebar_new_thread, &mut other.new_thread);
+        std::mem::swap(&mut self.sidebar_project_menu, &mut other.project_menu);
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
             &mut other.selected_work_group,
@@ -5867,6 +5888,7 @@ impl AppState {
             reap_done_panes: true,
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             settle_finished_after: std::time::Duration::from_secs(10 * 60),
+            settle_done_after: std::time::Duration::from_secs(30 * 60),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -5925,6 +5947,7 @@ impl AppState {
             sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
+            sidebar_project_menu: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,
             sidebar_selected_work_group: None,
@@ -6173,6 +6196,7 @@ impl AppState {
             add_project_start_dir: String::new(),
             auto_settle_finished: true,
             auto_settle_inactive: true,
+            auto_settle_done: true,
             settle_stops_agent: true,
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),

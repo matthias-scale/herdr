@@ -49,7 +49,7 @@ pub(crate) mod settings_archive;
 pub(crate) mod settings_general;
 pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
-mod settled;
+pub(crate) mod settled;
 pub mod state;
 mod tab_bar_status;
 mod terminal_targets;
@@ -810,6 +810,7 @@ impl App {
             sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
+            sidebar_project_menu: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,
             sidebar_selected_work_group: None,
@@ -890,6 +891,9 @@ impl App {
                     .session
                     .settle_finished_after_minutes
                     .saturating_mul(60),
+            ),
+            settle_done_after: std::time::Duration::from_secs(
+                config.session.settle_done_after_minutes.saturating_mul(60),
             ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
@@ -1186,6 +1190,7 @@ impl App {
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
+            auto_settle_done: config.session.auto_settle_done,
             settle_stops_agent: config.session.settle_stops_agent,
             nudge_resumed_agents: config.session.nudge_resumed_agents,
             resume_nudge_message: config.session.resume_nudge_message.clone(),
@@ -2316,6 +2321,10 @@ impl App {
                     .saturating_mul(60),
             );
             self.state.auto_settle_inactive = config.session.auto_settle_inactive;
+            self.state.auto_settle_done = config.session.auto_settle_done;
+            self.state.settle_done_after = std::time::Duration::from_secs(
+                config.session.settle_done_after_minutes.saturating_mul(60),
+            );
             self.state.settle_stops_agent = config.session.settle_stops_agent;
             self.state.nudge_resumed_agents = config.session.nudge_resumed_agents;
             self.state

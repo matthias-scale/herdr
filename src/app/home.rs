@@ -803,6 +803,16 @@ fn default_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+/// A checkout offered by the new-thread project picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewThreadOption {
+    pub(crate) path: PathBuf,
+    /// The directory name, which is what the row leads with.
+    pub(crate) name: String,
+    /// The project that claims this checkout, when more than one is configured.
+    pub(crate) project: Option<String>,
+}
+
 pub(crate) fn directory_label(path: &Path) -> String {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return path.display().to_string();
@@ -1889,6 +1899,48 @@ impl crate::app::state::AppState {
             agents,
             spaces: self.workspaces.len(),
         }
+    }
+
+    /// One row of the new-thread project picker: a checkout the composer can
+    /// open a thread in.
+    ///
+    /// Configured projects come first because picking the repository is the
+    /// question the picker exists to answer, and the directories this session
+    /// already touched follow, so a worktree no project root scans stays one
+    /// keystroke away.
+    pub(crate) fn new_thread_options(&self) -> Vec<NewThreadOption> {
+        let name_of = |path: &Path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        };
+        // One project is the implicit `~/Repos` group or a single configured
+        // one, and naming it on every row would say nothing.
+        let name_projects = self.projects.len() > 1;
+        let mut options: Vec<NewThreadOption> = Vec::new();
+        for project in &self.projects {
+            for repo in &project.repos {
+                if options.iter().any(|option| option.path == repo.path) {
+                    continue;
+                }
+                options.push(NewThreadOption {
+                    path: repo.path.clone(),
+                    name: repo.name.clone(),
+                    project: name_projects.then(|| project.label.clone()),
+                });
+            }
+        }
+        for path in self.home_directory_options() {
+            if options.iter().any(|option| option.path == path) {
+                continue;
+            }
+            options.push(NewThreadOption {
+                name: name_of(&path),
+                path,
+                project: None,
+            });
+        }
+        options
     }
 
     pub(crate) fn home_directory_options(&self) -> Vec<PathBuf> {

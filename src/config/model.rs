@@ -311,6 +311,16 @@ pub struct SessionConfig {
     /// Settle a pane that has been inactive for `settle_after_days`.
     /// Default: true.
     pub auto_settle_inactive: bool,
+    /// Settle a pane whose agent has read Done and stayed quiet for
+    /// `settle_done_after_minutes`, instead of leaving it running until
+    /// `reap_done_after_minutes` closes it. Only applies to panes that can be
+    /// resumed into their native agent session; a pane with no resume plan is
+    /// left to reaping, because settling it would strand it in the Settled
+    /// section with nothing to resume. Default: true.
+    pub auto_settle_done: bool,
+    /// How long a Done pane has to stay quiet before `auto_settle_done`
+    /// settles it. Default: 30.
+    pub settle_done_after_minutes: u64,
     /// Stop resumable agent processes when their pane settles.
     /// Default: true.
     pub settle_stops_agent: bool,
@@ -335,6 +345,8 @@ impl Default for SessionConfig {
             auto_settle_finished: true,
             settle_finished_after_minutes: 10,
             auto_settle_inactive: true,
+            auto_settle_done: true,
+            settle_done_after_minutes: 30,
             settle_stops_agent: true,
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),
@@ -807,6 +819,9 @@ pub struct KeysConfig {
     pub settings: BindingConfig,
     /// Create a new workspace. Default: "prefix+shift+n"
     pub new_workspace: BindingConfig,
+    /// Open the project picker and start a new Home thread in the project it
+    /// selects. Default: "prefix+c"
+    pub new_thread: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
     pub new_worktree: BindingConfig,
     /// Open an existing Git worktree from the selected workspace. Unset by default.
@@ -871,7 +886,7 @@ pub struct KeysConfig {
     pub focus_agent: BindingConfig,
     /// Local-client shortcut that sends a clipboard image to a remote Herdr session. Default: "ctrl+v".
     pub remote_image_paste: String,
-    /// Create a new tab in the active workspace. Default: "prefix+c"
+    /// Create a new tab in the active workspace. Default: "prefix+alt+c"
     pub new_tab: BindingConfig,
     /// Rename the active tab. Default: "prefix+shift+t".
     pub rename_tab: BindingConfig,
@@ -989,7 +1004,7 @@ pub struct KeysConfig {
     pub usage: BindingConfig,
     /// Open the Linear Tickets view. Default: "prefix+ctrl+t"
     pub tickets: BindingConfig,
-    /// Open the read-only Missive conversation view. Default: "prefix+shift+c"
+    /// Open the read-only Missive conversation view. Unset by default.
     pub missive: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
@@ -1046,6 +1061,8 @@ pub(crate) struct KeysConfigOverlay {
     settings: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_workspace: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_thread: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_worktree: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1281,6 +1298,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(help);
         apply_field!(settings);
         apply_field!(new_workspace);
+        apply_field!(new_thread);
         apply_field!(new_worktree);
         apply_field!(open_worktree);
         apply_field!(remove_worktree);
@@ -1439,6 +1457,7 @@ impl KeysConfig {
         copy_effective_action_field!(help, keybinds.help);
         copy_effective_action_field!(settings, keybinds.settings);
         copy_effective_action_field!(new_workspace, keybinds.new_workspace);
+        copy_effective_action_field!(new_thread, keybinds.new_thread);
         copy_effective_action_field!(new_worktree, keybinds.new_worktree);
         copy_effective_action_field!(open_worktree, keybinds.open_worktree);
         copy_effective_action_field!(remove_worktree, keybinds.remove_worktree);
@@ -1959,6 +1978,7 @@ impl Default for KeysConfig {
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
+            new_thread: BindingConfig::one("prefix+c"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),
@@ -1991,7 +2011,7 @@ impl Default for KeysConfig {
             next_review_agent: BindingConfig::one("prefix+ctrl+r"),
             focus_agent: BindingConfig::empty(),
             remote_image_paste: "ctrl+v".into(),
-            new_tab: BindingConfig::one("prefix+c"),
+            new_tab: BindingConfig::one("prefix+alt+c"),
             rename_tab: BindingConfig::one("prefix+shift+t"),
             toggle_tab_prio: BindingConfig::one("prefix+shift+f"),
             toggle_prio_panel: BindingConfig::empty(),
@@ -2049,7 +2069,7 @@ impl Default for KeysConfig {
             work: BindingConfig::one("prefix+ctrl+w"),
             usage: BindingConfig::one("prefix+ctrl+y"),
             tickets: BindingConfig::one("prefix+ctrl+t"),
-            missive: BindingConfig::one("prefix+shift+c"),
+            missive: BindingConfig::empty(),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             git_pull: BindingConfig::empty(),
@@ -2361,6 +2381,8 @@ new_cwd = "~/Projects"
         assert_eq!(default_config.session.settle_after_days, 3);
         assert_eq!(default_config.session.settle_finished_after_minutes, 10);
         assert!(default_config.session.settle_stops_agent);
+        assert!(default_config.session.auto_settle_done);
+        assert_eq!(default_config.session.settle_done_after_minutes, 30);
 
         let toml = r#"
 [session]
@@ -2371,6 +2393,8 @@ reap_done_panes = false
 settle_after_days = 7
 settle_finished_after_minutes = 20
 settle_stops_agent = false
+auto_settle_done = false
+settle_done_after_minutes = 45
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
@@ -2380,6 +2404,8 @@ settle_stops_agent = false
         assert_eq!(config.session.settle_after_days, 7);
         assert_eq!(config.session.settle_finished_after_minutes, 20);
         assert!(!config.session.settle_stops_agent);
+        assert!(!config.session.auto_settle_done);
+        assert_eq!(config.session.settle_done_after_minutes, 45);
     }
 
     #[test]

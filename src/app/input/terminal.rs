@@ -61,6 +61,9 @@ impl App {
             if self.state.handle_sidebar_new_thread_key(key_event) {
                 return None;
             }
+            if self.state.handle_sidebar_project_menu_key(key_event) {
+                return None;
+            }
             if self.state.handle_sidebar_search_key(key_event) {
                 return None;
             }

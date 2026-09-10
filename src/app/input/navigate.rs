@@ -191,6 +191,15 @@ impl App {
             NavigateAction::NewWorkspace => {
                 self.begin_tui_workspace_create("tui.key.workspace.create");
             }
+            NavigateAction::NewThread => {
+                // The picker takes keys through the sidebar's input path, so
+                // opening it without giving the sidebar the keyboard would draw
+                // a filter box that nothing can type into.
+                self.state.sidebar_focused = true;
+                self.state.sidebar_collapsed = false;
+                self.state.open_sidebar_new_thread();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
                     workspace_can_start_worktree_action(&self.state, &self.terminal_runtimes, *idx)
@@ -2203,6 +2212,7 @@ fn select_remote_agent_row(state: &mut AppState, agent_ref: crate::api::schema::
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavigateAction {
     NewWorkspace,
+    NewThread,
     NewWorktree,
     OpenWorktree,
     RemoveWorktree,
@@ -2473,6 +2483,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.command_palette, NavigateAction::OpenCommandPalette),
             (&kb.workspace_picker, NavigateAction::WorkspacePicker),
             (&kb.new_workspace, NavigateAction::NewWorkspace),
+            (&kb.new_thread, NavigateAction::NewThread),
             (&kb.new_worktree, NavigateAction::NewWorktree),
             (&kb.open_worktree, NavigateAction::OpenWorktree),
             (&kb.remove_worktree, NavigateAction::RemoveWorktree),
@@ -2668,6 +2679,12 @@ pub(super) fn execute_navigate_action_in_context(
     match action {
         NavigateAction::NewWorkspace => {
             state.request_new_workspace = true;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NewThread => {
+            state.sidebar_focused = true;
+            state.sidebar_collapsed = false;
+            state.open_sidebar_new_thread();
             leave_navigate_mode(state);
         }
         NavigateAction::NewWorktree => {
@@ -4468,12 +4485,23 @@ mod tests {
     }
 
     #[test]
-    fn default_missive_keybinding_opens_missive_projection() {
+    fn configured_missive_keybinding_opens_missive_projection() {
         let mut state = app_with_test_workspaces(&["one"]).state;
+        // Unbound by default: the Missive view released `c` to the spawn flow,
+        // so only a configured binding reaches it.
         assert_eq!(
             action_for_key(
                 &state,
                 TerminalKey::new(KeyCode::Char('c'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            None
+        );
+        state.keybinds.missive = crate::config::ActionKeybinds::prefix("m");
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()),
                 BindingDispatch::Prefix,
             ),
             Some(NavigateAction::OpenMissiveView)
@@ -5164,6 +5192,23 @@ mod tests {
         );
 
         assert!(state.request_new_workspace);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn new_thread_key_opens_the_project_picker_and_exits_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.new_thread = crate::config::ActionKeybinds::prefix("y");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()),
+        );
+
+        assert!(
+            state.sidebar_new_thread.is_some(),
+            "the shortcut asks which project before it spawns anything"
+        );
         assert_eq!(state.mode, Mode::Terminal);
     }
 

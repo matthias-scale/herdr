@@ -559,6 +559,12 @@
           "description": "Create a new workspace."
         },
         {
+          "key": "keys.new_thread",
+          "type": "keybinding",
+          "default": "\"prefix+c\"",
+          "description": "Open the project picker and start a new Home thread in the project it selects."
+        },
+        {
           "key": "keys.new_worktree",
           "type": "keybinding",
           "default": "\"prefix+shift+g\"",
@@ -747,7 +753,7 @@
         {
           "key": "keys.new_tab",
           "type": "keybinding",
-          "default": "\"prefix+c\"",
+          "default": "\"prefix+alt+c\"",
           "description": "Create a new tab in the active workspace."
         },
         {
@@ -1161,7 +1167,7 @@
         {
           "key": "keys.missive",
           "type": "keybinding",
-          "default": "\"prefix+shift+c\"",
+          "default": "unset",
           "description": "Open the read-only Missive conversations view."
         },
         {
@@ -1968,6 +1974,18 @@
           "type": "boolean",
           "default": "true",
           "description": "Settle a pane that has had no activity for settle_after_days."
+        },
+        {
+          "key": "session.auto_settle_done",
+          "type": "boolean",
+          "default": "true",
+          "description": "Settle a resumable pane whose agent read Done and stayed quiet, instead of leaving it running until reap_done_after_minutes closes it. A pane with no resume plan is left to reaping."
+        },
+        {
+          "key": "session.settle_done_after_minutes",
+          "type": "integer",
+          "default": "30",
+          "description": "How long a Done pane has to stay quiet before auto_settle_done settles it."
         },
         {
           "key": "session.settle_stops_agent",
