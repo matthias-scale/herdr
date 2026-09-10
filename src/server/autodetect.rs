@@ -119,6 +119,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
 
     let hello = crate::protocol::ClientMessage::Hello {
         version: crate::protocol::PROTOCOL_VERSION,
+        build_version: crate::build_info::version(),
         cols: 80,
         rows: 24,
         cell_width_px: 0,

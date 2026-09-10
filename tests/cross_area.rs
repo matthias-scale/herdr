@@ -384,6 +384,12 @@ fn encode_varint_u16(v: u16) -> Vec<u8> {
     }
 }
 
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut encoded = encode_varint_u32(value.len() as u32);
+    encoded.extend_from_slice(value.as_bytes());
+    encoded
+}
+
 fn frame_message(payload: &[u8]) -> Vec<u8> {
     let mut framed = (payload.len() as u32).to_le_bytes().to_vec();
     framed.extend_from_slice(payload);
@@ -431,6 +437,7 @@ fn client_handshake(stream: &mut UnixStream, version: u32, cols: u16, rows: u16)
     // ClientMessage::Hello = variant 0
     let mut payload = encode_varint_u32(0);
     payload.extend_from_slice(&encode_varint_u32(version));
+    payload.extend_from_slice(&encode_string("test-build"));
     payload.extend_from_slice(&encode_varint_u16(cols));
     payload.extend_from_slice(&encode_varint_u16(rows));
     payload.extend_from_slice(&encode_varint_u32(8)); // cell_width_px
@@ -464,6 +471,10 @@ fn client_handshake(stream: &mut UnixStream, version: u32, cols: u16, rows: u16)
     let (_server_version, consumed) =
         decode_varint_u32(&welcome_payload, offset).expect("decode version");
     offset += consumed;
+
+    let (build_len, consumed) =
+        decode_varint_u32(&welcome_payload, offset).expect("decode build version length");
+    offset += consumed + build_len as usize;
 
     let (_encoding, consumed) =
         decode_varint_u32(&welcome_payload, offset).expect("decode render encoding");

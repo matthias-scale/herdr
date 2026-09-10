@@ -1895,7 +1895,7 @@ impl HeadlessServer {
         let removed = self.clients.remove(&client_id);
         if let Some(removed) = removed {
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
-            if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
+            if let ClientConnectionMode::TerminalAttach { terminal_id, .. } = removed.mode {
                 self.terminal_attach_owners.remove(&terminal_id);
                 if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
                     self.app
@@ -2108,6 +2108,82 @@ impl HeadlessServer {
         Some(result)
     }
 
+    /// Revalidate the authoritative remote context and enqueue one input batch
+    /// while this server event-loop turn owns the runtime mutation boundary.
+    fn forward_control_bytes(&mut self, client_id: u64, data: Vec<u8>) -> bool {
+        let Some(lease) = self
+            .clients
+            .get(&client_id)
+            .and_then(|client| match &client.mode {
+                ClientConnectionMode::TerminalAttach {
+                    control: Some(control),
+                    ..
+                } => Some((**control).clone()),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        if let Err(error) = crate::server::remote_control::validate_input_owner(
+            self.terminal_attach_owners
+                .get(&lease.context.terminal_id)
+                .copied(),
+            client_id,
+        ) {
+            self.reject_remote_control(client_id, error);
+            return false;
+        }
+        let provider: &dyn crate::server::remote_control::RemoteControlContextProvider = &self.app;
+        let current = match provider.fresh_remote_control_context(&lease.agent_ref) {
+            Ok(context) => context,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        let configured_host = self.app.state.agent_host_name.clone();
+        let terminal_id = lease.context.terminal_id.clone();
+        let has_bytes = !data.is_empty();
+        let result = crate::server::remote_control::validate_and_enqueue(
+            &configured_host,
+            &lease.context.user,
+            &lease.context,
+            &current,
+            &data,
+            |bytes| {
+                let terminal_id = self
+                    .terminal_id_by_string(&terminal_id)
+                    .ok_or_else(|| "controlled terminal no longer exists".to_owned())?;
+                let runtime = self
+                    .app
+                    .terminal_runtimes
+                    .get(&terminal_id)
+                    .ok_or_else(|| "controlled terminal runtime is gone".to_owned())?;
+                runtime.scroll_reset();
+                runtime
+                    .try_send_bytes(Bytes::copy_from_slice(bytes))
+                    .map_err(|error| error.to_string())
+            },
+        );
+        match result {
+            Ok(()) => {
+                if has_bytes {
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.app.retire_blocked_hook_authority_for_terminal(
+                            &terminal_id,
+                            std::time::Instant::now(),
+                        );
+                    }
+                }
+                true
+            }
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                false
+            }
+        }
+    }
+
     fn resolve_terminal_target_id_string(&self, target: &str) -> Option<String> {
         if self.terminal_id_by_string(target).is_some() {
             return Some(target.to_owned());
@@ -2134,7 +2210,7 @@ impl HeadlessServer {
 
     fn paste_client_clipboard_image_path(&mut self, client_id: u64, path: String) -> bool {
         let attached_terminal_id = self.clients.get(&client_id).and_then(|client| {
-            if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
+            if let ClientConnectionMode::TerminalAttach { terminal_id, .. } = &client.mode {
                 Some(terminal_id.clone())
             } else {
                 None
@@ -2143,6 +2219,18 @@ impl HeadlessServer {
         if let Some(terminal_id) = attached_terminal_id {
             if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                 let payload = paste_payload_for_runtime(runtime, &path);
+                let guarded = self.clients.get(&client_id).is_some_and(|client| {
+                    matches!(
+                        client.mode,
+                        ClientConnectionMode::TerminalAttach {
+                            control: Some(_),
+                            ..
+                        }
+                    )
+                });
+                if guarded {
+                    return self.forward_control_bytes(client_id, payload.into_bytes());
+                }
                 if let Some(Err(err)) =
                     self.forward_terminal_attach_bytes(&terminal_id, payload.into_bytes(), false)
                 {
@@ -2229,7 +2317,156 @@ impl HeadlessServer {
         true
     }
 
-    fn control_terminal_client(&mut self, client_id: u64, target: String, takeover: bool) -> bool {
+    fn reject_remote_control(
+        &mut self,
+        client_id: u64,
+        error: crate::api::schema::ErrorBody,
+    ) -> bool {
+        self.send_to_client(
+            client_id,
+            ServerMessage::ControlError {
+                code: error.code,
+                message: error.message,
+            },
+        );
+        self.remove_client_and_resize_if_needed(client_id);
+        false
+    }
+
+    fn control_terminal_client(
+        &mut self,
+        client_id: u64,
+        target: String,
+        agent_ref: Option<crate::api::schema::AgentRef>,
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+        takeover: bool,
+    ) -> bool {
+        let Some(agent_ref) = agent_ref else {
+            return self.control_terminal_client_legacy(client_id, target, takeover);
+        };
+
+        #[cfg(not(unix))]
+        {
+            let _ = (agent_ref, expected_context);
+            self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "remote control is supported only on Unix runtimes".to_owned(),
+                },
+            )
+        }
+        #[cfg(unix)]
+        {
+            self.control_terminal_client_guarded(client_id, agent_ref, expected_context, takeover)
+        }
+    }
+
+    #[cfg(unix)]
+    fn control_terminal_client_guarded(
+        &mut self,
+        client_id: u64,
+        agent_ref: crate::api::schema::AgentRef,
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+        takeover: bool,
+    ) -> bool {
+        if takeover {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "already_controlled".to_owned(),
+                    message: "remote control takeover is not supported".to_owned(),
+                },
+            );
+        }
+        if !self.client_is_pending_terminal_mode(client_id) {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "connection is not pending terminal control".to_owned(),
+                },
+            );
+        }
+
+        let provider: &dyn crate::server::remote_control::RemoteControlContextProvider = &self.app;
+        let current = match provider.fresh_remote_control_context(&agent_ref) {
+            Ok(context) => context,
+            Err(error) => return self.reject_remote_control(client_id, error),
+        };
+        let expected = expected_context
+            .map(|context| *context)
+            .unwrap_or_else(|| current.clone());
+        if let Err(error) = crate::server::remote_control::validate_context(
+            &self.app.state.agent_host_name,
+            &current.user,
+            &expected,
+            &current,
+        ) {
+            return self.reject_remote_control(client_id, error);
+        }
+        let Some(real_terminal_id) = self.terminal_id_by_string(&current.terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "controlled terminal no longer exists".to_owned(),
+                },
+            );
+        };
+        if self
+            .pending_alt_screen_reads
+            .iter()
+            .any(|pending| pending.terminal_id == real_terminal_id)
+        {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "refused_for_safety".to_owned(),
+                    message: "terminal has a read in progress".to_owned(),
+                },
+            );
+        }
+        if self
+            .terminal_attach_owners
+            .get(&current.terminal_id)
+            .is_some_and(|owner| *owner != client_id)
+        {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "already_controlled".to_owned(),
+                    message: "terminal already has a writable controller".to_owned(),
+                },
+            );
+        }
+        let lease = crate::server::remote_control::RemoteControlLease {
+            agent_ref,
+            context: current.clone(),
+        };
+        if !self.attach_terminal_client_with_control(
+            client_id,
+            current.terminal_id.clone(),
+            false,
+            Some(Box::new(lease)),
+        ) {
+            return false;
+        }
+        self.send_to_client(
+            client_id,
+            ServerMessage::ControlReady {
+                context: Box::new(current),
+            },
+        );
+        true
+    }
+
+    fn control_terminal_client_legacy(
+        &mut self,
+        client_id: u64,
+        target: String,
+        takeover: bool,
+    ) -> bool {
         let Some(terminal_id) = self.resolve_terminal_session_target(client_id, &target, "control")
         else {
             return false;
@@ -2250,7 +2487,11 @@ impl HeadlessServer {
     ) -> bool {
         self.app.begin_contract_false_positive_input_burst();
         let Some(ClientConnection {
-            mode: ClientConnectionMode::TerminalAttach { terminal_id },
+            mode:
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id,
+                    control: None,
+                },
             ..
         }) = self.clients.get(&client_id)
         else {
@@ -3234,6 +3475,16 @@ impl HeadlessServer {
         terminal_id: String,
         takeover: bool,
     ) -> bool {
+        self.attach_terminal_client_with_control(client_id, terminal_id, takeover, None)
+    }
+
+    fn attach_terminal_client_with_control(
+        &mut self,
+        client_id: u64,
+        terminal_id: String,
+        takeover: bool,
+        control: Option<Box<crate::server::remote_control::RemoteControlLease>>,
+    ) -> bool {
         if !self.client_is_pending_terminal_mode(client_id) {
             self.send_to_client(
                 client_id,
@@ -3310,6 +3561,7 @@ impl HeadlessServer {
         let cell_size = client.cell_size;
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id.clone(),
+            control,
         };
         client.pending_terminal_attach = false;
         client.render_state.reset_baseline();
@@ -3655,8 +3907,16 @@ impl HeadlessServer {
             ServerEvent::ClientControlTerminal {
                 client_id,
                 target,
+                agent_ref,
+                expected_context,
                 takeover,
-            } => self.control_terminal_client(client_id, target, takeover),
+            } => self.control_terminal_client(
+                client_id,
+                target,
+                agent_ref,
+                expected_context,
+                takeover,
+            ),
             ServerEvent::ClientAttachScroll {
                 client_id,
                 source,
@@ -3706,15 +3966,34 @@ impl HeadlessServer {
                     );
                     return false;
                 }
+                if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.pending_terminal_attach)
+                {
+                    debug!(
+                        client_id,
+                        len = data.len(),
+                        "ignored client input while terminal control is connecting"
+                    );
+                    return false;
+                }
                 debug!(client_id, len = data.len(), "client input received");
-                let attached_terminal_id = self.clients.get(&client_id).and_then(|client| {
-                    if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
-                        Some(terminal_id.clone())
+                let attached_terminal = self.clients.get(&client_id).and_then(|client| {
+                    if let ClientConnectionMode::TerminalAttach {
+                        terminal_id,
+                        control,
+                    } = &client.mode
+                    {
+                        Some((terminal_id.clone(), control.is_some()))
                     } else {
                         None
                     }
                 });
-                if let Some(terminal_id) = attached_terminal_id {
+                if let Some((_terminal_id, true)) = attached_terminal {
+                    return self.forward_control_bytes(client_id, data);
+                }
+                if let Some((terminal_id, false)) = attached_terminal {
                     if let Some(Err(err)) =
                         self.forward_terminal_attach_bytes(&terminal_id, data, true)
                     {
@@ -3749,6 +4028,18 @@ impl HeadlessServer {
                     );
                     return false;
                 }
+                if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.pending_terminal_attach)
+                {
+                    debug!(
+                        client_id,
+                        len = events.len(),
+                        "ignored structured input while terminal control is connecting"
+                    );
+                    return false;
+                }
                 debug!(
                     client_id,
                     len = events.len(),
@@ -3757,6 +4048,15 @@ impl HeadlessServer {
                 if matches!(
                     self.clients.get(&client_id).map(|client| &client.mode),
                     Some(ClientConnectionMode::TerminalObserve { .. })
+                ) {
+                    return false;
+                }
+                if matches!(
+                    self.clients.get(&client_id).map(|client| &client.mode),
+                    Some(ClientConnectionMode::TerminalAttach {
+                        control: Some(_),
+                        ..
+                    })
                 ) {
                     return false;
                 }
@@ -3805,6 +4105,17 @@ impl HeadlessServer {
                     extension = %extension,
                     "client clipboard image received"
                 );
+                if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.pending_terminal_attach)
+                {
+                    debug!(
+                        client_id,
+                        "ignored clipboard input while terminal control is connecting"
+                    );
+                    return false;
+                }
                 if matches!(
                     self.clients.get(&client_id).map(|client| &client.mode),
                     Some(ClientConnectionMode::TerminalObserve { .. })
@@ -3831,7 +4142,11 @@ impl HeadlessServer {
                     cols, rows, cell_width_px, cell_height_px, "client resize"
                 );
                 let direct_terminal_id = if let Some(ClientConnection {
-                    mode: ClientConnectionMode::TerminalAttach { terminal_id },
+                    mode:
+                        ClientConnectionMode::TerminalAttach {
+                            terminal_id,
+                            control: None,
+                        },
                     terminal_size,
                     cell_size,
                     render_state,
@@ -4753,7 +5068,7 @@ impl HeadlessServer {
                 ClientConnectionMode::App if client.is_full_app_client() => {
                     has_app_target = true;
                 }
-                ClientConnectionMode::TerminalAttach { terminal_id }
+                ClientConnectionMode::TerminalAttach { terminal_id, .. }
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     direct_terminal_targets.insert(terminal_id.as_str());
                 }
@@ -5219,7 +5534,7 @@ impl HeadlessServer {
                     }
                     frame
                 }
-                ClientConnectionMode::TerminalAttach { terminal_id }
+                ClientConnectionMode::TerminalAttach { terminal_id, .. }
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) else {
                         self.send_to_client(
@@ -7336,6 +7651,7 @@ esac
             ClientConnection::new_with_mode(
                 ClientConnectionMode::TerminalAttach {
                     terminal_id: agent_terminal_id.to_string(),
+                    control: None,
                 },
                 None,
                 (80, 24),
@@ -8108,13 +8424,18 @@ next_tab = ""
                     server.handle_server_event(ServerEvent::ClientControlTerminal {
                         client_id: 7,
                         target: public_pane_id,
+                        agent_ref: None,
+                        expected_context: None,
                         takeover: false,
                     })
                 );
 
                 assert!(matches!(
                     server.clients.get(&7).map(|client| &client.mode),
-                    Some(ClientConnectionMode::TerminalAttach { terminal_id: attached })
+                    Some(ClientConnectionMode::TerminalAttach {
+                        terminal_id: attached,
+                        ..
+                    })
                         if attached == &terminal_id_string
                 ));
                 assert_eq!(
@@ -8165,6 +8486,8 @@ next_tab = ""
                 !server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8297,6 +8620,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8306,6 +8631,8 @@ next_tab = ""
                 !server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 8,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8327,6 +8654,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8336,6 +8665,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 8,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: true,
                 })
             );
@@ -8357,6 +8688,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8393,6 +8726,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -9165,6 +9500,7 @@ next_tab = ""
         let mut client = test_app_client(Some(true), 1);
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id_string,
+            control: None,
         };
         server.clients.insert(1, client);
 
@@ -10653,7 +10989,7 @@ next_tab = ""
     }
 
     #[tokio::test]
-    async fn structured_non_app_focus_is_ignored_without_suppressing_keys() {
+    async fn pending_terminal_control_drops_structured_input() {
         let mut server = test_headless_server();
         let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
         server.clients.insert(1, test_app_client(Some(true), 1));
@@ -10661,6 +10997,7 @@ next_tab = ""
         let mut attached = test_app_client(Some(false), 2);
         attached.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: "attached".to_owned(),
+            control: None,
         };
         server.clients.insert(2, attached);
 
@@ -10685,7 +11022,7 @@ next_tab = ""
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
-        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
             client_id: 3,
             events: vec![crate::protocol::ClientInputEvent::Key {
                 code: crate::protocol::ClientKeyCode::Char('x'),
@@ -10697,7 +11034,15 @@ next_tab = ""
                 source: crate::protocol::ClientKeySource::Synthesized,
             }],
         }));
-        assert_eq!(server.foreground_client_id, Some(3));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 3,
+            data: b"x".to_vec(),
+        }));
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -10717,6 +11062,7 @@ next_tab = ""
             );
             client.mode = ClientConnectionMode::TerminalAttach {
                 terminal_id: terminal_id.clone(),
+                control: None,
             };
             server.clients.insert(1, client);
 

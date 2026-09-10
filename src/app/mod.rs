@@ -1348,7 +1348,9 @@ impl App {
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
-            remote_focus_transport: Box::new(remote_focus::StubRemoteFocusTransport),
+            remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
+                &config.remote.fleet,
+            )),
             configured_remote_focus_hosts: remote_focus::configured_remote_hosts(
                 &config.remote.fleet,
             ),

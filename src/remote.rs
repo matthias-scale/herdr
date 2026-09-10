@@ -1,13 +1,22 @@
 mod attach;
+mod control;
 #[cfg(unix)]
 mod host_unix;
 
 pub(crate) use attach::*;
+pub(crate) use control::SshRemoteFocusTransport;
 #[cfg(unix)]
-pub(crate) use host_unix::run_remote_client_bridge;
+pub(crate) use host_unix::{run_remote_client_bridge, run_remote_control_bridge};
 
 #[cfg(windows)]
 pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "remote Windows hosts are not supported yet",
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn run_remote_control_bridge() -> std::io::Result<()> {
     Err(std::io::Error::other(
         "remote Windows hosts are not supported yet",
     ))

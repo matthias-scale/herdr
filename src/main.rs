@@ -752,6 +752,10 @@ fn main() -> io::Result<()> {
         return remote::run_remote_client_bridge();
     }
 
+    if args.get(1).map(|s| s.as_str()) == Some("remote-control-bridge") {
+        return remote::run_remote_control_bridge();
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("server") {
         return server::headless::run_server();
     }
@@ -953,6 +957,7 @@ fn main() -> io::Result<()> {
                 "server",
                 "client",
                 "remote-client-bridge",
+                "remote-control-bridge",
                 "update",
                 "status",
                 "config",

@@ -369,6 +369,8 @@ pub(crate) enum ServerEvent {
     ClientControlTerminal {
         client_id: u64,
         target: String,
+        agent_ref: Option<crate::api::schema::AgentRef>,
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
         takeover: bool,
     },
     /// A direct terminal attach client requested scrollback movement.
@@ -568,6 +570,7 @@ pub(crate) fn handle_client_handshake(
     ) = match hello {
         ClientMessage::Hello {
             version,
+            build_version,
             cols,
             rows,
             cell_width_px,
@@ -583,6 +586,7 @@ pub(crate) fn handle_client_handshake(
                     // Send rejection Welcome.
                     let welcome = ServerMessage::Welcome {
                         version: PROTOCOL_VERSION,
+                        build_version: crate::build_info::version(),
                         encoding: RenderEncoding::SemanticFrame,
                         error: Some(reason),
                     };
@@ -591,11 +595,23 @@ pub(crate) fn handle_client_handshake(
                 }
             }
 
+            if build_version.is_empty() {
+                let welcome = ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION,
+                    build_version: crate::build_info::version(),
+                    encoding: RenderEncoding::SemanticFrame,
+                    error: Some("client build identity is missing (version_skew)".to_owned()),
+                };
+                let _ = protocol::write_message(&mut stream, &welcome);
+                return Ok(());
+            }
+
             let keybindings = match parse_client_keybindings(keybindings) {
                 Ok(keybindings) => keybindings,
                 Err(error) => {
                     let welcome = ServerMessage::Welcome {
                         version: PROTOCOL_VERSION,
+                        build_version: crate::build_info::version(),
                         encoding: RenderEncoding::SemanticFrame,
                         error: Some(error),
                     };
@@ -622,6 +638,7 @@ pub(crate) fn handle_client_handshake(
             debug!(client_id, "first message was not Hello, closing");
             let welcome = ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 encoding: RenderEncoding::SemanticFrame,
                 error: Some("expected Hello as first message".to_owned()),
             };
@@ -637,6 +654,7 @@ pub(crate) fn handle_client_handshake(
     // Send Welcome.
     let welcome = ServerMessage::Welcome {
         version: PROTOCOL_VERSION,
+        build_version: crate::build_info::version(),
         encoding: render_encoding,
         error: None,
     };
@@ -892,13 +910,18 @@ fn client_read_loop(
             ClientMessage::ObserveTerminal { target } => {
                 ServerEvent::ClientObserveTerminal { client_id, target }
             }
-            ClientMessage::ControlTerminal { target, takeover } => {
-                ServerEvent::ClientControlTerminal {
-                    client_id,
-                    target,
-                    takeover,
-                }
-            }
+            ClientMessage::ControlTerminal {
+                target,
+                agent_ref,
+                expected_context,
+                takeover,
+            } => ServerEvent::ClientControlTerminal {
+                client_id,
+                target,
+                agent_ref,
+                expected_context,
+                takeover,
+            },
             ClientMessage::GraphicsTransmissionResult {
                 transfer_id,
                 image_id,
@@ -1337,6 +1360,7 @@ new_tab = "ctrl+notakey"
             &mut client_stream,
             &ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 cols: 100,
                 rows: 30,
                 cell_width_px: 8,
@@ -1353,10 +1377,12 @@ new_tab = "ctrl+notakey"
         match welcome {
             ServerMessage::Welcome {
                 version,
+                build_version,
                 encoding,
                 error,
             } => {
                 assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(build_version, crate::build_info::version());
                 assert_eq!(encoding, RenderEncoding::TerminalAnsi);
                 assert_eq!(error, None);
             }
@@ -1414,6 +1440,7 @@ new_tab = "ctrl+notakey"
             &mut client_stream,
             &ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 cols: 100,
                 rows: 30,
                 cell_width_px: 8,
@@ -1430,10 +1457,12 @@ new_tab = "ctrl+notakey"
         match welcome {
             ServerMessage::Welcome {
                 version,
+                build_version,
                 encoding,
                 error,
             } => {
                 assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(build_version, crate::build_info::version());
                 assert_eq!(encoding, RenderEncoding::TerminalAnsi);
                 assert_eq!(error, None);
             }

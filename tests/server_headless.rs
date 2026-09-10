@@ -178,6 +178,7 @@ fn client_handshake(
         0,
         &[
             &encode_varint_u32(version),
+            &encode_string("test-build"),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
             &encode_varint_u32(8),  // cell_width_px
@@ -231,6 +232,12 @@ fn encode_varint_u16(v: u16) -> Vec<u8> {
         buf.extend_from_slice(&v.to_le_bytes());
         buf
     }
+}
+
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut encoded = encode_varint_u32(value.len() as u32);
+    encoded.extend_from_slice(value.as_bytes());
+    encoded
 }
 
 /// Encode an enum variant with its fields.
@@ -325,6 +332,9 @@ fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
     // version: u32
     let (version, consumed) = decode_varint_u32(payload, offset)?;
     offset += consumed;
+
+    let (build_len, consumed) = decode_varint_u32(payload, offset)?;
+    offset += consumed + build_len as usize;
 
     // encoding: RenderEncoding
     let (_encoding, consumed) = decode_varint_u32(payload, offset)?;

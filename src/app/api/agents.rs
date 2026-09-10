@@ -463,6 +463,7 @@ mod tests {
                 argv: vec!["agent".into(), "run".into()],
                 cwd: "/work/repo".into(),
             },
+            detected_agent: "claude".into(),
             interactive_ready: true,
             human_draft: false,
             state_change_seq: 9,
@@ -1614,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_focus_default_stub_reports_failure_without_activation() {
+    fn remote_focus_transport_reports_unconfigured_target_without_activation() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
         configure_remote_host(&mut app, "buildbox");
@@ -1644,7 +1645,7 @@ mod tests {
         assert_eq!(status["result"]["error"]["code"], "host_unreachable");
         assert!(status["result"]["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("not implemented")));
+            .is_some_and(|message| message.contains("not configured")));
         assert!(status["result"].get("context").is_none());
     }
 

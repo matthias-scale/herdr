@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -345,6 +345,8 @@ pub enum ClientMessage {
     Hello {
         /// Protocol version the client speaks.
         version: u32,
+        /// Exact Herdr build identity. Control clients must match the server.
+        build_version: String,
         /// Terminal width in columns.
         cols: u16,
         /// Terminal height in rows.
@@ -427,6 +429,13 @@ pub enum ClientMessage {
     ControlTerminal {
         /// Pane, terminal, or agent target to control.
         target: String,
+        /// Cross-host agent identity for the guarded control path.
+        #[serde(default)]
+        agent_ref: Option<crate::api::schema::AgentRef>,
+        /// Context expected by the client, when it has a fresh one. The
+        /// remote server always captures and validates its own context.
+        #[serde(default)]
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
@@ -669,6 +678,8 @@ pub enum ServerMessage {
     Welcome {
         /// Protocol version the server speaks.
         version: u32,
+        /// Exact Herdr build identity reported by the server.
+        build_version: String,
         /// Render encoding selected by the server for this connection.
         encoding: RenderEncoding,
         /// If present, the handshake failed and this describes why.
@@ -762,6 +773,14 @@ pub enum ServerMessage {
 
     /// The server no longer needs the client's direct graphics transmission.
     GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
+
+    /// The remote server granted guarded terminal control.
+    ControlReady {
+        context: Box<crate::api::schema::RemoteControlContext>,
+    },
+
+    /// The remote server refused guarded terminal control.
+    ControlError { code: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,6 +1063,7 @@ mod tests {
     fn client_hello_roundtrip() {
         let msg = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             cols: 80,
             rows: 24,
             cell_width_px: 8,
@@ -1081,6 +1101,7 @@ mod tests {
         assert_eq!(
             tag(&ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 cols: 80,
                 rows: 24,
                 cell_width_px: 8,
@@ -1137,6 +1158,8 @@ mod tests {
         assert_eq!(
             tag(&ClientMessage::ControlTerminal {
                 target: "w1:p1".to_owned(),
+                agent_ref: None,
+                expected_context: None,
                 takeover: false,
             }),
             9
@@ -1359,6 +1382,8 @@ mod tests {
     fn client_control_terminal_roundtrip() {
         let msg = ClientMessage::ControlTerminal {
             target: "w1:p1".to_owned(),
+            agent_ref: None,
+            expected_context: None,
             takeover: true,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -1398,6 +1423,7 @@ mod tests {
     fn server_welcome_roundtrip() {
         let msg = ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             encoding: RenderEncoding::SemanticFrame,
             error: None,
         };
@@ -1411,6 +1437,7 @@ mod tests {
     fn server_welcome_with_error_roundtrip() {
         let msg = ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             encoding: RenderEncoding::SemanticFrame,
             error: Some("incompatible version".to_owned()),
         };
@@ -1671,6 +1698,7 @@ mod tests {
     fn framing_small_message_roundtrip() {
         let msg = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             cols: 80,
             rows: 24,
             cell_width_px: 8,
@@ -1745,6 +1773,7 @@ mod tests {
             let msg = match i % 5 {
                 0 => ClientMessage::Hello {
                     version: PROTOCOL_VERSION,
+                    build_version: crate::build_info::version(),
                     cols: (80 + (i % 40) as u16),
                     rows: (24 + (i % 20) as u16),
                     cell_width_px: 8,
@@ -1914,11 +1943,13 @@ mod tests {
         let response = match check {
             VersionCheck::Compatible => ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 encoding: RenderEncoding::SemanticFrame,
                 error: None,
             },
             VersionCheck::Incompatible(reason) => ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 encoding: RenderEncoding::SemanticFrame,
                 error: Some(reason),
             },
@@ -2181,6 +2212,7 @@ mod tests {
         // A normally-framed message should decode without error.
         let msg = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             cols: 80,
             rows: 24,
             cell_width_px: 8,
@@ -2217,6 +2249,7 @@ mod tests {
         let messages = vec![
             ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 cols: 200,
                 rows: 60,
                 cell_width_px: 8,
