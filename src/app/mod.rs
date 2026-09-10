@@ -1027,6 +1027,8 @@ impl App {
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
+                status_work_links: Vec::new(),
+                status_segments: Vec::new(),
             },
             drag: None,
             workspace_presses: HashMap::new(),
@@ -1182,6 +1184,7 @@ impl App {
             pane_outer_borders: config.ui.pane_outer_borders,
             pane_scrollbars: config.ui.pane_scrollbars,
             show_pull_button: config.ui.show_pull_button,
+            open_dock_on_work_link: config.ui.open_dock_on_work_link,
             show_pane_toggle_buttons: config.ui.show_pane_toggle_buttons,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
@@ -2414,6 +2417,7 @@ impl App {
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.show_pull_button = config.ui.show_pull_button;
+                self.state.open_dock_on_work_link = config.ui.open_dock_on_work_link;
                 self.state.show_pane_toggle_buttons = config.ui.show_pane_toggle_buttons;
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =

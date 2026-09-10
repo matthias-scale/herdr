@@ -13,7 +13,8 @@ use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{
-        CopyFeedback, Palette, StatusButton, StatusButtonAction, ToastKind, ToastNotification,
+        CopyFeedback, Palette, StatusButton, StatusButtonAction, StatusWorkLink, ToastKind,
+        ToastNotification,
     },
     app::AppState,
     config::{StatusIndicatorStyle, ToastClipboardPosition, ToastHerdrPosition},
@@ -43,15 +44,6 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     let bg = Style::default().bg(p.panel_bg);
     frame.render_widget(Paragraph::new("").style(bg), area);
 
-    let unavailable = StatusMetrics {
-        hostname: "--".into(),
-        ..StatusMetrics::default()
-    };
-    let metrics = app
-        .status_metrics
-        .as_ref()
-        .map(|snapshot| &snapshot.metrics)
-        .unwrap_or(&unavailable);
     // The pane toggles sit at the far right of this row when the tab row is
     // hidden, so the segments must stop short of them instead of underlapping.
     let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
@@ -59,27 +51,24 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if usize::from(content_width) < minimum_required_status_width(app) {
         return;
     }
-    let title_segment_budget = focused_pane_title_parts(app).and_then(|(repo, _)| {
-        let start = focused_pane_title_start(app, area);
-        let budget = area
-            .x
-            .saturating_add(content_width)
-            .saturating_sub(start)
-            .saturating_sub(display_width_u16(&repo));
-        (usize::from(budget) >= minimum_title_companion_width()).then_some(usize::from(budget))
-    });
-    let segments = match title_segment_budget {
-        Some(budget) => fitted_segments_beside_title(status_segments(app, metrics, p), budget),
-        None => fitted_segments(status_segments(app, metrics, p), usize::from(content_width)),
+    // The fitted row normally arrives on the view. A render that never went
+    // through view computation, which the unit tests and any future direct
+    // draw do, fits it here instead of drawing an empty row.
+    let fitted;
+    let segments = if app.view.status_segments.is_empty() {
+        fitted = fitted_status_segments(app, area);
+        &fitted
+    } else {
+        &app.view.status_segments
     };
 
-    let used = segment_width(&segments);
+    let used = segment_width(segments);
     let pad = (content_width as usize).saturating_sub(used);
     let mut spans: Vec<Span> = Vec::new();
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
     }
-    for seg in &segments {
+    for seg in segments {
         let style = if seg.preserve_bg {
             seg.style
         } else {
@@ -92,6 +81,15 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         Rect::new(area.x, area.y, content_width, area.height),
     );
     render_focused_pane_title(app, frame, area, used + usize::from(reserved));
+    for link in &app.view.status_work_links {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                link.label.clone(),
+                Style::default().fg(p.accent).bg(p.panel_bg),
+            ))),
+            link.rect,
+        );
+    }
 
     for button in &app.view.status_buttons {
         let style = if button.active {
@@ -114,9 +112,91 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 /// with the column the pane itself occupies below, and it yields to both the
 /// left-hand buttons and the right-aligned segments rather than overlapping.
 fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segments_used: usize) {
-    let Some((repo, thread)) = focused_pane_title_parts(app) else {
+    let Some(layout) = focused_pane_title_layout(app, area, segments_used) else {
         return;
     };
+    let style = Style::default()
+        .fg(app.palette.subtext0)
+        .bg(app.palette.panel_bg);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(layout.text, style))),
+        layout.rect,
+    );
+}
+
+/// Blank columns between the title and the first link, and between links.
+const WORK_LINK_GAP: usize = 2;
+
+struct TitleLayout {
+    text: String,
+    rect: Rect,
+    links: Vec<StatusWorkLink>,
+}
+
+/// Whether a lowercased title already names this link, as a whole word rather
+/// than as any substring.
+fn title_names(lowercased_title: &str, label: &str) -> bool {
+    let label = label.to_lowercase();
+    let boundary = |character: char| !character.is_alphanumeric() && character != '-';
+    lowercased_title
+        .match_indices(&label)
+        .any(|(index, matched)| {
+            let before = lowercased_title[..index].chars().next_back();
+            let after = lowercased_title[index + matched.len()..].chars().next();
+            before.is_none_or(boundary) && after.is_none_or(boundary)
+        })
+}
+
+/// The right-aligned segments this frame will draw. Built once during view
+/// computation because the title and its links are laid out against them, and
+/// building them twice would repeat the per-pane agent scan behind the dots.
+pub(crate) fn fitted_status_segments(app: &AppState, area: Rect) -> Vec<Segment> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
+    let content_width = area.width.saturating_sub(reserved);
+    if usize::from(content_width) < minimum_required_status_width(app) {
+        return Vec::new();
+    }
+    status_row_segments(
+        app,
+        metrics_or_unavailable(app),
+        &app.palette,
+        area,
+        content_width,
+    )
+}
+
+/// Ticket and pull-request links of the focused pane, as rendered in the status
+/// row. Computed during view computation so the hit areas belong to the same
+/// frame as the labels, and empty whenever the title itself does not fit.
+pub(crate) fn status_work_links(app: &AppState, area: Rect) -> Vec<StatusWorkLink> {
+    if app.dock_context_objects.is_empty() {
+        return Vec::new();
+    }
+    let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
+    if usize::from(area.width.saturating_sub(reserved)) < minimum_required_status_width(app) {
+        return Vec::new();
+    }
+    let segments_used = segment_width(&app.view.status_segments) + usize::from(reserved);
+    focused_pane_title_layout(app, area, segments_used)
+        .map(|layout| layout.links)
+        .unwrap_or_default()
+}
+
+/// Title text, its rect, and the links that follow it.
+///
+/// The links are paid for before the title is fitted: an identifier the human
+/// clicks is worth more than the tail of a thread name they are already
+/// reading. Links that would leave no room for the repository are dropped
+/// rather than shown over a clipped title.
+fn focused_pane_title_layout(
+    app: &AppState,
+    area: Rect,
+    segments_used: usize,
+) -> Option<TitleLayout> {
+    let (repo, thread) = focused_pane_title_parts(app)?;
     let start = focused_pane_title_start(app, area);
     let segments_start = area
         .x
@@ -125,17 +205,86 @@ fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segm
     let raw_width = segments_start.saturating_sub(start);
     // Keep a separator when space permits, but at 80 columns the repository is
     // more useful than a blank cell.
-    let width = raw_width.saturating_sub(u16::from(usize::from(raw_width) > display_width(&repo)));
-    let Some(text) = fit_focused_pane_title(&repo, &thread, usize::from(width)) else {
-        return;
-    };
-    let style = Style::default()
-        .fg(app.palette.subtext0)
-        .bg(app.palette.panel_bg);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(text, style))),
-        Rect::new(start, area.y, width, 1),
+    let width = usize::from(
+        raw_width.saturating_sub(u16::from(usize::from(raw_width) > display_width(&repo))),
     );
+    let mut links_width = 0usize;
+    let mut kept: Vec<(crate::app::state::DockObjectRef, String)> = Vec::new();
+    let title_of_record = fit_focused_pane_title(&repo, &thread, usize::MAX)
+        .unwrap_or_default()
+        .to_lowercase();
+    for object in &app.dock_context_objects {
+        let label = app.dock_object_label(object);
+        if label.is_empty() {
+            continue;
+        }
+        // The title already carries the ticket it was derived from. Naming it
+        // twice on one row buys nothing. Matched on whole words, so `#159`
+        // is not swallowed by a title that happens to mention `#1592`.
+        if title_names(&title_of_record, &label) {
+            continue;
+        }
+        let cost = WORK_LINK_GAP + display_width(&label);
+        if width.saturating_sub(links_width + cost) < display_width(&repo) {
+            break;
+        }
+        links_width += cost;
+        kept.push((object.clone(), label));
+    }
+    let title_width = width.saturating_sub(links_width);
+    let text = fit_focused_pane_title(&repo, &thread, title_width)?;
+    let mut cursor = start.saturating_add(display_width_u16(&text));
+    let links = kept
+        .into_iter()
+        .map(|(object, label)| {
+            let label_width = display_width_u16(&label);
+            let rect = Rect::new(
+                cursor.saturating_add(u16::try_from(WORK_LINK_GAP).unwrap_or(u16::MAX)),
+                area.y,
+                label_width,
+                1,
+            );
+            cursor = rect.x.saturating_add(label_width);
+            StatusWorkLink {
+                rect,
+                label,
+                object,
+            }
+        })
+        .collect();
+    Some(TitleLayout {
+        text,
+        rect: Rect::new(
+            start,
+            area.y,
+            u16::try_from(title_width).unwrap_or(u16::MAX),
+            1,
+        ),
+        links,
+    })
+}
+
+/// The right-aligned segments, fitted to whatever the title left them.
+fn status_row_segments(
+    app: &AppState,
+    metrics: &StatusMetrics,
+    p: &Palette,
+    area: Rect,
+    content_width: u16,
+) -> Vec<Segment> {
+    let title_segment_budget = focused_pane_title_parts(app).and_then(|(repo, _)| {
+        let start = focused_pane_title_start(app, area);
+        let budget = area
+            .x
+            .saturating_add(content_width)
+            .saturating_sub(start)
+            .saturating_sub(display_width_u16(&repo));
+        (usize::from(budget) >= minimum_title_companion_width()).then_some(usize::from(budget))
+    });
+    match title_segment_budget {
+        Some(budget) => fitted_segments_beside_title(status_segments(app, metrics, p), budget),
+        None => fitted_segments(status_segments(app, metrics, p), usize::from(content_width)),
+    }
 }
 
 fn focused_pane_title_start(app: &AppState, area: Rect) -> u16 {
@@ -175,14 +324,17 @@ fn focused_pane_title_parts(app: &AppState) -> Option<(String, String)> {
                 .filter(|repo| !repo.is_empty())
                 .map(str::to_string)
         })?;
-    let title = terminal
-        .manual_label
-        .clone()
-        .or_else(|| context.session_name.clone())
-        .or_else(|| context.work_title.clone())
-        .or_else(|| terminal.terminal_title_stripped())
-        .or_else(|| terminal.terminal_title.clone())?;
-    let title = subject_of(title.trim());
+    // The sidebar row for this pane reads the same function, so the two
+    // surfaces cannot name one session differently.
+    let tab_idx = workspace.active_tab;
+    let projection = workspace.tab_display_projection(&app.terminals, tab_idx);
+    let title = crate::workspace::session_title(
+        projection.as_ref(),
+        workspace
+            .tab_display_name_from(&app.terminals, tab_idx)
+            .or_else(|| Some(super::sidebar::DEFAULT_THREAD_TITLE.to_string())),
+    )?;
+    let title = title.trim();
     (!title.is_empty()).then(|| (repo, title.to_string()))
 }
 
@@ -200,17 +352,6 @@ fn fit_focused_pane_title(repo: &str, thread: &str, width: usize) -> Option<Stri
         return Some(repo.to_string());
     }
     Some(truncate_end(&full, width))
-}
-
-/// Agents prefix their title with identity -- `cc · herdr · rename the pane`.
-/// The sidebar and the tab already name the agent and the workspace, so the
-/// status row keeps only the trailing subject: the one thing nothing else on
-/// screen says. A title without the separator is already its own subject.
-fn subject_of(title: &str) -> &str {
-    title
-        .rsplit(" · ")
-        .find(|part| !part.trim().is_empty())
-        .map_or(title, str::trim)
 }
 
 /// Left-aligned quick-access buttons. The status bar's own segments are
@@ -313,7 +454,7 @@ fn metrics_or_unavailable(app: &AppState) -> &crate::platform::status_metrics::S
         })
 }
 
-struct Segment {
+pub(crate) struct Segment {
     text: String,
     style: Style,
     /// When true, `style` already carries its own background (prefix pill).
@@ -1924,17 +2065,128 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_title_drops_the_agent_and_workspace_prefix() {
-        assert_eq!(
-            subject_of("cc · herdr · rename the pane"),
-            "rename the pane"
+    fn work_links_follow_the_title_with_clickable_labels() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        const WIDTH: u16 = 120;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_collapsed = false;
+        app.sidebar_width = 30;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal");
+        terminal.set_terminal_title(Some("Fix billing".into()));
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            repo: Some("herdrdev/herdr".into()),
+            session_name: Some("Fix billing".into()),
+            pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
+            ticket_ids: vec!["SCA-3165".into()],
+            ..Default::default()
+        });
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, WIDTH, 20),
         );
-        // A trailing empty segment falls back to the last one that says something.
-        assert_eq!(subject_of("cc · herdr ·   "), "herdr");
-        assert_eq!(subject_of("Fix billing"), "Fix billing");
-        // A bare separator is not the agent prefix shape and must survive.
-        assert_eq!(subject_of("a·b"), "a·b");
-        assert_eq!(subject_of("修复 · 标题"), "标题");
+
+        assert!(
+            app.dock_open_surfaces.is_empty(),
+            "the links belong to the status row, not to an uninvited dock tab"
+        );
+        assert_eq!(
+            app.view
+                .status_work_links
+                .iter()
+                .map(|link| link.label.as_str())
+                .collect::<Vec<_>>(),
+            ["#159"],
+            "the ticket is already in the title and is not repeated"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("status terminal");
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, WIDTH, 1)))
+            .expect("render status");
+        let columns = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<Vec<_>>();
+        let rendered = columns.concat();
+        assert!(
+            rendered.contains("herdr / SCA-3165 · Fix billing  #159"),
+            "links follow the title with a gap between them: {rendered:?}"
+        );
+
+        // Every label is clickable exactly where it was drawn.
+        for link in &app.view.status_work_links {
+            let start = usize::from(link.rect.x);
+            let end = start + usize::from(link.rect.width);
+            assert_eq!(columns[start..end].concat(), link.label, "{rendered:?}");
+        }
+    }
+
+    #[test]
+    fn a_title_names_a_link_only_on_a_whole_word() {
+        assert!(title_names("sca-3165 · fix billing", "SCA-3165"));
+        assert!(title_names("#159 review", "#159"));
+        assert!(!title_names("#1592 review", "#159"));
+        assert!(!title_names("sca-31650 · fix billing", "SCA-3165"));
+    }
+
+    #[test]
+    fn the_status_row_title_is_the_title_the_sidebar_row_shows() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal");
+        terminal.set_terminal_title(Some("cc · herdr · Fix billing".into()));
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            repo: Some("herdrdev/herdr".into()),
+            session_name: Some("Fix billing".into()),
+            ticket_ids: vec!["SCA-3165".into()],
+            ..Default::default()
+        });
+
+        let sidebar_title = crate::ui::sidebar::agent_panel_entries_from(
+            &app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+        )
+        .into_iter()
+        .find(|entry| entry.ws_idx == 0)
+        .and_then(|entry| entry.primary_tab_label)
+        .expect("the sidebar names this session");
+
+        assert_eq!(
+            focused_pane_title_parts(&app).map(|(_, title)| title),
+            Some(sidebar_title),
+            "one session, one title"
+        );
     }
 
     #[test]
