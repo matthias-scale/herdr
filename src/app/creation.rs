@@ -326,10 +326,52 @@ impl App {
                 return;
             }
         };
+        // A host session is one thing. Clicking its row again must return to the
+        // pane already attached to it rather than dial a second ssh connection
+        // and leave the operator with two views of the same server.
+        if self.focus_attached_fleet_host_pane(&argv) {
+            return;
+        }
         if let Err(error) = self.create_fleet_host_tab(&argv) {
             tracing::warn!(host = %host.name, %error, "could not open fleet host");
             self.show_fleet_launch_error(error.to_string());
         }
+    }
+
+    /// Focus the pane already running `argv`, if one is open. The launch argv
+    /// is the host's identity here: it carries the target and session the
+    /// attach was built from, so two hosts can never collide on it.
+    fn focus_attached_fleet_host_pane(&mut self, argv: &[String]) -> bool {
+        let target = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, workspace)| {
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(tab_idx, tab)| {
+                        tab.panes
+                            .iter()
+                            .find(|(_, pane)| {
+                                self.state
+                                    .terminals
+                                    .get(&pane.attached_terminal_id)
+                                    .and_then(|terminal| terminal.launch_argv.as_deref())
+                                    == Some(argv)
+                            })
+                            .map(|(pane_id, _)| (ws_idx, tab_idx, *pane_id))
+                    })
+            });
+        let Some((ws_idx, tab_idx, pane_id)) = target else {
+            return false;
+        };
+        self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        self.state.mode = Mode::Terminal;
+        true
     }
 
     fn create_fleet_host_tab(&mut self, argv: &[String]) -> std::io::Result<()> {
