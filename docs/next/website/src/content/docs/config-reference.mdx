@@ -23,6 +23,10 @@ listed per key here. Each launch profile names one way to start an agent from
 the Home composer, including its agent type, command, environment, and optional
 quota source.
 
+`[[projects]]` is likewise a user-defined array of tables. Each project groups
+checkouts for the Home composer's project and repo selectors through `roots`
+and `repos`; see [Projects](/docs/configuration/#projects).
+
 Fleet polling uses `remote.fleet.refresh_interval_ms` for its background refresh
 period and `remote.fleet.timeout_ms` as the deadline for each configured host.
 Set `remote.fleet.hosts[].session` to open that host's named Herdr session.

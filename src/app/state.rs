@@ -2109,7 +2109,10 @@ pub(crate) enum HomeHitTarget {
     Effort,
     Access,
     Context,
+    Project,
+    Repo,
     Directory,
+    Machine,
     Workspace,
     Ref,
     Target,
@@ -2188,6 +2191,10 @@ pub struct ViewState {
     pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
+    /// The idle animation's panel under the notepad. Empty when it is off.
+    pub(crate) hyperspace_rect: Rect,
+    /// Its pause button, in the panel's bottom-left corner.
+    pub(crate) hyperspace_pause_hit_area: Rect,
     /// Sidebar-footer entry for refreshing work and Git metadata.
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
@@ -2869,6 +2876,9 @@ pub enum ContextMenuKind {
     Tab {
         ws_idx: usize,
         tab_idx: usize,
+        /// Snapshot of the tab's star at open time, so the entry can read
+        /// "Star" or "Unstar" without the menu reaching back into state.
+        starred: bool,
     },
     Pane {
         ws_idx: usize,
@@ -2888,6 +2898,10 @@ pub enum ContextMenuKind {
 
 /// Label of the pane menu entry that copies the clicked link.
 pub const COPY_LINK_ITEM: &str = "Copy link";
+/// Labels of the session-star entries in the tab context menu.
+pub const STAR_ITEM: &str = "Star";
+pub const UNSTAR_ITEM: &str = "Unstar";
+
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
 /// Label of the pane menu entry that binds the clicked ticket to the window.
@@ -3042,7 +3056,12 @@ impl ContextMenuState {
                 "Open worktree...",
                 if *collapsed { "Expand" } else { "Collapse" },
             ],
-            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { starred, .. } => vec![
+                "New tab",
+                "Rename",
+                if *starred { UNSTAR_ITEM } else { STAR_ITEM },
+                "Close",
+            ],
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -3227,6 +3246,12 @@ pub struct AppState {
     /// reload. Shared session fact rather than presentation state: it decides
     /// what a dispatch actually runs.
     pub(crate) launch_profiles: Vec<crate::app::launch_profiles::LaunchProfile>,
+    /// Checkout groups resolved from `[[projects]]`, scanned once at config
+    /// time. Never rescanned from the render path: the scan reads directories.
+    pub(crate) projects: Vec<crate::app::projects::Project>,
+    /// Machines the composer can dispatch to, resolved from the configured
+    /// fleet. Shared runtime fact: it decides where a launch actually runs.
+    pub(crate) machines: Vec<crate::app::machines::Machine>,
     /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
     pub(crate) home_ref_cache:
         std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
@@ -3366,6 +3391,9 @@ pub struct AppState {
     pub(crate) sidebar_filter_menu_selected: usize,
     /// Typed input goes to the persisted sidebar row query while this is set.
     pub(crate) sidebar_search_active: bool,
+    /// Sidebar-only view gate: show just the starred sessions. Pure client
+    /// presentation state — the star itself lives on the tab.
+    pub(crate) sidebar_starred_only: bool,
     /// Downward creation menu anchored to the sidebar header.
     pub(crate) sidebar_new_menu: Option<SidebarNewMenuState>,
     /// Downward recent-project picker. Project paths are derived at render time.
@@ -3598,6 +3626,8 @@ pub struct AppState {
     pub(crate) notepad: crate::notepad::NotepadState,
     /// The break reminder shown next to it.
     pub(crate) pomodoro: crate::pomodoro::PomodoroState,
+    /// The idle star field pinned under both of them.
+    pub(crate) hyperspace: crate::hyperspace::HyperspaceState,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -3641,6 +3671,10 @@ pub struct AppState {
     pub auto_settle_inactive: bool,
     /// Stop resumable agent processes when their pane settles (`session.settle_stops_agent`).
     pub settle_stops_agent: bool,
+    /// Nudge a natively resumed agent to continue (`session.nudge_resumed_agents`).
+    pub nudge_resumed_agents: bool,
+    /// Prompt submitted by the resume nudge (`session.resume_nudge_message`).
+    pub resume_nudge_message: String,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -3958,10 +3992,12 @@ pub(crate) enum SidebarFooterItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlId {
     SidebarNewThread,
+    SidebarStarFilter,
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
     SidebarHover(usize),
+    SidebarAnimationPause,
     DockTab(usize),
     DockClose,
     DockAdd,
@@ -5603,6 +5639,8 @@ impl AppState {
             home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             launch_profiles: crate::app::launch_profiles::resolve(&[]),
+            projects: Vec::new(),
+            machines: crate::app::machines::resolve(&crate::config::FleetConfig::default()),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
             request_tool_probes: false,
@@ -5690,6 +5728,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
@@ -5734,6 +5773,8 @@ impl AppState {
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
+                hyperspace_rect: Rect::default(),
+                hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
@@ -5901,6 +5942,10 @@ impl AppState {
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             notepad: crate::notepad::NotepadState::default(),
             pomodoro: crate::pomodoro::PomodoroState::default(),
+            // Off in fixtures, the way the break timer is: a decorative panel
+            // must not silently move every existing sidebar layout assertion.
+            // Tests that care about it set `hyperspace.enabled = true`.
+            hyperspace: crate::hyperspace::HyperspaceState::new(false, std::time::Instant::now()),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
@@ -5930,6 +5975,8 @@ impl AppState {
             auto_settle_finished: true,
             auto_settle_inactive: true,
             settle_stops_agent: true,
+            nudge_resumed_agents: true,
+            resume_nudge_message: "continue".to_string(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
@@ -6314,9 +6361,9 @@ impl AppState {
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
                     assert_workspace_index(ws_idx, "context menu workspace")
                 }
-                ContextMenuKind::Tab { ws_idx, tab_idx } => {
-                    assert_tab_index(ws_idx, tab_idx, "context menu tab")
-                }
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                } => assert_tab_index(ws_idx, tab_idx, "context menu tab"),
                 ContextMenuKind::Pane {
                     ws_idx,
                     tab_idx,

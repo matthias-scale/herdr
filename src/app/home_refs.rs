@@ -367,6 +367,12 @@ impl App {
         {
             return Err("checkout is already running".into());
         }
+        if let Some(machine) = plan.remote.clone() {
+            // A remote dispatch skips the local checkout: the ref would be
+            // prepared in this machine's copy of the repository, which is not
+            // the one the agent is about to open.
+            return self.start_remote_home_dispatch(plan, machine);
+        }
         let Some(git_ref) = plan.git_ref.clone().filter(|git_ref| !git_ref.is_current()) else {
             return self
                 .dispatch_home_composer(plan)
@@ -392,6 +398,78 @@ impl App {
             });
         });
         Ok(())
+    }
+
+    /// Create the pane on another machine's own Herdr server.
+    ///
+    /// The composer stays open with its pending state until the machine
+    /// answers, because the only evidence the launch worked arrives over the
+    /// network and a closed card could not report a refusal.
+    fn start_remote_home_dispatch(
+        &mut self,
+        plan: crate::app::home::HomeDispatchPlan,
+        machine: crate::app::machines::Machine,
+    ) -> Result<(), String> {
+        let Some(target) = machine.target.clone() else {
+            return Err("that machine has no ssh target".into());
+        };
+        let request = crate::app::machines::RemoteDispatch {
+            target,
+            socket: machine.socket.clone(),
+            directory: crate::app::machines::remote_directory(&plan.directory),
+            // No label: the remote server derives one from the directory the
+            // same way a local dispatch does, so the two look alike in a
+            // fleet listing.
+            label: None,
+            env: plan.env.clone(),
+            argv: plan.argv.clone(),
+        };
+        if let Some(home) = self.state.home.as_mut() {
+            home.pending_dispatch = Some(plan);
+            home.dispatch_error = None;
+            home.picker = None;
+        }
+        let event_tx = self.event_tx.clone();
+        let name = machine.name.clone();
+        std::thread::spawn(move || {
+            let result = crate::app::machines::dispatch(&request);
+            let _ = event_tx.blocking_send(AppEvent::HomeRemoteSpawnFinished {
+                machine: name,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    pub(crate) fn handle_home_remote_spawn_finished(
+        &mut self,
+        machine: &str,
+        result: Result<String, String>,
+    ) -> bool {
+        if self
+            .state
+            .home
+            .as_ref()
+            .is_none_or(|home| home.pending_dispatch.is_none())
+        {
+            return false;
+        }
+        if let Some(home) = self.state.home.as_mut() {
+            home.pending_dispatch = None;
+        }
+        match result {
+            Ok(pane_id) => {
+                tracing::info!(machine, pane_id, "home dispatched to another machine");
+                self.state.clear_home();
+                self.state.mode = super::Mode::Terminal;
+            }
+            Err(error) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.dispatch_error = Some(format!("{machine}: {error}"));
+                }
+            }
+        }
+        true
     }
 
     pub(crate) fn handle_home_checkout_finished(

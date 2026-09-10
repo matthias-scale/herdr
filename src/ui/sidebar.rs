@@ -35,6 +35,14 @@ const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
 const SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH: usize = 16;
 
+/// Focus-star suffix drawn immediately after a starred session's title. Kept to
+/// two display columns (space + glyph) so it costs the title field almost
+/// nothing at narrow sidebar widths.
+pub(crate) const SIDEBAR_STAR_SUFFIX: &str = " \u{2605}";
+/// Below this the title field is too short to give up columns to the star, so a
+/// starred row simply renders without it rather than truncating the name.
+const SIDEBAR_STAR_MIN_TITLE_WIDTH: usize = 6;
+
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
 }
@@ -624,6 +632,7 @@ fn render_compact_agent_row_with_prefix(
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let trailing_tag = tab
         .then_some(entry.space_label.as_str())
+        .filter(|_| !entry.space_label_redundant)
         .filter(|tag| !tag.is_empty());
     let mut space_suffix = None;
     let mut displayed_title_width = title_width;
@@ -637,10 +646,16 @@ fn render_compact_agent_row_with_prefix(
             }
         }
     }
-    let title = pad_right(
-        &truncate_end(&layout.title, displayed_title_width),
-        displayed_title_width,
-    );
+    // The star sits inside the title field, right after the name, so it reads as
+    // part of the session's label rather than as another right-hand column.
+    let star_suffix = (entry.starred
+        && displayed_title_width
+            >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
+    .then_some(SIDEBAR_STAR_SUFFIX);
+    let title_text_width =
+        displayed_title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text = truncate_end(&layout.title, title_text_width);
+    let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
     let provider = pad_left(&layout.provider, widths.provider);
     let age = layout
@@ -673,10 +688,19 @@ fn render_compact_agent_row_with_prefix(
     let mut spans = vec![
         Span::styled(prefix, compact_row_style(Style::default(), bg)),
         Span::styled(dot, compact_row_style(dot_style, bg)),
-        Span::styled(title, compact_row_style(title_style, bg)),
+        Span::styled(title_text, compact_row_style(title_style, bg)),
+    ];
+    if let Some(star) = star_suffix {
+        spans.push(Span::styled(
+            star,
+            compact_row_style(Style::default().fg(p.yellow), bg),
+        ));
+    }
+    spans.extend([
+        Span::styled(title_pad, compact_row_style(title_style, bg)),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
-    ];
+    ]);
     if let Some(suffix) = space_suffix.as_deref() {
         spans.push(Span::styled(
             suffix,
@@ -754,6 +778,10 @@ pub(crate) struct AgentPanelEntry {
     /// Server-owned Space label. Grouping views render this in the existing
     /// trailing tag cell instead of deriving a label from the pane title.
     pub space_label: String,
+    /// The enclosing group repeats this Space label, or the projection has no
+    /// second Space label to distinguish. Disambiguated headers preserve the
+    /// raw tag when another distinct Space label is present.
+    pub space_label_redundant: bool,
     pub primary_tab_label: Option<String>,
     pub tab_has_custom_name: bool,
     pub tab_label_leads_with_agent: bool,
@@ -774,6 +802,9 @@ pub(crate) struct AgentPanelEntry {
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
     pub prio: bool,
+    /// User-set focus star on the owning tab. Rendering only: it never
+    /// reorders or regroups the row.
+    pub starred: bool,
     pub state: AgentState,
     /// The last closing-block report still names at least one gate, even if
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
@@ -955,7 +986,6 @@ fn collect_agent_panel_entries_with_runtimes(
             &empty_runtimes
         }
     };
-
     app.workspaces
         .iter()
         .enumerate()
@@ -966,6 +996,7 @@ fn collect_agent_panel_entries_with_runtimes(
                 .map(move |detail| {
                     let space_label = workspace_label.clone();
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    let starred = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.starred);
                     let tab_has_custom_name = ws
                         .tabs
                         .get(detail.tab_idx)
@@ -1006,6 +1037,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         space_label: space_label.clone(),
+                        space_label_redundant: false,
                         primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
@@ -1020,6 +1052,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         prio,
+                        starred,
                         state: detail.state,
                         open_blockers: detail.open_blockers,
                         completion_tier,
@@ -1396,6 +1429,12 @@ fn sidebar_query_parts(query: &str) -> (Vec<&str>, Vec<&str>) {
         })
 }
 
+/// The tree is showing a filtered subset, so a workspace that contributes no
+/// entry is noise and gets dropped rather than rendered as an empty header.
+fn sidebar_rows_are_filtered(app: &AppState) -> bool {
+    !app.sidebar_work_filter.query.is_empty() || app.sidebar_starred_only
+}
+
 fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool {
     let (terms, _) = sidebar_query_parts(&app.sidebar_work_filter.query);
     if terms.is_empty() {
@@ -1476,13 +1515,26 @@ fn compact_sidebar_rows_inner(
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
     expand_worktrees: bool,
 ) -> Vec<SidebarRow> {
-    let entries = match terminal_runtimes {
+    let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
     }
     .into_iter()
+    // Cheap scalar gate first: when the star filter is on it discards most
+    // entries before the query matcher builds its haystack string.
+    .filter(|entry| !app.sidebar_starred_only || entry.starred)
     .filter(|entry| sidebar_entry_matches_query(app, entry))
     .collect::<Vec<_>>();
+    let has_one_space_label = entries.first().is_some_and(|first| {
+        entries
+            .iter()
+            .all(|entry| entry.space_label == first.space_label)
+    });
+    if has_one_space_label {
+        for entry in &mut entries {
+            entry.space_label_redundant = true;
+        }
+    }
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
@@ -1498,7 +1550,7 @@ fn compact_sidebar_rows_inner(
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
-    if !app.sidebar_work_filter.query.is_empty()
+    if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
         && recently_done.is_empty()
         && settled_entries.is_empty()
@@ -1519,7 +1571,13 @@ fn compact_sidebar_rows_inner(
                 entry_work_context(app, entry).is_some_and(pane_context_has_sidebar_metadata)
             }))
     {
-        append_legacy_space_rows(app, &mut rows, visible_entries, expand_worktrees);
+        append_legacy_space_rows(
+            app,
+            &mut rows,
+            visible_entries,
+            expand_worktrees,
+            terminal_runtimes,
+        );
         append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
@@ -1552,7 +1610,17 @@ fn append_legacy_space_rows(
     rows: &mut Vec<SidebarRow>,
     entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) {
+    let empty_runtimes;
+    let terminal_runtimes = match terminal_runtimes {
+        Some(terminal_runtimes) => terminal_runtimes,
+        None => {
+            empty_runtimes = TerminalRuntimeRegistry::new();
+            &empty_runtimes
+        }
+    };
+    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let workspaces = workspace_list_entries_for_mode(app, expand_worktrees, app.sidebar_group_mode);
     rows.push(SidebarRow::SectionHeader {
         title: SPACES_SECTION_TITLE,
@@ -1598,7 +1666,10 @@ fn append_legacy_space_rows(
                 member_entries.extend(entries);
             }
         }
-        if !app.sidebar_work_filter.query.is_empty() && member_entries.is_empty() {
+        if let Some((header_label, _)) = workspace_labels.get(&ws_idx) {
+            mark_redundant_space_labels(&mut member_entries, header_label);
+        }
+        if sidebar_rows_are_filtered(app) && member_entries.is_empty() {
             continue;
         }
         rows.push(SidebarRow::Workspace {
@@ -1611,9 +1682,10 @@ fn append_legacy_space_rows(
             continue;
         }
         if app.sidebar_group_mode == SidebarGroupMode::RepoWorktree {
-            for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
+            for mut group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
                 let key = format!("{ws_idx}:{}", group.key);
                 let collapsed = section_is_collapsed(app, &key);
+                mark_redundant_space_labels(&mut group.entries, &group.title);
                 rows.push(SidebarRow::NestedHeader {
                     key,
                     action_key: None,
@@ -1712,13 +1784,20 @@ fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, de
     }));
 }
 
+fn mark_redundant_space_labels(entries: &mut [AgentPanelEntry], group_title: &str) {
+    for entry in entries {
+        entry.space_label_redundant |= entry.space_label == group_title;
+    }
+}
+
 fn append_repo_group_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     entries: &[AgentPanelEntry],
     settled: bool,
 ) {
-    for group in sidebar_repo_groups(app, entries) {
+    for mut group in sidebar_repo_groups(app, entries) {
+        mark_redundant_space_labels(&mut group.entries, &group.title);
         if !group.unlinked {
             let Some(ws_idx) = group.entries.first().map(|entry| entry.ws_idx) else {
                 continue;
@@ -1786,10 +1865,13 @@ fn append_repo_group_rows(
                 key
             };
             let collapsed = section_is_collapsed(app, &collapse_key);
+            let title = branch.map_or_else(|| "unlinked".into(), |branch| format!("⎇ {branch}"));
+            let mut entries = entries;
+            mark_redundant_space_labels(&mut entries, &title);
             rows.push(SidebarRow::NestedHeader {
                 key: collapse_key,
                 action_key: None,
-                title: branch.map_or_else(|| "unlinked".into(), |branch| format!("⎇ {branch}")),
+                title,
                 count: entries.len(),
                 collapsed,
                 dim: false,
@@ -1809,7 +1891,7 @@ fn append_object_group_rows(
     entries: &[AgentPanelEntry],
     settled: bool,
 ) {
-    for group in sidebar_work_groups(app, entries, app.sidebar_group_mode)
+    for mut group in sidebar_work_groups(app, entries, app.sidebar_group_mode)
         .into_iter()
         .filter(|group| !group.entries.is_empty())
     {
@@ -1820,6 +1902,7 @@ fn append_object_group_rows(
         };
         let collapsed = section_is_collapsed(app, &collapse_key);
         let action_key = (!group.unlinked).then(|| group.key.clone());
+        mark_redundant_space_labels(&mut group.entries, &group.title);
         rows.push(SidebarRow::NestedHeader {
             key: collapse_key,
             action_key,
@@ -3751,11 +3834,25 @@ pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
     ws_area
 }
 
+/// The sidebar's content area minus the idle animation pinned to its bottom.
+/// Everything above the animation - the workspace list and the notepad - is
+/// laid out inside this, so both shrink with it.
+fn expanded_sidebar_body(app: &AppState, area: Rect) -> Rect {
+    let content = expanded_sidebar_content(area);
+    let animation = crate::ui::hyperspace::animation_height(app, content);
+    Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.saturating_sub(animation),
+    )
+}
+
 /// The workspace list gets the sidebar's content area minus whatever the
 /// notepad panel reserved at the bottom, so every row geometry derived from
 /// here shrinks with it.
 pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
-    let content = expanded_sidebar_content(area);
+    let content = expanded_sidebar_body(app, area);
     let notepad = crate::ui::notepad::notepad_height(app, content);
     Rect::new(
         content.x,
@@ -3767,7 +3864,13 @@ pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
 
 /// The notepad panel's rows inside the sidebar.
 pub(crate) fn sidebar_notepad_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_content(area))
+    crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_body(app, area))
+}
+
+/// The idle animation's box, in the bottom-left corner of the sidebar's content
+/// area and below the notepad.
+pub(crate) fn sidebar_animation_rect(app: &AppState, area: Rect) -> Rect {
+    crate::ui::hyperspace::animation_box_rect(app, expanded_sidebar_content(area))
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -5245,6 +5348,7 @@ pub(super) fn render_sidebar(
     let ws_area = workspace_list_rect_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
+    crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
     let settings = sidebar_footer_settings_hit_area(area);
     if settings.width > 0 {
@@ -5346,6 +5450,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     let search = sidebar_header_search_rect(area);
     let new_thread = sidebar_header_new_thread_rect(area);
     let new_menu = sidebar_header_new_menu_rect(area);
+    let star_filter = sidebar_header_star_filter_rect(area);
     let overflow = sidebar_header_overflow_rect(area);
     frame.render_widget(
         Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
@@ -5374,6 +5479,19 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
             )),
             search,
         );
+    }
+    if star_filter.width > 0 {
+        // Filled glyph while the gate is on, hollow while it is off, so the
+        // control reads as a state and not just as a button.
+        let (glyph, style) = if app.sidebar_starred_only {
+            (
+                "\u{2605}",
+                Style::default().fg(p.yellow).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("\u{2606}", Style::default().fg(p.overlay0))
+        };
+        frame.render_widget(Paragraph::new(Span::styled(glyph, style)), star_filter);
     }
     frame.render_widget(
         Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
@@ -6005,7 +6123,7 @@ fn render_workspace_list(
         render_symphony_job(app, frame, &job, symphony_now);
     }
     for card in tab_cards {
-        render_tab_card(app, frame, &card, narrow_prefix);
+        render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
     }
     for card in agent_cards {
         let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
@@ -6074,12 +6192,13 @@ fn render_tab_card(
     frame: &mut Frame,
     card: &crate::app::state::TabCardArea,
     narrow_prefix: Option<usize>,
+    rows: &[SidebarRow],
 ) {
-    let entry = sidebar_rows(app).into_iter().find_map(|row| match row {
+    let entry = rows.iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
             if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
         {
-            Some((entry, depth))
+            Some((entry.as_ref(), *depth))
         }
         _ => None,
     });
@@ -6087,7 +6206,7 @@ fn render_tab_card(
     render_compact_agent_row_with_prefix(
         app,
         frame,
-        &entry,
+        entry,
         card.rect,
         depth,
         true,
@@ -6210,8 +6329,24 @@ pub(crate) fn sidebar_header_new_thread_rect(area: Rect) -> Rect {
     Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
 }
 
+/// Header toggle that gates the tree down to starred sessions. Sits in the
+/// control strip left of the new-thread icon, so the search box shrinks by its
+/// width rather than the icons moving.
+pub(crate) fn sidebar_header_star_filter_rect(area: Rect) -> Rect {
+    let next = sidebar_header_new_thread_rect(area);
+    if next.width == 0 || next.x < area.x.saturating_add(3) {
+        return Rect::default();
+    }
+    Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
+}
+
 pub(crate) fn sidebar_header_search_rect(area: Rect) -> Rect {
-    let control = sidebar_header_new_thread_rect(area);
+    let star = sidebar_header_star_filter_rect(area);
+    let control = if star.width > 0 {
+        star
+    } else {
+        sidebar_header_new_thread_rect(area)
+    };
     if control.width == 0 || control.x <= area.x.saturating_add(1) {
         return Rect::default();
     }
@@ -7541,6 +7676,84 @@ pub(crate) mod tests {
         row_text(terminal.backend().buffer(), card.rect.y, card.rect.width)
     }
 
+    #[derive(Clone, Copy)]
+    enum SpaceTagFixture {
+        MatchingHeaders,
+        DivergentHeaders,
+        SingleSpace,
+    }
+
+    fn space_tag_fixture(mode: SidebarGroupMode, fixture: SpaceTagFixture) -> AppState {
+        let group_titles = match mode {
+            SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree => {
+                vec!["alpha".to_string(), "beta".to_string()]
+            }
+            SidebarGroupMode::Repo => vec!["repo-alpha".into(), "repo-beta".into()],
+            SidebarGroupMode::RepoPr => vec!["#101 · alpha".into(), "#102 · beta".into()],
+            SidebarGroupMode::LinearTeam => vec!["SCA-101".into(), "SCA-102".into()],
+            SidebarGroupMode::Missive => {
+                vec!["message-101 · alpha".into(), "message-102 · beta".into()]
+            }
+        };
+        let labels = match fixture {
+            SpaceTagFixture::MatchingHeaders => group_titles.clone(),
+            SpaceTagFixture::DivergentHeaders => match mode {
+                SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree => {
+                    vec!["same".into(), "same".into(), "other".into()]
+                }
+                _ => vec!["space-alpha".into(), "space-beta".into()],
+            },
+            SpaceTagFixture::SingleSpace => vec!["only-space".into()],
+        };
+        let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app = app_with_agents(&label_refs);
+        app.sidebar_group_mode = mode;
+
+        for ws_idx in 0..app.workspaces.len() {
+            let suffix = if ws_idx == 0 { "alpha" } else { "beta" };
+            let context = match mode {
+                SidebarGroupMode::Spaces | SidebarGroupMode::RepoWorktree => continue,
+                SidebarGroupMode::Repo => crate::work_context::PaneWorkContext {
+                    repo: Some(format!("repo-{suffix}")),
+                    ..Default::default()
+                },
+                SidebarGroupMode::RepoPr => crate::work_context::PaneWorkContext {
+                    pr_urls: vec![format!(
+                        "https://github.com/scalable-so/herdr/pull/{}",
+                        101 + ws_idx
+                    )],
+                    work_title: Some(suffix.into()),
+                    ..Default::default()
+                },
+                SidebarGroupMode::LinearTeam => crate::work_context::PaneWorkContext {
+                    ticket_ids: vec![format!("SCA-{}", 101 + ws_idx)],
+                    ..Default::default()
+                },
+                SidebarGroupMode::Missive => crate::work_context::PaneWorkContext {
+                    missive_urls: vec![format!(
+                        "https://mail.missiveapp.com/#inbox/conversations/message-{}",
+                        101 + ws_idx
+                    )],
+                    work_title: Some(suffix.into()),
+                    ..Default::default()
+                },
+            };
+            replace_tab_context(&mut app, ws_idx, 0, context, Default::default());
+        }
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    fn sidebar_tab_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+        sidebar_rows(app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(*entry),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn sidebar_entry_shows_only_positive_active_subagent_counts() {
         for (value, expected) in [(None, None), (Some(0), None), (Some(3), Some(3))] {
@@ -7826,6 +8039,7 @@ pub(crate) mod tests {
             pane_id: crate::layout::PaneId::alloc(),
             primary_label: "workspace".into(),
             space_label: String::new(),
+            space_label_redundant: false,
             primary_tab_label: Some("tab".into()),
             tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
@@ -7840,6 +8054,7 @@ pub(crate) mod tests {
             agent_context: None,
             has_agent: true,
             prio: true,
+            starred: false,
             state,
             open_blockers: false,
             completion_tier: None,
@@ -9612,7 +9827,8 @@ row_gap = 1
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("●"), "{busy_text:?}");
-        assert!(busy_text.ends_with("one"), "{busy_text:?}");
+        assert!(busy_text.ends_with('—'), "{busy_text:?}");
+        assert!(!busy_text.contains(" · one"), "{busy_text:?}");
         let dot_x = find_symbol_x(busy.backend().buffer(), tab_row, 49, "●");
         assert_eq!(
             busy.backend().buffer()[(dot_x, tab_row)].style().fg,
@@ -9644,7 +9860,8 @@ row_gap = 1
             .unwrap();
         let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
         assert!(idle_text.contains("○"), "{idle_text:?}");
-        assert!(idle_text.ends_with("one"), "{idle_text:?}");
+        assert!(idle_text.ends_with("5m"), "{idle_text:?}");
+        assert!(!idle_text.contains(" · one"), "{idle_text:?}");
     }
 
     #[test]
@@ -9704,7 +9921,8 @@ row_gap = 1
         let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
 
         assert!(rendered.contains("Review release"), "{rendered:?}");
-        assert!(rendered.ends_with("one"), "{rendered:?}");
+        assert!(rendered.ends_with("1m"), "{rendered:?}");
+        assert!(!rendered.contains(" · one"), "{rendered:?}");
         assert!(!rendered.contains("idle"), "{rendered:?}");
         assert!(!rendered.contains("done"), "{rendered:?}");
         assert!(rendered.contains("○  Review release"), "{rendered:?}");
@@ -9757,7 +9975,8 @@ row_gap = 1
         let card = &compute_tab_card_areas(&app, area)[0];
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
 
-        assert!(rendered.ends_with("one"), "{rendered:?}");
+        assert!(rendered.ends_with("5m"), "{rendered:?}");
+        assert!(!rendered.contains(" · one"), "{rendered:?}");
         assert_eq!(compute_tab_card_areas(&app, area).len(), 1);
     }
 
@@ -10715,8 +10934,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn a_blocked_worklist_row_renders_its_title_with_its_space_suffix() {
+    fn a_blocked_worklist_row_hides_its_redundant_space_suffix() {
         let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
         let blocked_pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(blocked_pane).unwrap().clone();
         app.terminals
@@ -10737,14 +10957,36 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
         assert!(rendered.contains('—'), "{rendered:?}");
-        assert!(rendered.ends_with("ws0"), "{rendered:?}");
+        assert!(!rendered.contains(" · ws0"), "{rendered:?}");
     }
 
     #[test]
-    fn f19_1a_keeps_age_and_appends_space_suffix_when_wide() {
-        let mut app = app_with_agents(&["one"]);
+    fn f19_1a_keeps_age_and_appends_divergent_space_suffix_when_wide() {
+        let mut app = app_with_agents(&["one", "two"]);
         app.workspaces[0].custom_name = Some("t3-sample".into());
+        app.workspaces[1].custom_name = Some("other-space".into());
         app.workspaces[0].tabs[0].custom_name = Some("sample-pr".into());
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("growth".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -10770,6 +11012,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .next()
             .expect("thread entry");
         assert_eq!(entry.space_label, "t3-sample");
+        assert!(!entry.space_label_redundant);
 
         let render_at_row_width = |entry: &AgentPanelEntry, width, depth| {
             let mut terminal =
@@ -10842,6 +11085,142 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
         assert!(wide.contains("2m · t3-sample"), "{wide:?}");
+    }
+
+    #[test]
+    fn compact_rows_hide_space_suffix_when_group_header_repeats_it_in_every_mode() {
+        for mode in SidebarGroupMode::ALL {
+            let app = space_tag_fixture(mode, SpaceTagFixture::MatchingHeaders);
+            let entries = sidebar_tab_entries(&app);
+            assert!(!entries.is_empty(), "mode {mode:?}");
+            let labels = entries
+                .iter()
+                .map(|entry| (entry.space_label.as_str(), entry.space_label_redundant))
+                .collect::<Vec<_>>();
+            assert!(
+                entries.iter().all(|entry| entry.space_label_redundant),
+                "mode {mode:?}: {labels:?}"
+            );
+            let first_label = &entries[0].space_label;
+            let rendered = render_first_tab_row(&app, 120);
+            assert!(
+                !rendered.contains(&format!(" · {first_label}")),
+                "{mode:?}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_rows_keep_space_suffix_when_group_header_differs_in_every_mode() {
+        for mode in SidebarGroupMode::ALL {
+            let app = space_tag_fixture(mode, SpaceTagFixture::DivergentHeaders);
+            let entries = sidebar_tab_entries(&app);
+            assert!(!entries.is_empty(), "mode {mode:?}");
+            let first = &entries[0];
+            assert!(!first.space_label_redundant, "mode {mode:?}");
+            let rendered = render_first_tab_row(&app, 120);
+            assert!(
+                rendered.contains(&format!(" · {}", first.space_label)),
+                "{mode:?}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_rows_hide_space_suffix_for_a_single_space_in_every_mode() {
+        for mode in SidebarGroupMode::ALL {
+            let app = space_tag_fixture(mode, SpaceTagFixture::SingleSpace);
+            let entries = sidebar_tab_entries(&app);
+            assert!(!entries.is_empty(), "mode {mode:?}");
+            assert!(
+                entries.iter().all(|entry| entry.space_label_redundant),
+                "mode {mode:?}"
+            );
+            let rendered = render_first_tab_row(&app, 120);
+            assert!(
+                !rendered.contains(" · only-space"),
+                "{mode:?}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn space_suffix_header_matching_covers_legacy_unlinked_branch_and_settled_groups() {
+        let mut legacy = app_with_agents(&["alpha", "beta"]);
+        legacy.sidebar_group_mode = SidebarGroupMode::Repo;
+        assert!(sidebar_tab_entries(&legacy)
+            .iter()
+            .all(|entry| entry.space_label_redundant));
+
+        let mut unlinked = app_with_agents(&["▫ alpha", "▫ beta"]);
+        unlinked.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        for (ws_idx, directory) in ["/work/alpha", "/work/beta"].into_iter().enumerate() {
+            let pane_id = unlinked.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = unlinked.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            unlinked
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("unlinked terminal")
+                .cwd = directory.into();
+        }
+        assert!(sidebar_tab_entries(&unlinked)
+            .iter()
+            .all(|entry| entry.space_label_redundant));
+
+        let mut branched = app_with_agents(&["⎇ main", "other"]);
+        branched.sidebar_group_mode = SidebarGroupMode::Repo;
+        for (ws_idx, branch) in ["main", "other"].into_iter().enumerate() {
+            replace_tab_context(
+                &mut branched,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some("herdr".into()),
+                    branch: Some(branch.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+        let branch_entry = sidebar_tab_entries(&branched)
+            .into_iter()
+            .find(|entry| entry.ws_idx == 0)
+            .expect("main branch entry");
+        assert!(branch_entry.space_label_redundant);
+
+        let mut settled =
+            space_tag_fixture(SidebarGroupMode::RepoPr, SpaceTagFixture::MatchingHeaders);
+        let settled_pane = settled.workspaces[0].tabs[0].root_pane;
+        settled.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_pane)
+            .expect("settled pane")
+            .settled_at = Some(1_725_000_000);
+        let settled_entry = sidebar_tab_entries(&settled)
+            .into_iter()
+            .find(|entry| entry.pane_id == settled_pane)
+            .expect("settled entry");
+        assert!(settled_entry.space_label_redundant);
+    }
+
+    #[test]
+    fn duplicate_space_headers_keep_space_suffix_for_disambiguation() {
+        let mut app = app_with_agents(&["first", "second", "third"]);
+        app.workspaces[0].custom_name = Some("same".into());
+        app.workspaces[1].custom_name = Some("same".into());
+        app.workspaces[2].custom_name = Some("other".into());
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
+
+        let labels = sidebar_workspace_labels(&app, &TerminalRuntimeRegistry::new());
+        assert_eq!(labels[&0].0, "same¹");
+        assert_eq!(labels[&1].0, "same²");
+        assert!(sidebar_tab_entries(&app)
+            .into_iter()
+            .filter(|entry| entry.space_label == "same")
+            .all(|entry| !entry.space_label_redundant));
+        assert!(render_first_tab_row(&app, 80).contains(" · same"));
     }
 
     #[test]
@@ -11284,6 +11663,106 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .join("\n");
             assert!(mobile_text.contains(expected_label), "{width}");
         }
+    }
+
+    #[test]
+    fn the_starred_only_gate_hides_every_unstarred_session() {
+        let mut app =
+            priority_app_with_states(&[AgentState::Working, AgentState::Idle, AgentState::Idle]);
+        app.workspaces[1].tabs[0].starred = true;
+        for ws_idx in 0..3 {
+            app.toggle_workspace_agent_disclosure(ws_idx);
+        }
+
+        let all = sidebar_thread_entries(&app).len();
+        assert!(all >= 3, "the fixture projects one entry per workspace");
+
+        app.sidebar_starred_only = true;
+        let visible: Vec<_> = sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                _ => None,
+            })
+            .collect();
+        assert!(!visible.is_empty(), "the starred session survives the gate");
+        assert!(
+            visible
+                .iter()
+                .all(|(ws_idx, starred)| *ws_idx == 1 && *starred),
+            "only the starred session remains, got {visible:?}"
+        );
+
+        app.sidebar_starred_only = false;
+        let unfiltered = sidebar_rows(&app)
+            .into_iter()
+            .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+            .count();
+        assert!(
+            unfiltered > visible.len(),
+            "clearing the gate brings the other sessions back"
+        );
+    }
+
+    #[test]
+    fn a_starred_session_draws_its_star_directly_after_the_title() {
+        let mut entry = compact_test_entry("focus-session", Some(Agent::Claude));
+        entry.starred = true;
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 40, 1);
+
+        let render = |entry: &AgentPanelEntry| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row_with_prefix(
+                        &app, frame, entry, area, 0, true, None, None,
+                    )
+                })
+                .unwrap();
+            row_text(terminal.backend().buffer(), 0, area.width)
+        };
+
+        let starred = render(&entry);
+        let title_end =
+            starred.find("focus-session").expect("title is drawn") + "focus-session".len();
+        assert_eq!(
+            &starred[title_end..title_end + SIDEBAR_STAR_SUFFIX.len()],
+            SIDEBAR_STAR_SUFFIX,
+            "the star follows the title immediately, got {starred:?}"
+        );
+
+        entry.starred = false;
+        let plain = render(&entry);
+        assert!(
+            !plain.contains(SIDEBAR_STAR_SUFFIX.trim()),
+            "an unstarred row draws no star, got {plain:?}"
+        );
+        assert_eq!(
+            starred.chars().count(),
+            plain.chars().count(),
+            "the star is absorbed by the title field, not appended to the row"
+        );
+    }
+
+    #[test]
+    fn a_narrow_row_drops_the_star_rather_than_eating_the_title() {
+        let mut entry = compact_test_entry("session", Some(Agent::Claude));
+        entry.starred = true;
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 12, 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_compact_agent_row_with_prefix(&app, frame, &entry, area, 0, true, None, None)
+            })
+            .unwrap();
+        let text = row_text(terminal.backend().buffer(), 0, area.width);
+        assert!(
+            !text.contains(SIDEBAR_STAR_SUFFIX.trim()),
+            "no star at this width, got {text:?}"
+        );
     }
 
     #[test]
@@ -15630,6 +16109,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             activity_at,
         );
         app.view_observed_at = activity_at + std::time::Duration::from_secs(60);
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        replace_tab_context(
+            &mut app,
+            1,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("growth".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
 
         for width in [26, 60] {
             let area = Rect::new(0, 0, width, 18);

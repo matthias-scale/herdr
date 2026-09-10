@@ -418,6 +418,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::TabRename(_) => "tab.rename",
         Method::TabPrio(_) => "tab.prio",
         Method::TabPin(_) => "tab.pin",
+        Method::TabStar(_) => "tab.star",
         Method::TabMove(_) => "tab.move",
         Method::TabClose(_) => "tab.close",
         Method::AgentList(_) => "agent.list",

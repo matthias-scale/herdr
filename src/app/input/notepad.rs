@@ -230,6 +230,27 @@ impl AppState {
 }
 
 impl crate::app::App {
+    /// The one rule for when the break prompt or the notepad owns a key.
+    ///
+    /// Both the in-process TUI loop and the headless server route keys through
+    /// here before anything else sees them, including the focused pane. Wiring
+    /// this into only one of the two paths is what made the panel look focused
+    /// while every keystroke went to the pane behind it.
+    pub(crate) fn intercept_notepad_key(&mut self, key: &crate::input::TerminalKey) -> bool {
+        let now = std::time::Instant::now();
+        if self.state.pomodoro.prompt.is_some() {
+            self.state
+                .handle_pomodoro_prompt_key(key.as_key_event(), now);
+            self.apply_notepad_request();
+            return true;
+        }
+        if self.state.notepad.focused && self.state.handle_notepad_key(key.as_key_event(), now) {
+            self.apply_notepad_request();
+            return true;
+        }
+        false
+    }
+
     /// Runs the filesystem half of a notepad interaction.
     pub(crate) fn apply_notepad_request(&mut self) -> bool {
         let Some(request) = self.state.notepad_request.take() else {

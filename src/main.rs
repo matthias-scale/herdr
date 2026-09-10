@@ -71,6 +71,7 @@ mod files;
 mod fleet;
 mod ghostty;
 mod handoff_runtime;
+mod hyperspace;
 mod input;
 mod integration;
 mod ipc;
@@ -360,6 +361,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Start with the sidebar collapsed. Changes take effect on the next launch.
 # sidebar_start_collapsed = false
 
+# Idle star-field animation at the bottom of the sidebar. It also has a pause
+# button; this switch removes the panel and gives its rows back to the list.
+# sidebar_animation = true
+
 # Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
 # sidebar_collapsed_mode = "compact"
 
@@ -553,6 +558,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # auto_settle_inactive = true
 # Stop resumable agent processes when their pane settles.
 # settle_stops_agent = true
+# After a resumed agent comes back up idle, submit one prompt so it continues
+# the work it was doing. Skipped when the agent resumes blocked or already
+# working, and when the pane holds a draft you typed.
+# nudge_resumed_agents = true
+# The prompt sent by nudge_resumed_agents.
+# resume_nudge_message = "continue"
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.

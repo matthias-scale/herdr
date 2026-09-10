@@ -314,6 +314,14 @@ pub struct SessionConfig {
     /// Stop resumable agent processes when their pane settles.
     /// Default: true.
     pub settle_stops_agent: bool,
+    /// After a pane is resumed into its native agent session, submit one
+    /// `resume_nudge_message` prompt so the agent picks the work back up
+    /// instead of waiting at a restored, idle prompt. The nudge is skipped
+    /// when the agent comes back blocked, when it resumes straight into work,
+    /// and when the pane already holds a draft the human typed. Default: true.
+    pub nudge_resumed_agents: bool,
+    /// Prompt submitted by `nudge_resumed_agents`. Default: "continue".
+    pub resume_nudge_message: String,
 }
 
 impl Default for SessionConfig {
@@ -328,6 +336,8 @@ impl Default for SessionConfig {
             settle_finished_after_minutes: 10,
             auto_settle_inactive: true,
             settle_stops_agent: true,
+            nudge_resumed_agents: true,
+            resume_nudge_message: "continue".to_string(),
         }
     }
 }
@@ -386,6 +396,23 @@ pub struct Config {
     pub pomodoro: PomodoroConfig,
     pub actions: Vec<ActionConfig>,
     pub launch_profiles: Vec<LaunchProfileConfig>,
+    pub projects: Vec<ProjectConfig>,
+}
+
+/// One named group of checkouts the home composer can dispatch into.
+///
+/// Which repositories belong together is a fact about how someone works, not
+/// about the filesystem, so it cannot be inferred from a path. `roots` names
+/// directories whose immediate children are checkouts; `repos` names single
+/// checkouts, absolute or relative to `~/Repos`. With no project configured
+/// the composer groups everything under `~/Repos`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProjectConfig {
+    pub id: String,
+    pub label: String,
+    pub roots: Vec<String>,
+    pub repos: Vec<String>,
 }
 
 /// One named way to start one agent, offered by the home composer.
@@ -1627,6 +1654,9 @@ pub enum TabBarPositionConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub sidebar_width: u16,
+    /// Whether the sidebar draws its idle animation. The panel also has a pause
+    /// button; this is the switch that removes it entirely.
+    pub sidebar_animation: bool,
     /// Minimum sidebar width (columns) when expanded. Default: 18.
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
@@ -2033,6 +2063,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             sidebar_width: 26,
+            sidebar_animation: true,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,

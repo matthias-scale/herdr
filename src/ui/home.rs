@@ -413,6 +413,19 @@ fn chip_specs(
     if let Some(context) = &home.context_window {
         specs.push((HomeFocus::Context, format!("{context} ▾")));
     }
+    if home.project_visible() {
+        if let Some(project) = home.project() {
+            specs.push((HomeFocus::Project, format!("{} ▾", project.label)));
+        }
+    }
+    if home.repo_visible() {
+        specs.push((HomeFocus::Repo, format!("{} ▾", home.repo_label())));
+    }
+    if home.machine_visible() {
+        if let Some(machine) = home.machine() {
+            specs.push((HomeFocus::Machine, format!("{} ▾", machine.name)));
+        }
+    }
     if target_in_chip_row(app, home, composer) {
         specs.push((HomeFocus::Target, target_chip_label(app, home)));
     }
@@ -869,6 +882,21 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|context| (*context).to_string())
             .collect(),
+        HomePicker::Project => home
+            .projects()
+            .iter()
+            .map(|project| project.label.clone())
+            .collect(),
+        HomePicker::Repo => home
+            .repo_options()
+            .iter()
+            .map(|repo| repo.name.clone())
+            .collect(),
+        HomePicker::Machine => home
+            .machines()
+            .iter()
+            .map(|machine| machine.name.clone())
+            .collect(),
         HomePicker::Directory => match home.browse.as_ref() {
             // Browsing replaces the options with what is under the typed path.
             Some(browse) => browse.children.clone(),
@@ -1147,6 +1175,10 @@ fn picker_layout(
     if (labels.is_empty() && !browsing) || area.width == 0 || area.height == 0 {
         return None;
     }
+    // The hint line is the last row of every home layout. A picker anchored on
+    // the headline is tall enough to reach it, so the popup clamps one row
+    // early rather than drawing over the only instructions on screen.
+    let area = Rect::new(area.x, area.y, area.width, area.height - 1);
     let has_filter = matches!(picker, HomePicker::Directory | HomePicker::Ref);
     let matches = picker_matches(app, home, picker, &labels);
     let filter_width = if has_filter {
@@ -1292,7 +1324,10 @@ pub(super) fn home_hit_areas(
                     HomeFocus::Effort => HomeHitTarget::Effort,
                     HomeFocus::Access => HomeHitTarget::Access,
                     HomeFocus::Context => HomeHitTarget::Context,
+                    HomeFocus::Project => HomeHitTarget::Project,
+                    HomeFocus::Repo => HomeHitTarget::Repo,
                     HomeFocus::Directory => HomeHitTarget::Directory,
+                    HomeFocus::Machine => HomeHitTarget::Machine,
                     HomeFocus::Workspace => HomeHitTarget::Workspace,
                     HomeFocus::Ref => HomeHitTarget::Ref,
                     HomeFocus::Target => HomeHitTarget::Target,
@@ -2007,6 +2042,7 @@ mod tests {
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],
             env: Vec::new(),
+            remote: None,
         });
         app.home = Some(home);
         let queue = [blocked(0)];
@@ -2079,7 +2115,10 @@ mod tests {
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Access => HomeHitTarget::Access,
                 HomeFocus::Context => HomeHitTarget::Context,
+                HomeFocus::Project => HomeHitTarget::Project,
+                HomeFocus::Repo => HomeHitTarget::Repo,
                 HomeFocus::Directory => HomeHitTarget::Directory,
+                HomeFocus::Machine => HomeHitTarget::Machine,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
                 HomeFocus::Target => HomeHitTarget::Target,
@@ -2301,7 +2340,10 @@ mod tests {
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Access => HomeHitTarget::Access,
                 HomeFocus::Context => HomeHitTarget::Context,
+                HomeFocus::Project => HomeHitTarget::Project,
+                HomeFocus::Repo => HomeHitTarget::Repo,
                 HomeFocus::Directory => HomeHitTarget::Directory,
+                HomeFocus::Machine => HomeHitTarget::Machine,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
                 HomeFocus::Target => HomeHitTarget::Target,
@@ -2658,6 +2700,40 @@ mod tests {
 
         assert_eq!(picker_row_label("Claude Fable 5.1 ▾", 11), "Fable 5.1 ▾");
         assert_eq!(picker_row_label("Claude Fable 5.1 ▾", 8), "Fable… ▾");
+    }
+
+    /// G-7: the headline picker is tall enough to reach the bottom, so it
+    /// clamps above the hint line instead of drawing over it.
+    #[test]
+    fn the_headline_dropdown_clamps_above_the_hint_line() {
+        for (columns, rows) in [(80u16, 24u16), (120, 40)] {
+            let mut app = AppState::test_new();
+            app.home = Some(HomeState::test_with_focus(HomeFocus::Directory));
+            for index in 0..40 {
+                let mut workspace = Workspace::test_new(&format!("space-{index}"));
+                workspace.identity_cwd =
+                    std::path::PathBuf::from(format!("/tmp/t3-f2-many/checkout-{index}"));
+                app.workspaces.push(workspace);
+            }
+            app.home_open_picker(HomePicker::Directory);
+            let queue = [blocked(0)];
+            let area = Rect::new(0, 0, columns, rows);
+            let layout = bands(area, queue.len());
+            let composer = layout.composer.expect("composer");
+            let home = app.home.as_ref().expect("home");
+
+            let dropdown = picker_viewport(&app, home, composer, area)
+                .unwrap_or_else(|| panic!("directory dropdown at {columns}x{rows}"));
+            assert!(
+                dropdown.rect.bottom() <= layout.hint.y,
+                "the dropdown covered the hint line at {columns}x{rows}: {:?}",
+                dropdown.rect
+            );
+            assert!(
+                dropdown.rect.y > composer.headline.y,
+                "the dropdown opens below the headline, never above it"
+            );
+        }
     }
 
     #[test]

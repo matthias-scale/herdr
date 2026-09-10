@@ -3,6 +3,8 @@
 //! Centralizes OS-dependent behavior behind a clean boundary so core
 //! modules don't scatter `#[cfg]` branches through product logic.
 
+use std::path::{Path, PathBuf};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,
@@ -472,9 +474,151 @@ pub(crate) fn test_spawn_budget(base: std::time::Duration) -> std::time::Duratio
     }
 }
 
+/// How far a symlink chain is followed before the write is refused. Matches the
+/// kernel's own `MAXSYMLINKS`, so any chain the OS can resolve resolves here.
+const MAX_WRITE_TARGET_SYMLINK_HOPS: usize = 40;
+
+/// Resolve `path` through any symlink chain so an atomic replace lands on the
+/// file the symlink points at instead of replacing the link itself.
+///
+/// Herdr's config and session files are commonly symlinks into a dotfiles or
+/// stow checkout. Renaming a temp file over the link detaches it: the managed
+/// file becomes an unmanaged regular file, later dotfiles changes never reach
+/// it, and a reinstall can relink over it and lose the edit.
+///
+/// Symlinks are followed manually rather than with `fs::canonicalize`, which
+/// requires the target to exist and so excludes the dangling-link case a stow
+/// user hits on the very first save. A dangling link resolves to its missing
+/// target, so the write creates the managed file. A chain still unresolved
+/// after [`MAX_WRITE_TARGET_SYMLINK_HOPS`] hops, or an unreadable link, is an
+/// error: the caller must fail the save rather than fall back onto replacing a
+/// link whose target it could not determine.
+pub(crate) fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_WRITE_TARGET_SYMLINK_HOPS {
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return Ok(current);
+        };
+        if !metadata.file_type().is_symlink() {
+            return Ok(current);
+        }
+        // An unreadable link is not a path to write through: fail the save
+        // rather than fall back to replacing the link.
+        let link = std::fs::read_link(&current)?;
+        current = if link.is_absolute() {
+            link
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link)
+        };
+    }
+    // The budget is spent, but the last hop may already have landed on a real
+    // file. Only a path that is still a symlink here is unresolved, and writing
+    // to any path in that chain would replace a link the operator manages.
+    match std::fs::symlink_metadata(&current) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            tracing::warn!(
+                path = %path.display(),
+                "symlink chain deeper than the kernel resolves; refusing the write"
+            );
+            // ErrorKind::FilesystemLoop is still unstable, so the kind stays
+            // Other and the message carries the reason.
+            Err(std::io::Error::other(format!(
+                "{} exceeds {MAX_WRITE_TARGET_SYMLINK_HOPS} symlink hops",
+                path.display()
+            )))
+        }
+        _ => Ok(current),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn symlink_scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-write-target-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn resolve_write_target_returns_a_plain_path_unchanged() {
+        let dir = symlink_scratch_dir();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "onboarding = false\n").expect("seed");
+
+        assert_eq!(resolve_write_target(&path).expect("resolve"), path);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_write_target_follows_a_relative_link() {
+        let dir = symlink_scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "onboarding = false\n").expect("seed");
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+
+        assert_eq!(resolve_write_target(&link).expect("resolve"), target);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A dangling link resolves to its missing target, so the write recreates
+    /// the managed file instead of replacing the link with a stub.
+    #[test]
+    fn resolve_write_target_resolves_a_dangling_link_to_its_target() {
+        let dir = symlink_scratch_dir();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink("never-generated.toml", &link).expect("symlink");
+
+        assert_eq!(
+            resolve_write_target(&link).expect("resolve"),
+            dir.join("never-generated.toml")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The hop budget bounds a loop, not a legitimately deep chain: a chain
+    /// that ends on a real file at the last allowed hop must still resolve, or
+    /// the write replaces the first link instead of its target.
+    #[test]
+    fn resolve_write_target_resolves_a_chain_that_ends_on_the_last_hop() {
+        let dir = symlink_scratch_dir();
+        let target = dir.join("generated.toml");
+        std::fs::write(&target, "onboarding = false\n").expect("seed");
+
+        let mut previous = target.clone();
+        for hop in 0..MAX_WRITE_TARGET_SYMLINK_HOPS {
+            let link = dir.join(format!("link-{hop}.toml"));
+            std::os::unix::fs::symlink(&previous, &link).expect("symlink");
+            previous = link;
+        }
+
+        assert_eq!(resolve_write_target(&previous).expect("resolve"), target);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_write_target_refuses_a_symlink_loop() {
+        let dir = symlink_scratch_dir();
+        let first = dir.join("config.toml");
+        let second = dir.join("other.toml");
+        std::os::unix::fs::symlink("other.toml", &first).expect("symlink");
+        std::os::unix::fs::symlink("config.toml", &second).expect("symlink");
+
+        let error = resolve_write_target(&first).expect_err("a loop has no write target");
+        assert!(
+            error.to_string().contains("symlink hops"),
+            "unexpected error: {error}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_process(pid: u32) -> ForegroundProcess {

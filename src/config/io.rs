@@ -15,11 +15,14 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "experimental",
     "files",
     "keys",
+    "launch_profiles",
+    "linear",
     "missive",
     "notepad",
     "onboarding",
     "panel",
     "pomodoro",
+    "projects",
     "remote",
     "server",
     "session",
@@ -306,6 +309,22 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.terminal = section,
+    );
+    load_live_section(
+        table,
+        "notepad",
+        "notepad config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.notepad = section,
+    );
+    load_live_section(
+        table,
+        "pomodoro",
+        "break timer config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.pomodoro = section,
     );
     load_live_section(
         table,
@@ -778,6 +797,9 @@ pub fn write_actions_atomically(
         .parse::<toml::Value>()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
+    // Keep a dotfiles-managed symlink intact: write to its target.
+    let resolved = crate::platform::resolve_write_target(path)?;
+    let path = resolved.as_path();
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
@@ -897,6 +919,45 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn symlink_scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-config-symlink-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_actions_atomically_follows_a_symlinked_config() {
+        let dir = symlink_scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "onboarding = false\n").expect("seed");
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+
+        let actions = vec![crate::config::ActionConfig {
+            name: "build".into(),
+            command: "just check".into(),
+            key: Some("prefix+ctrl+b".into()),
+            ..Default::default()
+        }];
+        write_actions_atomically(&link, &actions).expect("write actions");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "action save replaced the managed symlink with a regular file"
+        );
+        let written = std::fs::read_to_string(&target).expect("read target");
+        assert!(written.contains("onboarding = false"));
+        assert!(written.contains("name = \"build\""));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {
@@ -1195,6 +1256,29 @@ agent_panel_sort = "priority"
     }
 
     #[test]
+    fn load_live_config_reads_the_notepad_and_break_timer_sections() {
+        let loaded = load_live_config_from_str(
+            r#"
+[notepad]
+enabled = true
+height = 12
+
+[pomodoro]
+enabled = true
+work_minutes = 20
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+        assert!(loaded.config.notepad.enabled);
+        assert_eq!(loaded.config.notepad.height, 12);
+        assert!(loaded.config.pomodoro.enabled);
+        assert_eq!(loaded.config.pomodoro.work_minutes, 20);
+    }
+
+    #[test]
     fn load_live_config_discards_ignored_keys_from_an_invalid_section() {
         let loaded = load_live_config_from_str(
             r#"
@@ -1394,5 +1478,35 @@ mouse_capture = false
             1
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every field on `Config` is a top-level section a user can write, so one
+    /// missing from the allowlist makes `herdr config check` tell them their
+    /// valid config is being ignored. That has now happened twice, so this
+    /// reads the struct rather than trusting anyone to update two lists.
+    #[test]
+    fn every_config_field_is_a_known_top_level_section() {
+        let model = include_str!("model.rs");
+        let start = model
+            .find("pub struct Config {")
+            .expect("Config struct in model.rs");
+        let body = &model[start..];
+        let end = body.find("\n}").expect("end of the Config struct");
+        let fields: Vec<&str> = body[..end]
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|line| line.split(':').next())
+            .collect();
+        assert!(fields.len() > 20, "parsed too few fields: {fields:?}");
+
+        let missing: Vec<&&str> = fields
+            .iter()
+            .filter(|field| !KNOWN_TOP_LEVEL_CONFIG_KEYS.contains(field))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config sections missing from KNOWN_TOP_LEVEL_CONFIG_KEYS: {missing:?}"
+        );
     }
 }

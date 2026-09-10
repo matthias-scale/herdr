@@ -319,11 +319,37 @@ impl App {
         false
     }
 
+    /// Whether the idle animation is on screen and moving. A collapsed sidebar
+    /// or a sidebar too short to hold the panel draws nothing, so it must not
+    /// wake the loop either.
+    fn sidebar_animation_visible(&self) -> bool {
+        self.state.hyperspace.running()
+            && !self.state.sidebar_collapsed
+            && self.state.view.hyperspace_rect.height > 0
+    }
+
+    /// Advances the sidebar's idle animation. Returns whether the frame changed.
+    pub(crate) fn tick_sidebar_animation(&mut self, now: Instant) -> bool {
+        if !self.sidebar_animation_visible() {
+            return false;
+        }
+        self.state.hyperspace.tick(now)
+    }
+
+    /// When the loop should wake for the animation's next frame. `None` while it
+    /// is paused, disabled, or off screen, so a still sidebar costs nothing.
+    fn sidebar_animation_deadline(&self) -> Option<Instant> {
+        self.sidebar_animation_visible()
+            .then(|| self.state.hyperspace.next_deadline())
+            .flatten()
+    }
+
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = self.take_due_agent_activity_refresh(now);
         changed |= self.handle_loop_receipt_fallback(now);
         changed |= self.tick_notepad(now);
         changed |= self.tick_pomodoro(now);
+        changed |= self.tick_sidebar_animation(now);
         let mut resized = false;
 
         if now >= self.next_resize_poll {
@@ -528,6 +554,7 @@ impl App {
             self.sync_pending_agent_resume_deadline(now);
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
+        changed |= self.tick_resume_nudges(now);
         changed
     }
 
@@ -1021,6 +1048,11 @@ impl App {
                 .flatten(),
             self.state.next_done_reap_deadline(now),
             self.copy_feedback_deadline,
+            // Presentation only: an unattached headless server draws no
+            // sidebar, so the animation must never be what wakes it.
+            include_client_refresh
+                .then(|| self.sidebar_animation_deadline())
+                .flatten(),
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh
                     && self.status_metric_refresh_enabled
@@ -1054,6 +1086,7 @@ impl App {
                 .then_some(self.agent_activity_refresh_deadline)
                 .flatten(),
             self.pending_agent_resume_deadline,
+            self.next_resume_nudge_deadline(),
             self.session_save_deadline,
             self.loop_receipt_fallback_deadline,
             self.selection_autoscroll_deadline,

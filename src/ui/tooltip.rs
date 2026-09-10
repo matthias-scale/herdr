@@ -56,6 +56,10 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<ControlId> {
     let view = &app.view;
     let fixed = [
+        (
+            ControlId::SidebarAnimationPause,
+            view.hyperspace_pause_hit_area,
+        ),
         (ControlId::DockClose, view.dock_tab_close_rect),
         (ControlId::DockAdd, view.dock_plus_rect),
         (ControlId::TopBarScrollLeft, view.tab_scroll_left_hit_area),
@@ -69,6 +73,10 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         (ControlId::TopBarGitMenu, view.git_menu_button_hit_area),
         (ControlId::TopBarPaneBelow, view.pane_toggle_below_hit_area),
         (ControlId::TopBarPaneRight, view.pane_toggle_right_hit_area),
+        (
+            ControlId::SidebarStarFilter,
+            super::sidebar_header_star_filter_rect(view.sidebar_rect),
+        ),
         (
             ControlId::SidebarNewThread,
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
@@ -135,6 +143,14 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
 fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
     let view = &app.view;
     let target = match control {
+        ControlId::SidebarStarFilter => (
+            super::sidebar_header_star_filter_rect(view.sidebar_rect),
+            if app.sidebar_starred_only {
+                "Show all sessions".into()
+            } else {
+                "Show only starred sessions".into()
+            },
+        ),
         ControlId::SidebarNewThread => (
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
             "New thread".into(),
@@ -160,6 +176,14 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
             };
             (rect, label.into())
         }
+        ControlId::SidebarAnimationPause => (
+            view.hyperspace_pause_hit_area,
+            if app.hyperspace.paused() {
+                "Resume the sidebar animation".into()
+            } else {
+                "Pause the sidebar animation".into()
+            },
+        ),
         ControlId::DockTab(index) => (
             view.dock_tab_hit_areas.get(index).copied()?,
             app.dock_tab_title(index),

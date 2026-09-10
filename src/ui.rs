@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
@@ -20,6 +20,7 @@ mod dock_scratchpad;
 mod dock_shortcuts;
 pub(crate) mod dropdown;
 mod home;
+pub(crate) mod hyperspace;
 mod inbox;
 pub(crate) mod info_panel;
 mod keybind_help;
@@ -150,16 +151,16 @@ pub(crate) use self::{
         sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
         sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
-        sidebar_missive_copy_url, sidebar_nested_header_at, sidebar_new_menu_layout,
-        sidebar_new_thread_layout, sidebar_new_thread_matches, sidebar_object_action_at,
-        sidebar_object_at, sidebar_object_menu_item_at, sidebar_object_menu_items,
-        sidebar_pull_request_actions, sidebar_pull_request_key, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
-        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
-        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
+        sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
+        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
+        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
+        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
+        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
@@ -183,7 +184,7 @@ pub(crate) use self::{
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::ViewLayout;
+use crate::app::state::{Palette, ViewLayout};
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -607,6 +608,8 @@ fn compute_view_internal(
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
+    let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
+    let hyperspace_pause_hit_area = hyperspace::pause_hit_area(app, hyperspace_rect);
     // The caret has to stay inside the rows the panel actually got, which is
     // only known once the sidebar geometry above resolved.
     app.notepad
@@ -755,6 +758,8 @@ fn compute_view_internal(
         notepad_rect,
         notepad_tab_hit_areas,
         pomodoro_hit_area,
+        hyperspace_rect,
+        hyperspace_pause_hit_area,
         sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
@@ -1031,6 +1036,8 @@ fn compute_mobile_view(
         notepad_rect: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
         pomodoro_hit_area: Rect::default(),
+        hyperspace_rect: Rect::default(),
+        hyperspace_pause_hit_area: Rect::default(),
         sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
@@ -1389,6 +1396,30 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
         && b.x < a.x.saturating_add(a.width)
         && a.y < b.y.saturating_add(b.height)
         && b.y < a.y.saturating_add(a.height)
+}
+
+/// Opaque backdrop for a modal that has to be answered before work resumes.
+/// `dim_background` only adds the DIM modifier, which several terminals render
+/// as no change at all, so a blocking prompt gets a real veil instead: the
+/// cells behind it are blanked so the work underneath cannot be read past the
+/// dialog.
+fn veil_background(frame: &mut Frame, area: Rect, palette: &Palette) {
+    // The 16-colour theme leaves `surface0` as the terminal's own background,
+    // which would make the veil invisible; `surface1` is a concrete colour in
+    // every bundled theme.
+    let bg = match palette.surface0 {
+        Color::Reset => palette.surface1,
+        color => color,
+    };
+    let style = Style::default().bg(bg).fg(palette.overlay0);
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            cell.reset();
+            cell.set_style(style);
+        }
+    }
 }
 
 fn dim_background(frame: &mut Frame, area: Rect) {

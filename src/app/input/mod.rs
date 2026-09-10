@@ -110,7 +110,10 @@ impl AppState {
                 crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
                 crate::app::home::HomePicker::Access => crate::app::home::HomeFocus::Access,
                 crate::app::home::HomePicker::Context => crate::app::home::HomeFocus::Context,
+                crate::app::home::HomePicker::Project => crate::app::home::HomeFocus::Project,
+                crate::app::home::HomePicker::Repo => crate::app::home::HomeFocus::Repo,
                 crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
+                crate::app::home::HomePicker::Machine => crate::app::home::HomeFocus::Machine,
                 crate::app::home::HomePicker::Workspace => crate::app::home::HomeFocus::Workspace,
                 crate::app::home::HomePicker::Ref => crate::app::home::HomeFocus::Ref,
                 crate::app::home::HomePicker::Target => crate::app::home::HomeFocus::Target,
@@ -163,18 +166,7 @@ impl App {
     async fn handle_key_inner(&mut self, key: TerminalKey) -> Option<super::TerminalInputTarget> {
         // A due break reminder outranks every other surface, panes included:
         // an overlay that can be typed past is not a reminder.
-        if self.state.pomodoro.prompt.is_some() {
-            self.state
-                .handle_pomodoro_prompt_key(key.as_key_event(), std::time::Instant::now());
-            self.apply_notepad_request();
-            return None;
-        }
-        if self.state.notepad.focused
-            && self
-                .state
-                .handle_notepad_key(key.as_key_event(), std::time::Instant::now())
-        {
-            self.apply_notepad_request();
+        if self.intercept_notepad_key(&key) {
             return None;
         }
         if self.state.popup_pane.is_some() {
@@ -4383,7 +4375,7 @@ impl App {
             }
             return;
         }
-        if self.state.mode != Mode::Terminal {
+        if self.state.mode != Mode::Terminal || self.state.notepad.focused {
             self.paste_into_active_text_input(text);
             return;
         }

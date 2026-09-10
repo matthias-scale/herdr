@@ -127,6 +127,9 @@ impl App {
             AppEvent::HomeCheckoutFinished { plan, result } => {
                 self.handle_home_checkout_finished(*plan, result)
             }
+            AppEvent::HomeRemoteSpawnFinished { machine, result } => {
+                self.handle_home_remote_spawn_finished(&machine, result)
+            }
             AppEvent::GitStatusRefreshed {
                 generation,
                 results,
@@ -1575,6 +1578,7 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabPrio(params) => return self.handle_tab_prio(request.id, params),
             Method::TabPin(params) => return self.handle_tab_pin(request.id, params),
+            Method::TabStar(params) => return self.handle_tab_star(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),

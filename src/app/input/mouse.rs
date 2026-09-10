@@ -175,6 +175,12 @@ impl AppState {
                 _ => {}
             }
         }
+        if rect_contains(self.view.hyperspace_pause_hit_area, mouse.column, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.hyperspace.toggle_paused(std::time::Instant::now());
+            return None;
+        }
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
@@ -321,6 +327,9 @@ impl AppState {
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
                                 HomeHitTarget::Access => crate::app::home::HomePicker::Access,
                                 HomeHitTarget::Context => crate::app::home::HomePicker::Context,
+                                HomeHitTarget::Project => crate::app::home::HomePicker::Project,
+                                HomeHitTarget::Repo => crate::app::home::HomePicker::Repo,
+                                HomeHitTarget::Machine => crate::app::home::HomePicker::Machine,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
                                 HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,
                                 HomeHitTarget::Ref => crate::app::home::HomePicker::Ref,
@@ -380,6 +389,9 @@ impl AppState {
             group_menu_enabled && self.point_in_rect(new_menu_anchor, mouse.column, mouse.row);
         let search_hit =
             group_menu_enabled && self.point_in_rect(search_anchor, mouse.column, mouse.row);
+        let star_filter_anchor = crate::ui::sidebar_header_star_filter_rect(self.view.sidebar_rect);
+        let star_filter_hit =
+            group_menu_enabled && self.point_in_rect(star_filter_anchor, mouse.column, mouse.row);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
         let filter_anchor = self.sidebar_filter_anchor_rect();
         let filter_anchor_hit =
@@ -439,6 +451,10 @@ impl AppState {
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && new_menu_hit {
             self.open_sidebar_new_menu();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && star_filter_hit {
+            self.sidebar_starred_only = !self.sidebar_starred_only;
             return None;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && search_hit {
@@ -1927,6 +1943,27 @@ impl AppState {
                 {
                     return None;
                 }
+                // Session rows sit inside the same sidebar rect as workspace
+                // header rows but `workspace_at_row` never matches them, so
+                // without this branch a right-click on a session did nothing.
+                if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row).or_else(|| {
+                    self.agent_detail_target_at(mouse.row)
+                        .map(|(w, t, _)| (w, t))
+                }) {
+                    self.selected = ws_idx;
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Tab {
+                            ws_idx,
+                            tab_idx,
+                            starred: self.tab_starred(ws_idx, tab_idx),
+                        },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                    return None;
+                }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
                     let kind = self
@@ -1979,7 +2016,11 @@ impl AppState {
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Tab { ws_idx, tab_idx },
+                        kind: ContextMenuKind::Tab {
+                            ws_idx,
+                            tab_idx,
+                            starred: self.tab_starred(ws_idx, tab_idx),
+                        },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -2160,6 +2201,14 @@ impl AppState {
                 .union(self.view.terminal_area)
                 .union(self.view.dock_rect)
         }
+    }
+
+    /// Star flag of a tab, `false` when the indices no longer resolve.
+    pub(crate) fn tab_starred(&self, ws_idx: usize, tab_idx: usize) -> bool {
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .is_some_and(|tab| tab.starred)
     }
 
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
@@ -3209,6 +3258,60 @@ mod tests {
     }
 
     #[test]
+    fn clicking_the_sidebar_animation_button_toggles_its_pause() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.hyperspace.enabled = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let button = app.state.view.hyperspace_pause_hit_area;
+        assert!(button.width > 0, "the panel offers a pause button");
+        assert_eq!(
+            button.x, app.state.view.sidebar_rect.x,
+            "the button sits in the sidebar's left column"
+        );
+        assert!(!app.state.hyperspace.paused());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+        assert!(app.state.hyperspace.paused(), "one click stops the field");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+        assert!(
+            !app.state.hyperspace.paused(),
+            "a second click starts it again"
+        );
+    }
+
+    #[test]
+    fn a_click_next_to_the_animation_button_leaves_it_alone() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.hyperspace.enabled = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let button = app.state.view.hyperspace_pause_hit_area;
+        assert!(button.width > 0);
+        // The footer icon row is one row below the panel, and it owns its own
+        // clicks; a near miss must not toggle the animation.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.right(),
+            button.y,
+        ));
+        assert!(!app.state.hyperspace.paused());
+    }
+
+    #[test]
     fn clicking_pane_content_releases_dock_and_sidebar_focus() {
         let (mut app, _pane_id, rect) = app_with_clickable_pane();
         app.state.dock_home_focused = true;
@@ -3913,6 +4016,183 @@ mod tests {
                 tab_idx: 0
             })
         ));
+    }
+
+    #[test]
+    fn right_clicking_a_sidebar_session_row_opens_its_tab_menu_with_the_star_entry() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.toggle_workspace_agent_disclosure(1);
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace tab row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                target.rect.x + 2,
+                target.rect.y,
+            ),
+        );
+
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("session row opens a context menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Tab {
+                ws_idx: 1,
+                tab_idx: 0,
+                starred: false,
+            }
+        );
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert!(
+            menu.items().contains(&crate::app::state::STAR_ITEM),
+            "an unstarred session offers Star, got {:?}",
+            menu.items()
+        );
+        assert!(menu.items().contains(&"Rename"));
+    }
+
+    #[test]
+    fn a_starred_session_rows_menu_offers_unstar_instead_of_star() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.toggle_workspace_agent_disclosure(1);
+        app.state.workspaces[1].tabs[0].starred = true;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace tab row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                target.rect.x + 2,
+                target.rect.y,
+            ),
+        );
+
+        let items = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("session row opens a context menu")
+            .items();
+        assert!(items.contains(&crate::app::state::UNSTAR_ITEM), "{items:?}");
+        assert!(!items.contains(&crate::app::state::STAR_ITEM), "{items:?}");
+    }
+
+    #[test]
+    fn right_clicking_a_workspace_header_row_still_opens_the_workspace_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let row = crate::ui::compute_sidebar_row_areas(&app.state, sidebar)
+            .0
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace header row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                row.rect.x + 2,
+                row.rect.y,
+            ),
+        );
+
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("workspace row still opens a context menu");
+        assert!(
+            matches!(
+                menu.kind,
+                ContextMenuKind::Workspace { ws_idx: 1 }
+                    | ContextMenuKind::GitWorkspace { ws_idx: 1, .. }
+            ),
+            "{:?}",
+            menu.kind
+        );
+    }
+
+    #[test]
+    fn clicking_the_header_star_toggles_the_starred_only_view() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let star = crate::ui::sidebar_header_star_filter_rect(sidebar);
+        assert!(star.width > 0, "the header is wide enough for the star");
+        assert!(!app.state.sidebar_starred_only);
+
+        for expected in [true, false] {
+            app.state.handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Down(MouseButton::Left), star.x, star.y),
+            );
+            assert_eq!(app.state.sidebar_starred_only, expected);
+        }
+    }
+
+    #[test]
+    fn the_header_star_never_overlaps_the_search_box_or_the_other_icons() {
+        for width in 6u16..80 {
+            let sidebar = Rect::new(0, 0, width, 16);
+            let star = crate::ui::sidebar_header_star_filter_rect(sidebar);
+            if star.width == 0 {
+                continue;
+            }
+            let search = crate::ui::sidebar_header_search_rect(sidebar);
+            let new_thread = crate::ui::sidebar_header_new_thread_rect(sidebar);
+            let new_menu = crate::ui::sidebar_header_new_menu_rect(sidebar);
+            assert!(
+                search.x + search.width <= star.x,
+                "width {width}: search {search:?} runs into star {star:?}"
+            );
+            assert!(
+                star.x + star.width <= new_thread.x,
+                "width {width}: star {star:?} runs into new thread {new_thread:?}"
+            );
+            assert!(
+                new_thread.x + new_thread.width <= new_menu.x,
+                "width {width}: new thread {new_thread:?} runs into new menu {new_menu:?}"
+            );
+            assert!(star.x + star.width <= sidebar.x + sidebar.width);
+        }
     }
 
     #[test]
@@ -6821,7 +7101,8 @@ mod tests {
             menu.kind,
             ContextMenuKind::Tab {
                 ws_idx: 0,
-                tab_idx: 1
+                tab_idx: 1,
+                starred: false,
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -6850,10 +7131,21 @@ mod tests {
             .state
             .context_menu_rect()
             .expect("tab context menu rect");
+        // Derive the row from the item list: the menu gained entries over time
+        // and a hardcoded offset silently starts activating the wrong action.
+        let close_index = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("tab context menu")
+            .items()
+            .iter()
+            .position(|item| *item == "Close")
+            .expect("the tab menu closes tabs");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 3,
+            menu.y + 1 + u16::try_from(close_index).unwrap(),
         ));
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);

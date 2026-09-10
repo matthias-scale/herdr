@@ -1172,6 +1172,21 @@ impl App {
         );
     }
 
+    /// Toggle the session star through the runtime so the flag is a server fact
+    /// every client sees, not TUI-local view state.
+    pub(crate) fn toggle_tab_star_via_api(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return;
+        };
+        self.runtime_tab_star(
+            "tui.tab.star",
+            crate::api::schema::TabStarParams {
+                tab_id,
+                mode: crate::api::schema::TabStarMode::Toggle,
+            },
+        );
+    }
+
     pub(crate) fn toggle_pin_active_tab_via_api(&mut self) {
         let Some(ws_idx) = self.state.active else {
             return;

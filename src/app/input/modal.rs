@@ -850,19 +850,54 @@ pub(super) fn apply_context_menu_action(
                 state.mode = Mode::Navigate;
             }
         }
-        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some("New tab"),
+        ) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
             open_new_tab_dialog(state);
         }
-        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Rename")) => {
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some("Rename"),
+        ) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
             open_rename_active_tab(state, false);
         }
-        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some(crate::app::state::STAR_ITEM | crate::app::state::UNSTAR_ITEM),
+        ) => {
+            if let Some(tab) = state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            {
+                tab.starred = !tab.starred;
+                state.mark_session_dirty();
+            }
+            state.mode = if state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some("Close"),
+        ) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
@@ -1355,17 +1390,41 @@ impl App {
                     self.state.mode = Mode::Navigate;
                 }
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some("New tab"),
+            ) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 open_new_tab_dialog(&mut self.state);
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Rename")) => {
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some("Rename"),
+            ) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 open_rename_active_tab(&mut self.state, false);
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some(crate::app::state::STAR_ITEM | crate::app::state::UNSTAR_ITEM),
+            ) => {
+                self.toggle_tab_star_via_api(ws_idx, tab_idx);
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some("Close"),
+            ) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 if !self.close_active_tab_via_api_requires_confirmation() {
@@ -2576,6 +2635,7 @@ mod tests {
             kind: ContextMenuKind::Tab {
                 ws_idx: 0,
                 tab_idx: 0,
+                starred: false,
             },
             x: 0,
             y: 0,

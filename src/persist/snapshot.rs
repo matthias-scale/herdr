@@ -110,6 +110,10 @@ pub struct TabSnapshot {
     /// session files written before pins existed restore unchanged.
     #[serde(default)]
     pub pinned: bool,
+    /// User-set focus tag rendered as a star. Defaulted so session files written
+    /// before stars existed restore unchanged.
+    #[serde(default)]
+    pub starred: bool,
     #[serde(default)]
     pub prio: bool,
     #[serde(default)]
@@ -213,6 +217,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             zoomed: snap.zoomed,
             prio: false,
             pinned: false,
+            starred: false,
             focused: snap.focused,
             root_pane: snap.root_pane,
         };
@@ -474,6 +479,7 @@ fn capture_tab(
         zoomed: tab.zoomed,
         prio: tab.prio,
         pinned: tab.pinned,
+        starred: tab.starred,
         focused: Some(tab.layout.focused().raw()),
         root_pane: Some(tab.root_pane.raw()),
     }
@@ -1245,6 +1251,7 @@ mod tests {
                     zoomed: false,
                     prio: false,
                     pinned: false,
+                    starred: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1964,6 +1971,7 @@ mod tests {
                     zoomed: false,
                     prio: false,
                     pinned: false,
+                    starred: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],

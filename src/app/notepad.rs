@@ -251,16 +251,13 @@ impl super::App {
     }
 
     /// Applies a live config reload to both surfaces.
-    pub(crate) fn apply_notepad_and_pomodoro_config(&mut self, config: &crate::config::Config) {
-        let now = Instant::now();
-        self.notepad_preferred_files = config.notepad.files.clone();
-        self.notepad_git_sync = config.notepad.git_sync;
-        self.notepad_git_sync_interval = std::time::Duration::from_secs(
-            config.notepad.git_sync_interval_seconds.clamp(15, 3600),
-        );
-        self.pomodoro_log_file = config.pomodoro.log_file.clone();
+    pub(crate) fn apply_notepad_config(&mut self, config: &crate::config::NotepadConfig) {
+        self.notepad_preferred_files = config.files.clone();
+        self.notepad_git_sync = config.git_sync;
+        self.notepad_git_sync_interval =
+            std::time::Duration::from_secs(config.git_sync_interval_seconds.clamp(15, 3600));
 
-        let next = NotepadState::from_config(&config.notepad);
+        let next = NotepadState::from_config(config);
         if next.dir != self.state.notepad.dir || next.enabled != self.state.notepad.enabled {
             self.write_notepad_now();
             let focused = self.state.notepad.focused && next.enabled;
@@ -271,7 +268,11 @@ impl super::App {
         } else {
             self.state.notepad.height = next.height;
         }
-        self.state.pomodoro.apply_config(&config.pomodoro, now);
+    }
+
+    pub(crate) fn apply_pomodoro_config(&mut self, config: &crate::config::PomodoroConfig) {
+        self.pomodoro_log_file = config.log_file.clone();
+        self.state.pomodoro.apply_config(config, Instant::now());
     }
 }
 

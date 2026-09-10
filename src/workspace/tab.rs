@@ -127,6 +127,10 @@ pub struct Tab {
     /// Pinned by the user into the sidebar's Pinned group. Unlike the derived
     /// attention priority, nothing but an explicit toggle ever changes it.
     pub pinned: bool,
+    /// Starred by the user to mark a focus session. Purely a user tag: it never
+    /// moves the row between sidebar groups the way `pinned` does, and nothing
+    /// but an explicit toggle ever changes it.
+    pub starred: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
@@ -489,6 +493,7 @@ impl Tab {
                 zoomed: false,
                 prio: false,
                 pinned: false,
+                starred: false,
                 events,
                 render_notify,
                 render_dirty,
@@ -864,6 +869,7 @@ impl Tab {
             zoomed: false,
             prio: false,
             pinned: false,
+            starred: false,
             events,
             render_notify,
             render_dirty,

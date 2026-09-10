@@ -165,6 +165,8 @@ socket = "/home/you/.config/herdr/herdr.sock"
 
 The per-host timeout applies to the entire read. An unreachable or slow host produces a `STATUS UNKNOWN` host row while reachable hosts still appear. `heartbeat_stale_ms` controls when a non-terminal windowless run loses live status; its default is 30 minutes.
 
+These hosts are also the machines the Home composer can dispatch to. With more than one configured, the composer shows a machine chip; picking a remote machine asks that machine's own Herdr server to create the workspace and start the agent, so the pane belongs to that machine and outlives both this client and the SSH connection. The new pane appears in `herdr fleet status` under its host, not in the local workspace list.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).
@@ -227,6 +229,35 @@ focus_agent = "prefix+alt+1..9"
 ```
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
+
+## Projects
+
+The Home composer can group your checkouts, so choosing where a task runs is a
+two-step pick rather than a typed path. Which repositories belong together is a
+fact about how you work, not about the filesystem, so it has to be configured:
+
+```toml
+[[projects]]
+id = "scalable"
+label = "scalable"
+roots = ["~/Repos/scalable"]
+repos = ["~/Repos/herdr"]
+
+[[projects]]
+id = "personal"
+label = "personal"
+roots = ["~/Projects"]
+```
+
+`roots` names directories whose immediate children are checkouts. `repos` names
+single checkouts, either absolute or relative to `~/Repos`. A directory counts
+as a checkout when it carries a `.git` entry, so linked worktrees are included.
+Scanning is one level deep and happens once, when the config is read.
+
+With no `[[projects]]` configured the composer groups everything under
+`~/Repos`. The project chip appears only when there is more than one group, and
+the repo chip only when the selected group holds at least one checkout.
+Selecting a repo sets the composer's directory.
 
 ## Custom command keybindings
 
@@ -827,7 +858,21 @@ Herdr resumes supported Agent conversations after a server restart by default:
 resume_agents_on_restore = true
 ```
 
-Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
+Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells.
+
+A resumed agent comes back at an idle prompt with its conversation replayed but
+its work stopped. Herdr sends it one prompt so it continues:
+
+```toml
+[session]
+nudge_resumed_agents = true
+resume_nudge_message = "continue"
+```
+
+The prompt is skipped when the agent resumes blocked, when it resumes straight
+back into work, and when the pane already holds text you typed.
+
+See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
 
 ## IME cursor tracking
 
