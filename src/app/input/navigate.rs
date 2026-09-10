@@ -3506,10 +3506,11 @@ mod tests {
         remote.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
             .expect("valid remote agent reference");
         remote.local_target = None;
-        remote.host_label = Some("ub2".into());
         remote.state = crate::detect::AgentState::Idle;
         remote.open_blockers = true;
-        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(remote)];
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(remote),
+        )];
 
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 

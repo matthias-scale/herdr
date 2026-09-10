@@ -159,8 +159,8 @@ pub(crate) use self::{
         workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
-        WorkspaceListEntry, SETTLED_MENU_LABELS,
+        AgentPanelEntry, RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem,
+        SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;

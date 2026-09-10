@@ -3110,7 +3110,7 @@ pub struct AppState {
     /// This server's configured component in cross-host agent references.
     pub(crate) agent_host_name: String,
     /// TUI projection materialized only when the fleet snapshot changes.
-    pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::AgentPanelEntry>>,
+    pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
     /// Read-only remote row selected by blocked navigation. Activation remains
     /// reserved for the later remote-control slice.
     pub(crate) sidebar_selected_remote_agent: Option<crate::api::schema::AgentRef>,
