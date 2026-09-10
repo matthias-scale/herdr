@@ -29,11 +29,19 @@ const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 #[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
-const DEFAULT_THREAD_TITLE: &str = "New Thread";
+pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
 const SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH: usize = 16;
+
+/// Focus-star suffix drawn immediately after a starred session's title. Kept to
+/// two display columns (space + glyph) so it costs the title field almost
+/// nothing at narrow sidebar widths.
+pub(crate) const SIDEBAR_STAR_SUFFIX: &str = " \u{2605}";
+/// Below this the title field is too short to give up columns to the star, so a
+/// starred row simply renders without it rather than truncating the name.
+const SIDEBAR_STAR_MIN_TITLE_WIDTH: usize = 6;
 
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
@@ -253,63 +261,6 @@ fn compact_age(
         .and_then(|instant| status_report_age_compact_label(Some(instant), now))
         .unwrap_or_else(|| "—".to_string());
     (age, instant)
-}
-
-fn title_without_identifier<'a>(identifier: &str, title: &'a str) -> Option<&'a str> {
-    let title = title.trim();
-    let prefix = title.get(..identifier.len())?;
-    if !prefix.eq_ignore_ascii_case(identifier) {
-        return None;
-    }
-    let remainder = title.get(identifier.len()..)?;
-    if !remainder.is_empty()
-        && !remainder.chars().next().is_some_and(|character| {
-            character.is_whitespace() || matches!(character, ':' | '·' | '-')
-        })
-    {
-        return None;
-    }
-    Some(
-        remainder
-            .trim_start()
-            .strip_prefix([':', '·', '-'])
-            .unwrap_or(remainder.trim_start())
-            .trim_start(),
-    )
-}
-
-fn sidebar_tab_title(
-    projection: Option<&crate::workspace::TabDisplayProjection>,
-    fallback: Option<String>,
-) -> Option<String> {
-    let Some(crate::workspace::TabDisplayProjection::Derived {
-        agent,
-        ticket,
-        binding: _,
-        title,
-    }) = projection
-    else {
-        return fallback;
-    };
-    let normalized_title = match (ticket.as_deref(), title.as_deref()) {
-        (Some(identifier), Some(title)) => title_without_identifier(identifier, title)
-            .map(str::to_string)
-            .or_else(|| Some(title.to_string())),
-        (_, title) => title.map(str::to_string),
-    };
-    // Worktree identity belongs to the Spaces and Repo group headers. Agent
-    // rows use the work object and session title only.
-    let label = [ticket.clone(), normalized_title]
-        .into_iter()
-        .flatten()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if label.is_empty() {
-        agent.clone().or(fallback)
-    } else {
-        Some(label)
-    }
 }
 
 fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
@@ -542,10 +493,17 @@ pub(super) fn sidebar_workspace_labels(
     let mut labels = std::collections::HashMap::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         let members = sidebar_space_member_indices(app, ws_idx);
-        let manual = members
-            .iter()
-            .filter_map(|member| app.workspaces.get(*member))
-            .find_map(|member| member.custom_name.clone());
+        // Members of a worktree group share one checkout identity, so a name any
+        // of them carries names the group. Repository groups collect Spaces that
+        // only share a repo, and one member's rename must not retitle the row.
+        let manual = if ws.worktree_space().is_some() {
+            members
+                .iter()
+                .filter_map(|member| app.workspaces.get(*member))
+                .find_map(|member| member.custom_name.clone())
+        } else {
+            ws.custom_name.clone()
+        };
         let label = manual.map(|label| (label, false)).unwrap_or_else(|| {
             (
                 ws.display_name_from(&app.terminals, terminal_runtimes),
@@ -638,10 +596,16 @@ fn render_compact_agent_row_with_prefix(
             }
         }
     }
-    let title = pad_right(
-        &truncate_end(&layout.title, displayed_title_width),
-        displayed_title_width,
-    );
+    // The star sits inside the title field, right after the name, so it reads as
+    // part of the session's label rather than as another right-hand column.
+    let star_suffix = (entry.starred
+        && displayed_title_width
+            >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
+    .then_some(SIDEBAR_STAR_SUFFIX);
+    let title_text_width =
+        displayed_title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text = truncate_end(&layout.title, title_text_width);
+    let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
     let provider = pad_left(&layout.provider, widths.provider);
     let age = layout
@@ -674,10 +638,19 @@ fn render_compact_agent_row_with_prefix(
     let mut spans = vec![
         Span::styled(prefix, compact_row_style(Style::default(), bg)),
         Span::styled(dot, compact_row_style(dot_style, bg)),
-        Span::styled(title, compact_row_style(title_style, bg)),
+        Span::styled(title_text, compact_row_style(title_style, bg)),
+    ];
+    if let Some(star) = star_suffix {
+        spans.push(Span::styled(
+            star,
+            compact_row_style(Style::default().fg(p.yellow), bg),
+        ));
+    }
+    spans.extend([
+        Span::styled(title_pad, compact_row_style(title_style, bg)),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
-    ];
+    ]);
     if let Some(suffix) = space_suffix.as_deref() {
         spans.push(Span::styled(
             suffix,
@@ -779,6 +752,9 @@ pub(crate) struct AgentPanelEntry {
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
     pub prio: bool,
+    /// User-set focus star on the owning tab. Rendering only: it never
+    /// reorders or regroups the row.
+    pub starred: bool,
     pub state: AgentState,
     /// The last closing-block report still names at least one gate, even if
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
@@ -970,6 +946,7 @@ fn collect_agent_panel_entries_with_runtimes(
                 .map(move |detail| {
                     let space_label = workspace_label.clone();
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    let starred = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.starred);
                     let tab_has_custom_name = ws
                         .tabs
                         .get(detail.tab_idx)
@@ -1011,7 +988,10 @@ fn collect_agent_panel_entries_with_runtimes(
                         primary_label: workspace_label.clone(),
                         space_label: space_label.clone(),
                         space_label_redundant: false,
-                        primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
+                        primary_tab_label: crate::workspace::session_title(
+                            projection.as_ref(),
+                            thread_title,
+                        ),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
@@ -1025,6 +1005,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         prio,
+                        starred,
                         state: detail.state,
                         open_blockers: detail.open_blockers,
                         completion_tier,
@@ -1261,18 +1242,26 @@ fn workspace_declared_repo(app: &AppState, ws_idx: usize) -> Option<(&str, bool)
     if let Some(repo) = workspace.repo_binding.as_deref() {
         return Some((repo, true));
     }
-    workspace
-        .tabs
-        .iter()
-        .flat_map(|tab| tab.panes.values())
-        .find_map(|pane| {
-            app.terminals
-                .get(&pane.attached_terminal_id)?
-                .effective_work_context()
-                .repo
-                .as_deref()
-        })
-        .map(|repo| (repo, false))
+    // Every pane that resolved a repository must name the same one. A Space
+    // holding two checkouts stays ungrouped rather than nesting under whichever
+    // pane the map happened to yield first, which is the rule repo routing
+    // already applies when it places panes.
+    let mut resolved: Option<&str> = None;
+    for pane in workspace.tabs.iter().flat_map(|tab| tab.panes.values()) {
+        let Some(repo) = app
+            .terminals
+            .get(&pane.attached_terminal_id)
+            .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+        else {
+            continue;
+        };
+        match resolved {
+            Some(seen) if !seen.eq_ignore_ascii_case(repo) => return None,
+            Some(_) => {}
+            None => resolved = Some(repo),
+        }
+    }
+    resolved.map(|repo| (repo, false))
 }
 
 /// What a Space groups by in the Repo view.
@@ -1483,6 +1472,12 @@ fn sidebar_query_parts(query: &str) -> (Vec<&str>, Vec<&str>) {
         })
 }
 
+/// The tree is showing a filtered subset, so a workspace that contributes no
+/// entry is noise and gets dropped rather than rendered as an empty header.
+fn sidebar_rows_are_filtered(app: &AppState) -> bool {
+    !app.sidebar_work_filter.query.is_empty() || app.sidebar_starred_only
+}
+
 fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool {
     let (terms, _) = sidebar_query_parts(&app.sidebar_work_filter.query);
     if terms.is_empty() {
@@ -1568,6 +1563,9 @@ fn compact_sidebar_rows_inner(
         None => sidebar_thread_entries(app),
     }
     .into_iter()
+    // Cheap scalar gate first: when the star filter is on it discards most
+    // entries before the query matcher builds its haystack string.
+    .filter(|entry| !app.sidebar_starred_only || entry.starred)
     .filter(|entry| sidebar_entry_matches_query(app, entry))
     .collect::<Vec<_>>();
     let has_one_space_label = entries.first().is_some_and(|first| {
@@ -1595,7 +1593,7 @@ fn compact_sidebar_rows_inner(
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
-    if !app.sidebar_work_filter.query.is_empty()
+    if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
         && recently_done.is_empty()
         && settled_entries.is_empty()
@@ -1714,7 +1712,7 @@ fn append_legacy_space_rows(
         if let Some((header_label, _)) = workspace_labels.get(&ws_idx) {
             mark_redundant_space_labels(&mut member_entries, header_label);
         }
-        if !app.sidebar_work_filter.query.is_empty() && member_entries.is_empty() {
+        if sidebar_rows_are_filtered(app) && member_entries.is_empty() {
             continue;
         }
         rows.push(SidebarRow::Workspace {
@@ -1946,7 +1944,13 @@ fn append_object_group_rows(
             group.key.clone()
         };
         let collapsed = section_is_collapsed(app, &collapse_key);
-        let action_key = (!group.unlinked).then(|| group.key.clone());
+        // Only provider objects have object actions. A branch group names a
+        // branch, so the `…` affordance would open an empty menu.
+        let action_key = (!group.unlinked
+            && ["github:", "linear:", "missive:"]
+                .iter()
+                .any(|prefix| group.key.starts_with(prefix)))
+        .then(|| group.key.clone());
         mark_redundant_space_labels(&mut group.entries, &group.title);
         rows.push(SidebarRow::NestedHeader {
             key: collapse_key,
@@ -2145,11 +2149,19 @@ fn sidebar_tab_groups(
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
-                let Some(context) = context.filter(|context| !context.pr_urls.is_empty()) else {
+                // Same source as the work view's groups: a declared pull
+                // request is what the window is working on, and grouping it by
+                // the effective union filed a linked window under the branch's
+                // pull request as well.
+                let urls = preferred_pr_urls(app, &entry);
+                if urls.is_empty() {
                     match context.and_then(|context| context.branch.as_deref()) {
                         Some(branch) => push_sidebar_tab_group(
                             &mut groups,
-                            branch_group_key(branch),
+                            branch_group_key(
+                                context.and_then(|context| context.repo.as_deref()),
+                                branch,
+                            ),
                             branch_group_title(branch),
                             entry,
                             false,
@@ -2157,8 +2169,8 @@ fn sidebar_tab_groups(
                         None => push_unlinked_tab_group(app, &mut groups, entry),
                     }
                     continue;
-                };
-                for url in &context.pr_urls {
+                }
+                for url in &urls {
                     let title_suffix = app
                         .work_index_snapshot
                         .as_ref()
@@ -2169,8 +2181,8 @@ fn sidebar_tab_groups(
                                 .find(|item| item.pr_url.as_deref() == Some(url.as_str()))
                         })
                         .and_then(|item| item.pr_title.as_deref())
-                        .or(context.work_title.as_deref())
-                        .or(context.session_name.as_deref());
+                        .or_else(|| context.and_then(|context| context.work_title.as_deref()))
+                        .or_else(|| context.and_then(|context| context.session_name.as_deref()));
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
                     push_sidebar_tab_group(&mut groups, url.clone(), title, entry.clone(), false);
@@ -2204,6 +2216,11 @@ fn sidebar_tab_groups(
                 .flatten()
                 .and_then(|entry| unlinked_group_directory(app, entry))
         },
+        |group| &mut group.title,
+    );
+    disambiguate_branch_titles(
+        &mut groups,
+        |group| group.key.clone(),
         |group| &mut group.title,
     );
     groups.sort_by_key(|group| {
@@ -2276,7 +2293,7 @@ fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
 /// carries no title: a separator with nothing after it reads as missing text.
 fn work_group_header_title(id: &str, title: Option<&str>) -> String {
     match title.map(str::trim).filter(|title| !title.is_empty()) {
-        Some(title) => match title_without_identifier(id, title) {
+        Some(title) => match crate::workspace::title_without_identifier(id, title) {
             Some("") => id.to_string(),
             Some(title) => format!("{id} · {title}"),
             None => format!("{id} · {title}"),
@@ -2700,20 +2717,79 @@ fn disambiguate_unlinked_titles<T>(
     }
 }
 
-fn branch_group_key(branch: &str) -> String {
-    format!("{BRANCH_GROUP_PREFIX}{branch}")
+/// Keyed by repository and branch: `main` is the most common branch name there
+/// is, so a bare branch key would fold a session on one repository's `main` into
+/// another repository's group.
+fn branch_group_key(repo: Option<&str>, branch: &str) -> String {
+    match repo {
+        Some(repo) => format!(
+            "{BRANCH_GROUP_PREFIX}{}\u{1f}{branch}",
+            repo.to_ascii_lowercase()
+        ),
+        None => format!("{BRANCH_GROUP_PREFIX}\u{1f}{branch}"),
+    }
 }
 
 fn branch_group_title(branch: &str) -> String {
     format!("⎇ {branch}")
 }
 
+/// Repository a branch group key was built from, for titles that have to tell
+/// two same-named branches apart.
+fn branch_group_repo(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix(BRANCH_GROUP_PREFIX)?;
+    let repo = rest.split('\u{1f}').next()?;
+    (!repo.is_empty()).then_some(repo)
+}
+
+/// `⎇ main` twice tells the operator nothing, so branch groups that share a
+/// title name their repository. Groups are few and this runs once per
+/// projection, after every group exists.
+fn disambiguate_branch_titles<T>(
+    groups: &mut [T],
+    key: impl Fn(&T) -> String,
+    title: impl Fn(&mut T) -> &mut String,
+) {
+    let branch_keys = groups
+        .iter()
+        .map(|group| {
+            let key = key(group);
+            key.starts_with(BRANCH_GROUP_PREFIX).then_some(key)
+        })
+        .collect::<Vec<_>>();
+    let titles = (0..groups.len())
+        .map(|index| title(&mut groups[index]).clone())
+        .collect::<Vec<_>>();
+    let mut shared = std::collections::HashMap::<&str, usize>::new();
+    for (index, group_title) in titles.iter().enumerate() {
+        if branch_keys[index].is_some() {
+            *shared.entry(group_title.as_str()).or_default() += 1;
+        }
+    }
+    for index in 0..groups.len() {
+        let Some(key) = branch_keys[index].as_deref() else {
+            continue;
+        };
+        if shared.get(titles[index].as_str()).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        if let Some(repo) = branch_group_repo(key) {
+            *title(&mut groups[index]) = format!("{} · {repo}", titles[index]);
+        }
+    }
+}
+
 /// A session on a branch of this repo with no pull request yet. It is repo work
 /// like any other, so it groups under its branch beside the PR groups instead
 /// of sinking into the directory-named unlinked bucket, where a worktree that
 /// has not opened a PR reads as work on nothing.
-fn push_branch_entry(groups: &mut Vec<SidebarWorkGroup>, branch: &str, entry: AgentPanelEntry) {
-    let key = branch_group_key(branch);
+fn push_branch_entry(
+    groups: &mut Vec<SidebarWorkGroup>,
+    repo: Option<&str>,
+    branch: &str,
+    entry: AgentPanelEntry,
+) {
+    let key = branch_group_key(repo, branch);
     match work_group_index(groups, &key) {
         Some(index) => groups[index].entries.push(entry),
         None => groups.push(SidebarWorkGroup {
@@ -2890,7 +2966,12 @@ pub(crate) fn sidebar_work_groups(
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
                     match context.and_then(|context| context.branch.as_deref()) {
-                        Some(branch) => push_branch_entry(&mut groups, branch, entry),
+                        Some(branch) => push_branch_entry(
+                            &mut groups,
+                            context.and_then(|context| context.repo.as_deref()),
+                            branch,
+                            entry,
+                        ),
                         None => push_unlinked_entry(app, &mut groups, entry),
                     }
                     continue;
@@ -3050,6 +3131,11 @@ pub(crate) fn sidebar_work_groups(
                 .flatten()
                 .and_then(|entry| unlinked_group_directory(app, entry))
         },
+        |group| &mut group.title,
+    );
+    disambiguate_branch_titles(
+        &mut groups,
+        |group| group.key.clone(),
         |group| &mut group.title,
     );
     groups.sort_by_key(unlinked_sort_key);
@@ -3709,17 +3795,17 @@ fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) ->
 }
 
 pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
-    let Some((key, _)) = workspace_parent_group_state(app, root_idx) else {
+    if workspace_parent_group_state(app, root_idx).is_none() {
+        return vec![root_idx];
+    }
+    // Resolve the group once and compare against it. This runs per Space inside
+    // render-path loops, so a per-member group lookup would make the sidebar's
+    // label pass cubic in the number of Spaces.
+    let Some((ident, _)) = workspace_group_ident(app, root_idx) else {
         return vec![root_idx];
     };
     (0..app.workspaces.len())
-        .filter(|idx| {
-            workspace_parent_group_state(app, *idx)
-                .map(|(member, _)| member == key)
-                .unwrap_or_else(|| {
-                    workspace_group_ident(app, *idx).is_some_and(|(ident, _)| ident.key() == key)
-                })
-        })
+        .filter(|idx| workspace_joins_group(app, *idx, &ident))
         .collect()
 }
 
@@ -4318,14 +4404,22 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    nested_header_areas_from_rows(app, &rows, body, scroll_skip)
+}
+
+/// Header geometry from rows a caller already walked, so a frame that needs
+/// both the headers and something else from the same rows pays for one build.
+fn nested_header_areas_from_rows(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body: Rect,
+    scroll_skip: usize,
+) -> Vec<NestedHeaderArea> {
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
-    for (idx, row) in rows
-        .iter()
-        .enumerate()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
-    {
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
             break;
@@ -4355,9 +4449,160 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
         }
         y = y
             .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+            .saturating_add(sidebar_row_gap(app, rows, idx));
     }
     out
+}
+
+/// What an agent dot is saying, in the row's own vocabulary. A pane can
+/// override the words per status, so an operator who renamed "blocked" sees
+/// their own label here rather than ours.
+fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
+    if !entry.has_agent {
+        return "No agent".to_string();
+    }
+    // A usage limit outranks every lifecycle label: no answer releases the
+    // pane, only the reset window. A gate blocks only once work has stopped.
+    let key = if entry.usage_limited {
+        "usage"
+    } else if entry_has_gate(entry) && entry.state != AgentState::Working {
+        "blocked"
+    } else {
+        agent_panel_status_key(entry.state, entry.seen)
+    };
+    if let Some(label) = entry.state_labels.get(key) {
+        return label.clone();
+    }
+    match key {
+        "usage" => "Usage limit",
+        "blocked" => "Blocked, waiting on you",
+        "working" => "Working",
+        "done" => "Done, unread",
+        "idle" => "Idle",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+/// Hover explanations for the parts of a sidebar row that are a glyph or a
+/// truncation rather than words: status glyphs, agent dots, and work titles the
+/// row was too narrow to spell out.
+///
+/// One walk of the visible rows per frame, on the same geometry the row
+/// renderers use, so an anchor cannot drift from what it explains.
+pub(crate) fn compute_sidebar_hover_targets(
+    app: &AppState,
+    area: Rect,
+) -> Vec<crate::app::state::SidebarHoverTarget> {
+    let ws_area = workspace_list_rect_for_app(app, area);
+    if ws_area == Rect::default() {
+        return Vec::new();
+    }
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+
+    let rows = sidebar_rows(app);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    let mut visible = Vec::new();
+    let mut y = body.y;
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        visible.push((row, y));
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, &rows, idx));
+    }
+
+    // The narrow-view prefix is a property of the whole list, and the row
+    // renderers only apply it when a tab card asked for it.
+    let narrow_prefix = visible
+        .iter()
+        .any(|(row, _)| matches!(row, SidebarRow::Tab { .. }))
+        .then(|| narrow_view_tab_prefix_from_rows(&rows, usize::from(body.width)))
+        .flatten();
+
+    let mut targets = Vec::new();
+    for (row, row_y) in visible {
+        match row {
+            SidebarRow::Agent { entry, depth } | SidebarRow::Tab { entry, depth } => {
+                let tab = matches!(row, SidebarRow::Tab { .. });
+                let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth) * 3 + 1);
+                let provider = compact_provider(entry);
+                let title = compact_row_title_for_width(
+                    compact_row_title(entry, tab),
+                    &provider,
+                    usize::from(body.width),
+                    requested_prefix,
+                );
+                let prefix =
+                    compact_row_widths(title, &provider, usize::from(body.width), requested_prefix)
+                        .prefix;
+                let Some(rect) = clamp_row_cells(body, row_y, prefix, SIDEBAR_DOT_FIELD_WIDTH)
+                else {
+                    continue;
+                };
+                targets.push(crate::app::state::SidebarHoverTarget {
+                    rect,
+                    label: agent_dot_tooltip(entry),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for header in nested_header_areas_from_rows(app, &rows, body, scroll_skip) {
+        let spans = nested_header_spans(&header);
+        if let (Some(glyph), Some(status)) = (spans.glyph, header.status) {
+            if let Some(rect) = clamp_row_cells(
+                body,
+                header.rect.y,
+                spans.prefix_width,
+                display_width(glyph),
+            ) {
+                targets.push(crate::app::state::SidebarHoverTarget {
+                    rect,
+                    label: status.label().to_string(),
+                });
+            }
+        }
+        // The full `<id> · <title>` is only worth a tooltip when the row could
+        // not show it; an untruncated title would repeat itself.
+        if spans.title_truncated {
+            if let Some(rect) = clamp_row_cells(
+                body,
+                header.rect.y,
+                spans.prefix_width + spans.glyph_width,
+                display_width(&spans.title),
+            ) {
+                targets.push(crate::app::state::SidebarHoverTarget {
+                    rect,
+                    label: header.title.clone(),
+                });
+            }
+        }
+    }
+
+    targets
+}
+
+/// A cell span inside a sidebar row, clipped to the list body. `None` once the
+/// span starts past the right edge or has no width left.
+fn clamp_row_cells(body: Rect, row_y: u16, offset: usize, width: usize) -> Option<Rect> {
+    if width == 0 || row_y < body.y || row_y >= body.bottom() {
+        return None;
+    }
+    let x = body.x.saturating_add(u16::try_from(offset).ok()?);
+    if x >= body.right() {
+        return None;
+    }
+    let width = u16::try_from(width).ok()?.min(body.right() - x);
+    (width > 0).then(|| Rect::new(x, row_y, width, 1))
 }
 
 pub(crate) fn sidebar_nested_header_at(app: &AppState, row: u16) -> Option<String> {
@@ -5377,6 +5622,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     let search = sidebar_header_search_rect(area);
     let new_thread = sidebar_header_new_thread_rect(area);
     let new_menu = sidebar_header_new_menu_rect(area);
+    let star_filter = sidebar_header_star_filter_rect(area);
     let overflow = sidebar_header_overflow_rect(area);
     frame.render_widget(
         Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
@@ -5405,6 +5651,19 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
             )),
             search,
         );
+    }
+    if star_filter.width > 0 {
+        // Filled glyph while the gate is on, hollow while it is off, so the
+        // control reads as a state and not just as a button.
+        let (glyph, style) = if app.sidebar_starred_only {
+            (
+                "\u{2605}",
+                Style::default().fg(p.yellow).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("\u{2606}", Style::default().fg(p.overlay0))
+        };
+        frame.render_widget(Paragraph::new(Span::styled(glyph, style)), star_filter);
     }
     frame.render_widget(
         Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
@@ -5732,31 +5991,55 @@ fn render_section_header(
     );
 }
 
-fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
-    if header.rect.width == 0 || header.rect.height == 0 {
-        return;
-    }
-    let p = &app.palette;
-    let count_label = (!header.dim).then(|| format!(" ({})", header.count));
-    let count_width = count_label
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
+/// Where a nested header's cells land inside its row. Render and hover both
+/// read this, so a tooltip anchor can never drift from the glyph or title it
+/// points at.
+struct NestedHeaderSpans {
+    prefix_width: usize,
+    glyph: Option<&'static str>,
+    /// Cells the glyph occupies including its trailing gap, `0` without one.
+    glyph_width: usize,
+    title: String,
+    title_truncated: bool,
+}
+
+fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
+    let count_width = if header.dim {
+        0
+    } else {
+        display_width(&format!(" ({})", header.count))
+    };
     let action_width = usize::from(header.action_key.is_some()) * 2;
     let spawn_width = usize::from(header.spawn) * 2;
-    let prefix = if header.dim { "   " } else { "  ▸ " };
+    let prefix_width = display_width(if header.dim { "   " } else { "  ▸ " });
     // The status glyph sits before the id, so it costs the title its width.
     let glyph = header.status.map(WorkGroupStatus::glyph);
     let glyph_width = glyph.map(|glyph| display_width(glyph) + 1).unwrap_or(0);
     let title = truncate_end(
         &header.title,
         usize::from(header.rect.width)
-            .saturating_sub(display_width(prefix))
+            .saturating_sub(prefix_width)
             .saturating_sub(glyph_width)
             .saturating_sub(count_width)
             .saturating_sub(action_width)
             .saturating_sub(spawn_width),
     );
+    NestedHeaderSpans {
+        prefix_width,
+        glyph,
+        glyph_width,
+        title_truncated: display_width(&title) < display_width(&header.title),
+        title,
+    }
+}
+
+fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
+    if header.rect.width == 0 || header.rect.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let count_label = (!header.dim).then(|| format!(" ({})", header.count));
+    let NestedHeaderSpans { glyph, title, .. } = nested_header_spans(header);
     // A dim header carries no live state colour: nothing is running under it.
     let color = if header.dim { p.overlay0 } else { p.subtext0 };
     let mut spans = vec![Span::raw(if header.dim {
@@ -6218,8 +6501,24 @@ pub(crate) fn sidebar_header_new_thread_rect(area: Rect) -> Rect {
     Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
 }
 
+/// Header toggle that gates the tree down to starred sessions. Sits in the
+/// control strip left of the new-thread icon, so the search box shrinks by its
+/// width rather than the icons moving.
+pub(crate) fn sidebar_header_star_filter_rect(area: Rect) -> Rect {
+    let next = sidebar_header_new_thread_rect(area);
+    if next.width == 0 || next.x < area.x.saturating_add(3) {
+        return Rect::default();
+    }
+    Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
+}
+
 pub(crate) fn sidebar_header_search_rect(area: Rect) -> Rect {
-    let control = sidebar_header_new_thread_rect(area);
+    let star = sidebar_header_star_filter_rect(area);
+    let control = if star.width > 0 {
+        star
+    } else {
+        sidebar_header_new_thread_rect(area)
+    };
     if control.width == 0 || control.x <= area.x.saturating_add(1) {
         return Rect::default();
     }
@@ -6941,6 +7240,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn linking_a_pull_request_regroups_only_the_window_it_was_linked_to() {
+        let mut app = app_with_unlinked_tab_directories(&[Some("/work/repo"), Some("/work/repo")]);
+        // Both windows sit in one checkout, so the git tier observes the
+        // branch's pull request for each of them.
+        for tab_idx in 0..2 {
+            let terminal_id = {
+                let tab = &app.workspaces[0].tabs[tab_idx];
+                tab.panes[&tab.root_pane].attached_terminal_id.clone()
+            };
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .replace_git_work_context(crate::work_context::PaneWorkContext {
+                    pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                    ..Default::default()
+                })
+                .expect("git observation");
+        }
+        let linked_terminal_id = {
+            let tab = &app.workspaces[0].tabs[0];
+            tab.panes[&tab.root_pane].attached_terminal_id.clone()
+        };
+        app.terminals
+            .get_mut(&linked_terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                ..Default::default()
+            })
+            .expect("manual link");
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+            .into_iter()
+            .map(|group| (group.key, group.entries.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups,
+            vec![
+                ("https://github.com/o/r/pull/2".to_string(), 1),
+                ("https://github.com/o/r/pull/1".to_string(), 1),
+            ],
+            "the linked window leaves the branch's group instead of joining both"
+        );
+    }
+
+    #[test]
     fn directories_sharing_a_basename_get_distinguishable_headers() {
         let titles = |dirs: &[Option<&str>]| {
             let app = app_with_unlinked_tab_directories(dirs);
@@ -7034,6 +7380,85 @@ pub(crate) mod tests {
             groups.iter().map(|group| &group.key).collect::<Vec<_>>()
         );
         assert!(groups.iter().all(|group| group.unlinked));
+    }
+
+    /// `main` is the most common branch name there is, so two repositories on it
+    /// must stay two groups, and the titles have to say which is which.
+    #[test]
+    fn same_branch_in_two_repos_stays_two_named_groups() {
+        let mut app = app_with_agents(&["herdr", "scalablev2"]);
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        for (ws_idx, repo) in [(0usize, "herdrdev/herdr"), (1, "scalable-so/scalablev2")] {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    branch: Some("main".into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.title.as_str(), group.entries.len()))
+                .collect::<Vec<_>>(),
+            [
+                ("⎇ main · herdrdev/herdr", 1),
+                ("⎇ main · scalable-so/scalablev2", 1),
+            ],
+            "{:?}",
+            groups.iter().map(|group| &group.key).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+                .iter()
+                .map(|group| group.title.clone())
+                .collect::<Vec<_>>(),
+            [
+                "⎇ main · herdrdev/herdr".to_string(),
+                "⎇ main · scalable-so/scalablev2".to_string(),
+            ]
+        );
+    }
+
+    /// A Space holding panes on two repositories names neither: guessing one
+    /// would file the Space under a repository half its work is not in, and the
+    /// choice would flip as panes open and close.
+    #[test]
+    fn a_space_with_two_repos_joins_no_repo_group() {
+        let mut app = app_with_agents(&["bound", "mixed"]);
+        app.workspaces[0].repo_binding = Some("scalable-so/scalablev2".into());
+        app.workspaces[1].test_add_tab(Some("second"));
+        app.ensure_test_terminals();
+        for (tab_idx, repo) in [(0usize, "scalable-so/scalablev2"), (1, "scalable-so/other")] {
+            replace_tab_context(
+                &mut app,
+                1,
+                tab_idx,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+
+        assert_eq!(workspace_parent_group_state(&app, 0), None);
+        assert_eq!(sidebar_space_member_indices(&app, 0), [0]);
+        assert!(workspace_list_entries(&app).iter().all(|entry| matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                indented: false,
+                ..
+            }
+        )));
     }
 
     /// Agent tooling creates a Space per checkout without worktree membership,
@@ -8057,6 +8482,7 @@ pub(crate) mod tests {
             agent_context: None,
             has_agent: true,
             prio: true,
+            starred: false,
             state,
             open_blockers: false,
             completion_tier: None,
@@ -11668,6 +12094,106 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn the_starred_only_gate_hides_every_unstarred_session() {
+        let mut app =
+            priority_app_with_states(&[AgentState::Working, AgentState::Idle, AgentState::Idle]);
+        app.workspaces[1].tabs[0].starred = true;
+        for ws_idx in 0..3 {
+            app.toggle_workspace_agent_disclosure(ws_idx);
+        }
+
+        let all = sidebar_thread_entries(&app).len();
+        assert!(all >= 3, "the fixture projects one entry per workspace");
+
+        app.sidebar_starred_only = true;
+        let visible: Vec<_> = sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                _ => None,
+            })
+            .collect();
+        assert!(!visible.is_empty(), "the starred session survives the gate");
+        assert!(
+            visible
+                .iter()
+                .all(|(ws_idx, starred)| *ws_idx == 1 && *starred),
+            "only the starred session remains, got {visible:?}"
+        );
+
+        app.sidebar_starred_only = false;
+        let unfiltered = sidebar_rows(&app)
+            .into_iter()
+            .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+            .count();
+        assert!(
+            unfiltered > visible.len(),
+            "clearing the gate brings the other sessions back"
+        );
+    }
+
+    #[test]
+    fn a_starred_session_draws_its_star_directly_after_the_title() {
+        let mut entry = compact_test_entry("focus-session", Some(Agent::Claude));
+        entry.starred = true;
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 40, 1);
+
+        let render = |entry: &AgentPanelEntry| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row_with_prefix(
+                        &app, frame, entry, area, 0, true, None, None,
+                    )
+                })
+                .unwrap();
+            row_text(terminal.backend().buffer(), 0, area.width)
+        };
+
+        let starred = render(&entry);
+        let title_end =
+            starred.find("focus-session").expect("title is drawn") + "focus-session".len();
+        assert_eq!(
+            &starred[title_end..title_end + SIDEBAR_STAR_SUFFIX.len()],
+            SIDEBAR_STAR_SUFFIX,
+            "the star follows the title immediately, got {starred:?}"
+        );
+
+        entry.starred = false;
+        let plain = render(&entry);
+        assert!(
+            !plain.contains(SIDEBAR_STAR_SUFFIX.trim()),
+            "an unstarred row draws no star, got {plain:?}"
+        );
+        assert_eq!(
+            starred.chars().count(),
+            plain.chars().count(),
+            "the star is absorbed by the title field, not appended to the row"
+        );
+    }
+
+    #[test]
+    fn a_narrow_row_drops_the_star_rather_than_eating_the_title() {
+        let mut entry = compact_test_entry("session", Some(Agent::Claude));
+        entry.starred = true;
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 12, 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_compact_agent_row_with_prefix(&app, frame, &entry, area, 0, true, None, None)
+            })
+            .unwrap();
+        let text = row_text(terminal.backend().buffer(), 0, area.width);
+        assert!(
+            !text.contains(SIDEBAR_STAR_SUFFIX.trim()),
+            "no star at this width, got {text:?}"
+        );
+    }
+
+    #[test]
     fn blocked_agents_group_above_the_rest_under_their_own_header() {
         let app = priority_app_with_states(&[
             AgentState::Working,
@@ -14117,7 +14643,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(work_group_header_title("SCA-3165", None), "SCA-3165");
 
         let row_title = |title: &str| {
-            sidebar_tab_title(
+            crate::workspace::session_title(
                 Some(&crate::workspace::TabDisplayProjection::Derived {
                     agent: None,
                     ticket: Some("SCA-3165".into()),
@@ -14143,7 +14669,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
 
         assert_eq!(
-            sidebar_tab_title(Some(&projection), None).as_deref(),
+            crate::workspace::session_title(Some(&projection), None).as_deref(),
             Some("SCA-3165 · Fix sidebar rows")
         );
 
@@ -14154,7 +14680,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             title: None,
         };
         assert_eq!(
-            sidebar_tab_title(Some(&binding_only), Some("New Thread".into())).as_deref(),
+            crate::workspace::session_title(Some(&binding_only), Some("New Thread".into()))
+                .as_deref(),
             Some("codex")
         );
     }
@@ -16757,5 +17284,147 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(compute_tab_card_areas(&app, area)
             .iter()
             .all(|card| card.rect.y != job_row.rect.y));
+    }
+
+    fn test_nested_header(
+        title: &str,
+        status: Option<WorkGroupStatus>,
+        width: u16,
+    ) -> NestedHeaderArea {
+        NestedHeaderArea {
+            key: "key".into(),
+            action_key: Some("key".into()),
+            title: title.into(),
+            count: 2,
+            collapsed: false,
+            dim: false,
+            status,
+            spawn: false,
+            rect: Rect::new(0, 0, width, 1),
+        }
+    }
+
+    #[test]
+    fn nested_header_spans_place_the_glyph_before_the_title() {
+        let header = test_nested_header(
+            "SCA-1 \u{b7} short",
+            Some(WorkGroupStatus::TicketInProgress),
+            60,
+        );
+        let spans = nested_header_spans(&header);
+
+        assert_eq!(spans.prefix_width, 4);
+        assert_eq!(spans.glyph, Some("\u{25d0}"));
+        assert_eq!(spans.glyph_width, 2);
+        assert_eq!(spans.title, header.title);
+        assert!(!spans.title_truncated);
+    }
+
+    #[test]
+    fn a_narrow_header_reports_its_title_as_truncated() {
+        let header = test_nested_header(
+            "SCA-3296 \u{b7} enhance text tool to preserve stored ratio",
+            Some(WorkGroupStatus::TicketInReview),
+            24,
+        );
+        let spans = nested_header_spans(&header);
+
+        assert!(spans.title_truncated);
+        assert!(display_width(&spans.title) < display_width(&header.title));
+    }
+
+    #[test]
+    fn agent_dot_tooltip_says_what_the_dot_means() {
+        let mut entry = compact_test_entry("task", Some(Agent::Claude));
+        entry.state = AgentState::Working;
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
+
+        entry.state = AgentState::Blocked;
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        // A gate on a working pane does not steal the working label; a gate on
+        // a stopped pane is the thing blocking it.
+        entry.state = AgentState::Working;
+        entry.open_blockers = true;
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
+        entry.state = AgentState::Idle;
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        // A usage limit outranks every lifecycle label.
+        entry.usage_limited = true;
+        assert_eq!(agent_dot_tooltip(&entry), "Usage limit");
+
+        // A pane that renamed its own status is quoted, not overridden.
+        entry
+            .state_labels
+            .insert("usage".into(), "resets 14:00".into());
+        assert_eq!(agent_dot_tooltip(&entry), "resets 14:00");
+
+        let shell = compact_test_entry("terminal", None);
+        assert_eq!(agent_dot_tooltip(&shell), "No agent");
+    }
+
+    #[test]
+    fn hover_targets_anchor_on_the_agent_dot_a_row_actually_drew() {
+        let app = app_with_agents(&["alpha"]);
+        let area = Rect::new(0, 0, 32, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let target = compute_sidebar_hover_targets(&app, area)
+            .into_iter()
+            .find(|target| target.rect.y == card.rect.y)
+            .expect("dot target on the agent row");
+
+        assert_eq!(target.label, "Working");
+        assert_eq!(target.rect.height, 1);
+        // The anchor sits on the dot the row drew, not on its left edge.
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.width);
+        assert_eq!(
+            rendered.chars().nth(usize::from(target.rect.x)),
+            Some('\u{25cf}'),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_truncated_work_header_offers_its_full_title_on_hover() {
+        let header = test_nested_header(
+            "SCA-3296 \u{b7} enhance text tool to preserve stored ratio",
+            Some(WorkGroupStatus::TicketInReview),
+            24,
+        );
+        let spans = nested_header_spans(&header);
+        let glyph = clamp_row_cells(header.rect, header.rect.y, spans.prefix_width, 1)
+            .expect("glyph anchor");
+        let title = clamp_row_cells(
+            header.rect,
+            header.rect.y,
+            spans.prefix_width + spans.glyph_width,
+            display_width(&spans.title),
+        )
+        .expect("title anchor");
+
+        // The two anchors explain different things and must not overlap.
+        assert!(glyph.right() <= title.x);
+        assert!(title.right() <= header.rect.right());
+        assert_eq!(WorkGroupStatus::TicketInReview.label(), "In Review");
+    }
+
+    #[test]
+    fn a_row_span_past_the_right_edge_has_no_anchor() {
+        let body = Rect::new(0, 0, 10, 3);
+
+        assert!(clamp_row_cells(body, 0, 10, 3).is_none());
+        assert!(clamp_row_cells(body, 0, 0, 0).is_none());
+        assert!(clamp_row_cells(body, 9, 0, 3).is_none());
+        assert_eq!(
+            clamp_row_cells(body, 0, 8, 3),
+            Some(Rect::new(8, 0, 2, 1)),
+            "a span is clipped to the body, never past it"
+        );
     }
 }

@@ -1020,6 +1020,16 @@ pub struct AgentCardArea {
     pub row_idx: usize,
 }
 
+/// A sub-cell of a sidebar row that explains itself on hover: a status glyph,
+/// an agent dot, or a work-item title the row was too narrow to show in full.
+/// The label is resolved while the frame is laid out, so the tooltip never has
+/// to walk the sidebar rows again at render time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarHoverTarget {
+    pub rect: Rect,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabCardArea {
     pub ws_idx: usize,
@@ -1559,7 +1569,6 @@ pub(crate) struct DockPresentationState {
     pub(crate) context_objects: Vec<DockObjectRef>,
     pub(crate) suppressed_context: std::collections::HashSet<DockObjectRef>,
     pub(crate) maximized: bool,
-    pub(crate) auto_open: bool,
     pub(crate) surface_menu: Option<DockSurfaceMenu>,
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
@@ -1631,7 +1640,6 @@ impl Default for DockPresentationState {
             context_objects: Vec::new(),
             suppressed_context: std::collections::HashSet::new(),
             maximized: false,
-            auto_open: false,
             surface_menu: None,
             chooser_focused: false,
             scroll: 0,
@@ -2191,6 +2199,10 @@ pub struct ViewState {
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
+    /// Hover-only explanations for sidebar row internals (status glyphs, agent
+    /// dots, truncated work titles), in the order `ControlId::SidebarHover`
+    /// indexes them.
+    pub(crate) sidebar_hover_targets: Vec<SidebarHoverTarget>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -2255,6 +2267,12 @@ pub struct ViewState {
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
     /// label and the clickable rect can never disagree.
     pub status_buttons: Vec<StatusButton>,
+    /// Ticket and pull-request links of the focused pane, drawn after the
+    /// status-row title. Clicking one opens it in the dock.
+    pub(crate) status_work_links: Vec<StatusWorkLink>,
+    /// The status row's right-aligned segments, fitted once per frame so the
+    /// title and the links can be laid out beside what will actually be drawn.
+    pub(crate) status_segments: Vec<crate::ui::status::Segment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2275,6 +2293,16 @@ pub(crate) struct StatusButton {
     /// Drawn with the accent instead of the dim overlay: the inbox has work in
     /// it, or the surface this button opens is already showing.
     pub active: bool,
+}
+
+/// A work link the focused pane carries, named in the status row beside the
+/// title. Computed once per frame with the label it renders, so the clickable
+/// rect and the drawn text can never disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusWorkLink {
+    pub rect: Rect,
+    pub label: String,
+    pub object: DockObjectRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2865,6 +2893,9 @@ pub enum ContextMenuKind {
     Tab {
         ws_idx: usize,
         tab_idx: usize,
+        /// Snapshot of the tab's star at open time, so the entry can read
+        /// "Star" or "Unstar" without the menu reaching back into state.
+        starred: bool,
     },
     Pane {
         ws_idx: usize,
@@ -2876,8 +2907,17 @@ pub enum ContextMenuKind {
         /// Work link under the click, when the clicked cell carries one that is
         /// not already bound to every pane of this window.
         linkable_work_link: Option<PaneMenuWorkLinkAction>,
+        /// Whatever link the clicked cell carries, matched to no pattern. A
+        /// pull request and a paste-bin URL are equally copyable.
+        link: Option<String>,
     },
 }
+
+/// Label of the pane menu entry that copies the clicked link.
+pub const COPY_LINK_ITEM: &str = "Copy link";
+/// Labels of the session-star entries in the tab context menu.
+pub const STAR_ITEM: &str = "Star";
+pub const UNSTAR_ITEM: &str = "Unstar";
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
@@ -3033,17 +3073,26 @@ impl ContextMenuState {
                 "Open worktree...",
                 if *collapsed { "Expand" } else { "Collapse" },
             ],
-            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { starred, .. } => vec![
+                "New tab",
+                "Rename",
+                if *starred { UNSTAR_ITEM } else { STAR_ITEM },
+                "Close",
+            ],
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
                 linkable_work_link,
+                link,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
                 if let Some(action) = linkable_work_link {
                     items.push(action.menu_item());
+                }
+                if link.is_some() {
+                    items.push(COPY_LINK_ITEM);
                 }
                 if *has_manual_label {
                     items.push("Clear pane name");
@@ -3359,6 +3408,9 @@ pub struct AppState {
     pub(crate) sidebar_filter_menu_selected: usize,
     /// Typed input goes to the persisted sidebar row query while this is set.
     pub(crate) sidebar_search_active: bool,
+    /// Sidebar-only view gate: show just the starred sessions. Pure client
+    /// presentation state — the star itself lives on the tab.
+    pub(crate) sidebar_starred_only: bool,
     /// Downward creation menu anchored to the sidebar header.
     pub(crate) sidebar_new_menu: Option<SidebarNewMenuState>,
     /// Downward recent-project picker. Project paths are derived at render time.
@@ -3460,15 +3512,14 @@ pub struct AppState {
     pub(crate) dock_pane_tabs: std::collections::HashMap<PaneFocusTarget, PaneDockTabs>,
     pub(crate) dock_followed_pane: Option<PaneFocusTarget>,
     pub(crate) dock_context_objects: Vec<DockObjectRef>,
+    /// Whether a work link the focused pane carries opens the dock on its own.
+    /// Off by default: a link arrives while the human is reading the pane, and
+    /// taking a third of the width for it interrupts that. The status row names
+    /// the link instead, and the click on that name is what opens the dock.
+    pub(crate) open_dock_on_work_link: bool,
     pub(crate) dock_suppressed_context: std::collections::HashSet<DockObjectRef>,
     /// Dock takes the whole main area. TUI presentation state.
     pub dock_maximized: bool,
-    /// A focused pane's context objects may open the dock on their own. Off by
-    /// default: an automatically appearing panel steals width from the panes
-    /// the operator is reading, so it has to be asked for. TUI presentation
-    /// state, persisted per client.
-    pub(crate) dock_auto_open: bool,
-    pub(crate) dock_auto_open_persistence_request: Option<bool>,
     /// Open `+` chooser dropdown. TUI presentation state.
     pub(crate) dock_surface_menu: Option<DockSurfaceMenu>,
     /// Keyboard focus sits on the chooser card grid. TUI presentation state.
@@ -3963,9 +4014,11 @@ pub(crate) enum SidebarFooterItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlId {
     SidebarNewThread,
+    SidebarStarFilter,
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
+    SidebarHover(usize),
     SidebarAnimationPause,
     DockTab(usize),
     DockClose,
@@ -4798,7 +4851,14 @@ impl AppState {
         else {
             return surface.label().to_string();
         };
-        match surface {
+        self.dock_object_label(object)
+    }
+
+    /// The short name of a bound object: `#312`, `SCA-3296`, a trimmed Missive
+    /// subject. The dock tab strip and the status row share it so one link
+    /// reads the same wherever it is offered.
+    pub(crate) fn dock_object_label(&self, object: &DockObjectRef) -> String {
+        match object.surface {
             DockSurface::Pr => object
                 .key
                 .rsplit('/')
@@ -4819,7 +4879,7 @@ impl AppState {
                 })
                 .map(|conversation| crate::ui::text::truncate_end(&conversation.subject, 12))
                 .unwrap_or_else(|| crate::ui::text::truncate_end(&object.key, 12)),
-            _ => surface.label().to_string(),
+            surface => surface.label().to_string(),
         }
     }
 
@@ -5051,17 +5111,22 @@ impl AppState {
             }
         }
         self.dock_context_objects = objects.clone();
-        for object in objects {
-            if !self.dock_tab_bindings.iter().any(|binding| {
-                binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.object == object)
-            }) {
-                self.dock_open_surfaces.push(object.surface);
-                self.dock_tab_bindings.push(Some(DockTabBinding {
-                    object,
-                    origin: DockTabOrigin::Context,
-                }));
+        // Context tabs are the opt-in half of this: without them the objects
+        // are still tracked, because the status row names them and a click
+        // there opens the dock deliberately.
+        if self.open_dock_on_work_link {
+            for object in objects {
+                if !self.dock_tab_bindings.iter().any(|binding| {
+                    binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.object == object)
+                }) {
+                    self.dock_open_surfaces.push(object.surface);
+                    self.dock_tab_bindings.push(Some(DockTabBinding {
+                        object,
+                        origin: DockTabOrigin::Context,
+                    }));
+                }
             }
         }
         let retained_active = active.and_then(|(surface, object)| {
@@ -5075,14 +5140,18 @@ impl AppState {
                 })
         });
         if let Some(index) = retained_active.or_else(|| {
-            self.dock_tab_bindings
-                .iter()
-                .position(|binding| binding.is_some())
+            self.open_dock_on_work_link
+                .then(|| {
+                    self.dock_tab_bindings
+                        .iter()
+                        .position(|binding| binding.is_some())
+                })
+                .flatten()
         }) {
             // The context tab is always adopted; only revealing the dock is
             // opt-in. Without this gate every focus change on a pane that knows
             // its PR would take width from the panes being read.
-            if self.dock_auto_open {
+            if self.open_dock_on_work_link {
                 self.dock_collapsed = false;
             }
             self.select_dock_tab_index(index);
@@ -5160,18 +5229,6 @@ impl AppState {
         }
     }
 
-    /// Flip whether context objects may open the dock, and remember the choice
-    /// for this client. The dock is not opened or closed here: the toggle only
-    /// governs what happens on the next focus change.
-    pub(crate) fn toggle_dock_auto_open(&mut self) {
-        self.dock_auto_open = !self.dock_auto_open;
-        self.dock_auto_open_persistence_request = Some(self.dock_auto_open);
-    }
-
-    pub(crate) fn take_dock_auto_open_persistence_request(&mut self) -> Option<bool> {
-        self.dock_auto_open_persistence_request.take()
-    }
-
     pub(crate) fn toggle_dock_maximized(&mut self) {
         self.dock_maximized = !self.dock_maximized;
     }
@@ -5211,7 +5268,6 @@ impl AppState {
             &mut other.suppressed_context,
         );
         std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
-        std::mem::swap(&mut self.dock_auto_open, &mut other.auto_open);
         std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
@@ -5716,6 +5772,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
@@ -5765,6 +5822,7 @@ impl AppState {
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -5820,6 +5878,8 @@ impl AppState {
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
+                status_work_links: Vec::new(),
+                status_segments: Vec::new(),
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
@@ -5858,10 +5918,9 @@ impl AppState {
             dock_pane_tabs: std::collections::HashMap::new(),
             dock_followed_pane: None,
             dock_context_objects: Vec::new(),
+            open_dock_on_work_link: false,
             dock_suppressed_context: std::collections::HashSet::new(),
             dock_maximized: false,
-            dock_auto_open: false,
-            dock_auto_open_persistence_request: None,
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
@@ -6350,9 +6409,9 @@ impl AppState {
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
                     assert_workspace_index(ws_idx, "context menu workspace")
                 }
-                ContextMenuKind::Tab { ws_idx, tab_idx } => {
-                    assert_tab_index(ws_idx, tab_idx, "context menu tab")
-                }
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                } => assert_tab_index(ws_idx, tab_idx, "context menu tab"),
                 ContextMenuKind::Pane {
                     ws_idx,
                     tab_idx,
@@ -6957,6 +7016,9 @@ mod tests {
 
     fn app_with_object_and_bare_panes() -> (AppState, PaneId, PaneId) {
         let mut state = AppState::test_new();
+        // Context tabs are the configured behaviour these cases describe; the
+        // default path is covered by `work_links_do_not_open_the_dock_by_default`.
+        state.open_dock_on_work_link = true;
         let mut workspace = crate::workspace::Workspace::test_new("objects");
         let object_pane = workspace.tabs[0].root_pane;
         workspace.test_add_tab(Some("bare"));
@@ -7029,11 +7091,46 @@ mod tests {
     }
 
     #[test]
+    fn work_links_do_not_open_the_dock_by_default() {
+        let (mut state, object_pane, _) = app_with_object_and_bare_panes();
+        state.open_dock_on_work_link = false;
+        state.dock_collapsed = true;
+        let _ = state.focus_pane_in_workspace(0, object_pane);
+        state.reconcile_dock_context_tabs();
+
+        assert!(
+            state.dock_open_surfaces.is_empty(),
+            "a linked pane opens no dock tab on its own"
+        );
+        assert!(
+            state.dock_collapsed,
+            "the dock stays where the human left it"
+        );
+        assert_eq!(
+            state
+                .dock_context_objects
+                .iter()
+                .map(|object| state.dock_object_label(object))
+                .collect::<Vec<_>>(),
+            ["#159", "#206", "SCA-3165"],
+            "the links are still tracked, for the status row to name"
+        );
+
+        // The click on a named link is what opens it, and it opens the dock.
+        let object = state.dock_context_objects[2].clone();
+        state.dock_collapsed = false;
+        state.open_dock_object(object.clone(), DockTabOrigin::User);
+        assert_eq!(state.dock_tab, Some(DockSurface::Linear));
+        assert_eq!(state.dock_tab_label(0), "SCA-3165");
+        assert!(!state.dock_collapsed);
+    }
+
+    #[test]
     fn f20_context_tabs_follow_objects_and_bare_panes_stay_empty() {
         let (mut state, object_pane, bare_pane) = app_with_object_and_bare_panes();
         // Adopting the context tabs is unconditional; revealing the dock is the
         // opt-in half, so this case turns it on and the next one leaves it off.
-        state.dock_auto_open = true;
+        state.open_dock_on_work_link = true;
         state.reconcile_dock_context_tabs();
         assert_eq!(
             (0..state.dock_open_surfaces.len())
@@ -7058,33 +7155,6 @@ mod tests {
         state.reconcile_dock_context_tabs();
         assert_eq!(state.dock_open_surfaces.len(), 4);
         assert!(state.dock_open_surfaces.contains(&DockSurface::Files));
-    }
-
-    /// Automatic opening is off by default: a pane that knows its objects still
-    /// contributes its context tabs, but a collapsed dock stays collapsed, so
-    /// focusing such a pane never takes width from the panes being read.
-    #[test]
-    fn context_objects_do_not_open_a_collapsed_dock_unless_auto_open_is_on() {
-        let (mut state, _object_pane, _bare_pane) = app_with_object_and_bare_panes();
-        assert!(!state.dock_auto_open);
-        state.dock_collapsed = true;
-        state.reconcile_dock_context_tabs();
-        assert!(state.dock_collapsed);
-        assert_eq!(
-            (0..state.dock_open_surfaces.len())
-                .map(|index| state.dock_tab_label(index))
-                .collect::<Vec<_>>(),
-            ["#159", "#206", "SCA-3165"]
-        );
-
-        // The toggle only governs the next reconcile; it never opens or closes
-        // the dock by itself.
-        state.toggle_dock_auto_open();
-        assert_eq!(state.take_dock_auto_open_persistence_request(), Some(true));
-        assert!(state.dock_collapsed);
-        state.dock_context_objects.clear();
-        state.reconcile_dock_context_tabs();
-        assert!(!state.dock_collapsed);
     }
 
     #[test]

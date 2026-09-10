@@ -802,6 +802,7 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
@@ -972,6 +973,7 @@ impl App {
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -1027,6 +1029,8 @@ impl App {
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
+                status_work_links: Vec::new(),
+                status_segments: Vec::new(),
             },
             drag: None,
             workspace_presses: HashMap::new(),
@@ -1064,8 +1068,6 @@ impl App {
             dock_context_objects: Vec::new(),
             dock_suppressed_context: std::collections::HashSet::new(),
             dock_maximized: false,
-            dock_auto_open: crate::client::presentation::load_dock_auto_open(),
-            dock_auto_open_persistence_request: None,
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
@@ -1184,6 +1186,7 @@ impl App {
             pane_outer_borders: config.ui.pane_outer_borders,
             pane_scrollbars: config.ui.pane_scrollbars,
             show_pull_button: config.ui.show_pull_button,
+            open_dock_on_work_link: config.ui.open_dock_on_work_link,
             show_pane_toggle_buttons: config.ui.show_pane_toggle_buttons,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
@@ -1897,9 +1900,6 @@ impl App {
             if let Some(width) = self.state.take_dock_width_persistence_request() {
                 crate::client::presentation::save_dock_width(width);
             }
-            if let Some(enabled) = self.state.take_dock_auto_open_persistence_request() {
-                crate::client::presentation::save_dock_auto_open(enabled);
-            }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);
             }
@@ -2419,6 +2419,7 @@ impl App {
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.show_pull_button = config.ui.show_pull_button;
+                self.state.open_dock_on_work_link = config.ui.open_dock_on_work_link;
                 self.state.show_pane_toggle_buttons = config.ui.show_pane_toggle_buttons;
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =

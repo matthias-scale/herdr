@@ -79,6 +79,24 @@ pub enum TabPinMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabStarParams {
+    pub tab_id: String,
+    #[serde(default)]
+    pub mode: TabStarMode,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TabStarMode {
+    #[default]
+    Toggle,
+    Star,
+    Unstar,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabMoveParams {
     pub tab_id: String,
     pub insert_index: usize,
@@ -91,6 +109,8 @@ pub struct TabInfo {
     pub number: usize,
     pub label: String,
     pub prio: bool,
+    #[serde(default)]
+    pub starred: bool,
     pub focused: bool,
     pub pane_count: usize,
     pub agent_status: AgentStatus,

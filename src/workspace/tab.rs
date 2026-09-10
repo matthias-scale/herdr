@@ -55,6 +55,67 @@ pub(crate) enum TabPrioAction {
 /// Separator joining the components of a derived tab projection.
 pub(crate) const TAB_DISPLAY_SEPARATOR: &str = " · ";
 
+pub(crate) fn title_without_identifier<'a>(identifier: &str, title: &'a str) -> Option<&'a str> {
+    let title = title.trim();
+    let prefix = title.get(..identifier.len())?;
+    if !prefix.eq_ignore_ascii_case(identifier) {
+        return None;
+    }
+    let remainder = title.get(identifier.len()..)?;
+    if !remainder.is_empty()
+        && !remainder.chars().next().is_some_and(|character| {
+            character.is_whitespace() || matches!(character, ':' | '·' | '-')
+        })
+    {
+        return None;
+    }
+    Some(
+        remainder
+            .trim_start()
+            .strip_prefix([':', '·', '-'])
+            .unwrap_or(remainder.trim_start())
+            .trim_start(),
+    )
+}
+
+/// The session's title as every surface names it.
+///
+/// The sidebar row and the status row read this one function, so a session
+/// cannot be called two different things on the same screen. The worktree
+/// binding is deliberately absent: it belongs to the Spaces and Repo group
+/// headers, and the agent is already stripped from a derived title.
+pub(crate) fn session_title(
+    projection: Option<&TabDisplayProjection>,
+    fallback: Option<String>,
+) -> Option<String> {
+    let Some(TabDisplayProjection::Derived {
+        agent,
+        ticket,
+        binding: _,
+        title,
+    }) = projection
+    else {
+        return fallback;
+    };
+    let normalized_title = match (ticket.as_deref(), title.as_deref()) {
+        (Some(identifier), Some(title)) => title_without_identifier(identifier, title)
+            .map(str::to_string)
+            .or_else(|| Some(title.to_string())),
+        (_, title) => title.map(str::to_string),
+    };
+    let label = [ticket.clone(), normalized_title]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if label.is_empty() {
+        agent.clone().or(fallback)
+    } else {
+        Some(label)
+    }
+}
+
 impl TabDisplayProjection {
     pub(crate) fn full_label(&self) -> String {
         match self {
@@ -127,6 +188,10 @@ pub struct Tab {
     /// Pinned by the user into the sidebar's Pinned group. Unlike the derived
     /// attention priority, nothing but an explicit toggle ever changes it.
     pub pinned: bool,
+    /// Starred by the user to mark a focus session. Purely a user tag: it never
+    /// moves the row between sidebar groups the way `pinned` does, and nothing
+    /// but an explicit toggle ever changes it.
+    pub starred: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
@@ -489,6 +554,7 @@ impl Tab {
                 zoomed: false,
                 prio: false,
                 pinned: false,
+                starred: false,
                 events,
                 render_notify,
                 render_dirty,
@@ -864,6 +930,7 @@ impl Tab {
             zoomed: false,
             prio: false,
             pinned: false,
+            starred: false,
             events,
             render_notify,
             render_dirty,

@@ -300,7 +300,7 @@ fn render_tab_strip(app: &AppState, frame: &mut Frame) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 AUTO_OPEN_GLYPH,
-                Style::default().fg(if app.dock_auto_open {
+                Style::default().fg(if app.open_dock_on_work_link {
                     app.palette.accent
                 } else {
                     app.palette.overlay0

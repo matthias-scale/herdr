@@ -1406,6 +1406,7 @@ mod tests {
             has_agent: agent_label.is_some(),
             foreground_process_name: None,
             prio: false,
+            starred: false,
             state: AgentState::Idle,
             open_blockers: false,
             completion_tier: None,

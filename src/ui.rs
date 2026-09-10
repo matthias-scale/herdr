@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
@@ -45,7 +45,7 @@ pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// `terminal::counts_as_blocked`.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
-mod status;
+pub(crate) mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
@@ -151,16 +151,16 @@ pub(crate) use self::{
         sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
         sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
-        sidebar_missive_copy_url, sidebar_nested_header_at, sidebar_new_menu_layout,
-        sidebar_new_thread_layout, sidebar_new_thread_matches, sidebar_object_action_at,
-        sidebar_object_at, sidebar_object_menu_item_at, sidebar_object_menu_items,
-        sidebar_pull_request_actions, sidebar_pull_request_key, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
-        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
-        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
+        sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
+        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
+        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
+        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
+        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
@@ -184,7 +184,7 @@ pub(crate) use self::{
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::ViewLayout;
+use crate::app::state::{Palette, ViewLayout};
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -565,6 +565,11 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
+    let sidebar_hover_targets = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_sidebar_hover_targets(app, sidebar_area)
+    };
     let sidebar_footer_work_hit_area = if app.sidebar_collapsed {
         Rect::default()
     } else {
@@ -759,6 +764,7 @@ fn compute_view_internal(
         sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
+        sidebar_hover_targets,
         visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -799,6 +805,8 @@ fn compute_view_internal(
         } else {
             Vec::new()
         },
+        status_work_links: Vec::new(),
+        status_segments: Vec::new(),
         scratchpad_link_rows: if !app.dock_collapsed
             && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
         {
@@ -840,6 +848,17 @@ fn compute_view_internal(
     // The menu anchors on the `+`, so its geometry needs the strip already
     // stored on the view.
     app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
+    // The links follow the title, and the title starts at the sidebar's right
+    // edge, so they are laid out only once this frame's sidebar is on the view.
+    // The row is fitted once here: the status segments, the title, and the
+    // links share one layout pass, and render draws what this stored.
+    if status_bar_is_renderable(app, area) {
+        app.view.status_segments = status::fitted_status_segments(app, status_bar_rect);
+        app.view.status_work_links = status::status_work_links(app, status_bar_rect);
+    } else {
+        app.view.status_segments = Vec::new();
+        app.view.status_work_links = Vec::new();
+    }
     app.sync_copy_mode_search_geometry();
 }
 
@@ -1048,6 +1067,7 @@ fn compute_mobile_view(
         sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
+        sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -1075,6 +1095,8 @@ fn compute_mobile_view(
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),
         status_buttons: Vec::new(),
+        status_work_links: Vec::new(),
+        status_segments: Vec::new(),
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
@@ -1291,6 +1313,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
+    notepad::render_notepad_caret(app, frame);
     // Last, and over everything: a due break reminder outranks whatever the
     // operator was looking at, which is the point of it.
     pomodoro::render_overlay(app, frame, frame.area());
@@ -1402,6 +1425,30 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
         && b.x < a.x.saturating_add(a.width)
         && a.y < b.y.saturating_add(b.height)
         && b.y < a.y.saturating_add(a.height)
+}
+
+/// Opaque backdrop for a modal that has to be answered before work resumes.
+/// `dim_background` only adds the DIM modifier, which several terminals render
+/// as no change at all, so a blocking prompt gets a real veil instead: the
+/// cells behind it are blanked so the work underneath cannot be read past the
+/// dialog.
+fn veil_background(frame: &mut Frame, area: Rect, palette: &Palette) {
+    // The 16-colour theme leaves `surface0` as the terminal's own background,
+    // which would make the veil invisible; `surface1` is a concrete colour in
+    // every bundled theme.
+    let bg = match palette.surface0 {
+        Color::Reset => palette.surface1,
+        color => color,
+    };
+    let style = Style::default().bg(bg).fg(palette.overlay0);
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            cell.reset();
+            cell.set_style(style);
+        }
+    }
 }
 
 fn dim_background(frame: &mut Frame, area: Rect) {
