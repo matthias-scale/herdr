@@ -1255,6 +1255,7 @@ pub struct PaneRuntime {
     #[cfg(test)]
     resize_count: Cell<usize>,
     child_pid: Arc<AtomicU32>,
+    tty_name: Option<std::path::PathBuf>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
@@ -1901,6 +1902,7 @@ impl PaneRuntime {
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
+            tty_name: self.tty_name.clone(),
             rows,
             cols,
             cell_width_px,
@@ -2123,6 +2125,7 @@ impl PaneRuntime {
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
+            tty_name,
             rows,
             cols,
             cell_width_px,
@@ -2276,6 +2279,7 @@ impl PaneRuntime {
             #[cfg(test)]
             resize_count: Cell::new(0),
             child_pid,
+            tty_name,
             reported_cwd,
             child_wait_completed: None,
             kitty_keyboard_flags,
@@ -2342,6 +2346,7 @@ impl PaneRuntime {
             pane_id = pane_id.raw(),
             "pty spawn returned"
         );
+        let tty_name = spawned.tty_name;
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
@@ -2935,6 +2940,7 @@ impl PaneRuntime {
             #[cfg(test)]
             resize_count: Cell::new(0),
             child_pid,
+            tty_name,
             reported_cwd,
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
@@ -3441,6 +3447,10 @@ impl PaneRuntime {
         (pid > 0).then_some(pid)
     }
 
+    pub fn tty_name(&self) -> Option<&Path> {
+        self.tty_name.as_deref()
+    }
+
     pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
@@ -3597,6 +3607,7 @@ impl PaneRuntime {
                 current_size: Cell::new((rows, cols, 0, 0)),
                 resize_count: Cell::new(0),
                 child_pid: Arc::new(AtomicU32::new(0)),
+                tty_name: None,
                 reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
@@ -4382,6 +4393,7 @@ mod tests {
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
             child_pid: Arc::new(AtomicU32::new(0)),
+            tty_name: None,
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
@@ -4420,6 +4432,7 @@ mod tests {
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
             child_pid: Arc::new(AtomicU32::new(0)),
+            tty_name: None,
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),

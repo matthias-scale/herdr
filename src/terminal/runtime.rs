@@ -598,6 +598,10 @@ impl TerminalRuntime {
         self.0.child_pid()
     }
 
+    pub fn tty_name(&self) -> Option<&std::path::Path> {
+        self.0.tty_name()
+    }
+
     pub(crate) fn current_size(&self) -> (u16, u16) {
         self.0.current_size()
     }

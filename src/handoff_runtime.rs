@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct HandoffRuntimeState {
     pub pane_id: u32,
     pub child_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty_name: Option<std::path::PathBuf>,
     pub rows: u16,
     pub cols: u16,
     pub cell_width_px: u32,
