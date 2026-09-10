@@ -2102,6 +2102,7 @@ pub(crate) enum HomeHitTarget {
     Project,
     Repo,
     Directory,
+    Machine,
     Workspace,
     Ref,
     Target,
@@ -3213,6 +3214,9 @@ pub struct AppState {
     /// Checkout groups resolved from `[[projects]]`, scanned once at config
     /// time. Never rescanned from the render path: the scan reads directories.
     pub(crate) projects: Vec<crate::app::projects::Project>,
+    /// Machines the composer can dispatch to, resolved from the configured
+    /// fleet. Shared runtime fact: it decides where a launch actually runs.
+    pub(crate) machines: Vec<crate::app::machines::Machine>,
     /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
     pub(crate) home_ref_cache:
         std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
@@ -5596,6 +5600,7 @@ impl AppState {
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             launch_profiles: crate::app::launch_profiles::resolve(&[]),
             projects: Vec::new(),
+            machines: crate::app::machines::resolve(&crate::config::FleetConfig::default()),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
             request_tool_probes: false,

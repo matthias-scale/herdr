@@ -98,6 +98,12 @@ pub enum AppEvent {
     ToolProbesFinished {
         probes: Vec<crate::app::probes::ToolProbe>,
     },
+    /// A Home dispatch to another machine finished; carries that machine's
+    /// pane id on success.
+    HomeRemoteSpawnFinished {
+        machine: String,
+        result: Result<String, String>,
+    },
     /// A requested Home checkout completed before agent launch.
     HomeCheckoutFinished {
         plan: Box<crate::app::home::HomeDispatchPlan>,

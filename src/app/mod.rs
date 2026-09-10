@@ -30,6 +30,7 @@ mod ids;
 pub(crate) mod inbox;
 mod input;
 pub(crate) mod launch_profiles;
+pub(crate) mod machines;
 #[cfg(test)]
 pub(crate) use input::SidebarWorkGroupKeyAction;
 mod notepad;
@@ -1167,6 +1168,7 @@ impl App {
             new_thread_workspace: config.ui.new_thread_workspace,
             launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
             projects: crate::app::projects::resolve(&config.projects),
+            machines: crate::app::machines::resolve(&config.remote.fleet),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
@@ -2402,6 +2404,7 @@ impl App {
                 self.state.launch_profiles =
                     crate::app::launch_profiles::resolve(&config.launch_profiles);
                 self.state.projects = crate::app::projects::resolve(&config.projects);
+                self.state.machines = crate::app::machines::resolve(&config.remote.fleet);
                 self.state
                     .add_project_start_dir
                     .clone_from(&config.ui.add_project_start_dir);

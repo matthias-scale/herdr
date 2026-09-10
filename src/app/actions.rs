@@ -3157,7 +3157,8 @@ impl AppState {
             | AppEvent::HomeRefsRefreshed { .. }
             | AppEvent::HomeGithubReposRefreshed { .. }
             | AppEvent::ToolProbesFinished { .. }
-            | AppEvent::HomeCheckoutFinished { .. } => Vec::new(),
+            | AppEvent::HomeCheckoutFinished { .. }
+            | AppEvent::HomeRemoteSpawnFinished { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()

@@ -127,6 +127,9 @@ impl App {
             AppEvent::HomeCheckoutFinished { plan, result } => {
                 self.handle_home_checkout_finished(*plan, result)
             }
+            AppEvent::HomeRemoteSpawnFinished { machine, result } => {
+                self.handle_home_remote_spawn_finished(&machine, result)
+            }
             AppEvent::GitStatusRefreshed {
                 generation,
                 results,

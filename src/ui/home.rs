@@ -421,6 +421,11 @@ fn chip_specs(
     if home.repo_visible() {
         specs.push((HomeFocus::Repo, format!("{} ▾", home.repo_label())));
     }
+    if home.machine_visible() {
+        if let Some(machine) = home.machine() {
+            specs.push((HomeFocus::Machine, format!("{} ▾", machine.name)));
+        }
+    }
     if target_in_chip_row(app, home, composer) {
         specs.push((HomeFocus::Target, target_chip_label(app, home)));
     }
@@ -887,6 +892,11 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|repo| repo.name.clone())
             .collect(),
+        HomePicker::Machine => home
+            .machines()
+            .iter()
+            .map(|machine| machine.name.clone())
+            .collect(),
         HomePicker::Directory => match home.browse.as_ref() {
             // Browsing replaces the options with what is under the typed path.
             Some(browse) => browse.children.clone(),
@@ -1317,6 +1327,7 @@ pub(super) fn home_hit_areas(
                     HomeFocus::Project => HomeHitTarget::Project,
                     HomeFocus::Repo => HomeHitTarget::Repo,
                     HomeFocus::Directory => HomeHitTarget::Directory,
+                    HomeFocus::Machine => HomeHitTarget::Machine,
                     HomeFocus::Workspace => HomeHitTarget::Workspace,
                     HomeFocus::Ref => HomeHitTarget::Ref,
                     HomeFocus::Target => HomeHitTarget::Target,
@@ -2031,6 +2042,7 @@ mod tests {
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],
             env: Vec::new(),
+            remote: None,
         });
         app.home = Some(home);
         let queue = [blocked(0)];
@@ -2106,6 +2118,7 @@ mod tests {
                 HomeFocus::Project => HomeHitTarget::Project,
                 HomeFocus::Repo => HomeHitTarget::Repo,
                 HomeFocus::Directory => HomeHitTarget::Directory,
+                HomeFocus::Machine => HomeHitTarget::Machine,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
                 HomeFocus::Target => HomeHitTarget::Target,
@@ -2330,6 +2343,7 @@ mod tests {
                 HomeFocus::Project => HomeHitTarget::Project,
                 HomeFocus::Repo => HomeHitTarget::Repo,
                 HomeFocus::Directory => HomeHitTarget::Directory,
+                HomeFocus::Machine => HomeHitTarget::Machine,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
                 HomeFocus::Target => HomeHitTarget::Target,
