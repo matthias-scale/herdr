@@ -559,6 +559,12 @@
           "description": "Create a new workspace."
         },
         {
+          "key": "keys.new_thread",
+          "type": "keybinding",
+          "default": "\"prefix+alt+c\"",
+          "description": "Open the project picker and start a new Home thread in the project it selects."
+        },
+        {
           "key": "keys.new_worktree",
           "type": "keybinding",
           "default": "\"prefix+shift+g\"",

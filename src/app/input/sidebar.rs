@@ -114,7 +114,11 @@ impl AppState {
         else {
             return false;
         };
-        let Some(directory) = self.home_directory_options().get(path_index).cloned() else {
+        let Some(directory) = self
+            .new_thread_options()
+            .get(path_index)
+            .map(|option| option.path.clone())
+        else {
             return false;
         };
         self.sidebar_new_thread = None;

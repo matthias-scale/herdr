@@ -819,6 +819,9 @@ pub struct KeysConfig {
     pub settings: BindingConfig,
     /// Create a new workspace. Default: "prefix+shift+n"
     pub new_workspace: BindingConfig,
+    /// Open the project picker and start a new Home thread in the project it
+    /// selects. Default: "prefix+alt+c"
+    pub new_thread: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
     pub new_worktree: BindingConfig,
     /// Open an existing Git worktree from the selected workspace. Unset by default.
@@ -1059,6 +1062,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     new_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    new_thread: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     new_worktree: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_worktree: Option<BindingConfig>,
@@ -1293,6 +1298,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(help);
         apply_field!(settings);
         apply_field!(new_workspace);
+        apply_field!(new_thread);
         apply_field!(new_worktree);
         apply_field!(open_worktree);
         apply_field!(remove_worktree);
@@ -1451,6 +1457,7 @@ impl KeysConfig {
         copy_effective_action_field!(help, keybinds.help);
         copy_effective_action_field!(settings, keybinds.settings);
         copy_effective_action_field!(new_workspace, keybinds.new_workspace);
+        copy_effective_action_field!(new_thread, keybinds.new_thread);
         copy_effective_action_field!(new_worktree, keybinds.new_worktree);
         copy_effective_action_field!(open_worktree, keybinds.open_worktree);
         copy_effective_action_field!(remove_worktree, keybinds.remove_worktree);
@@ -1952,6 +1959,7 @@ impl Default for KeysConfig {
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
+            new_thread: BindingConfig::one("prefix+alt+c"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),

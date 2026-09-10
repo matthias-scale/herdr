@@ -42,6 +42,7 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "workspace_picker" => NavigateAction::WorkspacePicker,
         "goto" => NavigateAction::OpenNavigator,
         "new_workspace" => NavigateAction::NewWorkspace,
+        "new_thread" => NavigateAction::NewThread,
         "new_worktree" => NavigateAction::NewWorktree,
         "open_worktree" => NavigateAction::OpenWorktree,
         "remove_worktree" => NavigateAction::RemoveWorktree,

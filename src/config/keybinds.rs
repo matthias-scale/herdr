@@ -337,6 +337,7 @@ pub struct Keybinds {
     pub help: ActionKeybinds,
     pub settings: ActionKeybinds,
     pub new_workspace: ActionKeybinds,
+    pub new_thread: ActionKeybinds,
     pub new_worktree: ActionKeybinds,
     pub open_worktree: ActionKeybinds,
     pub remove_worktree: ActionKeybinds,
@@ -560,6 +561,7 @@ impl Config {
             help: empty_action!(),
             settings: empty_action!(),
             new_workspace: empty_action!(),
+            new_thread: empty_action!(),
             new_worktree: empty_action!(),
             open_worktree: empty_action!(),
             remove_worktree: empty_action!(),
@@ -743,6 +745,7 @@ impl Config {
             apply_action!(keybinds.help, help, source);
             apply_action!(keybinds.settings, settings, source);
             apply_action!(keybinds.new_workspace, new_workspace, source);
+            apply_action!(keybinds.new_thread, new_thread, source);
             apply_action!(keybinds.new_worktree, new_worktree, source);
             apply_action!(keybinds.open_worktree, open_worktree, source);
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
@@ -1933,6 +1936,18 @@ next_tab = "prefix+n"
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('g'),
                 KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    #[test]
+    fn new_thread_defaults_to_prefix_alt_c() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.new_thread),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('c'),
+                KeyModifiers::ALT
             ))]
         );
     }

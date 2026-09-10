@@ -6582,10 +6582,6 @@ pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
     Rect::new(x, area.y.saturating_add(1), right.saturating_sub(x), 1)
 }
 
-fn sidebar_new_thread_paths(app: &AppState) -> Vec<std::path::PathBuf> {
-    app.home_directory_options()
-}
-
 pub(crate) fn sidebar_new_menu_layout(
     app: &AppState,
     area: Rect,
@@ -6627,14 +6623,16 @@ pub(super) fn render_sidebar_new_menu(app: &AppState, frame: &mut Frame) {
 }
 
 fn sidebar_new_thread_labels(app: &AppState) -> Vec<String> {
-    sidebar_new_thread_paths(app)
+    app.new_thread_options()
         .iter()
-        .map(|path| {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            format!("📁 {name}  {}", crate::app::home::directory_label(path))
+        .map(|option| {
+            let path = crate::app::home::directory_label(&option.path);
+            // The project name is part of the row so the filter matches it,
+            // which is what makes typing a project narrow the list to it.
+            match option.project.as_deref() {
+                Some(project) => format!("📁 {}  {project} · {path}", option.name),
+                None => format!("📁 {}  {path}", option.name),
+            }
         })
         .collect()
 }
@@ -17036,6 +17034,74 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_new_thread_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
         );
         assert!(app.sidebar_new_thread.is_none());
+    }
+
+    #[test]
+    fn new_thread_picker_offers_configured_projects_and_filters_by_project_name() {
+        use crate::app::projects::{Project, ProjectRepo};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = AppState::test_new();
+        let mut space = Workspace::test_new("worktree-space");
+        space.identity_cwd = std::path::PathBuf::from("/tmp/t3-projects/herdr-improve");
+        app.workspaces = vec![space];
+        app.projects = vec![
+            Project {
+                id: "scalable".into(),
+                label: "scalable".into(),
+                repos: vec![ProjectRepo {
+                    name: "110x".into(),
+                    path: "/tmp/t3-projects/110x".into(),
+                }],
+            },
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: vec![ProjectRepo {
+                    name: "agent-box-bootstrap".into(),
+                    path: "/tmp/t3-projects/agent-box-bootstrap".into(),
+                }],
+            },
+        ];
+
+        app.open_sidebar_new_thread();
+        let labels = sidebar_new_thread_matches(&app)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("📁 110x  scalable · /tmp/t3-projects/110x"),
+            "a configured project repo leads the picker: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("/tmp/t3-projects/herdr-improve")),
+            "a checkout no project scans stays reachable: {labels:?}"
+        );
+
+        app.sidebar_new_thread
+            .as_mut()
+            .expect("project picker")
+            .filter
+            .set_query("personal");
+        assert_eq!(
+            sidebar_new_thread_matches(&app)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            vec!["📁 agent-box-bootstrap  personal · /tmp/t3-projects/agent-box-bootstrap"],
+            "typing a project name narrows the list to that project"
+        );
+
+        assert!(app
+            .handle_sidebar_new_thread_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+        assert_eq!(
+            app.home.as_ref().map(|home| home.directory.as_path()),
+            Some(std::path::Path::new("/tmp/t3-projects/agent-box-bootstrap")),
+            "the picker spawns into the selected project, not the filtered position"
+        );
     }
 
     #[test]
