@@ -459,6 +459,7 @@ fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) 
         "sh" | "bash" | "zsh" | "fish" => script_arg_agent_name(argv, &["-c"], &[]),
         "cmd" => windows_cmd_arg_agent_name(argv),
         "powershell" | "pwsh" => powershell_arg_agent_name(argv),
+        "ssh" => ssh_remote_agent_name(argv),
         "tmux" => None,
         _ => None,
     }
@@ -637,6 +638,125 @@ fn option_takes_value(arg: &str) -> bool {
     )
 }
 
+/// `ssh` short options that consume the following argument. A bundled payload
+/// carries its value inline (`-p2222`), so only a trailing option letter counts.
+const SSH_VALUE_OPTIONS: &[char] = &[
+    'B', 'b', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L', 'l', 'm', 'O', 'o', 'p', 'Q', 'R', 'S',
+    'W', 'w',
+];
+
+/// Command prefixes that wrap the real program without replacing it, so the
+/// agent name still follows them on the same command line.
+const COMMAND_PREFIX_WRAPPERS: &[&str] = &[
+    "command", "env", "exec", "nice", "nohup", "setsid", "stdbuf", "sudo", "time", "timeout",
+];
+
+/// An agent driven over `ssh` runs on the remote host, so no local process
+/// carries its name and identification by process name alone leaves the pane
+/// unidentified: no agent token, no state, no age. The local `ssh` client still
+/// exposes the remote command, which is enough to name the agent.
+fn ssh_remote_agent_name(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    let mut destination_seen = false;
+    let mut remote_command = String::new();
+
+    while let Some(arg) = args.next() {
+        if !destination_seen {
+            if arg.starts_with('-') {
+                if ssh_option_takes_value(arg) {
+                    let _ = args.next();
+                }
+                continue;
+            }
+            destination_seen = true;
+            continue;
+        }
+
+        if !remote_command.is_empty() {
+            remote_command.push(' ');
+        }
+        remote_command.push_str(arg);
+    }
+
+    agent_name_from_command_line(&remote_command)
+}
+
+fn ssh_option_takes_value(arg: &str) -> bool {
+    if arg.starts_with("--") {
+        return false;
+    }
+    arg.strip_prefix('-')
+        .and_then(|flags| flags.chars().next_back())
+        .is_some_and(|last| SSH_VALUE_OPTIONS.contains(&last))
+}
+
+/// Find the first agent among the command positions of a shell command line.
+/// Only command positions are inspected so that `git log codex` stays
+/// unidentified, and only the basename is read: the path names a file on
+/// another host and must never be resolved against this filesystem.
+fn agent_name_from_command_line(command: &str) -> Option<String> {
+    let mut expect_command = true;
+    let mut after_wrapper = false;
+
+    for token in command.split_whitespace() {
+        if is_shell_separator(token) {
+            expect_command = true;
+            after_wrapper = false;
+            continue;
+        }
+
+        if !expect_command {
+            continue;
+        }
+
+        // `cd x; codex` glues the separator onto the previous token, which
+        // still ends that command position.
+        let ends_segment = token.ends_with([';', '&', '|']);
+        let token = token
+            .trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | '{' | '}' | ';' | '&' | '|'));
+        if token.is_empty() {
+            continue;
+        }
+
+        // `FOO=bar codex` keeps the command position open past the assignment.
+        if !token.starts_with('-')
+            && token
+                .split_once('=')
+                .is_some_and(|(key, _)| !key.is_empty())
+        {
+            continue;
+        }
+
+        if COMMAND_PREFIX_WRAPPERS.contains(&path_basename(token)) {
+            after_wrapper = true;
+            continue;
+        }
+
+        if let Some(agent) = agent_name_from_basename(path_basename(token)) {
+            return Some(agent);
+        }
+
+        // A wrapper's own arguments (`timeout 5400 codex`, `nice -n 10 codex`)
+        // sit between it and the program, so keep scanning past them.
+        if token.starts_with('-') || after_wrapper {
+            continue;
+        }
+
+        expect_command = ends_segment;
+    }
+
+    None
+}
+
+/// True when the token is made only of shell control characters, so the next
+/// token opens a fresh command position.
+fn is_shell_separator(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| matches!(c, '&' | '|' | ';' | '(' | ')' | '{' | '}'))
+}
+
 fn argv0_agent_name(argv: Option<&[String]>) -> Option<String> {
     agent_name_from_path_token(argv?.first()?)
 }
@@ -760,6 +880,7 @@ fn is_generic_runtime_or_shell(name: &str) -> bool {
                 | "cmd"
                 | "powershell"
                 | "pwsh"
+                | "ssh"
         )
 }
 
@@ -1032,6 +1153,72 @@ mod tests {
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
         assert_eq!(identify_agent("Codex"), Some(Agent::Codex));
         assert_eq!(identify_agent("Devin"), Some(Agent::Devin));
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_ssh_wrapped_remote_codex() {
+        // The real ub1 pane: codex runs on ub2, so only `ssh` is local.
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 1,
+            processes: vec![foreground_process(
+                1,
+                "ssh",
+                &[
+                    "ssh",
+                    "-t",
+                    "ub2",
+                    "cd ~/tmp/review-opt && codex -m gpt-5.6-luna --sandbox workspace-write",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn ssh_remote_agent_name_skips_options_destination_and_wrappers() {
+        let cases: [(&[&str], Option<Agent>); 7] = [
+            (&["ssh", "ub2", "claude"], Some(Agent::Claude)),
+            (&["ssh", "-p", "2222", "ub2", "codex"], Some(Agent::Codex)),
+            (&["ssh", "-p2222", "ub2", "codex"], Some(Agent::Codex)),
+            (
+                &["ssh", "-o", "BatchMode=yes", "-tt", "ub2", "gemini"],
+                Some(Agent::Gemini),
+            ),
+            (
+                &["ssh", "ub2", "timeout 5400 nohup codex exec"],
+                Some(Agent::Codex),
+            ),
+            (&["ssh", "ub2", "FOO=bar codex"], Some(Agent::Codex)),
+            (&["ssh", "-p", "codex", "ub2", "true"], None),
+        ];
+
+        for (argv, expected) in cases {
+            let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
+            assert_eq!(
+                ssh_remote_agent_name(&argv)
+                    .as_deref()
+                    .and_then(parse_agent_label),
+                expected,
+                "argv: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_remote_agent_name_ignores_agent_names_outside_command_position() {
+        for argv in [
+            vec!["ssh", "ub2", "git log codex"],
+            vec!["ssh", "ub2", "cat codex.md"],
+            vec!["ssh", "ub2", "grep -r claude src"],
+            vec!["ssh", "ub2"],
+        ] {
+            let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
+            assert_eq!(ssh_remote_agent_name(&argv), None, "argv: {argv:?}");
+        }
     }
 
     #[test]
