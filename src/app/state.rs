@@ -1559,6 +1559,7 @@ pub(crate) struct DockPresentationState {
     pub(crate) context_objects: Vec<DockObjectRef>,
     pub(crate) suppressed_context: std::collections::HashSet<DockObjectRef>,
     pub(crate) maximized: bool,
+    pub(crate) auto_open: bool,
     pub(crate) surface_menu: Option<DockSurfaceMenu>,
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
@@ -1630,6 +1631,7 @@ impl Default for DockPresentationState {
             context_objects: Vec::new(),
             suppressed_context: std::collections::HashSet::new(),
             maximized: false,
+            auto_open: false,
             surface_menu: None,
             chooser_focused: false,
             scroll: 0,
@@ -2232,6 +2234,7 @@ pub struct ViewState {
     pub dock_plus_rect: Rect,
     /// The `⤢` that maximises the dock.
     pub dock_maximize_rect: Rect,
+    pub dock_auto_open_rect: Rect,
     /// One rect per `DockSurface::CARDS` entry of the empty-dock grid.
     pub dock_surface_card_hit_areas: Vec<Rect>,
     /// Geometry of the open `+` menu.
@@ -3460,6 +3463,12 @@ pub struct AppState {
     pub(crate) dock_suppressed_context: std::collections::HashSet<DockObjectRef>,
     /// Dock takes the whole main area. TUI presentation state.
     pub dock_maximized: bool,
+    /// A focused pane's context objects may open the dock on their own. Off by
+    /// default: an automatically appearing panel steals width from the panes
+    /// the operator is reading, so it has to be asked for. TUI presentation
+    /// state, persisted per client.
+    pub(crate) dock_auto_open: bool,
+    pub(crate) dock_auto_open_persistence_request: Option<bool>,
     /// Open `+` chooser dropdown. TUI presentation state.
     pub(crate) dock_surface_menu: Option<DockSurfaceMenu>,
     /// Keyboard focus sits on the chooser card grid. TUI presentation state.
@@ -3961,6 +3970,7 @@ pub(crate) enum ControlId {
     DockTab(usize),
     DockClose,
     DockAdd,
+    DockAutoOpen,
     TopBarScrollLeft,
     TopBarScrollRight,
     TopBarNewTab,
@@ -5069,7 +5079,12 @@ impl AppState {
                 .iter()
                 .position(|binding| binding.is_some())
         }) {
-            self.dock_collapsed = false;
+            // The context tab is always adopted; only revealing the dock is
+            // opt-in. Without this gate every focus change on a pane that knows
+            // its PR would take width from the panes being read.
+            if self.dock_auto_open {
+                self.dock_collapsed = false;
+            }
             self.select_dock_tab_index(index);
         } else if self.dock_open_surfaces.is_empty() {
             self.dock_tab = None;
@@ -5145,6 +5160,18 @@ impl AppState {
         }
     }
 
+    /// Flip whether context objects may open the dock, and remember the choice
+    /// for this client. The dock is not opened or closed here: the toggle only
+    /// governs what happens on the next focus change.
+    pub(crate) fn toggle_dock_auto_open(&mut self) {
+        self.dock_auto_open = !self.dock_auto_open;
+        self.dock_auto_open_persistence_request = Some(self.dock_auto_open);
+    }
+
+    pub(crate) fn take_dock_auto_open_persistence_request(&mut self) -> Option<bool> {
+        self.dock_auto_open_persistence_request.take()
+    }
+
     pub(crate) fn toggle_dock_maximized(&mut self) {
         self.dock_maximized = !self.dock_maximized;
     }
@@ -5184,6 +5211,7 @@ impl AppState {
             &mut other.suppressed_context,
         );
         std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
+        std::mem::swap(&mut self.dock_auto_open, &mut other.auto_open);
         std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
@@ -5775,6 +5803,7 @@ impl AppState {
                 dock_tab_close_rect: Rect::default(),
                 dock_plus_rect: Rect::default(),
                 dock_maximize_rect: Rect::default(),
+                dock_auto_open_rect: Rect::default(),
                 dock_surface_card_hit_areas: Vec::new(),
                 dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
@@ -5831,6 +5860,8 @@ impl AppState {
             dock_context_objects: Vec::new(),
             dock_suppressed_context: std::collections::HashSet::new(),
             dock_maximized: false,
+            dock_auto_open: false,
+            dock_auto_open_persistence_request: None,
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
@@ -7000,6 +7031,9 @@ mod tests {
     #[test]
     fn f20_context_tabs_follow_objects_and_bare_panes_stay_empty() {
         let (mut state, object_pane, bare_pane) = app_with_object_and_bare_panes();
+        // Adopting the context tabs is unconditional; revealing the dock is the
+        // opt-in half, so this case turns it on and the next one leaves it off.
+        state.dock_auto_open = true;
         state.reconcile_dock_context_tabs();
         assert_eq!(
             (0..state.dock_open_surfaces.len())
@@ -7024,6 +7058,33 @@ mod tests {
         state.reconcile_dock_context_tabs();
         assert_eq!(state.dock_open_surfaces.len(), 4);
         assert!(state.dock_open_surfaces.contains(&DockSurface::Files));
+    }
+
+    /// Automatic opening is off by default: a pane that knows its objects still
+    /// contributes its context tabs, but a collapsed dock stays collapsed, so
+    /// focusing such a pane never takes width from the panes being read.
+    #[test]
+    fn context_objects_do_not_open_a_collapsed_dock_unless_auto_open_is_on() {
+        let (mut state, _object_pane, _bare_pane) = app_with_object_and_bare_panes();
+        assert!(!state.dock_auto_open);
+        state.dock_collapsed = true;
+        state.reconcile_dock_context_tabs();
+        assert!(state.dock_collapsed);
+        assert_eq!(
+            (0..state.dock_open_surfaces.len())
+                .map(|index| state.dock_tab_label(index))
+                .collect::<Vec<_>>(),
+            ["#159", "#206", "SCA-3165"]
+        );
+
+        // The toggle only governs the next reconcile; it never opens or closes
+        // the dock by itself.
+        state.toggle_dock_auto_open();
+        assert_eq!(state.take_dock_auto_open_persistence_request(), Some(true));
+        assert!(state.dock_collapsed);
+        state.dock_context_objects.clear();
+        state.reconcile_dock_context_tabs();
+        assert!(!state.dock_collapsed);
     }
 
     #[test]

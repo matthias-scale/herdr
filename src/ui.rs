@@ -619,6 +619,7 @@ fn compute_view_internal(
         close: dock_tab_close_rect,
         plus: dock_plus_rect,
         maximize: dock_maximize_rect,
+        auto_open: dock_auto_open_rect,
         body: dock_body_rect,
     } = dock_geometry(
         dock_area,
@@ -820,6 +821,7 @@ fn compute_view_internal(
         dock_tab_close_rect,
         dock_plus_rect,
         dock_maximize_rect,
+        dock_auto_open_rect,
         dock_surface_card_hit_areas,
         dock_surface_menu_layout: None,
         dock_home_section_hit_areas,
@@ -857,6 +859,7 @@ pub(crate) struct DockGeometry {
     pub close: Rect,
     pub plus: Rect,
     pub maximize: Rect,
+    pub auto_open: Rect,
     pub body: Rect,
 }
 
@@ -870,6 +873,7 @@ impl DockGeometry {
             close: Rect::default(),
             plus: Rect::default(),
             maximize: Rect::default(),
+            auto_open: Rect::default(),
             body: Rect::default(),
         }
     }
@@ -895,21 +899,29 @@ fn dock_geometry(
     let [tab_bar, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
 
-    // Width the strip wants: every open tab, the trailing `+`, and the `⤢`
-    // pinned to the right edge. The maximise glyph only claims its two columns
-    // when the tabs do not need them.
+    // Width the strip wants: every open tab, the trailing `+`, and the two
+    // right-edge toggles. Each toggle only claims its columns when the tabs do
+    // not need them, and the maximise glyph keeps the outer cell so its
+    // position does not move when the auto-open toggle drops out.
     let wanted: u16 = labels
         .iter()
         .enumerate()
         .map(|(index, label)| dock::tab_width_label(label, active_index == Some(index)))
         .fold(dock::PLUS_WIDTH, u16::saturating_add);
-    let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
+    let (strip, maximize, auto_open) = if tab_bar.width >= wanted.saturating_add(4) {
+        (
+            Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 4, 1),
+            Rect::new(tab_bar.right() - 1, tab_bar.y, 1, 1),
+            Rect::new(tab_bar.right() - 3, tab_bar.y, 1, 1),
+        )
+    } else if tab_bar.width >= wanted.saturating_add(2) {
         (
             Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 2, 1),
             Rect::new(tab_bar.right() - 1, tab_bar.y, 1, 1),
+            Rect::default(),
         )
     } else {
-        (tab_bar, Rect::default())
+        (tab_bar, Rect::default(), Rect::default())
     };
 
     // The hit areas come from the same layout the strip is drawn from, so the
@@ -925,6 +937,7 @@ fn dock_geometry(
         close,
         plus,
         maximize,
+        auto_open,
         body,
     }
 }
@@ -1078,6 +1091,7 @@ fn compute_mobile_view(
         dock_tab_close_rect: Rect::default(),
         dock_plus_rect: Rect::default(),
         dock_maximize_rect: Rect::default(),
+        dock_auto_open_rect: Rect::default(),
         dock_surface_card_hit_areas: Vec::new(),
         dock_surface_menu_layout: None,
         dock_home_section_hit_areas: Vec::new(),
@@ -1843,6 +1857,33 @@ mod tests {
                 assert_eq!(app.dock_tab_at(plus.x, plus.y), None);
             }
         }
+    }
+
+    /// The auto-open toggle sits inside the strip, left of the maximise glyph,
+    /// and is clickable there. Maximise keeps the outer cell either way so its
+    /// position does not move when the strip is too narrow for both.
+    #[test]
+    fn the_auto_open_toggle_sits_left_of_maximise_and_is_clickable() {
+        let (row, app) = strip_row(120, 40, &[crate::app::DockSurface::Files]);
+        let toggle = app.view.dock_auto_open_rect;
+        let maximize = app.view.dock_maximize_rect;
+        assert_eq!(toggle.width, 1);
+        assert_eq!(toggle.y, app.view.dock_tab_bar_rect.y);
+        assert_eq!(toggle.x + 2, maximize.x);
+        let cell = usize::from(toggle.x - app.view.dock_tab_bar_rect.x);
+        assert_eq!(
+            row.chars().nth(cell),
+            Some('◧'),
+            "the toggle is not at {toggle:?} in {row:?}"
+        );
+        assert!(app.on_dock_auto_open(toggle.x, toggle.y));
+        assert!(!app.on_dock_maximize(toggle.x, toggle.y));
+        assert_eq!(app.dock_tab_at(toggle.x, toggle.y), None);
+
+        // A collapsed dock exposes neither control.
+        let mut collapsed = app;
+        collapsed.dock_collapsed = true;
+        assert!(!collapsed.on_dock_auto_open(toggle.x, toggle.y));
     }
 
     #[test]

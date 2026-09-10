@@ -1075,6 +1075,11 @@ impl AppState {
                         return None;
                     }
                 }
+                if self.on_dock_auto_open(mouse.column, mouse.row) {
+                    self.toggle_dock_auto_open();
+                    self.mark_session_dirty();
+                    return None;
+                }
                 if self.on_dock_maximize(mouse.column, mouse.row) {
                     self.toggle_dock_maximized();
                     self.mark_session_dirty();
@@ -4561,6 +4566,47 @@ mod tests {
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.dock_home_selection, Some(second_key));
         assert!(app.state.dock_home_focused);
+    }
+
+    /// Clicking the strip's auto-open glyph flips the preference and persists it,
+    /// and does not open, close, or maximise the dock.
+    #[test]
+    fn clicking_the_auto_open_toggle_flips_and_persists_the_preference() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let toggle = app.state.view.dock_auto_open_rect;
+        assert!(toggle.width > 0);
+        assert!(!app.state.dock_auto_open);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(app.state.dock_auto_open);
+        assert_eq!(
+            app.state.take_dock_auto_open_persistence_request(),
+            Some(true)
+        );
+        assert!(!app.state.dock_maximized);
+        assert!(!app.state.dock_collapsed);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(!app.state.dock_auto_open);
+        assert_eq!(
+            app.state.take_dock_auto_open_persistence_request(),
+            Some(false)
+        );
     }
 
     #[test]

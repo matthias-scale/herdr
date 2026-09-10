@@ -62,6 +62,7 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         ),
         (ControlId::DockClose, view.dock_tab_close_rect),
         (ControlId::DockAdd, view.dock_plus_rect),
+        (ControlId::DockAutoOpen, view.dock_auto_open_rect),
         (ControlId::TopBarScrollLeft, view.tab_scroll_left_hit_area),
         (ControlId::TopBarScrollRight, view.tab_scroll_right_hit_area),
         (ControlId::TopBarNewTab, view.new_tab_hit_area),
@@ -170,6 +171,14 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
         ),
         ControlId::DockClose => (view.dock_tab_close_rect, "Close tab".into()),
         ControlId::DockAdd => (view.dock_plus_rect, "Open surface".into()),
+        ControlId::DockAutoOpen => (
+            view.dock_auto_open_rect,
+            if app.dock_auto_open {
+                "Opening automatically: on".into()
+            } else {
+                "Opening automatically: off".into()
+            },
+        ),
         ControlId::TopBarScrollLeft => (view.tab_scroll_left_hit_area, "Scroll tabs left".into()),
         ControlId::TopBarScrollRight => {
             (view.tab_scroll_right_hit_area, "Scroll tabs right".into())

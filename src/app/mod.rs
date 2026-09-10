@@ -1010,6 +1010,7 @@ impl App {
                 dock_tab_close_rect: Rect::default(),
                 dock_plus_rect: Rect::default(),
                 dock_maximize_rect: Rect::default(),
+                dock_auto_open_rect: Rect::default(),
                 dock_surface_card_hit_areas: Vec::new(),
                 dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
@@ -1063,6 +1064,8 @@ impl App {
             dock_context_objects: Vec::new(),
             dock_suppressed_context: std::collections::HashSet::new(),
             dock_maximized: false,
+            dock_auto_open: crate::client::presentation::load_dock_auto_open(),
+            dock_auto_open_persistence_request: None,
             dock_surface_menu: None,
             dock_chooser_focused: false,
             dock_scroll: 0,
@@ -1893,6 +1896,9 @@ impl App {
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
             if let Some(width) = self.state.take_dock_width_persistence_request() {
                 crate::client::presentation::save_dock_width(width);
+            }
+            if let Some(enabled) = self.state.take_dock_auto_open_persistence_request() {
+                crate::client::presentation::save_dock_auto_open(enabled);
             }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);

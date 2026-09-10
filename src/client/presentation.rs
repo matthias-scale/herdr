@@ -15,6 +15,10 @@ struct ClientPresentationFile {
     sidebar_group_mode: Option<crate::app::state::SidebarGroupMode>,
     #[serde(default)]
     sidebar_work_filter: Option<crate::app::state::SidebarWorkFilter>,
+    /// Whether a pane's context objects may open the dock on their own. Absent
+    /// means off: the dock only opens when the operator opens it.
+    #[serde(default)]
+    dock_auto_open: Option<bool>,
 }
 
 fn presentation_path() -> PathBuf {
@@ -44,6 +48,24 @@ pub(crate) fn save_dock_width(width: u16) {
     if let Err(err) = update_path(&path, |state| {
         state.dock_width = Some(clamp_dock_width(width));
     }) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+pub(crate) fn load_dock_auto_open() -> bool {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.dock_auto_open.unwrap_or(false),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            false
+        }
+    }
+}
+
+pub(crate) fn save_dock_auto_open(enabled: bool) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| state.dock_auto_open = Some(enabled)) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
 }
@@ -249,6 +271,23 @@ mod tests {
             filters.missive,
             crate::app::state::MissiveSidebarFilter::default()
         );
+    }
+
+    #[test]
+    fn dock_auto_open_defaults_to_off_and_round_trips() {
+        let path = temp_path();
+        assert_eq!(
+            load_from_path(&path).expect("missing state").dock_auto_open,
+            None,
+        );
+        update_path(&path, |state| state.dock_auto_open = Some(true)).expect("save dock auto open");
+        assert_eq!(
+            load_from_path(&path)
+                .expect("load client presentation state")
+                .dock_auto_open,
+            Some(true)
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
