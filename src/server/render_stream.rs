@@ -648,6 +648,34 @@ mod render_scale_benchmark {
         app_with(vec![workspace])
     }
 
+    fn app_with_remote_agents(remote_count: usize) -> AppState {
+        let mut app = app_with_workspaces(1);
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "bench-remote".into(),
+                target: "bench-remote".into(),
+                local: false,
+                session: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                entries: (0..remote_count)
+                    .map(|index| {
+                        crate::fleet::FleetRow::test_run_row(
+                            "bench-remote",
+                            &format!("remote-{index}"),
+                            false,
+                        )
+                    })
+                    .collect(),
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(&snapshot);
+        app
+    }
+
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
         app.mode = Mode::Terminal;
@@ -680,6 +708,10 @@ mod render_scale_benchmark {
 
     fn profile_cardinalities(build: fn(usize) -> AppState) -> [(usize, RenderStats); 3] {
         [1, 15, 50].map(|count| (count, profile(build(count))))
+    }
+
+    fn profile_remote_cardinalities() -> [(usize, RenderStats); 3] {
+        [0, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
     }
 
     fn print_profiles(label: &str, profiles: [(usize, RenderStats); 3]) {
@@ -736,6 +768,10 @@ mod render_scale_benchmark {
         print_profiles(
             "active panes (one workspace)",
             profile_cardinalities(app_with_active_panes),
+        );
+        print_profiles(
+            "remote agents (one local pane)",
+            profile_remote_cardinalities(),
         );
     }
 }
