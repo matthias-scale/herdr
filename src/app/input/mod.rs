@@ -4815,6 +4815,27 @@ impl App {
                 return;
             }
 
+            // A named work link opens its object where the human asked for it:
+            // the click is the opt-in the dock no longer takes on its own.
+            if let Some(object) = self
+                .state
+                .view
+                .status_work_links
+                .iter()
+                .find(|link| {
+                    mouse.column >= link.rect.x
+                        && mouse.column < link.rect.x.saturating_add(link.rect.width)
+                        && mouse.row >= link.rect.y
+                        && mouse.row < link.rect.y.saturating_add(link.rect.height)
+                })
+                .map(|link| link.object.clone())
+            {
+                self.state.dock_collapsed = false;
+                self.state
+                    .open_dock_object(object, crate::app::state::DockTabOrigin::User);
+                return;
+            }
+
             if let Some(action) = self
                 .state
                 .view

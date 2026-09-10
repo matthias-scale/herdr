@@ -3258,6 +3258,60 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_status_row_work_link_opens_it_in_the_dock() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .and_then(|pane_id| app.state.workspaces[0].terminal_id(pane_id))
+            .expect("focused terminal")
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal state");
+        terminal.set_terminal_title(Some("Fix billing".into()));
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            repo: Some("herdrdev/herdr".into()),
+            session_name: Some("Fix billing".into()),
+            pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
+            ..Default::default()
+        });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 24));
+
+        assert!(
+            app.state.dock_open_surfaces.is_empty(),
+            "the link alone opens nothing"
+        );
+        let link = app
+            .state
+            .view
+            .status_work_links
+            .first()
+            .cloned()
+            .expect("the status row names the pull request");
+        assert_eq!(link.label, "#159");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            link.rect.x,
+            link.rect.y,
+        ));
+
+        assert!(!app.state.dock_collapsed, "the click opens the dock");
+        assert_eq!(
+            app.state.dock_tab,
+            Some(crate::app::DockSurface::Pr),
+            "on the link that was clicked"
+        );
+        assert_eq!(app.state.dock_tab_label(0), "#159");
+    }
+
+    #[test]
     fn clicking_the_sidebar_animation_button_toggles_its_pause() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];

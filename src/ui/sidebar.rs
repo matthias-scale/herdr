@@ -29,7 +29,7 @@ const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 #[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
-const DEFAULT_THREAD_TITLE: &str = "New Thread";
+pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
@@ -261,63 +261,6 @@ fn compact_age(
         .and_then(|instant| status_report_age_compact_label(Some(instant), now))
         .unwrap_or_else(|| "—".to_string());
     (age, instant)
-}
-
-fn title_without_identifier<'a>(identifier: &str, title: &'a str) -> Option<&'a str> {
-    let title = title.trim();
-    let prefix = title.get(..identifier.len())?;
-    if !prefix.eq_ignore_ascii_case(identifier) {
-        return None;
-    }
-    let remainder = title.get(identifier.len()..)?;
-    if !remainder.is_empty()
-        && !remainder.chars().next().is_some_and(|character| {
-            character.is_whitespace() || matches!(character, ':' | '·' | '-')
-        })
-    {
-        return None;
-    }
-    Some(
-        remainder
-            .trim_start()
-            .strip_prefix([':', '·', '-'])
-            .unwrap_or(remainder.trim_start())
-            .trim_start(),
-    )
-}
-
-fn sidebar_tab_title(
-    projection: Option<&crate::workspace::TabDisplayProjection>,
-    fallback: Option<String>,
-) -> Option<String> {
-    let Some(crate::workspace::TabDisplayProjection::Derived {
-        agent,
-        ticket,
-        binding: _,
-        title,
-    }) = projection
-    else {
-        return fallback;
-    };
-    let normalized_title = match (ticket.as_deref(), title.as_deref()) {
-        (Some(identifier), Some(title)) => title_without_identifier(identifier, title)
-            .map(str::to_string)
-            .or_else(|| Some(title.to_string())),
-        (_, title) => title.map(str::to_string),
-    };
-    // Worktree identity belongs to the Spaces and Repo group headers. Agent
-    // rows use the work object and session title only.
-    let label = [ticket.clone(), normalized_title]
-        .into_iter()
-        .flatten()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if label.is_empty() {
-        agent.clone().or(fallback)
-    } else {
-        Some(label)
-    }
 }
 
 fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
@@ -1038,7 +981,10 @@ fn collect_agent_panel_entries_with_runtimes(
                         primary_label: workspace_label.clone(),
                         space_label: space_label.clone(),
                         space_label_redundant: false,
-                        primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
+                        primary_tab_label: crate::workspace::session_title(
+                            projection.as_ref(),
+                            thread_title,
+                        ),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
@@ -2221,7 +2167,7 @@ fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
 /// carries no title: a separator with nothing after it reads as missing text.
 fn work_group_header_title(id: &str, title: Option<&str>) -> String {
     match title.map(str::trim).filter(|title| !title.is_empty()) {
-        Some(title) => match title_without_identifier(id, title) {
+        Some(title) => match crate::workspace::title_without_identifier(id, title) {
             Some("") => id.to_string(),
             Some(title) => format!("{id} · {title}"),
             None => format!("{id} · {title}"),
@@ -14267,7 +14213,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(work_group_header_title("SCA-3165", None), "SCA-3165");
 
         let row_title = |title: &str| {
-            sidebar_tab_title(
+            crate::workspace::session_title(
                 Some(&crate::workspace::TabDisplayProjection::Derived {
                     agent: None,
                     ticket: Some("SCA-3165".into()),
@@ -14293,7 +14239,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
 
         assert_eq!(
-            sidebar_tab_title(Some(&projection), None).as_deref(),
+            crate::workspace::session_title(Some(&projection), None).as_deref(),
             Some("SCA-3165 · Fix sidebar rows")
         );
 
@@ -14304,7 +14250,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             title: None,
         };
         assert_eq!(
-            sidebar_tab_title(Some(&binding_only), Some("New Thread".into())).as_deref(),
+            crate::workspace::session_title(Some(&binding_only), Some("New Thread".into()))
+                .as_deref(),
             Some("codex")
         );
     }

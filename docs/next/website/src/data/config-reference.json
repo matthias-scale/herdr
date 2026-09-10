@@ -1412,6 +1412,12 @@
           "description": "Show the pull button in the top-right action row. Off by default. It is the only entry point to the git menu, so enable it to reach that menu."
         },
         {
+          "key": "ui.open_dock_on_work_link",
+          "type": "boolean",
+          "default": "false",
+          "description": "Open the dock automatically when the focused pane carries a pull request, ticket, or conversation. Off by default: the status row names each link after the pane title, and clicking that name opens it in the dock."
+        },
+        {
           "key": "ui.show_pane_toggle_buttons",
           "type": "boolean",
           "default": "false",
