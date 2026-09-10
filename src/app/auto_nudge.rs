@@ -939,6 +939,23 @@ mod tests {
         assert_eq!(drain(&mut rx), "");
     }
 
+    /// Pins that a draft changed at fire time suppresses Enter without cancellation.
+    #[tokio::test]
+    async fn a_draft_change_at_fire_time_cancels_the_delayed_stall_nudge_submission() {
+        let now = Instant::now();
+        let (mut app, pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
+
+        assert!(app.tick_auto_nudges(now));
+        assert!(drain(&mut rx).contains("/status"));
+
+        app.state
+            .pending_human_drafts
+            .insert(pane_id, "human input".into());
+        assert!(!app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
+
+        assert_eq!(drain(&mut rx), "");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn handoff_restores_stall_nudge_budget_without_refilling_it() {

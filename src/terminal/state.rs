@@ -5441,15 +5441,6 @@ mod tests {
     fn subagent_claim_terminal(now: Instant) -> TerminalState {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        terminal.set_agent_session_ref_for_session_start(
-            "herdr:claude".into(),
-            "claude".into(),
-            crate::agent_resume::AgentSessionRef::path(test_session_path(
-                "subagent-watchdog.jsonl",
-            )),
-            Some(999),
-            Some("startup".into()),
-        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5458,6 +5449,13 @@ mod tests {
             None,
             Some(1000),
             now,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-subagent-watchdog"),
+            Some(999),
+            Some("startup".into()),
         );
         assert!(terminal.metadata_tokens.patch(
             HashMap::from([("closing_agents".into(), Some("3".into()))]),
@@ -5482,7 +5480,7 @@ mod tests {
         assert!(terminal.supervisor_stale);
     }
 
-    /// AC3: A stale unverified subagent claim stays non-quiet and cannot auto-settle as Done.
+    /// Pins that a stale unverified subagent claim blocks the armed Done auto-settle trigger.
     #[test]
     fn a_stale_subagent_claim_never_becomes_done_or_auto_settles() {
         let now = Instant::now();
@@ -5491,6 +5489,7 @@ mod tests {
             .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
             .expect("watchdog should mark the subagent claim stale");
         assert!(terminal.supervisor_stale);
+        assert!(crate::app::settled::pane_has_resume_plan(&terminal));
 
         let active_subagents = terminal
             .metadata_tokens
