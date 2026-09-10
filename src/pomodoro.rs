@@ -1,0 +1,496 @@
+//! Pomodoro timer: a work/break cycle the operator cannot silently ignore.
+//!
+//! The state here is pure data driven by an injected [`Instant`], so the whole
+//! cycle — including the blocking prompt — is testable without a terminal, a
+//! client, or a clock that really advances. Everything with a side effect (the
+//! break log written next to the notepad notes) lives in the `App` layer.
+
+use std::time::{Duration, Instant};
+
+/// How much text the operator has to type before a due prompt can be dismissed.
+/// A bare Enter is what makes a reminder ignorable, so the prompt refuses one.
+pub const DEFAULT_MIN_CONFIRM_CHARS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PomodoroPhase {
+    Work,
+    ShortBreak,
+    LongBreak,
+}
+
+impl PomodoroPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Work => "focus",
+            Self::ShortBreak => "short break",
+            Self::LongBreak => "long break",
+        }
+    }
+
+    pub fn is_break(self) -> bool {
+        matches!(self, Self::ShortBreak | Self::LongBreak)
+    }
+}
+
+/// The overlay raised when a phase runs out. It owns the confirmation buffer so
+/// the operator's answer is part of ordinary app state, not a side channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PomodoroPrompt {
+    pub ended: PomodoroPhase,
+    pub next: PomodoroPhase,
+    pub input: String,
+    /// Set when the operator tried to dismiss the prompt without typing enough.
+    pub error: Option<String>,
+}
+
+/// What a confirmed prompt hands back for logging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PomodoroConfirmation {
+    pub ended: PomodoroPhase,
+    pub started: PomodoroPhase,
+    pub note: String,
+}
+
+/// The outcome of one tick: whether the rendered timer changed, and whether the
+/// tick is the one that ended a phase.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PomodoroTick {
+    pub changed: bool,
+    pub phase_ended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PomodoroState {
+    pub enabled: bool,
+    pub work: Duration,
+    pub short_break: Duration,
+    pub long_break: Duration,
+    /// Work intervals between long breaks. `4 * 25min` is the ~2h the operator
+    /// asked the long break to land on.
+    pub long_break_every: u32,
+    pub min_confirm_chars: usize,
+    pub phase: PomodoroPhase,
+    pub completed_work_intervals: u32,
+    pub prompt: Option<PomodoroPrompt>,
+    /// Set while the phase is counting down. Cleared while paused or prompting,
+    /// which is what makes "paused" a single unambiguous fact.
+    deadline: Option<Instant>,
+    /// Remaining time while not counting down.
+    remaining: Duration,
+    /// Whole seconds last reported to the renderer. Ticking is cheap and happens
+    /// on every server wake, so it only reports a change at 1 Hz.
+    rendered_secs: u64,
+}
+
+impl Default for PomodoroState {
+    fn default() -> Self {
+        let work = Duration::from_secs(25 * 60);
+        Self {
+            enabled: false,
+            work,
+            short_break: Duration::from_secs(5 * 60),
+            long_break: Duration::from_secs(20 * 60),
+            long_break_every: 4,
+            min_confirm_chars: DEFAULT_MIN_CONFIRM_CHARS,
+            phase: PomodoroPhase::Work,
+            completed_work_intervals: 0,
+            prompt: None,
+            deadline: None,
+            remaining: work,
+            rendered_secs: work.as_secs(),
+        }
+    }
+}
+
+impl PomodoroState {
+    pub fn from_config(config: &crate::config::PomodoroConfig, now: Instant) -> Self {
+        let mut state = Self {
+            enabled: config.enabled,
+            work: minutes(config.work_minutes, 25),
+            short_break: minutes(config.short_break_minutes, 5),
+            long_break: minutes(config.long_break_minutes, 20),
+            long_break_every: config.long_break_every.max(1),
+            min_confirm_chars: config.min_confirm_chars,
+            ..Self::default()
+        };
+        state.remaining = state.work;
+        state.rendered_secs = state.remaining.as_secs();
+        if state.enabled {
+            state.start(now);
+        }
+        state
+    }
+
+    /// Applies a live config reload without resetting a cycle that is mid-flight.
+    /// Only the durations of phases the operator is not currently inside change
+    /// immediately; the running phase keeps its deadline.
+    pub fn apply_config(&mut self, config: &crate::config::PomodoroConfig, now: Instant) {
+        let was_enabled = self.enabled;
+        self.work = minutes(config.work_minutes, 25);
+        self.short_break = minutes(config.short_break_minutes, 5);
+        self.long_break = minutes(config.long_break_minutes, 20);
+        self.long_break_every = config.long_break_every.max(1);
+        self.min_confirm_chars = config.min_confirm_chars;
+        self.enabled = config.enabled;
+        if !self.enabled {
+            self.deadline = None;
+            self.prompt = None;
+        } else if !was_enabled {
+            self.reset(now);
+        }
+    }
+
+    pub fn running(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    pub fn paused(&self) -> bool {
+        self.enabled && self.prompt.is_none() && self.deadline.is_none()
+    }
+
+    pub fn phase_duration(&self, phase: PomodoroPhase) -> Duration {
+        match phase {
+            PomodoroPhase::Work => self.work,
+            PomodoroPhase::ShortBreak => self.short_break,
+            PomodoroPhase::LongBreak => self.long_break,
+        }
+    }
+
+    pub fn remaining_at(&self, now: Instant) -> Duration {
+        match self.deadline {
+            Some(deadline) => deadline.saturating_duration_since(now),
+            None => self.remaining,
+        }
+    }
+
+    /// `mm:ss`, or `hh:mm:ss` for a phase longer than an hour.
+    pub fn label_at(&self, now: Instant) -> String {
+        format_remaining(self.remaining_at(now))
+    }
+
+    pub fn start(&mut self, now: Instant) {
+        if !self.enabled || self.prompt.is_some() {
+            return;
+        }
+        self.deadline = Some(now + self.remaining);
+        self.rendered_secs = self.remaining.as_secs();
+    }
+
+    pub fn pause(&mut self, now: Instant) {
+        if let Some(deadline) = self.deadline.take() {
+            self.remaining = deadline.saturating_duration_since(now);
+            self.rendered_secs = self.remaining.as_secs();
+        }
+    }
+
+    pub fn toggle_pause(&mut self, now: Instant) {
+        if !self.enabled || self.prompt.is_some() {
+            return;
+        }
+        if self.running() {
+            self.pause(now);
+        } else {
+            self.start(now);
+        }
+    }
+
+    /// Restarts the current phase from the top.
+    pub fn reset(&mut self, now: Instant) {
+        self.remaining = self.phase_duration(self.phase);
+        self.rendered_secs = self.remaining.as_secs();
+        self.deadline = None;
+        self.prompt = None;
+        if self.enabled {
+            self.start(now);
+        }
+    }
+
+    /// Moves to the next phase without raising a prompt. This is the deliberate
+    /// operator action ("I am done early"), not the reminder path.
+    pub fn skip(&mut self, now: Instant) {
+        if !self.enabled {
+            return;
+        }
+        self.prompt = None;
+        self.enter(self.next_phase(), now);
+    }
+
+    /// Advances the countdown. Returns whether the frame has to be redrawn and
+    /// whether this tick is the one that ended a phase.
+    pub fn tick(&mut self, now: Instant) -> PomodoroTick {
+        if !self.enabled {
+            return PomodoroTick::default();
+        }
+        let Some(deadline) = self.deadline else {
+            return PomodoroTick::default();
+        };
+        if now >= deadline {
+            self.deadline = None;
+            self.remaining = Duration::ZERO;
+            self.rendered_secs = 0;
+            let ended = self.phase;
+            self.prompt = Some(PomodoroPrompt {
+                ended,
+                next: self.next_phase(),
+                input: String::new(),
+                error: None,
+            });
+            return PomodoroTick {
+                changed: true,
+                phase_ended: true,
+            };
+        }
+        let secs = deadline.saturating_duration_since(now).as_secs();
+        if secs == self.rendered_secs {
+            return PomodoroTick::default();
+        }
+        self.rendered_secs = secs;
+        PomodoroTick {
+            changed: true,
+            phase_ended: false,
+        }
+    }
+
+    /// Rejects an answer shorter than `min_confirm_chars` so the overlay cannot
+    /// be cleared by leaning on Enter.
+    pub fn confirm(&mut self, now: Instant) -> Option<PomodoroConfirmation> {
+        let prompt = self.prompt.as_mut()?;
+        let note = prompt.input.trim().to_string();
+        if note.chars().count() < self.min_confirm_chars {
+            prompt.error = Some(format!(
+                "type at least {} characters to dismiss",
+                self.min_confirm_chars
+            ));
+            return None;
+        }
+        let ended = prompt.ended;
+        self.prompt = None;
+        let started = self.next_phase();
+        self.enter(started, now);
+        Some(PomodoroConfirmation {
+            ended,
+            started,
+            note,
+        })
+    }
+
+    /// The escape hatch: drops a due prompt without logging an answer and
+    /// leaves the next phase paused. A reminder that fires at the wrong moment
+    /// must not be able to lock the operator out of Herdr.
+    pub fn dismiss_and_pause(&mut self, now: Instant) {
+        if self.prompt.take().is_none() {
+            return;
+        }
+        let next = self.next_phase();
+        self.enter(next, now);
+        self.pause(now);
+    }
+
+    /// The phase that follows the current one. A long break replaces the short
+    /// one every `long_break_every` completed work intervals.
+    pub fn next_phase(&self) -> PomodoroPhase {
+        match self.phase {
+            PomodoroPhase::Work => {
+                let completed = self.completed_work_intervals.saturating_add(1);
+                if completed.is_multiple_of(self.long_break_every) {
+                    PomodoroPhase::LongBreak
+                } else {
+                    PomodoroPhase::ShortBreak
+                }
+            }
+            PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => PomodoroPhase::Work,
+        }
+    }
+
+    fn enter(&mut self, phase: PomodoroPhase, now: Instant) {
+        if self.phase == PomodoroPhase::Work {
+            self.completed_work_intervals = self.completed_work_intervals.saturating_add(1);
+        }
+        self.phase = phase;
+        self.remaining = self.phase_duration(phase);
+        self.rendered_secs = self.remaining.as_secs();
+        self.deadline = None;
+        self.start(now);
+    }
+}
+
+/// A zero or absurd minute count in configuration falls back to the default
+/// rather than producing a phase that ends instantly or never.
+fn minutes(value: u64, fallback: u64) -> Duration {
+    let minutes = if value == 0 {
+        fallback
+    } else {
+        value.min(24 * 60)
+    };
+    Duration::from_secs(minutes * 60)
+}
+
+pub fn format_remaining(remaining: Duration) -> String {
+    let total = remaining.as_secs();
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enabled_state(now: Instant) -> PomodoroState {
+        let config = crate::config::PomodoroConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        PomodoroState::from_config(&config, now)
+    }
+
+    #[test]
+    fn disabled_timer_never_ticks() {
+        let now = Instant::now();
+        let mut state = PomodoroState::default();
+        assert_eq!(
+            state.tick(now + Duration::from_secs(3600)),
+            PomodoroTick::default()
+        );
+        assert!(state.prompt.is_none());
+    }
+
+    #[test]
+    fn expiring_work_phase_raises_a_prompt_and_stops_the_countdown() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        let tick = state.tick(now + Duration::from_secs(25 * 60));
+        assert!(tick.phase_ended);
+        let prompt = state.prompt.as_ref().expect("prompt raised");
+        assert_eq!(prompt.ended, PomodoroPhase::Work);
+        assert_eq!(prompt.next, PomodoroPhase::ShortBreak);
+        assert!(!state.running());
+    }
+
+    #[test]
+    fn a_short_answer_cannot_dismiss_the_prompt() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        state.tick(now + Duration::from_secs(25 * 60));
+        if let Some(prompt) = state.prompt.as_mut() {
+            prompt.input = "ok".into();
+        }
+        assert!(state.confirm(now).is_none());
+        assert!(state.prompt.is_some());
+        assert!(state
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.error.is_some()));
+    }
+
+    #[test]
+    fn confirming_starts_the_break_and_reports_the_note() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        state.tick(now + Duration::from_secs(25 * 60));
+        if let Some(prompt) = state.prompt.as_mut() {
+            prompt.input = "  stretching  ".into();
+        }
+        let confirmation = state.confirm(now).expect("confirmed");
+        assert_eq!(confirmation.note, "stretching");
+        assert_eq!(confirmation.ended, PomodoroPhase::Work);
+        assert_eq!(confirmation.started, PomodoroPhase::ShortBreak);
+        assert_eq!(state.phase, PomodoroPhase::ShortBreak);
+        assert_eq!(state.completed_work_intervals, 1);
+        assert!(state.running());
+        assert_eq!(state.remaining_at(now), Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn every_fourth_work_interval_ends_in_a_long_break() {
+        let mut now = Instant::now();
+        let mut state = enabled_state(now);
+        let mut breaks = Vec::new();
+        for _ in 0..4 {
+            now += Duration::from_secs(25 * 60);
+            state.tick(now);
+            if let Some(prompt) = state.prompt.as_mut() {
+                prompt.input = "noted".into();
+            }
+            let confirmation = state.confirm(now).expect("work confirmed");
+            breaks.push(confirmation.started);
+            now += state.phase_duration(state.phase);
+            state.tick(now);
+            if let Some(prompt) = state.prompt.as_mut() {
+                prompt.input = "noted".into();
+            }
+            state.confirm(now).expect("break confirmed");
+        }
+        assert_eq!(
+            breaks,
+            vec![
+                PomodoroPhase::ShortBreak,
+                PomodoroPhase::ShortBreak,
+                PomodoroPhase::ShortBreak,
+                PomodoroPhase::LongBreak,
+            ]
+        );
+    }
+
+    #[test]
+    fn pausing_freezes_the_remaining_time() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        state.toggle_pause(now + Duration::from_secs(60));
+        assert!(state.paused());
+        let frozen = state.remaining_at(now + Duration::from_secs(600));
+        assert_eq!(frozen, Duration::from_secs(24 * 60));
+        state.toggle_pause(now + Duration::from_secs(600));
+        assert!(state.running());
+        assert_eq!(
+            state.remaining_at(now + Duration::from_secs(600)),
+            Duration::from_secs(24 * 60)
+        );
+    }
+
+    #[test]
+    fn ticking_reports_a_change_only_once_per_second() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        // The label crosses into 24:59 as soon as the first second is not whole.
+        assert!(state.tick(now + Duration::from_millis(100)).changed);
+        assert!(!state.tick(now + Duration::from_millis(200)).changed);
+        assert!(!state.tick(now + Duration::from_millis(999)).changed);
+        assert!(state.tick(now + Duration::from_millis(1100)).changed);
+        assert!(!state.tick(now + Duration::from_millis(1200)).changed);
+    }
+
+    #[test]
+    fn skipping_advances_without_a_prompt() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        state.skip(now);
+        assert!(state.prompt.is_none());
+        assert_eq!(state.phase, PomodoroPhase::ShortBreak);
+        assert!(state.running());
+    }
+
+    #[test]
+    fn a_prompt_can_be_dismissed_without_an_answer_into_a_paused_next_phase() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        state.tick(now + Duration::from_secs(25 * 60));
+        state.dismiss_and_pause(now);
+        assert!(state.prompt.is_none());
+        assert_eq!(state.phase, PomodoroPhase::ShortBreak);
+        assert!(state.paused());
+        assert_eq!(state.remaining_at(now), Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn remaining_is_formatted_as_minutes_and_seconds() {
+        assert_eq!(format_remaining(Duration::from_secs(65)), "1:05");
+        assert_eq!(format_remaining(Duration::from_secs(0)), "0:00");
+        assert_eq!(format_remaining(Duration::from_secs(3725)), "1:02:05");
+    }
+}

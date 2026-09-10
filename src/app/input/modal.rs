@@ -817,12 +817,10 @@ pub(super) fn apply_context_menu_action(
             },
             Some("Collapse" | "Expand"),
         ) => {
-            if let Some(key) = state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|ws| ws.worktree_space())
-                .map(|space| space.key.clone())
-            {
+            // The key has to be the one the sidebar reads back, which is the
+            // group key, not the raw worktree key: a Space grouped by repository
+            // has no worktree membership and would silently collapse nothing.
+            if let Some((key, _)) = crate::ui::workspace_parent_group_state(state, ws_idx) {
                 if collapsed {
                     state.collapsed_space_keys.remove(&key);
                 } else {
@@ -850,19 +848,54 @@ pub(super) fn apply_context_menu_action(
                 state.mode = Mode::Navigate;
             }
         }
-        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some("New tab"),
+        ) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
             open_new_tab_dialog(state);
         }
-        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Rename")) => {
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some("Rename"),
+        ) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
             open_rename_active_tab(state, false);
         }
-        (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some(crate::app::state::STAR_ITEM | crate::app::state::UNSTAR_ITEM),
+        ) => {
+            if let Some(tab) = state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            {
+                tab.starred = !tab.starred;
+                state.mark_session_dirty();
+            }
+            state.mode = if state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some("Close"),
+        ) => {
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
@@ -881,12 +914,12 @@ pub(super) fn apply_context_menu_action(
             ContextMenuKind::Pane {
                 ws_idx,
                 tab_idx,
-                linkable_work_link: Some(link),
+                linkable_work_link: Some(action),
                 ..
             },
             Some(item),
-        ) if item == link.menu_item() => {
-            let patch = link.patch();
+        ) if item == action.menu_item() => {
+            let patch = action.patch();
             for pane_id in state.window_pane_ids(ws_idx, tab_idx) {
                 let Some(terminal_id) = state
                     .workspaces
@@ -905,6 +938,15 @@ pub(super) fn apply_context_menu_action(
                     Err(err) => tracing::warn!(err = %err, "failed to link work item to window"),
                 }
             }
+            state.mode = Mode::Terminal;
+        }
+        (
+            ContextMenuKind::Pane {
+                link: Some(link), ..
+            },
+            Some(crate::app::state::COPY_LINK_ITEM),
+        ) => {
+            state.request_clipboard_write = Some(link.into_bytes());
             state.mode = Mode::Terminal;
         }
         (
@@ -1267,7 +1309,7 @@ impl App {
     /// human may not be looking.
     fn show_work_linked_toast(
         &mut self,
-        link: &crate::app::state::PaneMenuWorkLink,
+        action: &crate::app::state::PaneMenuWorkLinkAction,
         ws_idx: usize,
         panes: usize,
     ) {
@@ -1280,7 +1322,7 @@ impl App {
         let previous_toast = self.state.toast.clone();
         self.state.toast = Some(crate::app::state::ToastNotification {
             kind: crate::app::state::ToastKind::WorkLinked,
-            title: format!("linked {}", link.short_label()),
+            title: action.toast_title(),
             context: format!(
                 "{workspace_label} · {panes} pane{}",
                 if panes == 1 { "" } else { "s" }
@@ -1312,12 +1354,7 @@ impl App {
                 },
                 Some("Collapse" | "Expand"),
             ) => {
-                if let Some(key) = self
-                    .state
-                    .workspaces
-                    .get(ws_idx)
-                    .and_then(|ws| ws.worktree_space())
-                    .map(|space| space.key.clone())
+                if let Some((key, _)) = crate::ui::workspace_parent_group_state(&self.state, ws_idx)
                 {
                     if collapsed {
                         self.state.collapsed_space_keys.remove(&key);
@@ -1346,17 +1383,41 @@ impl App {
                     self.state.mode = Mode::Navigate;
                 }
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some("New tab"),
+            ) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 open_new_tab_dialog(&mut self.state);
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Rename")) => {
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some("Rename"),
+            ) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 open_rename_active_tab(&mut self.state, false);
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some(crate::app::state::STAR_ITEM | crate::app::state::UNSTAR_ITEM),
+            ) => {
+                self.toggle_tab_star_via_api(ws_idx, tab_idx);
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some("Close"),
+            ) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 if !self.close_active_tab_via_api_requires_confirmation() {
@@ -1370,12 +1431,12 @@ impl App {
                 ContextMenuKind::Pane {
                     ws_idx,
                     tab_idx,
-                    linkable_work_link: Some(link),
+                    linkable_work_link: Some(action),
                     ..
                 },
                 Some(item),
-            ) if item == link.menu_item() => {
-                let patch = link.patch();
+            ) if item == action.menu_item() => {
+                let patch = action.patch();
                 let mut linked = 0usize;
                 for pane_id in self.state.window_pane_ids(ws_idx, tab_idx) {
                     if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
@@ -1390,8 +1451,17 @@ impl App {
                     }
                 }
                 if linked > 0 {
-                    self.show_work_linked_toast(&link, ws_idx, linked);
+                    self.show_work_linked_toast(&action, ws_idx, linked);
                 }
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    link: Some(link), ..
+                },
+                Some(crate::app::state::COPY_LINK_ITEM),
+            ) => {
+                self.state.request_clipboard_write = Some(link.into_bytes());
                 self.state.mode = Mode::Terminal;
             }
             (
@@ -1570,6 +1640,60 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    /// The Repo view groups a bound Space with the checkout Spaces of its
+    /// repository, and those Spaces carry no worktree membership. Collapse has to
+    /// write the key the sidebar reads back, or the menu item does nothing.
+    #[test]
+    fn collapsing_a_repository_group_writes_the_key_the_sidebar_reads() {
+        let mut app = app_with_test_workspaces(&["scalablev2", "checkout"]);
+        app.state.workspaces[0].repo_binding = Some("scalable-so/scalablev2".into());
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[1].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("checkout terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("scalable-so/scalablev2".into()),
+                ..Default::default()
+            })
+            .expect("work context");
+
+        let (key, collapsed) = crate::ui::workspace_parent_group_state(&app.state, 0)
+            .expect("the bound Space heads the group");
+        assert_eq!(key, "repo:scalable-so/scalablev2");
+        assert!(!collapsed);
+
+        let mut menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: true,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let collapse_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Collapse")
+            .expect("collapse item");
+        menu.list.highlighted = collapse_idx;
+        app.state.context_menu = Some(menu);
+
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(app.state.collapsed_space_keys.contains(&key));
+        assert_eq!(
+            crate::ui::workspace_parent_group_state(&app.state, 0),
+            Some((key, true))
+        );
     }
 
     #[test]
@@ -2432,6 +2556,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 0,
             y: 0,
@@ -2481,6 +2606,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 0,
             y: 0,
@@ -2556,6 +2682,7 @@ mod tests {
             kind: ContextMenuKind::Tab {
                 ws_idx: 0,
                 tab_idx: 0,
+                starred: false,
             },
             x: 0,
             y: 0,
@@ -2592,6 +2719,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 0,
             y: 0,

@@ -1519,6 +1519,10 @@
             "prio": {
               "type": "boolean"
             },
+            "starred": {
+              "default": false,
+              "type": "boolean"
+            },
             "tab_id": {
               "type": "string"
             },
@@ -5064,6 +5068,29 @@
           ],
           "type": "object"
         },
+        "TabStarMode": {
+          "enum": [
+            "toggle",
+            "star",
+            "unstar"
+          ],
+          "type": "string"
+        },
+        "TabStarParams": {
+          "properties": {
+            "mode": {
+              "$ref": "#/schemas/request/$defs/TabStarMode",
+              "default": "toggle"
+            },
+            "tab_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tab_id"
+          ],
+          "type": "object"
+        },
         "TabTarget": {
           "properties": {
             "tab_id": {
@@ -6041,6 +6068,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TabPinParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.star",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabStarParams"
             }
           },
           "required": [
@@ -12081,6 +12124,10 @@
               "type": "integer"
             },
             "prio": {
+              "type": "boolean"
+            },
+            "starred": {
+              "default": false,
               "type": "boolean"
             },
             "tab_id": {

@@ -1403,6 +1403,7 @@ mod tests {
             prompt: home.prompt.clone(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
             env: Vec::new(),
+            remote: None,
         };
         home.pending_dispatch = Some(plan);
         app.state.home = Some(home);
@@ -1524,6 +1525,7 @@ mod tests {
             prompt: "dispatch after worktree add".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
             env: Vec::new(),
+            remote: None,
         };
 
         app.start_home_worktree_add(plan)

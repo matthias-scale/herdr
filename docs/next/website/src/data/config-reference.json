@@ -697,6 +697,12 @@
           "description": "Copy the focused pane's first preview URL."
         },
         {
+          "key": "keys.toggle_theme",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Swap the active theme with its dark or light sibling for the current session without writing config. Unset by default."
+        },
+        {
           "key": "keys.previous_workspace",
           "type": "keybinding",
           "default": "unset",
@@ -979,6 +985,12 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.focus_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Move keyboard focus to the sidebar, expanding it if collapsed. Unset by default."
+        },
+        {
           "key": "keys.sidebar_cycle_group_mode",
           "type": "keybinding",
           "default": "unset",
@@ -1015,6 +1027,72 @@
           "description": "Select the next dock tab."
         },
         {
+          "key": "keys.dock_home",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Home dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_terminal",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Terminal dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_files",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Files dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_diff",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Diff dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_pr",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the pull request dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_linear",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Linear dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_missive",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Missive dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_agents",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Agents dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_shortcuts",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Shortcuts dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_context",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Context dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
+          "key": "keys.dock_symphony",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the Symphony dock surface, expanding the dock if collapsed. Unset by default."
+        },
+        {
           "key": "keys.editor_open_repo",
           "type": "keybinding",
           "default": "unset",
@@ -1031,6 +1109,18 @@
           "type": "keybinding",
           "default": "\"ctrl+alt+n\"",
           "description": "Show the scratchpad in the dock without opening an editor."
+        },
+        {
+          "key": "keys.toggle_notepad",
+          "type": "keybinding",
+          "default": "\"ctrl+alt+m\"",
+          "description": "Focus the sidebar notepad for typing."
+        },
+        {
+          "key": "keys.toggle_pomodoro",
+          "type": "keybinding",
+          "default": "\"ctrl+alt+b\"",
+          "description": "Pause or resume the break timer, or dismiss a due reminder."
         },
         {
           "key": "keys.toggle_pin_tab",
@@ -1087,6 +1177,30 @@
           "description": "Open the home view."
         },
         {
+          "key": "keys.git_pull",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's pull flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
+          "key": "keys.git_commit",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's commit flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
+          "key": "keys.git_push",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's push flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
+          "key": "keys.git_create_pr",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Run the tab-bar Git menu's create-pull-request flow for the focused repository. Does nothing when the focused pane is not in a Git repository. Unset by default."
+        },
+        {
           "key": "keys.toggle_status_detail",
           "type": "keybinding",
           "default": "\"prefix+shift+m\"",
@@ -1121,6 +1235,12 @@
           "type": "integer",
           "default": "26",
           "description": "Default expanded sidebar width in columns. Auto-scales based on workspace names."
+        },
+        {
+          "key": "ui.sidebar_animation",
+          "type": "boolean",
+          "default": "true",
+          "description": "Whether the sidebar draws its idle animation. The panel also has a pause button; this switch removes the animation entirely."
         },
         {
           "key": "ui.sidebar_min_width",
@@ -1290,6 +1410,12 @@
           "type": "boolean",
           "default": "false",
           "description": "Show the pull button in the top-right action row. Off by default. It is the only entry point to the git menu, so enable it to reach that menu."
+        },
+        {
+          "key": "ui.open_dock_on_work_link",
+          "type": "boolean",
+          "default": "false",
+          "description": "Open the dock automatically when the focused pane carries a pull request, ticket, or conversation. Off by default: the status row names each link after the pane title, and clicking that name opens it in the dock. The dock tab strip's \u25e7 toggle writes this setting too."
         },
         {
           "key": "ui.show_pane_toggle_buttons",
@@ -1832,6 +1958,12 @@
           "description": "Settle a pane when the work it is linked to finishes, such as its pull request merging or its ticket reaching Done."
         },
         {
+          "key": "session.settle_finished_after_minutes",
+          "type": "integer",
+          "default": "10",
+          "description": "Wait this many minutes after linked work first reads as finished before settling the pane, and settle only if it still reads finished and the pane stayed quiet."
+        },
+        {
           "key": "session.auto_settle_inactive",
           "type": "boolean",
           "default": "true",
@@ -1842,6 +1974,18 @@
           "type": "boolean",
           "default": "true",
           "description": "Stop resumable agent processes when their pane settles. Unsettling the pane resumes the stored agent session."
+        },
+        {
+          "key": "session.nudge_resumed_agents",
+          "type": "boolean",
+          "default": "true",
+          "description": "After a pane resumes into its native agent session, submit resume_nudge_message once so the agent continues its work. Skipped when the agent resumes blocked or already working, and when the pane holds a draft you typed."
+        },
+        {
+          "key": "session.resume_nudge_message",
+          "type": "string",
+          "default": "continue",
+          "description": "The prompt nudge_resumed_agents submits to a resumed agent."
         }
       ]
     },
@@ -2071,6 +2215,98 @@
           "type": "boolean",
           "default": "false",
           "description": "While prefix mode is active, temporarily switch the host input source to an ASCII-capable mode so prefix commands are read as ASCII even when an IME is active, then restore the previous input source when prefix mode exits. On macOS this selects the ASCII-capable keyboard layout; on Windows it switches the IME to English (ASCII) input. Windows support is currently limited to the Korean IME; with an IME for any other language, the input source is left unchanged. macOS and Windows only; a no-op elsewhere and a best-effort no-op if the switch fails."
+        }
+      ]
+    },
+    {
+      "id": "notepad",
+      "title": "Notepad",
+      "description": "A folder of Markdown notes edited at the bottom of the sidebar. Sync is whatever already carries the folder: a sync daemon, or the built-in git sync.",
+      "keys": [
+        {
+          "key": "notepad.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show the notepad panel at the bottom of the sidebar."
+        },
+        {
+          "key": "notepad.dir",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Notes directory. Empty uses `<config dir>/notes`. `~` is expanded."
+        },
+        {
+          "key": "notepad.files",
+          "type": "array of strings",
+          "default": "[]",
+          "description": "Note names to offer first, in this order. Others follow alphabetically."
+        },
+        {
+          "key": "notepad.height",
+          "type": "integer",
+          "default": "8",
+          "description": "Sidebar rows the panel occupies, header included. Clamped to 3..=24."
+        },
+        {
+          "key": "notepad.git_sync",
+          "type": "boolean",
+          "default": "false",
+          "description": "Pull and push the notes directory as a git checkout."
+        },
+        {
+          "key": "notepad.git_sync_interval_seconds",
+          "type": "integer",
+          "default": "120",
+          "description": "Seconds between background `git pull` runs when `git_sync` is set."
+        }
+      ]
+    },
+    {
+      "id": "pomodoro",
+      "title": "Break timer",
+      "description": "A pomodoro cycle whose reminder is an overlay that has to be answered in writing before it goes away.",
+      "keys": [
+        {
+          "key": "pomodoro.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Run the break timer."
+        },
+        {
+          "key": "pomodoro.work_minutes",
+          "type": "integer",
+          "default": "25",
+          "description": "Minutes of focus before a break is due."
+        },
+        {
+          "key": "pomodoro.short_break_minutes",
+          "type": "integer",
+          "default": "5",
+          "description": "Minutes in a short break."
+        },
+        {
+          "key": "pomodoro.long_break_minutes",
+          "type": "integer",
+          "default": "20",
+          "description": "Minutes in a long break."
+        },
+        {
+          "key": "pomodoro.long_break_every",
+          "type": "integer",
+          "default": "4",
+          "description": "Work intervals between long breaks."
+        },
+        {
+          "key": "pomodoro.min_confirm_chars",
+          "type": "integer",
+          "default": "3",
+          "description": "Characters the operator has to type to dismiss a due reminder."
+        },
+        {
+          "key": "pomodoro.log_file",
+          "type": "string",
+          "default": "\"pomodoro-log.md\"",
+          "description": "Note in the notepad directory confirmations are appended to. Empty disables the log."
         }
       ]
     }

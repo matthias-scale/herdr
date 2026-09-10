@@ -16,9 +16,10 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::Value;
 use support::{
-    cleanup_test_base, client_handshake, encode_varint_u32, frame_message, read_server_message,
-    register_runtime_dir, register_spawned_herdr_pid, unregister_spawned_herdr_pid,
-    wait_for_message_variant, wait_for_socket, wait_until, CURRENT_PROTOCOL,
+    cleanup_test_base, client_handshake, drain_messages, encode_varint_u32, frame_message,
+    read_server_message, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, wait_for_message_variant, wait_for_socket, wait_until,
+    CURRENT_PROTOCOL,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -1502,11 +1503,9 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     assert_eq!(version, CURRENT_PROTOCOL);
     assert!(error.is_none(), "{:?}", error);
 
-    // Drain initial frame(s).
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    while read_server_message(&mut stream).is_ok() {}
+    // Drain initial frame(s). The shared helper caps the drain; the sidebar
+    // idle animation keeps a frame arriving inside any read timeout.
+    drain_messages(&mut stream);
 
     // Send SIGINT to the server process to trigger graceful shutdown.
     if let Some(pid) = spawned.child.process_id() {
@@ -1605,11 +1604,9 @@ fn client_receives_notify_on_agent_state_change() {
     assert_eq!(version, CURRENT_PROTOCOL);
     assert!(error.is_none(), "{:?}", error);
 
-    // Drain initial frame(s).
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    while read_server_message(&mut stream).is_ok() {}
+    // Drain initial frame(s). The shared helper caps the drain; the sidebar
+    // idle animation keeps a frame arriving inside any read timeout.
+    drain_messages(&mut stream);
 
     // Create a workspace via the API.
     let mut ws_stream = UnixStream::connect(&api_socket).expect("connect to API");

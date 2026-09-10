@@ -174,6 +174,60 @@ fn work_item_detail_request(
             });
         return Some((crate::app::state::DockHomeSection::Prs, selection, true));
     }
+    // A collapsed dock still renders a sidebar-selected ticket into the pane
+    // area (`ui::dock::render_object_preview`), so that host needs its detail
+    // too.
+    if presentation.collapsed {
+        if let Some(object) = presentation
+            .object_preview
+            .as_ref()
+            .filter(|object| object.surface == crate::app::DockSurface::Linear)
+        {
+            return Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(object.key.clone()),
+                }),
+                true,
+            ));
+        }
+    }
+    // The Linear surface owns a ticket detail exactly the way the pull-request
+    // surface owns a PR detail. Without this branch the request fell through to
+    // the home block, which reports the detail as hidden, so a server-backed
+    // client showed a ticket header with no description, criteria, or comments.
+    if !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Linear) {
+        let selection = presentation
+            .active_tab_index
+            .or_else(|| {
+                presentation
+                    .open_surfaces
+                    .iter()
+                    .position(|surface| *surface == crate::app::DockSurface::Linear)
+            })
+            .and_then(|index| presentation.tab_bindings.get(index))
+            .and_then(Option::as_ref)
+            .map(|binding| &binding.object)
+            .filter(|object| object.surface == crate::app::DockSurface::Linear)
+            .or_else(|| {
+                presentation
+                    .context_objects
+                    .iter()
+                    .find(|object| object.surface == crate::app::DockSurface::Linear)
+            })
+            // Keyed exactly as `dock::linear::focused_ticket_key` keys it, so the
+            // fetched detail lands in the entry the render reads.
+            .map(|object| crate::app::state::WorkItemKey {
+                repo: String::new(),
+                pr_number: None,
+                pr_url: None,
+                ticket_id: Some(object.key.clone()),
+            });
+        return Some((crate::app::state::DockHomeSection::Tickets, selection, true));
+    }
     let selection = match presentation.home_section {
         crate::app::state::DockHomeSection::Prs => presentation.home_selection.clone(),
         crate::app::state::DockHomeSection::Tickets => presentation.home_ticket_selection.clone(),
@@ -1065,6 +1119,10 @@ impl HeadlessServer {
         if self.app.apply_git_action_request() {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_git_action");
+        }
+        if self.app.apply_notepad_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_notepad");
         }
         if self.app.apply_add_project_clone_request() {
             needs_render = true;
@@ -5101,6 +5159,7 @@ impl HeadlessServer {
                         self.app.ensure_dock_editor();
                         self.app.resize_dock_editor();
                         self.app.ensure_scratchpad();
+                        self.app.ensure_notepad();
                     }
                     if let Some(deadline) = self
                         .app
@@ -5393,6 +5452,14 @@ impl HeadlessServer {
             }
         }
         changed |= self.app.handle_loop_receipt_fallback(now);
+        changed |= self.app.tick_notepad(now);
+        if has_app_client {
+            changed |= self.app.tick_pomodoro(now);
+            // The sidebar only exists in front of an attached client, and this
+            // loop - not `App::handle_scheduled_tasks` - is the one every
+            // server-backed session actually runs.
+            changed |= self.app.tick_sidebar_animation(now);
+        }
         if self.app.status_metrics_visible {
             changed |= self.app.schedule_status_metrics(now);
             self.app.schedule_status_side_signals(now);
@@ -5593,6 +5660,10 @@ impl HeadlessServer {
                 .app
                 .start_pending_agent_resumes(self.app.pending_agent_resume_due(now));
         }
+        // The headless server owns its own scheduler, so anything the TUI loop
+        // ticks has to be ticked here too or it only runs for TUI-owned
+        // runtimes. Resumes above, and the nudge that follows them.
+        changed |= self.app.tick_resume_nudges(now);
         changed
     }
 
@@ -6374,6 +6445,60 @@ mod tests {
         assert_eq!(
             work_item_detail_request(&client),
             Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
+        );
+    }
+
+    #[test]
+    fn focused_headless_linear_dock_requests_its_ticket_detail() {
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Linear);
+        client.dock_presentation.open_surfaces = vec![crate::app::DockSurface::Linear];
+        client.dock_presentation.active_tab_index = Some(0);
+        client.dock_presentation.tab_bindings = vec![Some(crate::app::state::DockTabBinding {
+            object: crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Linear,
+                key: "SCA-3313".into(),
+            },
+            origin: crate::app::state::DockTabOrigin::Context,
+        })];
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some("SCA-3313".into()),
+                }),
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn a_collapsed_linear_preview_requests_its_ticket_detail_too() {
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = true;
+        client.dock_presentation.object_preview = Some(crate::app::state::DockObjectRef {
+            surface: crate::app::DockSurface::Linear,
+            key: "SCA-3313".into(),
+        });
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some("SCA-3313".into()),
+                }),
+                true
+            ))
         );
     }
 
@@ -8459,6 +8584,124 @@ next_tab = ""
     #[test]
     fn semantic_app_client_marks_git_refresh_due_on_first_attach() {
         app_client_marks_git_refresh_due_on_first_attach(RenderEncoding::SemanticFrame);
+    }
+
+    /// The headless server runs its own scheduler, so a nudge armed by a native
+    /// resume only fires if that scheduler ticks it. Without the tick in
+    /// `handle_scheduled_tasks_headless` this passes in the TUI and does nothing
+    /// behind `herdr server`, which is how #273 shipped inert in 4fa86f16.
+    #[tokio::test]
+    async fn headless_scheduler_fires_a_pending_resume_nudge() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-resume-nudge");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        server.app.arm_resume_nudge(pane_id, &terminal_id, "claude");
+
+        let armed_at = Instant::now();
+        server.handle_scheduled_tasks_headless(armed_at, false);
+        assert!(
+            server.app.pending_resume_nudges.contains_key(&terminal_id),
+            "the nudge should still be waiting out its idle hold"
+        );
+
+        server.handle_scheduled_tasks_headless(
+            armed_at + crate::app::agent_resume::RESUME_NUDGE_IDLE_HOLD,
+            false,
+        );
+
+        assert!(
+            !server.app.pending_resume_nudges.contains_key(&terminal_id),
+            "the headless scheduler never ticked the resume nudge"
+        );
+        let mut sent = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            sent.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            sent.contains("continue"),
+            "expected the nudge to reach the pane, got {sent:?}"
+        );
+    }
+
+    /// The animation ships through the server loop, not `App::run`, so this is
+    /// the path that has to advance it. It shipped ticking only in `App::run`,
+    /// which is why the field stood still in front of every real client.
+    #[test]
+    fn an_attached_headless_server_advances_the_sidebar_animation() {
+        let mut server = test_headless_server();
+        server.app.state.hyperspace.enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 40,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+        crate::ui::compute_view(
+            &mut server.app.state,
+            ratatui::layout::Rect::new(0, 0, 120, 40),
+        );
+        assert!(
+            server.app.state.view.hyperspace_rect.height > 0,
+            "the panel has to be on screen for the tick to mean anything"
+        );
+
+        let before = server.app.state.hyperspace.step();
+        let now = Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2;
+        assert!(
+            server.handle_scheduled_tasks_headless(now, false),
+            "advancing the field is a render-worthy change"
+        );
+        assert_ne!(
+            server.app.state.hyperspace.step(),
+            before,
+            "the star field has to move"
+        );
+    }
+
+    #[test]
+    fn a_detached_headless_server_leaves_the_sidebar_animation_alone() {
+        let mut server = test_headless_server();
+        server.app.state.hyperspace.enabled = true;
+        let before = server.app.state.hyperspace.step();
+
+        server.handle_scheduled_tasks_headless(
+            Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2,
+            false,
+        );
+
+        assert_eq!(server.app.state.hyperspace.step(), before);
     }
 
     #[test]

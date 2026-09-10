@@ -165,6 +165,8 @@ socket = "/home/you/.config/herdr/herdr.sock"
 
 The per-host timeout applies to the entire read. An unreachable or slow host produces a `STATUS UNKNOWN` host row while reachable hosts still appear. `heartbeat_stale_ms` controls when a non-terminal windowless run loses live status; its default is 30 minutes.
 
+These hosts are also the machines the Home composer can dispatch to. With more than one configured, the composer shows a machine chip; picking a remote machine asks that machine's own Herdr server to create the workspace and start the agent, so the pane belongs to that machine and outlives both this client and the SSH connection. The new pane appears in `herdr fleet status` under its host, not in the local workspace list.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).
@@ -227,6 +229,35 @@ focus_agent = "prefix+alt+1..9"
 ```
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
+
+## Projects
+
+The Home composer can group your checkouts, so choosing where a task runs is a
+two-step pick rather than a typed path. Which repositories belong together is a
+fact about how you work, not about the filesystem, so it has to be configured:
+
+```toml
+[[projects]]
+id = "scalable"
+label = "scalable"
+roots = ["~/Repos/scalable"]
+repos = ["~/Repos/herdr"]
+
+[[projects]]
+id = "personal"
+label = "personal"
+roots = ["~/Projects"]
+```
+
+`roots` names directories whose immediate children are checkouts. `repos` names
+single checkouts, either absolute or relative to `~/Repos`. A directory counts
+as a checkout when it carries a `.git` entry, so linked worktrees are included.
+Scanning is one level deep and happens once, when the config is read.
+
+With no `[[projects]]` configured the composer groups everything under
+`~/Repos`. The project chip appears only when there is more than one group, and
+the repo chip only when the selected group holds at least one checkout.
+Selecting a repo sets the composer's directory.
 
 ## Custom command keybindings
 
@@ -697,6 +728,61 @@ approved review or a configured label. The default label is `approved`:
 approval_label = "approved"
 ```
 
+## Notepad
+
+A folder of Markdown notes lives at the bottom of the sidebar. Click into it and
+type; Herdr writes the note back shortly after you stop, and the header switches
+between the notes in the folder with a click, `Tab`, or `Shift+Tab`.
+
+```toml
+[notepad]
+enabled = true
+dir = "~/notes"
+files = ["todo", "ideas"]
+height = 8
+```
+
+Syncing across devices is the folder's job, not Herdr's. Point `dir` at a
+directory Syncthing, iCloud, or Dropbox already carries and every device edits
+the same notes; Herdr watches the directory and reloads a note the moment it
+changes underneath it. A note you are actively typing into is never overwritten
+by a remote change — the header shows `⇅` until your version is written.
+
+If you would rather sync with git, make the notes directory a checkout with a
+remote and set `git_sync = true`. Herdr then pulls it on an interval and commits
+and pushes after each write.
+
+`ctrl+alt+m` focuses the notepad from anywhere, `Esc` leaves it, and `ctrl+s`
+writes immediately.
+
+## Break timer
+
+The break timer runs a pomodoro cycle and, when a phase ends, raises an overlay
+that has to be answered in writing before it goes away. A countdown sits in the
+sidebar footer: click it to pause or resume, right-click it to end the current
+block early.
+
+```toml
+[pomodoro]
+enabled = true
+work_minutes = 25
+short_break_minutes = 5
+long_break_minutes = 20
+long_break_every = 4
+min_confirm_chars = 3
+log_file = "pomodoro-log.md"
+```
+
+With these defaults a break is due every 25 minutes and every fourth break is
+the long one, so a 20-minute break lands roughly every two hours. What you type
+into the overlay is appended to `log_file` in the notepad directory, which makes
+the log a by-product of taking the break rather than extra bookkeeping. Set
+`log_file = ""` to turn it off.
+
+`ctrl+alt+b` pauses and resumes the timer, and is also the way out of an overlay
+that fired at the wrong moment: it dismisses the reminder and leaves the next
+phase paused.
+
 ## Notifications
 
 Herdr can notify you when a background agent finishes or needs input:
@@ -772,7 +858,21 @@ Herdr resumes supported Agent conversations after a server restart by default:
 resume_agents_on_restore = true
 ```
 
-Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
+Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells.
+
+A resumed agent comes back at an idle prompt with its conversation replayed but
+its work stopped. Herdr sends it one prompt so it continues:
+
+```toml
+[session]
+nudge_resumed_agents = true
+resume_nudge_message = "continue"
+```
+
+The prompt is skipped when the agent resumes blocked, when it resumes straight
+back into work, and when the pane already holds text you typed.
+
+See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
 
 ## IME cursor tracking
 

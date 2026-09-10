@@ -2,7 +2,7 @@ use crate::api::schema::{
     FleetAgentInfo, FleetHostInfo, FleetHostStateInfo, FleetSnapshotInfo, ResponseResult,
 };
 use crate::app::App;
-use crate::fleet::{EvidenceSource, HostState};
+use crate::fleet::{counts_as_live_agent, EvidenceSource, HostState};
 
 use super::responses::encode_success;
 
@@ -13,16 +13,20 @@ impl App {
             .hosts
             .iter()
             .map(|host| {
+                let mut agent_count = 0;
                 let agents = host
                     .entries
                     .iter()
                     .filter(|entry| entry.source != EvidenceSource::Host)
-                    .map(|entry| FleetAgentInfo {
-                        agent_ref: entry.agent_ref.clone(),
-                        name: entry.name.clone().unwrap_or_else(|| entry.handle.clone()),
-                        agent: entry.agent.clone(),
-                        state: entry.state.clone(),
-                        source: entry.source.table_label().to_string(),
+                    .map(|entry| {
+                        agent_count += usize::from(counts_as_live_agent(entry));
+                        FleetAgentInfo {
+                            agent_ref: entry.agent_ref.clone(),
+                            name: entry.name.clone().unwrap_or_else(|| entry.handle.clone()),
+                            agent: entry.agent.clone(),
+                            state: entry.state.clone(),
+                            source: entry.source.table_label().to_string(),
+                        }
                     })
                     .collect::<Vec<_>>();
                 FleetHostInfo {
@@ -35,7 +39,7 @@ impl App {
                         HostState::Unreachable => FleetHostStateInfo::Unreachable,
                         HostState::VersionSkew => FleetHostStateInfo::VersionSkew,
                     },
-                    agent_count: agents.len(),
+                    agent_count,
                     version: host.version.clone(),
                     protocol: host.protocol,
                     error: host.error.clone(),
@@ -59,6 +63,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
     fn app_with_local_agent(self_name: &str) -> App {
         let mut config = crate::config::Config::default();
@@ -80,6 +85,53 @@ mod tests {
                 crate::detect::AgentState::Idle,
             );
         app
+    }
+
+    fn app_with_entries(entries: Vec<crate::fleet::FleetRow>) -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            refreshed_at: None,
+            refreshed_at_unix_ms: Some(42),
+            configured_hosts: vec!["ub2".to_string()],
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "ub2".to_string(),
+                target: "ub2".to_string(),
+                local: false,
+                session: Some("agents".to_string()),
+                state: HostState::Reachable,
+                version: Some("0.8.2".to_string()),
+                protocol: Some(crate::protocol::PROTOCOL_VERSION),
+                error: None,
+                entries,
+            }],
+        };
+        app
+    }
+
+    fn render_hosts(app: &App) -> String {
+        let area = Rect::new(0, 0, 80, 16);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::dock::hosts::render_hosts(&app.state, frame, area))
+            .expect("render hosts");
+        let buffer = terminal.backend().buffer();
+        (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -163,5 +215,44 @@ mod tests {
             panic!("expected fleet list response");
         };
         assert_eq!(snapshot.hosts[0].agents[0].agent_ref, agent_ref);
+    }
+
+    #[test]
+    fn fleet_api_lists_unknown_agents_with_zero_live_count() {
+        let app = app_with_entries(vec![
+            crate::fleet::FleetRow::test_agent_row_with_state("ub2", "stale-one", "status_unknown"),
+            crate::fleet::FleetRow::test_agent_row_with_state("ub2", "stale-two", "status_unknown"),
+        ]);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&app.handle_fleet_list("x".into())).expect("fleet response");
+        let host = &value["result"]["snapshot"]["hosts"][0];
+        assert_eq!(host["agent_count"], 0);
+        assert_eq!(host["agents"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn fleet_api_and_hosts_dock_agree_on_live_count() {
+        let entries = [
+            ("idle", "idle"),
+            ("working", "working"),
+            ("blocked", "blocked"),
+            ("blocked-unknown", "blocked_liveness_unknown"),
+            ("done", "done"),
+            ("stale", "status_unknown"),
+        ]
+        .into_iter()
+        .map(|(name, state)| crate::fleet::FleetRow::test_agent_row_with_state("ub2", name, state))
+        .collect();
+        let app = app_with_entries(entries);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&app.handle_fleet_list("x".into())).expect("fleet response");
+        let host = &value["result"]["snapshot"]["hosts"][0];
+        let dock = render_hosts(&app);
+        assert_eq!(host["agent_count"], 5);
+        assert_eq!(host["agents"].as_array().map(Vec::len), Some(6));
+        assert!(dock.contains("5 agents"), "{dock}");
+        assert!(dock.contains("stale"), "{dock}");
     }
 }

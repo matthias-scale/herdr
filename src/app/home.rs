@@ -34,65 +34,92 @@ pub(crate) enum HomeFocus {
     Effort,
     Access,
     Context,
+    Project,
+    Repo,
     Directory,
+    Machine,
     Workspace,
     Ref,
     Target,
 }
 
+/// Which optional composer fields the card is currently showing.
+///
+/// Traversal has to skip hidden fields, and five positional booleans is how the
+/// wrong one gets passed. Naming them costs one struct and removes that class
+/// of bug entirely.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HomeFieldVisibility {
+    pub(crate) effort: bool,
+    pub(crate) access: bool,
+    pub(crate) context: bool,
+    pub(crate) project: bool,
+    pub(crate) repo: bool,
+    pub(crate) machine: bool,
+}
+
+/// The card's field order, top row first.
+///
+/// `Reply` is deliberately absent: it is the blocked-queue row above the card,
+/// not a field in it, so it hands off into this ring rather than sitting in it.
+const FOCUS_RING: [HomeFocus; 13] = [
+    HomeFocus::Prompt,
+    HomeFocus::Agent,
+    HomeFocus::Model,
+    HomeFocus::Effort,
+    HomeFocus::Access,
+    HomeFocus::Context,
+    HomeFocus::Project,
+    HomeFocus::Repo,
+    HomeFocus::Directory,
+    HomeFocus::Machine,
+    HomeFocus::Workspace,
+    HomeFocus::Ref,
+    HomeFocus::Target,
+];
+
 impl HomeFocus {
-    pub(crate) fn next(
-        self,
-        effort_visible: bool,
-        access_visible: bool,
-        context_visible: bool,
-    ) -> Self {
+    /// A field the card is not drawing must not be reachable by Tab.
+    fn shown(self, visibility: HomeFieldVisibility) -> bool {
         match self {
-            Self::Reply => Self::Prompt,
-            Self::Prompt => Self::Agent,
-            Self::Agent => Self::Model,
-            Self::Model if effort_visible => Self::Effort,
-            Self::Model if access_visible => Self::Access,
-            Self::Model if context_visible => Self::Context,
-            Self::Model => Self::Directory,
-            Self::Effort if access_visible => Self::Access,
-            Self::Effort if context_visible => Self::Context,
-            Self::Effort => Self::Directory,
-            Self::Access if context_visible => Self::Context,
-            Self::Access => Self::Directory,
-            Self::Context => Self::Directory,
-            Self::Directory => Self::Workspace,
-            Self::Workspace => Self::Ref,
-            Self::Ref => Self::Target,
-            Self::Target => Self::Prompt,
+            Self::Effort => visibility.effort,
+            Self::Access => visibility.access,
+            Self::Context => visibility.context,
+            Self::Project => visibility.project,
+            Self::Repo => visibility.repo,
+            Self::Machine => visibility.machine,
+            _ => true,
         }
     }
 
-    pub(crate) fn previous(
-        self,
-        effort_visible: bool,
-        access_visible: bool,
-        context_visible: bool,
-    ) -> Self {
-        match self {
-            Self::Reply => Self::Target,
-            Self::Prompt => Self::Target,
-            Self::Agent => Self::Prompt,
-            Self::Model => Self::Agent,
-            Self::Effort => Self::Model,
-            Self::Access if effort_visible => Self::Effort,
-            Self::Access => Self::Model,
-            Self::Context if access_visible => Self::Access,
-            Self::Context if effort_visible => Self::Effort,
-            Self::Context => Self::Model,
-            Self::Directory if context_visible => Self::Context,
-            Self::Directory if access_visible => Self::Access,
-            Self::Directory if effort_visible => Self::Effort,
-            Self::Directory => Self::Model,
-            Self::Workspace => Self::Directory,
-            Self::Ref => Self::Workspace,
-            Self::Target => Self::Ref,
+    pub(crate) fn next(self, visibility: HomeFieldVisibility) -> Self {
+        self.step(visibility, true)
+    }
+
+    pub(crate) fn previous(self, visibility: HomeFieldVisibility) -> Self {
+        self.step(visibility, false)
+    }
+
+    fn step(self, visibility: HomeFieldVisibility, forward: bool) -> Self {
+        if self == Self::Reply {
+            return if forward { Self::Prompt } else { Self::Target };
         }
+        let len = FOCUS_RING.len();
+        let index = FOCUS_RING
+            .iter()
+            .position(|focus| *focus == self)
+            .unwrap_or(0);
+        (1..=len)
+            .map(|offset| {
+                let position = if forward {
+                    index + offset
+                } else {
+                    index + len - offset
+                };
+                FOCUS_RING[position % len]
+            })
+            .find(|candidate| candidate.shown(visibility))
+            .unwrap_or(self)
     }
 }
 
@@ -103,7 +130,10 @@ pub(crate) enum HomePicker {
     Effort,
     Access,
     Context,
+    Project,
+    Repo,
     Directory,
+    Machine,
     Workspace,
     Ref,
     Target,
@@ -119,7 +149,10 @@ impl HomePicker {
             HomeFocus::Effort => Some(Self::Effort),
             HomeFocus::Access => Some(Self::Access),
             HomeFocus::Context => Some(Self::Context),
+            HomeFocus::Project => Some(Self::Project),
+            HomeFocus::Repo => Some(Self::Repo),
             HomeFocus::Directory => Some(Self::Directory),
+            HomeFocus::Machine => Some(Self::Machine),
             HomeFocus::Workspace => Some(Self::Workspace),
             HomeFocus::Ref => Some(Self::Ref),
             HomeFocus::Target => Some(Self::Target),
@@ -741,6 +774,8 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) argv: Vec<String>,
     /// Environment the selected lane adds to the spawned pane.
     pub(crate) env: Vec<(String, String)>,
+    /// The machine to dispatch on, when it is not this one.
+    pub(crate) remote: Option<crate::app::machines::Machine>,
 }
 
 /// Shown when no pane in the selected directory has reported a branch yet.
@@ -805,6 +840,20 @@ pub(crate) struct HomeState {
     /// Id of the selected lane. Held as an id rather than an index so a config
     /// reload that reorders the list cannot silently repoint the selection.
     profile: String,
+    /// Checkout groups this composer offers, resolved from config at open time.
+    /// Empty when nothing is configured and `~/Repos` holds no checkouts.
+    projects: Vec<crate::app::projects::Project>,
+    /// Id of the selected group, held as an id for the same reason `profile` is.
+    project: String,
+    /// Name of the selected checkout inside that group, or nothing when the
+    /// directory was reached some other way.
+    repo: Option<String>,
+    /// Machines this composer can dispatch to, resolved from the configured
+    /// fleet at open time. Never empty: the local machine is always present.
+    machines: Vec<crate::app::machines::Machine>,
+    /// Name of the selected machine, held as a name for the same reason the
+    /// lane and group selections are held as ids.
+    machine: String,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     pub(crate) access: Option<HomeAccess>,
@@ -852,6 +901,11 @@ impl Default for HomeState {
             agent: Agent::Claude,
             profiles: crate::app::launch_profiles::resolve(&[]),
             profile: crate::detect::agent_label(Agent::Claude).to_ascii_lowercase(),
+            projects: Vec::new(),
+            project: String::new(),
+            repo: None,
+            machines: crate::app::machines::resolve(&crate::config::FleetConfig::default()),
+            machine: String::new(),
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
             access: default_access(Agent::Claude),
@@ -1068,20 +1122,125 @@ impl HomeState {
         !self.profile().owns_its_flags() && self.context_window.is_some()
     }
 
+    /// One project is not a choice, so the chip only earns its width from two.
+    pub(crate) fn project_visible(&self) -> bool {
+        self.projects.len() > 1
+    }
+
+    /// A project with no checkouts yet has nothing to offer.
+    pub(crate) fn repo_visible(&self) -> bool {
+        self.project()
+            .is_some_and(|project| !project.repos.is_empty())
+    }
+
+    /// One machine is not a choice, so the chip only earns its width from two.
+    pub(crate) fn machine_visible(&self) -> bool {
+        self.machines.len() > 1
+    }
+
+    pub(crate) fn machines(&self) -> &[crate::app::machines::Machine] {
+        &self.machines
+    }
+
+    /// The selected machine, falling back to the local one. Never `None`:
+    /// `resolve` always yields at least the local machine.
+    pub(crate) fn machine(&self) -> Option<&crate::app::machines::Machine> {
+        self.machines
+            .iter()
+            .find(|machine| machine.name == self.machine)
+            .or_else(|| self.machines.first())
+    }
+
+    pub(crate) fn set_machines(&mut self, machines: Vec<crate::app::machines::Machine>) {
+        self.machines = machines;
+        if !self
+            .machines
+            .iter()
+            .any(|machine| machine.name == self.machine)
+        {
+            self.machine = self
+                .machines
+                .first()
+                .map(|machine| machine.name.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    pub(crate) fn set_machine(&mut self, name: &str) {
+        self.machine = name.to_string();
+        self.dispatch_error = None;
+    }
+
+    pub(crate) fn field_visibility(&self) -> HomeFieldVisibility {
+        HomeFieldVisibility {
+            effort: self.effort_visible(),
+            access: self.access_visible(),
+            context: self.context_visible(),
+            project: self.project_visible(),
+            repo: self.repo_visible(),
+            machine: self.machine_visible(),
+        }
+    }
+
+    pub(crate) fn projects(&self) -> &[crate::app::projects::Project] {
+        &self.projects
+    }
+
+    /// The selected project, or the first one when the selection is stale.
+    pub(crate) fn project(&self) -> Option<&crate::app::projects::Project> {
+        self.projects
+            .iter()
+            .find(|project| project.id == self.project)
+            .or_else(|| self.projects.first())
+    }
+
+    pub(crate) fn repo_options(&self) -> &[crate::app::projects::ProjectRepo] {
+        self.project()
+            .map(|project| project.repos.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// What the repo chip shows. No selection is not an error: a fresh composer
+    /// still points at whatever directory it opened on.
+    pub(crate) fn repo_label(&self) -> &str {
+        self.repo.as_deref().unwrap_or("repo")
+    }
+
+    /// Replace the resolved project list, keeping a selection that survives.
+    pub(crate) fn set_projects(&mut self, projects: Vec<crate::app::projects::Project>) {
+        self.projects = projects;
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.id == self.project)
+        {
+            self.project = self
+                .projects
+                .first()
+                .map(|project| project.id.clone())
+                .unwrap_or_default();
+            self.repo = None;
+        }
+    }
+
+    /// Switching project drops the repo: a checkout name means nothing outside
+    /// the group it was chosen from.
+    pub(crate) fn set_project(&mut self, id: &str) {
+        if self.project == id {
+            return;
+        }
+        self.project = id.to_string();
+        self.repo = None;
+        self.dispatch_error = None;
+    }
+
     pub(crate) fn move_focus(&mut self, backwards: bool) {
         let current = self.focus.unwrap_or(HomeFocus::Prompt);
+        let visibility = self.field_visibility();
         self.focus = Some(if backwards {
-            current.previous(
-                self.effort_visible(),
-                self.access_visible(),
-                self.context_visible(),
-            )
+            current.previous(visibility)
         } else {
-            current.next(
-                self.effort_visible(),
-                self.access_visible(),
-                self.context_visible(),
-            )
+            current.next(visibility)
         });
     }
 
@@ -1413,6 +1572,10 @@ impl HomeState {
             prompt: prompt.into(),
             argv,
             env,
+            remote: self
+                .machine()
+                .filter(|machine| !machine.is_local())
+                .cloned(),
         }
     }
 }
@@ -1601,6 +1764,8 @@ impl crate::app::state::AppState {
             self.home_agent_choices.clone(),
         );
         home.set_profiles(self.launch_profiles.clone());
+        home.set_projects(self.projects.clone());
+        home.set_machines(self.machines.clone());
         home
     }
 
@@ -2015,6 +2180,21 @@ impl crate::app::state::AppState {
                 .as_ref()
                 .map(|home| home.context_options().len())
                 .unwrap_or(0),
+            HomePicker::Project => self
+                .home
+                .as_ref()
+                .map(|home| home.projects().len())
+                .unwrap_or(0),
+            HomePicker::Repo => self
+                .home
+                .as_ref()
+                .map(|home| home.repo_options().len())
+                .unwrap_or(0),
+            HomePicker::Machine => self
+                .home
+                .as_ref()
+                .map(|home| home.machines().len())
+                .unwrap_or(0),
             HomePicker::Directory => match self.home_browse() {
                 Some(browse) => browse.children.len(),
                 None => self.home_directory_match_indices().len(),
@@ -2113,6 +2293,18 @@ impl crate::app::state::AppState {
                     home.context_options()
                         .iter()
                         .position(|option| *option == context)
+                }),
+                HomePicker::Project => home.projects().iter().position(|project| {
+                    Some(project.id.as_str()) == home.project().map(|current| current.id.as_str())
+                }),
+                HomePicker::Repo => home.repo.as_deref().and_then(|name| {
+                    home.repo_options()
+                        .iter()
+                        .position(|repo| repo.name == name)
+                }),
+                HomePicker::Machine => home.machines().iter().position(|machine| {
+                    Some(machine.name.as_str())
+                        == home.machine().map(|current| current.name.as_str())
                 }),
                 HomePicker::Directory => self
                     .home_directory_picker_options()
@@ -2347,6 +2539,41 @@ impl crate::app::state::AppState {
                     .map(|context| (*context).to_string());
                 if let Some(home) = self.home.as_mut() {
                     home.set_context_window(context);
+                }
+            }
+            HomePicker::Project => {
+                let id = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.projects().get(selected))
+                    .map(|project| project.id.clone());
+                if let (Some(id), Some(home)) = (id, self.home.as_mut()) {
+                    home.set_project(&id);
+                }
+            }
+            HomePicker::Repo => {
+                let repo = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.repo_options().get(selected))
+                    .cloned();
+                if let Some(repo) = repo {
+                    // The checkout is the directory; recording the name as well
+                    // is what lets the chip keep saying which repo it was.
+                    if let Some(home) = self.home.as_mut() {
+                        home.repo = Some(repo.name.clone());
+                    }
+                    self.home_set_directory(crate::worktree::canonical_or_original(&repo.path));
+                }
+            }
+            HomePicker::Machine => {
+                let name = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.machines().get(selected))
+                    .map(|machine| machine.name.clone());
+                if let (Some(name), Some(home)) = (name, self.home.as_mut()) {
+                    home.set_machine(&name);
                 }
             }
             HomePicker::Directory => {
@@ -2769,6 +2996,7 @@ mod tests {
                     "cap the retry loop\nand log it".into(),
                 ],
                 env: Vec::new(),
+                remote: None,
             }
         );
     }
@@ -2938,6 +3166,97 @@ mod tests {
                 "implement the retry cap",
             ]
         );
+    }
+
+    fn projects_for_test() -> Vec<crate::app::projects::Project> {
+        use crate::app::projects::{Project, ProjectRepo};
+        vec![
+            Project {
+                id: "scalable".into(),
+                label: "scalable".into(),
+                repos: vec![ProjectRepo {
+                    name: "herdr".into(),
+                    path: std::env::temp_dir().join("herdr"),
+                }],
+            },
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn switching_project_forgets_the_repo_and_hides_the_chip_when_the_group_is_empty() {
+        let mut home = HomeState::default();
+        assert!(
+            !home.project_visible() && !home.repo_visible(),
+            "an unconfigured composer offers no project fields"
+        );
+
+        home.set_projects(projects_for_test());
+        assert!(home.project_visible(), "two groups is a choice");
+        assert_eq!(
+            home.project().map(|project| project.id.as_str()),
+            Some("scalable")
+        );
+        assert!(home.repo_visible());
+
+        home.repo = Some("herdr".into());
+        home.set_project("personal");
+        assert_eq!(
+            home.repo, None,
+            "a checkout name means nothing in another group"
+        );
+        assert!(
+            !home.repo_visible(),
+            "a group with no checkouts offers no repo chip"
+        );
+    }
+
+    #[test]
+    fn focus_traversal_skips_the_project_fields_it_is_not_drawing() {
+        let visibility = HomeFieldVisibility {
+            effort: false,
+            access: false,
+            context: false,
+            project: false,
+            repo: false,
+            machine: false,
+        };
+        assert_eq!(HomeFocus::Model.next(visibility), HomeFocus::Directory);
+        assert_eq!(HomeFocus::Directory.previous(visibility), HomeFocus::Model);
+
+        let visibility = HomeFieldVisibility {
+            project: true,
+            repo: true,
+            ..visibility
+        };
+        assert_eq!(HomeFocus::Model.next(visibility), HomeFocus::Project);
+        assert_eq!(HomeFocus::Project.next(visibility), HomeFocus::Repo);
+        assert_eq!(HomeFocus::Repo.next(visibility), HomeFocus::Directory);
+        assert_eq!(HomeFocus::Directory.previous(visibility), HomeFocus::Repo);
+
+        // The machine sits after the directory: you choose what to work on,
+        // then where it runs.
+        assert_eq!(HomeFocus::Directory.next(visibility), HomeFocus::Workspace);
+        let visibility = HomeFieldVisibility {
+            machine: true,
+            ..visibility
+        };
+        assert_eq!(HomeFocus::Directory.next(visibility), HomeFocus::Machine);
+        assert_eq!(HomeFocus::Machine.next(visibility), HomeFocus::Workspace);
+        assert_eq!(
+            HomeFocus::Workspace.previous(visibility),
+            HomeFocus::Machine
+        );
+
+        // The ring wraps, and Reply enters it rather than sitting in it.
+        assert_eq!(HomeFocus::Target.next(visibility), HomeFocus::Prompt);
+        assert_eq!(HomeFocus::Prompt.previous(visibility), HomeFocus::Target);
+        assert_eq!(HomeFocus::Reply.next(visibility), HomeFocus::Prompt);
+        assert_eq!(HomeFocus::Reply.previous(visibility), HomeFocus::Target);
     }
 
     #[test]

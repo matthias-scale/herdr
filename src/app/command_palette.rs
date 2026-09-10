@@ -38,6 +38,7 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "copy_work_ticket" => NavigateAction::CopyWorkTicket,
         "copy_work_pr" => NavigateAction::CopyWorkPr,
         "copy_work_preview" => NavigateAction::CopyWorkPreview,
+        "toggle_theme" => NavigateAction::ToggleTheme,
         "workspace_picker" => NavigateAction::WorkspacePicker,
         "goto" => NavigateAction::OpenNavigator,
         "new_workspace" => NavigateAction::NewWorkspace,
@@ -55,6 +56,8 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "toggle_pin_tab" => NavigateAction::TogglePinTab,
         "previous_tab" => NavigateAction::PreviousTab,
         "next_tab" => NavigateAction::NextTab,
+        "move_tab_previous" => NavigateAction::MoveTabPrevious,
+        "move_tab_next" => NavigateAction::MoveTabNext,
         "previous_window" => NavigateAction::PreviousWindow,
         "next_window" => NavigateAction::NextWindow,
         "next_blocked_window" => NavigateAction::NextBlockedWindow,
@@ -76,10 +79,15 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "close_pane" => NavigateAction::ClosePane,
         "zoom" => NavigateAction::Zoom,
         "resize_mode" => NavigateAction::EnterResizeMode,
+        "resize_pane_left" => NavigateAction::ResizePaneLeft,
+        "resize_pane_down" => NavigateAction::ResizePaneDown,
+        "resize_pane_up" => NavigateAction::ResizePaneUp,
+        "resize_pane_right" => NavigateAction::ResizePaneRight,
         "rename_pane" => NavigateAction::RenamePane,
         "edit_scrollback" => NavigateAction::EditScrollback,
         "copy_mode" => NavigateAction::CopyMode,
         "toggle_sidebar" => NavigateAction::ToggleSidebar,
+        "focus_sidebar" => NavigateAction::FocusSidebar,
         "sidebar_cycle_group_mode" => NavigateAction::CycleSidebarGroupMode,
         "sidebar_refresh" => NavigateAction::RefreshSidebar,
         "toggle_blocked_filter" => NavigateAction::ToggleBlockedFilter,
@@ -92,12 +100,30 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "toggle_status_detail" => NavigateAction::ToggleStatusDetail,
         "edit_scratchpad" => NavigateAction::EditScratchpad,
         "show_scratchpad" => NavigateAction::ShowScratchpad,
+        "toggle_notepad" => NavigateAction::ToggleNotepad,
+        "toggle_pomodoro" => NavigateAction::TogglePomodoro,
         "home" => NavigateAction::OpenHome,
         "work" => NavigateAction::OpenWorkView,
         "usage" => NavigateAction::OpenUsageView,
         "tickets" => NavigateAction::OpenTicketView,
         "inbox" => NavigateAction::OpenInbox,
+        "missive" => NavigateAction::OpenMissiveView,
         "symphony" => NavigateAction::OpenSymphony,
+        "git_pull" => NavigateAction::GitPull,
+        "git_commit" => NavigateAction::GitCommit,
+        "git_push" => NavigateAction::GitPush,
+        "git_create_pr" => NavigateAction::GitCreatePr,
+        "dock_home" => NavigateAction::OpenDockHome,
+        "dock_terminal" => NavigateAction::OpenDockTerminal,
+        "dock_files" => NavigateAction::OpenDockFiles,
+        "dock_diff" => NavigateAction::OpenDockDiff,
+        "dock_pr" => NavigateAction::OpenDockPr,
+        "dock_linear" => NavigateAction::OpenDockLinear,
+        "dock_missive" => NavigateAction::OpenDockMissive,
+        "dock_agents" => NavigateAction::OpenDockAgents,
+        "dock_shortcuts" => NavigateAction::OpenDockShortcuts,
+        "dock_context" => NavigateAction::OpenDockContext,
+        "dock_symphony" => NavigateAction::OpenDockSymphony,
         "next_review_agent" => NavigateAction::NextReviewAgent,
         "previous_agent" => NavigateAction::PreviousAgent,
         "next_agent" => NavigateAction::NextAgent,
@@ -402,7 +428,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::{
-        app::input::{action_for_key_for_test, BindingDispatch},
+        app::input::{
+            action_for_key_for_test, non_indexed_navigation_actions_for_test, BindingDispatch,
+        },
         config::ActionKeybinds,
         input::TerminalKey,
     };
@@ -439,6 +467,130 @@ mod tests {
             Some("keybinds")
         );
         assert!(entries.len() > 40);
+    }
+
+    #[test]
+    fn new_palette_commands_have_their_expected_labels_and_actions() {
+        let state = AppState::test_new();
+        let entries = state.command_palette_entries();
+        let expected = [
+            ("missive", NavigateAction::OpenMissiveView),
+            ("move tab previous", NavigateAction::MoveTabPrevious),
+            ("move tab next", NavigateAction::MoveTabNext),
+            ("resize pane left", NavigateAction::ResizePaneLeft),
+            ("resize pane down", NavigateAction::ResizePaneDown),
+            ("resize pane up", NavigateAction::ResizePaneUp),
+            ("resize pane right", NavigateAction::ResizePaneRight),
+            ("git pull", NavigateAction::GitPull),
+            ("git commit", NavigateAction::GitCommit),
+            ("git push", NavigateAction::GitPush),
+            ("git create pull request", NavigateAction::GitCreatePr),
+            ("dock: home", NavigateAction::OpenDockHome),
+            ("dock: terminal", NavigateAction::OpenDockTerminal),
+            ("dock: files", NavigateAction::OpenDockFiles),
+            ("dock: diff", NavigateAction::OpenDockDiff),
+            ("dock: pull requests", NavigateAction::OpenDockPr),
+            ("dock: linear", NavigateAction::OpenDockLinear),
+            ("dock: missive", NavigateAction::OpenDockMissive),
+            ("dock: agents", NavigateAction::OpenDockAgents),
+            ("dock: shortcuts", NavigateAction::OpenDockShortcuts),
+            ("dock: context", NavigateAction::OpenDockContext),
+            ("dock: symphony", NavigateAction::OpenDockSymphony),
+            ("toggle dark/light theme", NavigateAction::ToggleTheme),
+            ("focus sidebar", NavigateAction::FocusSidebar),
+        ];
+
+        for (label, action) in expected {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.label == label)
+                .unwrap_or_else(|| panic!("missing palette command {label:?}"));
+            assert_eq!(entry.command, PaletteCommand::BuiltIn(action));
+        }
+        assert!(entries.iter().any(|entry| entry.label == "missive"));
+    }
+
+    #[test]
+    fn fuzzy_queries_find_the_new_palette_commands() {
+        let mut state = AppState::test_new();
+        for (query, label) in [
+            ("diff", "dock: diff"),
+            ("push", "git push"),
+            ("theme", "toggle dark/light theme"),
+        ] {
+            state.command_palette.query = query.to_string();
+            assert_eq!(
+                state
+                    .command_palette_entries()
+                    .first()
+                    .map(|entry| entry.label.as_str()),
+                Some(label),
+                "query {query:?}"
+            );
+        }
+    }
+
+    /// The dispatch pair list and the settings/palette table are independent
+    /// hand-maintained surfaces. This catches a keybindable action that is
+    /// dispatched but missing from `BUILT_IN_GROUPS`. The help table is a
+    /// third independently maintained table and has already drifted from the
+    /// settings table in both directions, so it is documented here rather
+    /// than forced into a larger cleanup.
+    #[test]
+    fn every_non_indexed_dispatch_action_has_a_palette_row() {
+        let state = AppState::test_new();
+        let rows = crate::app::settings_keybindings::built_in_keybinding_entries()
+            .filter_map(|(_, field, _, _)| action_for_field(field))
+            .collect::<Vec<_>>();
+
+        let intentional_dispatch_exclusions = [
+            // Legacy and canonical work-link fields share aliases in the
+            // dispatch order, so the palette exposes the legacy action name.
+            (NavigateAction::OpenWorkUrl, "legacy open work URL alias"),
+            (NavigateAction::CopyWorkUrl, "legacy copy work URL alias"),
+            (
+                NavigateAction::OpenWorkLink,
+                "canonical field shares the legacy dispatch slot",
+            ),
+            (
+                NavigateAction::CopyWorkLink,
+                "canonical field shares the legacy dispatch slot",
+            ),
+        ];
+        let intentional_field_exclusions = [
+            // Navigate-mode workspace motion is handled directly by the
+            // navigate handler, not by a NavigateAction.
+            ("navigate_workspace_up", "navigate-mode workspace motion"),
+            ("navigate_workspace_down", "navigate-mode workspace motion"),
+            // Navigate-mode pane motion is handled directly by the navigate
+            // handler, not by a palette action.
+            ("navigate_pane_left", "navigate-mode pane motion"),
+            ("navigate_pane_down", "navigate-mode pane motion"),
+            ("navigate_pane_up", "navigate-mode pane motion"),
+            ("navigate_pane_right", "navigate-mode pane motion"),
+            // Indexed actions carry a parameter and have no single palette
+            // command to expose.
+            ("switch_workspace", "parametric indexed action"),
+            ("switch_tab", "parametric indexed action"),
+            ("focus_agent", "parametric indexed action"),
+        ];
+
+        for (field, reason) in intentional_field_exclusions {
+            assert!(action_for_field(field).is_none(), "{field} is {reason}");
+        }
+
+        for action in non_indexed_navigation_actions_for_test(&state.keybinds) {
+            if intentional_dispatch_exclusions
+                .iter()
+                .any(|(excluded, _)| *excluded == action)
+            {
+                continue;
+            }
+            assert!(
+                rows.contains(&action),
+                "dispatch action {action:?} has no BUILT_IN_GROUPS row"
+            );
+        }
     }
 
     #[test]

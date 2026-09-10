@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, RightClickPassthroughGesture,
-        TabPressState, ViewLayout, WorkspacePressState,
+        HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -103,6 +103,21 @@ pub(super) enum MouseAction {
     OpenUrl {
         url: String,
     },
+    /// Run one entry of the ticket detail's `[⋯]` menu.
+    DockTicketAction {
+        action: crate::ui::ticket_actions::TicketAction,
+    },
+    /// Start a thread on the focused ticket in the picked checkout.
+    DockTicketStartThread {
+        choice: crate::app::state::PrCheckoutChoice,
+    },
+}
+
+/// What a click inside the ticket detail did: handled here, or an app-level
+/// action the runtime has to run.
+enum TicketClick {
+    Consumed,
+    Action(MouseAction),
 }
 
 enum MobileMouseResult {
@@ -153,6 +168,34 @@ impl AppState {
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
         self.forwarded_pane_input = None;
+        // Same rule as the keyboard: a due break reminder owns the screen.
+        if self.pomodoro.prompt.is_some() {
+            return None;
+        }
+        if self.handle_notepad_mouse(&mouse) {
+            return None;
+        }
+        if rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.toggle_pomodoro(std::time::Instant::now());
+                    return None;
+                }
+                // Right-click ends the phase early, which is the deliberate
+                // "I am done with this block" action.
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.skip_pomodoro_phase(std::time::Instant::now());
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if rect_contains(self.view.hyperspace_pause_hit_area, mouse.column, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.hyperspace.toggle_paused(std::time::Instant::now());
+            return None;
+        }
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
@@ -299,6 +342,9 @@ impl AppState {
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
                                 HomeHitTarget::Access => crate::app::home::HomePicker::Access,
                                 HomeHitTarget::Context => crate::app::home::HomePicker::Context,
+                                HomeHitTarget::Project => crate::app::home::HomePicker::Project,
+                                HomeHitTarget::Repo => crate::app::home::HomePicker::Repo,
+                                HomeHitTarget::Machine => crate::app::home::HomePicker::Machine,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
                                 HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,
                                 HomeHitTarget::Ref => crate::app::home::HomePicker::Ref,
@@ -358,6 +404,9 @@ impl AppState {
             group_menu_enabled && self.point_in_rect(new_menu_anchor, mouse.column, mouse.row);
         let search_hit =
             group_menu_enabled && self.point_in_rect(search_anchor, mouse.column, mouse.row);
+        let star_filter_anchor = crate::ui::sidebar_header_star_filter_rect(self.view.sidebar_rect);
+        let star_filter_hit =
+            group_menu_enabled && self.point_in_rect(star_filter_anchor, mouse.column, mouse.row);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
         let filter_anchor = self.sidebar_filter_anchor_rect();
         let filter_anchor_hit =
@@ -417,6 +466,10 @@ impl AppState {
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && new_menu_hit {
             self.open_sidebar_new_menu();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && star_filter_hit {
+            self.sidebar_starred_only = !self.sidebar_starred_only;
             return None;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && search_hit {
@@ -759,6 +812,17 @@ impl AppState {
             // section headers fold on click too. Resolved from the previewed
             // surface, because the dock tab underneath it may be anything.
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if self
+                    .dock_object_preview
+                    .as_ref()
+                    .is_some_and(|object| object.surface == crate::app::DockSurface::Linear)
+                {
+                    match self.click_dock_ticket_control(mouse.column, mouse.row) {
+                        Some(TicketClick::Action(action)) => return Some(action),
+                        Some(TicketClick::Consumed) => return None,
+                        None => {}
+                    }
+                }
                 if let Some((object_key, section)) = self
                     .dock_object_preview
                     .as_ref()
@@ -1044,6 +1108,18 @@ impl AppState {
                         return None;
                     }
                 }
+                if self.on_dock_auto_open(mouse.column, mouse.row) {
+                    // The strip toggle writes the same `ui.open_dock_on_work_link`
+                    // setting the settings screen edits, so the two surfaces
+                    // cannot disagree and the choice survives a config reload.
+                    return Some(MouseAction::Settings(SettingsAction::SaveConfigEdit(
+                        crate::app::settings_general::ConfigEdit::Bool {
+                            section: "ui",
+                            key: "open_dock_on_work_link",
+                            value: !self.open_dock_on_work_link,
+                        },
+                    )));
+                }
                 if self.on_dock_maximize(mouse.column, mouse.row) {
                     self.toggle_dock_maximized();
                     self.mark_session_dirty();
@@ -1200,6 +1276,15 @@ impl AppState {
                 if in_dock && self.dock_tab == Some(crate::app::DockSurface::Hosts) {
                     if let Some(name) = self.click_dock_host_row(mouse.column, mouse.row) {
                         return Some(MouseAction::OpenFleetHost { name });
+                    }
+                }
+                // The ticket buttons and their dropdowns sit above the section
+                // headers, so they claim the click first.
+                if in_dock && self.dock_tab == Some(crate::app::DockSurface::Linear) {
+                    match self.click_dock_ticket_control(mouse.column, mouse.row) {
+                        Some(TicketClick::Action(action)) => return Some(action),
+                        Some(TicketClick::Consumed) => return None,
+                        None => {}
                     }
                 }
                 // A section header folds on click. This runs before the plain
@@ -1905,6 +1990,27 @@ impl AppState {
                 {
                     return None;
                 }
+                // Session rows sit inside the same sidebar rect as workspace
+                // header rows but `workspace_at_row` never matches them, so
+                // without this branch a right-click on a session did nothing.
+                if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row).or_else(|| {
+                    self.agent_detail_target_at(mouse.row)
+                        .map(|(w, t, _)| (w, t))
+                }) {
+                    self.selected = ws_idx;
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Tab {
+                            ws_idx,
+                            tab_idx,
+                            starred: self.tab_starred(ws_idx, tab_idx),
+                        },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                    return None;
+                }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
                     let kind = self
@@ -1957,7 +2063,11 @@ impl AppState {
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Tab { ws_idx, tab_idx },
+                        kind: ContextMenuKind::Tab {
+                            ws_idx,
+                            tab_idx,
+                            starred: self.tab_starred(ws_idx, tab_idx),
+                        },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -1997,6 +2107,12 @@ impl AppState {
                         ws_idx,
                         tab_idx,
                     );
+                    let link = self.url_at_pane_cell(
+                        terminal_runtimes,
+                        info.id,
+                        mouse.row.saturating_sub(info.inner_rect.y),
+                        mouse.column.saturating_sub(info.inner_rect.x),
+                    );
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
                             ws_idx,
@@ -2006,6 +2122,7 @@ impl AppState {
                             has_manual_label,
                             right_click_passthrough,
                             linkable_work_link,
+                            link,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -2133,6 +2250,14 @@ impl AppState {
         }
     }
 
+    /// Star flag of a tab, `false` when the indices no longer resolve.
+    pub(crate) fn tab_starred(&self, ws_idx: usize, tab_idx: usize) -> bool {
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .is_some_and(|tab| tab.starred)
+    }
+
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
         let menu = self.context_menu.as_ref()?;
         let screen = self.screen_rect();
@@ -2212,6 +2337,140 @@ impl AppState {
     /// `surface`, accounting for the scroll offset the render applies. The
     /// surface is passed in because the same renderers back the dock tab and the
     /// collapsed-dock preview, which resolve it differently.
+    /// Ticket context for hit-testing the action menu. The app-level twin adds
+    /// the repo, which a click does not need.
+    fn dock_ticket_action_context_for_hit(
+        &self,
+    ) -> Option<crate::ui::ticket_actions::TicketActionContext> {
+        let key = crate::ui::dock::linear::focused_ticket_key(self)?;
+        let ticket_id = key.ticket_id.as_deref()?;
+        let ticket = self
+            .work_index_snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .find(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))?;
+        Some(crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            ticket,
+            self.work_item_detail_cache.get(&key),
+            self.work_index_session.linear.viewer.as_deref(),
+            self.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(self).is_some(),
+        ))
+    }
+
+    /// A click inside the ticket detail: its two buttons and, while one is
+    /// open, its dropdown. `None` leaves the click to the callers below.
+    fn click_dock_ticket_control(&mut self, column: u16, row: u16) -> Option<TicketClick> {
+        // Same precedence the keyboard uses: a pending write owns the surface
+        // until it is answered, and a comment draft owns it until it is sent or
+        // dropped. Without this a click could reopen the menu over either and
+        // replace a half-typed comment with an empty one.
+        if self.dock_pending_write.is_some() || self.dock_ticket_comment_draft.is_some() {
+            return None;
+        }
+        if let Some(state) = self.dock_ticket_action_menu {
+            let Some(index) = self.dock_ticket_menu_row_at(column, row) else {
+                self.dock_ticket_action_menu = None;
+                return Some(TicketClick::Consumed);
+            };
+            let entries = self
+                .dock_ticket_action_context_for_hit()
+                .map(|context| crate::ui::ticket_actions::ticket_action_table(&context, state.page))
+                .unwrap_or_default();
+            let Some(entry) = entries.get(index).filter(|entry| entry.enabled()) else {
+                return Some(TicketClick::Consumed);
+            };
+            let action = entry.action;
+            if let Some(menu) = self.dock_ticket_action_menu.as_mut() {
+                menu.selected = index;
+            }
+            return Some(TicketClick::Action(MouseAction::DockTicketAction {
+                action,
+            }));
+        }
+        if self.dock_ticket_start_menu.is_some() {
+            let Some(index) = self.dock_ticket_menu_row_at(column, row) else {
+                self.dock_ticket_start_menu = None;
+                return Some(TicketClick::Consumed);
+            };
+            let choice = if index == 0 {
+                crate::app::state::PrCheckoutChoice::CurrentCheckout
+            } else {
+                crate::app::state::PrCheckoutChoice::NewWorktree
+            };
+            return Some(TicketClick::Action(MouseAction::DockTicketStartThread {
+                choice,
+            }));
+        }
+        match self.dock_ticket_action_at(column, row)? {
+            crate::ui::work_view::TicketActionControl::StartThread => {
+                self.dock_linear_focused = true;
+                self.dock_ticket_start_menu = Some(Default::default());
+            }
+            crate::ui::work_view::TicketActionControl::More => {
+                self.dock_linear_focused = true;
+                self.dock_ticket_action_menu = Some(Default::default());
+            }
+        }
+        Some(TicketClick::Consumed)
+    }
+
+    /// Ticket control under the pointer in the Linear dock surface.
+    ///
+    /// The detail draws `[Start thread ▾]` and `[⋯]` as buttons, so a click has
+    /// to reach them; before this they were keyboard-only (`c` and `m`) and a
+    /// click did nothing.
+    fn dock_ticket_action_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<crate::ui::work_view::TicketActionControl> {
+        let area = super::dock_detail_area(self);
+        if !self.point_in_rect(area, column, row) {
+            return None;
+        }
+        let key = crate::ui::dock::linear::focused_ticket_key(self)?;
+        let layout = crate::ui::dock::linear::focused_ticket_layout(self, area)?;
+        // Clamped exactly as the render clamps it, so a click near the bottom
+        // of a short detail resolves to the line that was drawn.
+        let max_scroll = layout.lines.len().saturating_sub(usize::from(area.height));
+        let scroll = self
+            .dock_object_views
+            .get(&key)
+            .map(|view| usize::from(view.scroll))
+            .unwrap_or(0)
+            .min(max_scroll);
+        crate::ui::work_view::ticket_action_control_at(
+            area,
+            layout.action_rows,
+            u16::try_from(scroll).unwrap_or(u16::MAX),
+            column,
+            row,
+        )
+    }
+
+    /// Row of an open ticket dropdown under the pointer. `None` means the click
+    /// fell outside the menu, which dismisses it the way Esc does.
+    fn dock_ticket_menu_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let area = super::dock_detail_area(self);
+        if let Some(state) = self.dock_ticket_action_menu {
+            let layout = crate::ui::dock::linear::focused_ticket_layout(self, area)?;
+            let context = self.dock_ticket_action_context_for_hit()?;
+            let anchor = crate::ui::work_view::ticket_action_menu_anchor(area, layout.action_rows);
+            let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
+                anchor, area, &context, state,
+            )?;
+            return crate::ui::dropdown::hit_test(&layout, column, row);
+        }
+        if self.dock_ticket_start_menu.is_some() {
+            let layout = crate::ui::work_view::ticket_start_menu_layout(area)?;
+            return crate::ui::dropdown::hit_test(&layout, column, row);
+        }
+        None
+    }
+
     fn dock_detail_section_at(
         &self,
         surface: crate::app::DockSurface,
@@ -2497,11 +2756,12 @@ impl AppState {
         })
     }
 
-    /// Work link under a pane click that is not already bound to its window.
+    /// Work link under a pane click, resolved to the action worth offering.
     ///
-    /// The menu entry only appears when acting on it would change something, so
-    /// a click on a pull request or ticket the whole window already carries
-    /// offers nothing.
+    /// A link every pane declares offers the way back out. One the window
+    /// carries partially, or not at all, offers the binding that completes it.
+    /// A link only the hook or git tier observed offers nothing, because a
+    /// declaration cannot remove an observation and the entry would lie.
     pub(super) fn linkable_work_link_at(
         &self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -2510,7 +2770,7 @@ impl AppState {
         row: u16,
         ws_idx: usize,
         tab_idx: usize,
-    ) -> Option<PaneMenuWorkLink> {
+    ) -> Option<PaneMenuWorkLinkAction> {
         if col < info.inner_rect.x || row < info.inner_rect.y {
             return None;
         }
@@ -2530,17 +2790,33 @@ impl AppState {
                     .next()
                     .map(PaneMenuWorkLink::Ticket)
             })?;
-        let bound_everywhere = self
-            .window_pane_ids(ws_idx, tab_idx)
-            .into_iter()
-            .all(|pane_id| {
-                self.workspaces
-                    .get(ws_idx)
-                    .and_then(|ws| ws.pane_state(pane_id))
-                    .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
-                    .is_some_and(|terminal| link.is_bound_in(terminal.effective_work_context()))
-            });
-        (!bound_everywhere).then_some(link)
+        let panes = self.window_pane_ids(ws_idx, tab_idx);
+        let mut declared_anywhere = false;
+        let mut declared_everywhere = true;
+        let mut bound_everywhere = true;
+        for pane_id in panes {
+            let terminal = self
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.pane_state(pane_id))
+                .and_then(|pane| self.terminals.get(&pane.attached_terminal_id));
+            let Some(terminal) = terminal else {
+                bound_everywhere = false;
+                declared_everywhere = false;
+                continue;
+            };
+            let declared = link.is_bound_in(terminal.manual_work_context());
+            declared_anywhere |= declared;
+            declared_everywhere &= declared;
+            bound_everywhere &= link.is_bound_in(terminal.effective_work_context());
+        }
+        if declared_everywhere {
+            Some(PaneMenuWorkLinkAction::unlink(link))
+        } else if !bound_everywhere || declared_anywhere {
+            Some(PaneMenuWorkLinkAction::link(link))
+        } else {
+            None
+        }
     }
 
     /// Panes of one window, in layout order, so a window-wide binding applies
@@ -3160,6 +3436,114 @@ mod tests {
             .expect("pane laid out")
             .inner_rect;
         (app, pane_id, rect)
+    }
+
+    #[test]
+    fn clicking_a_status_row_work_link_opens_it_in_the_dock() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .and_then(|pane_id| app.state.workspaces[0].terminal_id(pane_id))
+            .expect("focused terminal")
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal state");
+        terminal.set_terminal_title(Some("Fix billing".into()));
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            repo: Some("herdrdev/herdr".into()),
+            session_name: Some("Fix billing".into()),
+            pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
+            ..Default::default()
+        });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 24));
+
+        assert!(
+            app.state.dock_open_surfaces.is_empty(),
+            "the link alone opens nothing"
+        );
+        let link = app
+            .state
+            .view
+            .status_work_links
+            .first()
+            .cloned()
+            .expect("the status row names the pull request");
+        assert_eq!(link.label, "#159");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            link.rect.x,
+            link.rect.y,
+        ));
+
+        assert!(!app.state.dock_collapsed, "the click opens the dock");
+        assert_eq!(
+            app.state.dock_tab,
+            Some(crate::app::DockSurface::Pr),
+            "on the link that was clicked"
+        );
+        assert_eq!(app.state.dock_tab_label(0), "#159");
+    }
+
+    #[test]
+    fn clicking_the_sidebar_animation_button_toggles_its_pause() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.hyperspace.enabled = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let button = app.state.view.hyperspace_pause_hit_area;
+        assert!(button.width > 0, "the panel offers a pause button");
+        assert_eq!(
+            button.x, app.state.view.sidebar_rect.x,
+            "the button sits in the sidebar's left column"
+        );
+        assert!(!app.state.hyperspace.paused());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+        assert!(app.state.hyperspace.paused(), "one click stops the field");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+        assert!(
+            !app.state.hyperspace.paused(),
+            "a second click starts it again"
+        );
+    }
+
+    #[test]
+    fn a_click_next_to_the_animation_button_leaves_it_alone() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.hyperspace.enabled = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let button = app.state.view.hyperspace_pause_hit_area;
+        assert!(button.width > 0);
+        // The footer icon row is one row below the panel, and it owns its own
+        // clicks; a near miss must not toggle the animation.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.right(),
+            button.y,
+        ));
+        assert!(!app.state.hyperspace.paused());
     }
 
     #[test]
@@ -3875,6 +4259,183 @@ mod tests {
     }
 
     #[test]
+    fn right_clicking_a_sidebar_session_row_opens_its_tab_menu_with_the_star_entry() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.toggle_workspace_agent_disclosure(1);
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace tab row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                target.rect.x + 2,
+                target.rect.y,
+            ),
+        );
+
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("session row opens a context menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Tab {
+                ws_idx: 1,
+                tab_idx: 0,
+                starred: false,
+            }
+        );
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert!(
+            menu.items().contains(&crate::app::state::STAR_ITEM),
+            "an unstarred session offers Star, got {:?}",
+            menu.items()
+        );
+        assert!(menu.items().contains(&"Rename"));
+    }
+
+    #[test]
+    fn a_starred_session_rows_menu_offers_unstar_instead_of_star() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.toggle_workspace_agent_disclosure(1);
+        app.state.workspaces[1].tabs[0].starred = true;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace tab row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                target.rect.x + 2,
+                target.rect.y,
+            ),
+        );
+
+        let items = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("session row opens a context menu")
+            .items();
+        assert!(items.contains(&crate::app::state::UNSTAR_ITEM), "{items:?}");
+        assert!(!items.contains(&crate::app::state::STAR_ITEM), "{items:?}");
+    }
+
+    #[test]
+    fn right_clicking_a_workspace_header_row_still_opens_the_workspace_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let row = crate::ui::compute_sidebar_row_areas(&app.state, sidebar)
+            .0
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace header row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                row.rect.x + 2,
+                row.rect.y,
+            ),
+        );
+
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("workspace row still opens a context menu");
+        assert!(
+            matches!(
+                menu.kind,
+                ContextMenuKind::Workspace { ws_idx: 1 }
+                    | ContextMenuKind::GitWorkspace { ws_idx: 1, .. }
+            ),
+            "{:?}",
+            menu.kind
+        );
+    }
+
+    #[test]
+    fn clicking_the_header_star_toggles_the_starred_only_view() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let star = crate::ui::sidebar_header_star_filter_rect(sidebar);
+        assert!(star.width > 0, "the header is wide enough for the star");
+        assert!(!app.state.sidebar_starred_only);
+
+        for expected in [true, false] {
+            app.state.handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Down(MouseButton::Left), star.x, star.y),
+            );
+            assert_eq!(app.state.sidebar_starred_only, expected);
+        }
+    }
+
+    #[test]
+    fn the_header_star_never_overlaps_the_search_box_or_the_other_icons() {
+        for width in 6u16..80 {
+            let sidebar = Rect::new(0, 0, width, 16);
+            let star = crate::ui::sidebar_header_star_filter_rect(sidebar);
+            if star.width == 0 {
+                continue;
+            }
+            let search = crate::ui::sidebar_header_search_rect(sidebar);
+            let new_thread = crate::ui::sidebar_header_new_thread_rect(sidebar);
+            let new_menu = crate::ui::sidebar_header_new_menu_rect(sidebar);
+            assert!(
+                search.x + search.width <= star.x,
+                "width {width}: search {search:?} runs into star {star:?}"
+            );
+            assert!(
+                star.x + star.width <= new_thread.x,
+                "width {width}: star {star:?} runs into new thread {new_thread:?}"
+            );
+            assert!(
+                new_thread.x + new_thread.width <= new_menu.x,
+                "width {width}: new thread {new_thread:?} runs into new menu {new_menu:?}"
+            );
+            assert!(star.x + star.width <= sidebar.x + sidebar.width);
+        }
+    }
+
+    #[test]
     fn clicking_a_symphony_row_opens_that_workflow() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
@@ -4466,6 +5027,57 @@ mod tests {
         assert!(app.state.dock_home_focused);
     }
 
+    /// Clicking the strip's auto-open glyph writes the `ui.open_dock_on_work_link`
+    /// setting and takes effect immediately, and does not open, close, or
+    /// maximise the dock.
+    #[test]
+    fn clicking_the_auto_open_toggle_writes_the_config_setting() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-dock-auto-open-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "[ui]\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let toggle = app.state.view.dock_auto_open_rect;
+        assert!(toggle.width > 0);
+        assert!(!app.state.open_dock_on_work_link);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(app.state.open_dock_on_work_link);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid saved config");
+        assert!(saved.ui.open_dock_on_work_link);
+        assert!(!app.state.dock_maximized);
+        assert!(!app.state.dock_collapsed);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(!app.state.open_dock_on_work_link);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(directory).expect("remove temp config");
+    }
+
     #[test]
     fn dragging_the_dock_divider_resizes_and_persists_the_width() {
         let mut app = app_for_mouse_test();
@@ -4813,6 +5425,28 @@ mod tests {
             .clone()
     }
 
+    const PR_URL: &str = "https://github.com/herdrdev/herdr/pull/398";
+
+    fn bind_manually(
+        app: &mut App,
+        panes: &[PaneId],
+        build: impl Fn(&mut crate::work_context::PaneWorkContextPatch),
+    ) {
+        for pane_id in panes {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[pane_id]
+                .attached_terminal_id
+                .clone();
+            let mut patch = crate::work_context::PaneWorkContextPatch::default();
+            build(&mut patch);
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .apply_manual_work_context_patch(patch)
+                .expect("manual work-context patch");
+        }
+    }
+
     fn right_click_link(app: &mut App, info: &crate::layout::PaneInfo, line: &str, needle: &str) {
         let col = line.find(needle).expect("link host") as u16;
         app.handle_mouse(mouse(
@@ -4851,7 +5485,10 @@ mod tests {
         assert!(matches!(
             &menu.kind,
             ContextMenuKind::Pane {
-                linkable_work_link: Some(PaneMenuWorkLink::PullRequest(url)),
+                linkable_work_link: Some(PaneMenuWorkLinkAction {
+                    link: PaneMenuWorkLink::PullRequest(url),
+                    unlink: false,
+                }),
                 ..
             } if url == "https://github.com/herdrdev/herdr/pull/398"
         ));
@@ -4871,7 +5508,10 @@ mod tests {
         assert!(matches!(
             &menu.kind,
             ContextMenuKind::Pane {
-                linkable_work_link: Some(PaneMenuWorkLink::Ticket(id)),
+                linkable_work_link: Some(PaneMenuWorkLinkAction {
+                    link: PaneMenuWorkLink::Ticket(id),
+                    unlink: false,
+                }),
                 ..
             } if id == "SCA-412"
         ));
@@ -4898,6 +5538,53 @@ mod tests {
         assert!(!menu
             .items()
             .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    /// A link Herdr has no pattern for is still a link: the menu has to let it
+    /// leave the pane.
+    #[tokio::test]
+    async fn right_click_on_any_link_copies_it_to_the_clipboard() {
+        let line = "see https://example.com/build/logs?run=42 for the failure";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "example");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane {
+                linkable_work_link: None,
+                link: Some(url),
+                ..
+            } if url == "https://example.com/build/logs?run=42"
+        ));
+        assert!(menu.items().contains(&crate::app::state::COPY_LINK_ITEM));
+
+        click_menu_item(&mut app, crate::app::state::COPY_LINK_ITEM);
+        let copied = match app.event_rx.try_recv().expect("clipboard write event") {
+            crate::events::AppEvent::ClipboardWrite { content } => content,
+            event => panic!("unexpected event: {event:?}"),
+        };
+        assert_eq!(
+            String::from_utf8(copied).expect("utf8"),
+            "https://example.com/build/logs?run=42"
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn right_click_away_from_any_link_offers_nothing_to_copy() {
+        let line = "the build failed twice in a row";
+        let (mut app, _panes, info) = app_with_pane_screen(line.as_bytes(), 0);
+
+        right_click_link(&mut app, &info, line, "failed");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Pane { link: None, .. }
+        ));
+        assert!(!menu.items().contains(&crate::app::state::COPY_LINK_ITEM));
     }
 
     #[tokio::test]
@@ -4971,6 +5658,93 @@ mod tests {
                 vec!["https://github.com/herdrdev/herdr/pull/398".to_string()]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn right_click_on_a_manually_linked_pr_offers_unlinking_it() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        bind_manually(&mut app, &panes, |patch| {
+            patch.pr_urls = Some(vec![PR_URL.into()])
+        });
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(menu
+            .items()
+            .contains(&crate::app::state::UNLINK_PR_FROM_WINDOW_ITEM));
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+    }
+
+    #[tokio::test]
+    async fn clicking_unlink_drops_the_pull_request_from_every_pane_of_the_window() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        bind_manually(&mut app, &panes, |patch| {
+            patch.pr_urls = Some(vec![PR_URL.into()])
+        });
+
+        right_click_link(&mut app, &info, line, "github");
+        click_menu_item(&mut app, crate::app::state::UNLINK_PR_FROM_WINDOW_ITEM);
+
+        for pane_id in &panes {
+            assert!(pane_work_context(&app, *pane_id).pr_urls.is_empty());
+        }
+        let toast = app.state.toast.as_ref().expect("unlink toast");
+        assert_eq!(toast.title, "unlinked #398");
+    }
+
+    #[tokio::test]
+    async fn clicking_unlink_drops_the_ticket_from_every_pane_of_the_window() {
+        let line = "tracking https://linear.app/scalable/issue/SCA-412/sidebar for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        bind_manually(&mut app, &panes, |patch| {
+            patch.ticket_ids = Some(vec!["SCA-412".into()])
+        });
+
+        right_click_link(&mut app, &info, line, "linear");
+        click_menu_item(&mut app, crate::app::state::UNLINK_TICKET_FROM_WINDOW_ITEM);
+
+        for pane_id in &panes {
+            assert!(pane_work_context(&app, *pane_id).ticket_ids.is_empty());
+        }
+        assert_eq!(
+            app.state.toast.as_ref().expect("unlink toast").title,
+            "unlinked SCA-412"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_observed_pull_request_offers_neither_link_nor_unlink() {
+        let line = "opened https://github.com/herdrdev/herdr/pull/398 for review";
+        let (mut app, panes, info) = app_with_pane_screen(line.as_bytes(), 1);
+        for pane_id in &panes {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .replace_git_work_context(crate::work_context::PaneWorkContext {
+                    pr_urls: vec![PR_URL.into()],
+                    ..Default::default()
+                })
+                .expect("observe pull request");
+        }
+
+        right_click_link(&mut app, &info, line, "github");
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::LINK_PR_TO_WINDOW_ITEM));
+        assert!(!menu
+            .items()
+            .contains(&crate::app::state::UNLINK_PR_FROM_WINDOW_ITEM));
     }
 
     #[tokio::test]
@@ -6063,6 +6837,7 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
                 linkable_work_link: None,
+                link: None,
             },
             x: 2,
             y: 2,
@@ -6617,7 +7392,8 @@ mod tests {
             menu.kind,
             ContextMenuKind::Tab {
                 ws_idx: 0,
-                tab_idx: 1
+                tab_idx: 1,
+                starred: false,
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -6646,10 +7422,21 @@ mod tests {
             .state
             .context_menu_rect()
             .expect("tab context menu rect");
+        // Derive the row from the item list: the menu gained entries over time
+        // and a hardcoded offset silently starts activating the wrong action.
+        let close_index = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("tab context menu")
+            .items()
+            .iter()
+            .position(|item| *item == "Close")
+            .expect("the tab menu closes tabs");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 3,
+            menu.y + 1 + u16::try_from(close_index).unwrap(),
         ));
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);

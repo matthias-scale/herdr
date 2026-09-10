@@ -25,6 +25,18 @@ pub(crate) enum QuotaSource {
 }
 
 impl QuotaSource {
+    /// This lane's window in a collected snapshot.
+    pub(crate) fn usage(
+        self,
+        snapshot: &crate::provider_usage::ProviderUsageSnapshot,
+    ) -> &crate::provider_usage::AccountUsage {
+        match self {
+            Self::Claude => &snapshot.claude,
+            Self::Codex => &snapshot.codex,
+            Self::Kimi => &snapshot.kimi,
+        }
+    }
+
     fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude_code" | "claude-code" => Some(Self::Claude),

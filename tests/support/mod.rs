@@ -313,11 +313,22 @@ pub fn send_detach(stream: &mut UnixStream) -> Result<(), String> {
     Ok(())
 }
 
+/// Drains queued server messages, stopping once the stream goes quiet for the
+/// read timeout or the overall budget runs out.
+///
+/// The budget is not optional. A server with any periodic redraw - the sidebar
+/// idle animation ticks every 120ms - always lands another frame inside the
+/// 200ms read window, so "read until it blocks" alone never returns.
 pub fn drain_messages(stream: &mut UnixStream) {
+    let deadline = Instant::now() + Duration::from_secs(2);
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
-    while read_server_message(stream).is_ok() {}
+    while read_server_message(stream).is_ok() {
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
     stream.set_read_timeout(None).unwrap();
 }
 

@@ -102,6 +102,7 @@ impl App {
                 self.refresh_symphony_snapshot(snapshot)
             }
             AppEvent::ScratchpadChanged => self.reload_scratchpad(),
+            AppEvent::NotepadChanged => self.reload_notepad(),
             AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
@@ -147,6 +148,9 @@ impl App {
             AppEvent::ToolProbesFinished { probes } => self.handle_tool_probes_finished(probes),
             AppEvent::HomeCheckoutFinished { plan, result } => {
                 self.handle_home_checkout_finished(*plan, result)
+            }
+            AppEvent::HomeRemoteSpawnFinished { machine, result } => {
+                self.handle_home_remote_spawn_finished(&machine, result)
             }
             AppEvent::GitStatusRefreshed {
                 generation,
@@ -317,6 +321,10 @@ impl App {
 
         if let AppEvent::ScratchpadChanged = ev {
             return Some(self.reload_scratchpad());
+        }
+
+        if let AppEvent::NotepadChanged = ev {
+            return Some(self.reload_notepad());
         }
 
         if let AppEvent::LoopRunHistoryChanged = ev {
@@ -1590,6 +1598,7 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabPrio(params) => return self.handle_tab_prio(request.id, params),
             Method::TabPin(params) => return self.handle_tab_pin(request.id, params),
+            Method::TabStar(params) => return self.handle_tab_star(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),

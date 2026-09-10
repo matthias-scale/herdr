@@ -3153,6 +3153,7 @@ impl AppState {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
             AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::ScratchpadChanged => Vec::new(),
+            AppEvent::NotepadChanged => Vec::new(),
             AppEvent::LoopRunHistoryChanged => Vec::new(),
             AppEvent::StatusMetricsRefreshed { .. }
             | AppEvent::ProviderUsageRefreshed { .. }
@@ -3162,7 +3163,8 @@ impl AppState {
             | AppEvent::HomeRefsRefreshed { .. }
             | AppEvent::HomeGithubReposRefreshed { .. }
             | AppEvent::ToolProbesFinished { .. }
-            | AppEvent::HomeCheckoutFinished { .. } => Vec::new(),
+            | AppEvent::HomeCheckoutFinished { .. }
+            | AppEvent::HomeRemoteSpawnFinished { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()

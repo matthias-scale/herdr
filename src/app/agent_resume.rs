@@ -1,9 +1,30 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use ratatui::layout::Rect;
 
 use super::App;
+
+/// How long the resume nudge waits for the agent to finish booting before it
+/// gives up. A native resume replays the whole conversation, so a large session
+/// can take a while to reach its prompt.
+const RESUME_NUDGE_READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the agent has to hold `Idle` before the nudge is submitted. Boot
+/// output can read as idle for a frame before the agent settles on its prompt.
+pub(crate) const RESUME_NUDGE_IDLE_HOLD: Duration = Duration::from_millis(1_500);
+/// Gap between the nudge text and its Enter, matching `agent prompt`.
+const RESUME_NUDGE_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+/// Poll interval while a nudge is armed and the agent is still coming up.
+const RESUME_NUDGE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A resumed agent that still owes us a "continue".
+#[derive(Debug, Clone)]
+pub(crate) struct ResumeNudge {
+    pane_id: crate::layout::PaneId,
+    agent: crate::detect::Agent,
+    expires_at: Instant,
+    idle_since: Option<Instant>,
+}
 
 struct PendingAgentResumeCandidate {
     pane_id: crate::layout::PaneId,
@@ -297,8 +318,226 @@ impl App {
             terminal.pending_agent_resume_plan = None;
             terminal.respawn_shell_on_exit = false;
         }
+        self.arm_resume_nudge(pane_id, &terminal_id, &plan.agent);
         true
     }
+
+    /// Queue a "continue" for a pane that was just resumed into a native agent
+    /// session. The resume only replays the conversation; without this the
+    /// agent sits at an idle prompt and the work it was doing stops there.
+    pub(crate) fn arm_resume_nudge(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        agent_label: &str,
+    ) {
+        if !self.state.nudge_resumed_agents {
+            return;
+        }
+        if self.state.resume_nudge_message.trim().is_empty() {
+            return;
+        }
+        let Some(agent) = crate::detect::parse_agent_label(agent_label) else {
+            tracing::debug!(
+                pane = pane_id.raw(),
+                agent = %agent_label,
+                "skipping resume nudge for an agent herdr cannot detect on screen"
+            );
+            return;
+        };
+        let now = Instant::now();
+        self.pending_resume_nudges.insert(
+            terminal_id.clone(),
+            ResumeNudge {
+                pane_id,
+                agent,
+                expires_at: now + RESUME_NUDGE_READY_TIMEOUT,
+                idle_since: None,
+            },
+        );
+    }
+
+    pub(crate) fn next_resume_nudge_deadline(&self) -> Option<Instant> {
+        self.pending_resume_nudges
+            .values()
+            .map(|nudge| match nudge.idle_since {
+                Some(idle_since) => (idle_since + RESUME_NUDGE_IDLE_HOLD).min(nudge.expires_at),
+                None => nudge.expires_at,
+            })
+            .min()
+            .map(|deadline| deadline.min(Instant::now() + RESUME_NUDGE_POLL_INTERVAL))
+    }
+
+    /// Submit the queued "continue" to every resumed agent that has come back
+    /// up idle and ready. Blocked agents, agents that resumed straight into
+    /// work, and panes holding a human draft are dropped without a nudge.
+    pub(crate) fn tick_resume_nudges(&mut self, now: Instant) -> bool {
+        if self.pending_resume_nudges.is_empty() {
+            return false;
+        }
+
+        let mut fire: Vec<(crate::terminal::TerminalId, ResumeNudge)> = Vec::new();
+        let mut drop_ids: Vec<crate::terminal::TerminalId> = Vec::new();
+        let mut idle_marks: Vec<(crate::terminal::TerminalId, Option<Instant>)> = Vec::new();
+
+        for (terminal_id, nudge) in &self.pending_resume_nudges {
+            match self.resume_nudge_readiness(terminal_id, nudge) {
+                ResumeNudgeStep::Drop(reason) => {
+                    tracing::debug!(
+                        pane = nudge.pane_id.raw(),
+                        terminal = %terminal_id,
+                        agent = ?nudge.agent,
+                        reason,
+                        "dropping resume nudge"
+                    );
+                    drop_ids.push(terminal_id.clone());
+                }
+                ResumeNudgeStep::Wait => {
+                    if nudge.idle_since.is_some() {
+                        idle_marks.push((terminal_id.clone(), None));
+                    }
+                    if now >= nudge.expires_at {
+                        tracing::debug!(
+                            pane = nudge.pane_id.raw(),
+                            terminal = %terminal_id,
+                            agent = ?nudge.agent,
+                            "resume nudge timed out before the agent was ready"
+                        );
+                        drop_ids.push(terminal_id.clone());
+                    }
+                }
+                ResumeNudgeStep::Idle => match nudge.idle_since {
+                    Some(idle_since)
+                        if now.saturating_duration_since(idle_since) >= RESUME_NUDGE_IDLE_HOLD =>
+                    {
+                        fire.push((terminal_id.clone(), nudge.clone()));
+                    }
+                    Some(_) => {}
+                    None => idle_marks.push((terminal_id.clone(), Some(now))),
+                },
+            }
+        }
+
+        for (terminal_id, idle_since) in idle_marks {
+            if let Some(nudge) = self.pending_resume_nudges.get_mut(&terminal_id) {
+                nudge.idle_since = idle_since;
+            }
+        }
+        for terminal_id in drop_ids {
+            self.pending_resume_nudges.remove(&terminal_id);
+        }
+
+        let mut changed = false;
+        for (terminal_id, nudge) in fire {
+            self.pending_resume_nudges.remove(&terminal_id);
+            changed |= self.send_resume_nudge(&terminal_id, &nudge, now);
+        }
+        changed
+    }
+
+    fn resume_nudge_readiness(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+        nudge: &ResumeNudge,
+    ) -> ResumeNudgeStep {
+        let Some(terminal) = self.state.terminals.get(terminal_id) else {
+            return ResumeNudgeStep::Drop("terminal is gone");
+        };
+        let Some(runtime) = self.terminal_runtimes.get(terminal_id) else {
+            return ResumeNudgeStep::Drop("pane has no runtime");
+        };
+        resume_nudge_step(&ResumeNudgeFacts {
+            parked_for_resume: terminal.pending_agent_resume_plan.is_some(),
+            human_draft: self
+                .state
+                .pending_human_drafts
+                .get(&nudge.pane_id)
+                .is_some_and(|draft| !draft.is_empty()),
+            launch_pending: terminal.managed_agent_launch_pending(),
+            agent_matches: terminal.effective_known_agent() == Some(nudge.agent),
+            hosts_agent: super::agents::runtime_hosts_agent(runtime, nudge.agent),
+            state: terminal.state,
+        })
+    }
+
+    fn send_resume_nudge(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+        nudge: &ResumeNudge,
+        now: Instant,
+    ) -> bool {
+        let message = self.state.resume_nudge_message.clone();
+        let Some(runtime) = self.terminal_runtimes.get(terminal_id) else {
+            return false;
+        };
+        let (text, enter) = crate::app::api_helpers::encode_api_submission_parts(runtime, &message);
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(text)) {
+            tracing::warn!(
+                pane = nudge.pane_id.raw(),
+                terminal = %terminal_id,
+                agent = ?nudge.agent,
+                err = %err,
+                "failed to send resume nudge to a resumed agent"
+            );
+            return false;
+        }
+        runtime.send_bytes_after(Bytes::from(enter), RESUME_NUDGE_SUBMIT_DELAY);
+        self.retire_blocked_hook_authority_for_pane(nudge.pane_id, now);
+        tracing::info!(
+            pane = nudge.pane_id.raw(),
+            terminal = %terminal_id,
+            agent = ?nudge.agent,
+            "nudged a resumed agent to continue"
+        );
+        true
+    }
+}
+
+/// Everything the nudge decision needs, read off the pane in one pass.
+struct ResumeNudgeFacts {
+    parked_for_resume: bool,
+    human_draft: bool,
+    launch_pending: bool,
+    agent_matches: bool,
+    hosts_agent: bool,
+    state: crate::detect::AgentState,
+}
+
+/// Decide what to do with an armed nudge.
+///
+/// A resumed agent is only worth prompting while it is idle at its own prompt.
+/// Blocked means a human owes it an answer, working means it already picked the
+/// thread back up, and a draft in the composer means anything we submit would
+/// carry the human's half-typed text with it.
+fn resume_nudge_step(facts: &ResumeNudgeFacts) -> ResumeNudgeStep {
+    if facts.parked_for_resume {
+        return ResumeNudgeStep::Drop("pane was parked for another resume");
+    }
+    if facts.human_draft {
+        return ResumeNudgeStep::Drop("pane holds a draft the human typed");
+    }
+    if facts.launch_pending || !facts.agent_matches || !facts.hosts_agent {
+        return ResumeNudgeStep::Wait;
+    }
+    match facts.state {
+        crate::detect::AgentState::Blocked => {
+            ResumeNudgeStep::Drop("agent resumed blocked on a question")
+        }
+        crate::detect::AgentState::Working => {
+            ResumeNudgeStep::Drop("agent resumed straight back into work")
+        }
+        crate::detect::AgentState::Idle => ResumeNudgeStep::Idle,
+        crate::detect::AgentState::Unknown => ResumeNudgeStep::Wait,
+    }
+}
+
+enum ResumeNudgeStep {
+    /// The agent is up, idle, and safe to prompt.
+    Idle,
+    /// Still booting; check again on the next tick.
+    Wait,
+    /// Nothing to nudge; forget this pane.
+    Drop(&'static str),
 }
 
 fn derived_pending_agent_resume_pane_infos(
@@ -849,5 +1088,205 @@ mod tests {
             Some("claude --resume 'session with '\\'' quote'")
         );
         assert_eq!(shell_command_from_argv(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod resume_nudge_tests {
+    use super::*;
+    use crate::detect::{Agent, AgentState};
+    use crate::terminal::{TerminalId, TerminalRuntime};
+    use crate::workspace::Workspace;
+
+    fn ready_facts(state: AgentState) -> ResumeNudgeFacts {
+        ResumeNudgeFacts {
+            parked_for_resume: false,
+            human_draft: false,
+            launch_pending: false,
+            agent_matches: true,
+            hosts_agent: true,
+            state,
+        }
+    }
+
+    fn step(facts: &ResumeNudgeFacts) -> &'static str {
+        match resume_nudge_step(facts) {
+            ResumeNudgeStep::Idle => "idle",
+            ResumeNudgeStep::Wait => "wait",
+            ResumeNudgeStep::Drop(_) => "drop",
+        }
+    }
+
+    #[test]
+    fn an_idle_resumed_agent_is_ready_for_its_nudge() {
+        assert_eq!(step(&ready_facts(AgentState::Idle)), "idle");
+    }
+
+    #[test]
+    fn a_blocked_agent_is_never_nudged() {
+        assert_eq!(step(&ready_facts(AgentState::Blocked)), "drop");
+    }
+
+    #[test]
+    fn an_agent_that_resumed_into_work_is_never_nudged() {
+        assert_eq!(step(&ready_facts(AgentState::Working)), "drop");
+    }
+
+    #[test]
+    fn a_human_draft_cancels_the_nudge() {
+        let mut facts = ready_facts(AgentState::Idle);
+        facts.human_draft = true;
+        assert_eq!(step(&facts), "drop");
+    }
+
+    #[test]
+    fn an_agent_that_is_still_booting_is_waited_out() {
+        for facts in [
+            ResumeNudgeFacts {
+                launch_pending: true,
+                ..ready_facts(AgentState::Idle)
+            },
+            ResumeNudgeFacts {
+                agent_matches: false,
+                ..ready_facts(AgentState::Idle)
+            },
+            ResumeNudgeFacts {
+                hosts_agent: false,
+                ..ready_facts(AgentState::Idle)
+            },
+            ready_facts(AgentState::Unknown),
+        ] {
+            assert_eq!(step(&facts), "wait");
+        }
+    }
+
+    fn app_with_resumed_pane(
+        state: AgentState,
+    ) -> (App, TerminalId, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = crate::config::Config::default();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        let workspace = Workspace::test_new("resume-nudge");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(Agent::Claude), state);
+        let (runtime, rx) =
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 1024, b"", 4);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.arm_resume_nudge(pane_id, &terminal_id, "claude");
+        (app, terminal_id, rx)
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>) -> String {
+        let mut out = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn an_idle_resumed_agent_is_nudged_once_the_idle_hold_passes() {
+        let (mut app, terminal_id, mut rx) = app_with_resumed_pane(AgentState::Idle);
+        let armed_at = Instant::now();
+
+        assert!(!app.tick_resume_nudges(armed_at));
+        assert!(app.pending_resume_nudges.contains_key(&terminal_id));
+        assert_eq!(drain(&mut rx), "");
+
+        let due = armed_at + RESUME_NUDGE_IDLE_HOLD;
+        assert!(app.tick_resume_nudges(due));
+        assert!(!app.pending_resume_nudges.contains_key(&terminal_id));
+        assert!(drain(&mut rx).contains("continue"));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_resumed_agent_is_dropped_without_a_nudge() {
+        let (mut app, terminal_id, mut rx) = app_with_resumed_pane(AgentState::Blocked);
+        let now = Instant::now();
+
+        assert!(!app.tick_resume_nudges(now));
+        assert!(!app.pending_resume_nudges.contains_key(&terminal_id));
+        assert!(!app.tick_resume_nudges(now + RESUME_NUDGE_IDLE_HOLD));
+        assert_eq!(drain(&mut rx), "");
+    }
+
+    #[tokio::test]
+    async fn a_pane_that_never_becomes_ready_gives_up_at_the_timeout() {
+        let (mut app, terminal_id, mut rx) = app_with_resumed_pane(AgentState::Unknown);
+        let armed_at = Instant::now();
+
+        assert!(!app.tick_resume_nudges(armed_at));
+        assert!(app.pending_resume_nudges.contains_key(&terminal_id));
+
+        assert!(!app.tick_resume_nudges(armed_at + RESUME_NUDGE_READY_TIMEOUT));
+        assert!(!app.pending_resume_nudges.contains_key(&terminal_id));
+        assert_eq!(drain(&mut rx), "");
+    }
+
+    #[tokio::test]
+    async fn a_pane_that_stops_being_idle_has_to_hold_idle_again() {
+        let (mut app, terminal_id, mut rx) = app_with_resumed_pane(AgentState::Idle);
+        let armed_at = Instant::now();
+
+        assert!(!app.tick_resume_nudges(armed_at));
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(Agent::Claude), AgentState::Unknown);
+        assert!(!app.tick_resume_nudges(armed_at + RESUME_NUDGE_IDLE_HOLD));
+        assert_eq!(drain(&mut rx), "");
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let restarted = armed_at + RESUME_NUDGE_IDLE_HOLD;
+        assert!(!app.tick_resume_nudges(restarted));
+        assert!(app.tick_resume_nudges(restarted + RESUME_NUDGE_IDLE_HOLD));
+        assert!(drain(&mut rx).contains("continue"));
+    }
+
+    #[tokio::test]
+    async fn the_nudge_is_not_armed_when_the_setting_is_off() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = crate::config::Config::default();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        let workspace = Workspace::test_new("resume-nudge-off");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        app.state.workspaces = vec![workspace];
+        app.state.nudge_resumed_agents = false;
+
+        app.arm_resume_nudge(pane_id, &terminal_id, "claude");
+        assert!(app.pending_resume_nudges.is_empty());
+
+        app.state.nudge_resumed_agents = true;
+        app.state.resume_nudge_message = "   ".to_string();
+        app.arm_resume_nudge(pane_id, &terminal_id, "claude");
+        assert!(app.pending_resume_nudges.is_empty());
+
+        app.state.resume_nudge_message = "continue".to_string();
+        app.arm_resume_nudge(pane_id, &terminal_id, "definitely-not-an-agent");
+        assert!(app.pending_resume_nudges.is_empty());
+
+        app.arm_resume_nudge(pane_id, &terminal_id, "claude");
+        assert!(app.pending_resume_nudges.contains_key(&terminal_id));
     }
 }

@@ -270,6 +270,38 @@ fn read_pane_tty_size_after_marker(
     panic!("did not observe tty size after marker {marker}. pane output:\n{last_text}");
 }
 
+fn read_settled_pane_tty_size(
+    socket_path: &PathBuf,
+    pane_id: &str,
+    marker: &str,
+    timeout: Duration,
+) -> (u16, u16) {
+    // A shell that enters the alternate screen while starting up hands the pane
+    // its full width, and leaving it hands back the scrollbar gutter column. So
+    // a single reading taken right after workspace creation can be one column
+    // wider than the size the pane settles on. Require two identical readings.
+    let deadline = Instant::now() + timeout;
+    let mut attempt = 0;
+    let mut previous =
+        read_pane_tty_size_after_marker(socket_path, pane_id, &format!("{marker}_0"), timeout);
+
+    while Instant::now() < deadline {
+        attempt += 1;
+        let current = read_pane_tty_size_after_marker(
+            socket_path,
+            pane_id,
+            &format!("{marker}_{attempt}"),
+            timeout,
+        );
+        if current == previous {
+            return current;
+        }
+        previous = current;
+    }
+
+    panic!("pane tty size never settled for marker {marker}, last reading {previous:?}");
+}
+
 fn workspace_id_by_label(response: &Value, label: &str) -> String {
     response["result"]["workspaces"]
         .as_array()
@@ -816,11 +848,11 @@ fn detached_output_preserves_last_attached_pty_size() {
         .expect("root pane id")
         .to_string();
 
-    let before = read_pane_tty_size_after_marker(
+    let before = read_settled_pane_tty_size(
         &api_socket,
         &pane_id,
         "SIZE_BEFORE_DETACH",
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     );
 
     send_detach(&mut stream).expect("send detach");

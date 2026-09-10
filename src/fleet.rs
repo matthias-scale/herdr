@@ -1009,6 +1009,10 @@ pub(crate) struct FleetRow {
     agent_info: Option<AgentInfo>,
 }
 
+pub(crate) fn counts_as_live_agent(entry: &FleetRow) -> bool {
+    entry.source != EvidenceSource::Host && entry.state != "status_unknown"
+}
+
 impl FleetRow {
     #[cfg(test)]
     pub(crate) fn test_agent_row(host: &str, name: &str) -> Self {
@@ -1019,7 +1023,9 @@ impl FleetRow {
     pub(crate) fn test_agent_row_with_id(host: &str, name: &str, agent_id: &str) -> Self {
         let agent_ref =
             crate::api::schema::AgentRef::new(host, agent_id).expect("valid test agent reference");
-        Self::unknown(host, EvidenceSource::Herdr, agent_ref, String::new()).with_test_name(name)
+        Self::unknown(host, EvidenceSource::Herdr, agent_ref, String::new())
+            .with_test_name(name)
+            .with_test_state("working")
     }
 
     #[cfg(test)]
@@ -1046,9 +1052,20 @@ impl FleetRow {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_agent_row_with_state(host: &str, name: &str, state: &str) -> Self {
+        Self::test_agent_row(host, name).with_test_state(state)
+    }
+
+    #[cfg(test)]
     fn with_test_name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self.agent = Some("codex".to_string());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_state(mut self, state: &str) -> Self {
+        self.state = state.to_string();
         self
     }
 
@@ -1831,6 +1848,34 @@ mod tests {
     }
 
     #[test]
+    fn live_agent_membership_keeps_supported_states_only() {
+        let cases = [
+            (AgentStatus::Idle, serde_json::json!([]), true),
+            (AgentStatus::Working, serde_json::json!([]), true),
+            (AgentStatus::Blocked, serde_json::json!([]), true),
+            (AgentStatus::Done, serde_json::json!([]), true),
+            (
+                AgentStatus::Stale,
+                serde_json::json!([{"n": 1, "label": "Gate", "text": "answer"}]),
+                true,
+            ),
+            (AgentStatus::Stale, serde_json::json!([]), false),
+            (AgentStatus::Unknown, serde_json::json!([]), false),
+        ];
+
+        for (status, gates, expected) in cases {
+            let row = FleetRow::from_agent("ub2", false, agent(status, gates), 1_777_000_000)
+                .expect("valid fleet row");
+            assert_eq!(counts_as_live_agent(&row), expected, "{}", row.state);
+        }
+
+        let host_entry = FleetRow::host_unknown("ub2", "offline".to_string())
+            .expect("valid host row")
+            .with_test_state("working");
+        assert!(!counts_as_live_agent(&host_entry));
+    }
+
+    #[test]
     fn unpolled_snapshot_differs_from_polled_empty_fleet() {
         let config = FleetConfig::default();
         let unpolled = Snapshot::unpolled(&config.hosts);
@@ -1938,6 +1983,32 @@ mod tests {
     fn run_schema_mismatch_is_rejected_loudly() {
         let error = parse_run_state(br#"{"schema":2}"#, "fixture").unwrap_err();
         assert!(error.contains("schema 2 is unsupported; expected 1"));
+    }
+
+    #[test]
+    fn rejected_run_state_is_listed_but_not_counted_as_live() {
+        let configured_host = host("ub2", false);
+        let rejected = parse_run_state(br#"{"schema":2}"#, "fixture");
+        let snapshot = snapshot_from_evidence(
+            std::slice::from_ref(&configured_host),
+            &FleetConfig::default(),
+            vec![HostEvidence {
+                host: configured_host.clone(),
+                agents: Ok(Vec::new()),
+                runs: vec![rejected],
+                runtime: HostRuntime::default(),
+            }],
+            SystemTime::UNIX_EPOCH,
+        );
+
+        let entries = &snapshot.hosts[0].entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].state, "status_unknown");
+        assert!(entries[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("schema 2 is unsupported")));
+        assert!(!counts_as_live_agent(&entries[0]));
     }
 
     #[test]

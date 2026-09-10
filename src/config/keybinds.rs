@@ -355,6 +355,7 @@ pub struct Keybinds {
     pub copy_work_ticket: ActionKeybinds,
     pub copy_work_pr: ActionKeybinds,
     pub copy_work_preview: ActionKeybinds,
+    pub toggle_theme: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -402,6 +403,7 @@ pub struct Keybinds {
     pub resize_pane_up: ActionKeybinds,
     pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub focus_sidebar: ActionKeybinds,
     pub sidebar_cycle_group_mode: ActionKeybinds,
     pub sidebar_refresh: ActionKeybinds,
     pub toggle_blocked_filter: ActionKeybinds,
@@ -411,6 +413,8 @@ pub struct Keybinds {
     pub editor_open_repo: ActionKeybinds,
     pub edit_scratchpad: ActionKeybinds,
     pub show_scratchpad: ActionKeybinds,
+    pub toggle_notepad: ActionKeybinds,
+    pub toggle_pomodoro: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
     pub work: ActionKeybinds,
@@ -419,6 +423,21 @@ pub struct Keybinds {
     pub missive: ActionKeybinds,
     pub inbox: ActionKeybinds,
     pub home: ActionKeybinds,
+    pub git_pull: ActionKeybinds,
+    pub git_commit: ActionKeybinds,
+    pub git_push: ActionKeybinds,
+    pub git_create_pr: ActionKeybinds,
+    pub dock_home: ActionKeybinds,
+    pub dock_terminal: ActionKeybinds,
+    pub dock_files: ActionKeybinds,
+    pub dock_diff: ActionKeybinds,
+    pub dock_pr: ActionKeybinds,
+    pub dock_linear: ActionKeybinds,
+    pub dock_missive: ActionKeybinds,
+    pub dock_agents: ActionKeybinds,
+    pub dock_shortcuts: ActionKeybinds,
+    pub dock_context: ActionKeybinds,
+    pub dock_symphony: ActionKeybinds,
     pub toggle_status_detail: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
     pub user_actions: Vec<UserAction>,
@@ -559,6 +578,7 @@ impl Config {
             copy_work_ticket: empty_action!(),
             copy_work_pr: empty_action!(),
             copy_work_preview: empty_action!(),
+            toggle_theme: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -606,6 +626,7 @@ impl Config {
             resize_pane_up: empty_action!(),
             resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
+            focus_sidebar: empty_action!(),
             sidebar_cycle_group_mode: empty_action!(),
             sidebar_refresh: empty_action!(),
             toggle_blocked_filter: empty_action!(),
@@ -615,6 +636,8 @@ impl Config {
             editor_open_repo: empty_action!(),
             edit_scratchpad: empty_action!(),
             show_scratchpad: empty_action!(),
+            toggle_notepad: empty_action!(),
+            toggle_pomodoro: empty_action!(),
             toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
             work: empty_action!(),
@@ -623,6 +646,21 @@ impl Config {
             missive: empty_action!(),
             inbox: empty_action!(),
             home: empty_action!(),
+            git_pull: empty_action!(),
+            git_commit: empty_action!(),
+            git_push: empty_action!(),
+            git_create_pr: empty_action!(),
+            dock_home: empty_action!(),
+            dock_terminal: empty_action!(),
+            dock_files: empty_action!(),
+            dock_diff: empty_action!(),
+            dock_pr: empty_action!(),
+            dock_linear: empty_action!(),
+            dock_missive: empty_action!(),
+            dock_agents: empty_action!(),
+            dock_shortcuts: empty_action!(),
+            dock_context: empty_action!(),
+            dock_symphony: empty_action!(),
             toggle_status_detail: empty_action!(),
             custom_commands: Vec::new(),
             user_actions: Vec::new(),
@@ -727,6 +765,7 @@ impl Config {
             apply_action!(keybinds.copy_work_ticket, copy_work_ticket, source);
             apply_action!(keybinds.copy_work_pr, copy_work_pr, source);
             apply_action!(keybinds.copy_work_preview, copy_work_preview, source);
+            apply_action!(keybinds.toggle_theme, toggle_theme, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -789,6 +828,7 @@ impl Config {
             apply_action!(keybinds.resize_pane_up, resize_pane_up, source);
             apply_action!(keybinds.resize_pane_right, resize_pane_right, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
+            apply_action!(keybinds.focus_sidebar, focus_sidebar, source);
             apply_action!(
                 keybinds.sidebar_cycle_group_mode,
                 sidebar_cycle_group_mode,
@@ -806,6 +846,8 @@ impl Config {
             apply_action!(keybinds.editor_open_repo, editor_open_repo, source);
             apply_action!(keybinds.edit_scratchpad, edit_scratchpad, source);
             apply_action!(keybinds.show_scratchpad, show_scratchpad, source);
+            apply_action!(keybinds.toggle_notepad, toggle_notepad, source);
+            apply_action!(keybinds.toggle_pomodoro, toggle_pomodoro, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.work, work, source);
@@ -814,6 +856,21 @@ impl Config {
             apply_action!(keybinds.missive, missive, source);
             apply_action!(keybinds.inbox, inbox, source);
             apply_action!(keybinds.home, home, source);
+            apply_action!(keybinds.git_pull, git_pull, source);
+            apply_action!(keybinds.git_commit, git_commit, source);
+            apply_action!(keybinds.git_push, git_push, source);
+            apply_action!(keybinds.git_create_pr, git_create_pr, source);
+            apply_action!(keybinds.dock_home, dock_home, source);
+            apply_action!(keybinds.dock_terminal, dock_terminal, source);
+            apply_action!(keybinds.dock_files, dock_files, source);
+            apply_action!(keybinds.dock_diff, dock_diff, source);
+            apply_action!(keybinds.dock_pr, dock_pr, source);
+            apply_action!(keybinds.dock_linear, dock_linear, source);
+            apply_action!(keybinds.dock_missive, dock_missive, source);
+            apply_action!(keybinds.dock_agents, dock_agents, source);
+            apply_action!(keybinds.dock_shortcuts, dock_shortcuts, source);
+            apply_action!(keybinds.dock_context, dock_context, source);
+            apply_action!(keybinds.dock_symphony, dock_symphony, source);
             apply_action!(keybinds.toggle_status_detail, toggle_status_detail, source);
 
             if source == field_source!(indexed) {

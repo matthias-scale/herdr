@@ -103,6 +103,53 @@ impl App {
         true
     }
 
+    /// Swap the active theme with its known dark/light sibling for this
+    /// session. The config writer intentionally is not used here: save_theme
+    /// disables auto_switch, which would make the palette command undo the
+    /// user's theme mode.
+    pub(crate) fn toggle_theme(&mut self) {
+        let current = self.state.theme_name.clone();
+        let (dark, light) = super::sibling_theme_names(&current);
+        if dark == light {
+            tracing::debug!(theme = %current, "theme has no dark/light sibling");
+            return;
+        }
+
+        let normalized_current = super::normalize_theme_name(&current);
+        let normalized_dark = super::normalize_theme_name(&dark);
+        let normalized_light = super::normalize_theme_name(&light);
+        let next = if normalized_current == normalized_dark {
+            light
+        } else if normalized_current == normalized_light {
+            dark
+        } else {
+            match self.state.palette.appearance() {
+                Some(crate::terminal_theme::HostAppearance::Dark) => light,
+                Some(crate::terminal_theme::HostAppearance::Light) => dark,
+                None => {
+                    tracing::debug!(theme = %current, "theme sibling cannot be inferred");
+                    return;
+                }
+            }
+        };
+        let next_appearance = if super::normalize_theme_name(&next) == normalized_dark {
+            crate::config::HostAppearanceOverride::Dark
+        } else {
+            crate::config::HostAppearanceOverride::Light
+        };
+
+        self.state.theme_runtime.manual_name = next;
+        if self.state.theme_runtime.auto_switch {
+            // Pin the host side too, otherwise the next appearance poll would
+            // immediately select the previous auto-switch branch again.
+            if !self.set_host_appearance_override(next_appearance) {
+                self.refresh_effective_app_theme();
+            }
+        } else {
+            self.refresh_effective_app_theme();
+        }
+    }
+
     pub(super) fn refresh_effective_app_theme(&mut self) -> bool {
         let (palette, theme_name) = super::resolve_effective_theme(
             &self.state.theme_runtime,
@@ -180,4 +227,72 @@ pub(super) fn theme_appearance_mismatch(
         describe(host),
         describe(host),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app(config: &crate::config::Config) -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(config, true, None, api_rx, crate::api::EventHub::default())
+    }
+
+    #[test]
+    fn theme_toggle_swaps_to_the_sibling_and_back() {
+        let mut app = test_app(&crate::config::Config::default());
+
+        app.toggle_theme();
+        assert_eq!(app.state.theme_name, "catppuccin-latte");
+        assert_eq!(app.state.theme_runtime.manual_name, "catppuccin-latte");
+
+        app.toggle_theme();
+        assert_eq!(app.state.theme_name, "catppuccin");
+        assert_eq!(app.state.theme_runtime.manual_name, "catppuccin");
+    }
+
+    #[test]
+    fn theme_toggle_is_a_no_op_for_an_unpaired_theme() {
+        let mut config = crate::config::Config::default();
+        config.theme.name = Some("vesper".into());
+        let mut app = test_app(&config);
+        let before = (
+            app.state.theme_name.clone(),
+            app.state.theme_runtime.manual_name.clone(),
+            app.state.palette.clone(),
+        );
+
+        app.toggle_theme();
+
+        assert_eq!(
+            (
+                app.state.theme_name,
+                app.state.theme_runtime.manual_name,
+                app.state.palette,
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn theme_toggle_pins_the_target_side_when_auto_switch_is_enabled() {
+        let mut config = crate::config::Config::default();
+        config.theme.auto_switch = true;
+        let mut app = test_app(&config);
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true);
+
+        app.toggle_theme();
+        assert_eq!(
+            app.state.theme_runtime.host_appearance,
+            crate::config::HostAppearanceOverride::Light
+        );
+        assert_eq!(app.state.theme_name, "catppuccin-latte");
+
+        app.toggle_theme();
+        assert_eq!(
+            app.state.theme_runtime.host_appearance,
+            crate::config::HostAppearanceOverride::Dark
+        );
+        assert_eq!(app.state.theme_name, "catppuccin");
+    }
 }

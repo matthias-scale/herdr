@@ -6,7 +6,7 @@
 
 pub(crate) mod actions;
 mod add_project;
-mod agent_resume;
+pub(crate) mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
@@ -30,12 +30,15 @@ mod ids;
 pub(crate) mod inbox;
 mod input;
 pub(crate) mod launch_profiles;
+pub(crate) mod machines;
 #[cfg(test)]
 pub(crate) use input::SidebarWorkGroupKeyAction;
+mod notepad;
 pub(crate) mod pane_graphics;
 mod pane_lifecycle;
 mod popup;
 pub(crate) mod probes;
+pub(crate) mod projects;
 mod repo_editor;
 mod repo_routing;
 mod runtime;
@@ -170,6 +173,16 @@ pub struct App {
     /// to a different repository.
     pub(crate) scratchpad_watcher: Option<notify::RecommendedWatcher>,
     pub(crate) scratchpad_watched_path: Option<std::path::PathBuf>,
+    /// Held only to keep the notepad directory watcher alive.
+    pub(crate) notepad_watcher: Option<notify::RecommendedWatcher>,
+    pub(crate) notepad_watched_dir: Option<std::path::PathBuf>,
+    /// Note names the operator wants offered first, from `[notepad] files`.
+    pub(crate) notepad_preferred_files: Vec<String>,
+    pub(crate) notepad_git_sync: bool,
+    pub(crate) notepad_git_sync_interval: std::time::Duration,
+    pub(crate) notepad_next_git_pull: Option<Instant>,
+    /// `[pomodoro] log_file`; empty disables the break log.
+    pub(crate) pomodoro_log_file: String,
     pub(crate) loop_receipt_fallback_deadline: Option<Instant>,
     pub(crate) loop_receipt_watch_degraded: bool,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
@@ -263,6 +276,10 @@ pub struct App {
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) agent_activity_refresh_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    /// Agents that were just resumed into a native session and are waiting to
+    /// be nudged back into their work, keyed by the terminal they run in.
+    pub(crate) pending_resume_nudges:
+        std::collections::HashMap<crate::terminal::TerminalId, agent_resume::ResumeNudge>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -788,6 +805,7 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
@@ -887,6 +905,7 @@ impl App {
             request_new_tab: false,
             request_pane_toggle: None,
             request_open_repo_editor: false,
+            notepad_request: None,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
@@ -953,9 +972,15 @@ impl App {
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
+                notepad_rect: Rect::default(),
+                notepad_tab_hit_areas: Vec::new(),
+                pomodoro_hit_area: Rect::default(),
+                hyperspace_rect: Rect::default(),
+                hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -994,6 +1019,7 @@ impl App {
                 dock_tab_close_rect: Rect::default(),
                 dock_plus_rect: Rect::default(),
                 dock_maximize_rect: Rect::default(),
+                dock_auto_open_rect: Rect::default(),
                 dock_surface_card_hit_areas: Vec::new(),
                 dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
@@ -1010,6 +1036,8 @@ impl App {
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
+                status_work_links: Vec::new(),
+                status_segments: Vec::new(),
             },
             drag: None,
             workspace_presses: HashMap::new(),
@@ -1119,6 +1147,12 @@ impl App {
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
+            notepad: crate::notepad::NotepadState::from_config(&config.notepad),
+            pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
+            hyperspace: crate::hyperspace::HyperspaceState::new(
+                config.ui.sidebar_animation,
+                Instant::now(),
+            ),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
@@ -1145,16 +1179,21 @@ impl App {
             combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
             new_thread_workspace: config.ui.new_thread_workspace,
             launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
+            projects: crate::app::projects::resolve(&config.projects),
+            machines: crate::app::machines::resolve(&config.remote.fleet),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
             auto_settle_inactive: config.session.auto_settle_inactive,
             settle_stops_agent: config.session.settle_stops_agent,
+            nudge_resumed_agents: config.session.nudge_resumed_agents,
+            resume_nudge_message: config.session.resume_nudge_message.clone(),
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
             pane_outer_borders: config.ui.pane_outer_borders,
             pane_scrollbars: config.ui.pane_scrollbars,
             show_pull_button: config.ui.show_pull_button,
+            open_dock_on_work_link: config.ui.open_dock_on_work_link,
             show_pane_toggle_buttons: config.ui.show_pane_toggle_buttons,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
@@ -1303,6 +1342,15 @@ impl App {
             _loop_receipt_watcher: loop_receipt_watcher,
             scratchpad_watcher: None,
             scratchpad_watched_path: None,
+            notepad_watcher: None,
+            notepad_watched_dir: None,
+            notepad_preferred_files: config.notepad.files.clone(),
+            notepad_git_sync: config.notepad.git_sync,
+            notepad_git_sync_interval: std::time::Duration::from_secs(
+                config.notepad.git_sync_interval_seconds.clamp(15, 3600),
+            ),
+            notepad_next_git_pull: None,
+            pomodoro_log_file: config.pomodoro.log_file.clone(),
             loop_receipt_fallback_deadline,
             loop_receipt_watch_degraded: false,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -1381,6 +1429,7 @@ impl App {
             agent_metadata_deadline: None,
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
+            pending_resume_nudges: std::collections::HashMap::new(),
             session_save_deadline: None,
             session_save_scheduled_revision: None,
             session_save_thread: None,
@@ -1753,6 +1802,10 @@ impl App {
                 needs_render = true;
             }
 
+            if self.apply_notepad_request() {
+                needs_render = true;
+            }
+
             if self.apply_git_action_request() {
                 needs_render = true;
             }
@@ -1918,6 +1971,7 @@ impl App {
                     self.ensure_dock_editor();
                     self.resize_dock_editor();
                     self.ensure_scratchpad();
+                    self.ensure_notepad();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,
@@ -2261,6 +2315,10 @@ impl App {
             );
             self.state.auto_settle_inactive = config.session.auto_settle_inactive;
             self.state.settle_stops_agent = config.session.settle_stops_agent;
+            self.state.nudge_resumed_agents = config.session.nudge_resumed_agents;
+            self.state
+                .resume_nudge_message
+                .clone_from(&config.session.resume_nudge_message);
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session
@@ -2333,6 +2391,9 @@ impl App {
                 self.state.sidebar_min_width = config.ui.sidebar_min_width;
                 self.state.sidebar_max_width = config.ui.sidebar_max_width;
                 self.state.sidebar_collapsed_mode = config.ui.sidebar_collapsed_mode;
+                self.state
+                    .hyperspace
+                    .set_enabled(config.ui.sidebar_animation, Instant::now());
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
@@ -2365,6 +2426,8 @@ impl App {
                 self.state.new_thread_workspace = config.ui.new_thread_workspace;
                 self.state.launch_profiles =
                     crate::app::launch_profiles::resolve(&config.launch_profiles);
+                self.state.projects = crate::app::projects::resolve(&config.projects);
+                self.state.machines = crate::app::machines::resolve(&config.remote.fleet);
                 self.state
                     .add_project_start_dir
                     .clone_from(&config.ui.add_project_start_dir);
@@ -2373,6 +2436,7 @@ impl App {
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.show_pull_button = config.ui.show_pull_button;
+                self.state.open_dock_on_work_link = config.ui.open_dock_on_work_link;
                 self.state.show_pane_toggle_buttons = config.ui.show_pane_toggle_buttons;
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
@@ -2415,6 +2479,15 @@ impl App {
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
             }
+        }
+
+        // Their own gates: the notepad and the break timer read nothing out of
+        // `[ui]`, so a broken `[ui]` section must not freeze either of them.
+        if !invalid_section("notepad") {
+            self.apply_notepad_config(&config.notepad);
+        }
+        if !invalid_section("pomodoro") {
+            self.apply_pomodoro_config(&config.pomodoro);
         }
 
         if !invalid_section("experimental") {
@@ -2730,6 +2803,15 @@ impl App {
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
+                            // Before the pane-context decision below: a focused
+                            // notepad and a due break reminder outrank the pane.
+                            if self.intercept_notepad_key(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             if self.handle_dock_surface_menu_key(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
@@ -2847,7 +2929,7 @@ impl App {
                         || self.state.work_view.is_some()
                         || self.try_route_paste_to_popup(&text)
                     {
-                    } else if self.state.mode != Mode::Terminal {
+                    } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
                         self.paste_into_active_text_input(&text);
                     } else {
                         if let Some(ws_idx) = self.state.active {
@@ -8195,6 +8277,37 @@ last_pane = "prefix+tab"
             bytes::Bytes::from_static(b"\x1b[106;1:3u")
         );
         assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_focused_notepad_takes_client_keys_before_the_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.notepad.enabled = true;
+        app.state.notepad.focused = true;
+
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+
+        assert_eq!(app.state.notepad.body(), "j\n");
+        assert!(
+            rx.try_recv().is_err(),
+            "the pane must not see keys typed into the notepad"
+        );
     }
 
     #[tokio::test]

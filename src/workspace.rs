@@ -25,7 +25,10 @@ use self::git::git_status_cache_key_for_space;
 #[cfg(test)]
 pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand;
 pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand_and_program;
-pub(crate) use self::tab::{MovedPane, TabDisplayProjection, TabNameOrigin, TabPrioAction};
+pub(crate) use self::tab::{
+    session_title, title_without_identifier, MovedPane, TabDisplayProjection, TabNameOrigin,
+    TabPrioAction,
+};
 pub use self::{
     git::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
@@ -1553,6 +1556,7 @@ impl Workspace {
             zoomed: false,
             prio: false,
             pinned: false,
+            starred: false,
             events,
             render_notify,
             render_dirty,
@@ -1614,6 +1618,7 @@ impl Workspace {
             zoomed: false,
             prio: false,
             pinned: false,
+            starred: false,
             events,
             render_notify,
             render_dirty,

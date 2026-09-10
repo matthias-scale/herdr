@@ -61,6 +61,8 @@ pub enum AppEvent {
     SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
     /// The focused repository's scratchpad file changed on disk; reload it.
     ScratchpadChanged,
+    /// A note in the notepad directory changed on disk; rescan and reload.
+    NotepadChanged,
     /// The append-only loop receipt source changed; refresh its cursor.
     LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.
@@ -95,6 +97,12 @@ pub enum AppEvent {
     /// Background provider/integration probes for settings finished.
     ToolProbesFinished {
         probes: Vec<crate::app::probes::ToolProbe>,
+    },
+    /// A Home dispatch to another machine finished; carries that machine's
+    /// pane id on success.
+    HomeRemoteSpawnFinished {
+        machine: String,
+        result: Result<String, String>,
     },
     /// A requested Home checkout completed before agent launch.
     HomeCheckoutFinished {

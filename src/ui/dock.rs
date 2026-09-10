@@ -34,6 +34,9 @@ pub(crate) use home::ticket_tab_layouts as home_ticket_tab_layouts;
 /// Glyph that closes the active tab, and the one that maximises the dock.
 pub(crate) const CLOSE_GLYPH: &str = "×";
 pub(crate) const MAXIMIZE_GLYPH: &str = "⤢";
+/// Half-filled square: the panel that can show itself. Accent when automatic
+/// opening is on, dim when the dock only opens on request.
+pub(crate) const AUTO_OPEN_GLYPH: &str = "◧";
 pub(crate) const PLUS_GLYPH: &str = "+";
 
 /// Columns a tab occupies: its label, a separating space, and — while it is the
@@ -291,6 +294,19 @@ fn render_tab_strip(app: &AppState, frame: &mut Frame) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(PLUS_GLYPH, style))),
             app.view.dock_plus_rect,
+        );
+    }
+    if app.view.dock_auto_open_rect.width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                AUTO_OPEN_GLYPH,
+                Style::default().fg(if app.open_dock_on_work_link {
+                    app.palette.accent
+                } else {
+                    app.palette.overlay0
+                }),
+            ))),
+            app.view.dock_auto_open_rect,
         );
     }
     if app.view.dock_maximize_rect.width > 0 {

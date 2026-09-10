@@ -139,6 +139,10 @@ impl AppState {
         !self.dock_collapsed && rect_contains(self.view.dock_maximize_rect, col, row)
     }
 
+    pub(crate) fn on_dock_auto_open(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_auto_open_rect, col, row)
+    }
+
     /// Card of the empty-dock grid under the cursor, available or not. The
     /// caller decides what an unavailable card does, so the geometry stays a
     /// pure function of the rect.
@@ -213,6 +217,7 @@ impl AppState {
         ) {
             return false;
         }
+        self.dock_collapsed = false;
         if matches!(
             surface,
             DockSurface::Pr | DockSurface::Linear | DockSurface::Missive
@@ -413,6 +418,16 @@ mod tests {
         assert!(app.activate_dock_surface(DockSurface::Linear));
         assert_eq!(app.dock_tab, Some(DockSurface::Linear));
         assert!(app.dock_linear_focused);
+    }
+
+    #[test]
+    fn activating_a_surface_expands_a_collapsed_dock() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = true;
+
+        assert!(app.activate_dock_surface(DockSurface::Terminal));
+        assert!(!app.dock_collapsed);
+        assert_eq!(app.dock_tab, Some(DockSurface::Terminal));
     }
 
     #[test]

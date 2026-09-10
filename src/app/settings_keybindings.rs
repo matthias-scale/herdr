@@ -81,6 +81,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("copy_work_preview", "copy work preview", |kb| {
                 &kb.copy_work_preview
             }),
+            built_in("toggle_theme", "toggle dark/light theme", |kb| {
+                &kb.toggle_theme
+            }),
         ],
     ),
     (
@@ -143,6 +146,10 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("toggle_pin_tab", "pin tab", |kb| &kb.toggle_pin_tab),
             built_in("previous_tab", "previous tab", |kb| &kb.previous_tab),
             built_in("next_tab", "next tab", |kb| &kb.next_tab),
+            built_in("move_tab_previous", "move tab previous", |kb| {
+                &kb.move_tab_previous
+            }),
+            built_in("move_tab_next", "move tab next", |kb| &kb.move_tab_next),
             built_in("previous_window", "previous window", |kb| {
                 &kb.previous_window
             }),
@@ -187,6 +194,16 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("close_pane", "close pane", |kb| &kb.close_pane),
             built_in("zoom", "zoom pane", |kb| &kb.zoom),
             built_in("resize_mode", "resize mode", |kb| &kb.resize_mode),
+            built_in("resize_pane_left", "resize pane left", |kb| {
+                &kb.resize_pane_left
+            }),
+            built_in("resize_pane_down", "resize pane down", |kb| {
+                &kb.resize_pane_down
+            }),
+            built_in("resize_pane_up", "resize pane up", |kb| &kb.resize_pane_up),
+            built_in("resize_pane_right", "resize pane right", |kb| {
+                &kb.resize_pane_right
+            }),
             built_in("rename_pane", "rename pane", |kb| &kb.rename_pane),
             built_in("edit_scrollback", "edit scrollback", |kb| {
                 &kb.edit_scrollback
@@ -198,6 +215,7 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
         "surfaces",
         &[
             built_in("toggle_sidebar", "toggle sidebar", |kb| &kb.toggle_sidebar),
+            built_in("focus_sidebar", "focus sidebar", |kb| &kb.focus_sidebar),
             built_in("sidebar_cycle_group_mode", "cycle sidebar grouping", |kb| {
                 &kb.sidebar_cycle_group_mode
             }),
@@ -230,17 +248,49 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("show_scratchpad", "show scratchpad", |kb| {
                 &kb.show_scratchpad
             }),
+            built_in("toggle_notepad", "focus notepad", |kb| &kb.toggle_notepad),
+            built_in("toggle_pomodoro", "pause/resume break timer", |kb| {
+                &kb.toggle_pomodoro
+            }),
             built_in("home", "home", |kb| &kb.home),
             built_in("work", "work", |kb| &kb.work),
             built_in("usage", "usage", |kb| &kb.usage),
             built_in("tickets", "tickets", |kb| &kb.tickets),
             built_in("inbox", "inbox", |kb| &kb.inbox),
+            built_in("missive", "missive", |kb| &kb.missive),
             built_in("symphony", "symphony", |kb| &kb.symphony),
             built_in("next_review_agent", "next review agent", |kb| {
                 &kb.next_review_agent
             }),
             built_in("previous_agent", "previous agent", |kb| &kb.previous_agent),
             built_in("next_agent", "next agent", |kb| &kb.next_agent),
+        ],
+    ),
+    (
+        "git",
+        &[
+            built_in("git_pull", "git pull", |kb| &kb.git_pull),
+            built_in("git_commit", "git commit", |kb| &kb.git_commit),
+            built_in("git_push", "git push", |kb| &kb.git_push),
+            built_in("git_create_pr", "git create pull request", |kb| {
+                &kb.git_create_pr
+            }),
+        ],
+    ),
+    (
+        "dock",
+        &[
+            built_in("dock_home", "dock: home", |kb| &kb.dock_home),
+            built_in("dock_terminal", "dock: terminal", |kb| &kb.dock_terminal),
+            built_in("dock_files", "dock: files", |kb| &kb.dock_files),
+            built_in("dock_diff", "dock: diff", |kb| &kb.dock_diff),
+            built_in("dock_pr", "dock: pull requests", |kb| &kb.dock_pr),
+            built_in("dock_linear", "dock: linear", |kb| &kb.dock_linear),
+            built_in("dock_missive", "dock: missive", |kb| &kb.dock_missive),
+            built_in("dock_agents", "dock: agents", |kb| &kb.dock_agents),
+            built_in("dock_shortcuts", "dock: shortcuts", |kb| &kb.dock_shortcuts),
+            built_in("dock_context", "dock: context", |kb| &kb.dock_context),
+            built_in("dock_symphony", "dock: symphony", |kb| &kb.dock_symphony),
         ],
     ),
 ];

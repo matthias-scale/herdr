@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
@@ -20,6 +20,7 @@ mod dock_scratchpad;
 mod dock_shortcuts;
 pub(crate) mod dropdown;
 mod home;
+pub(crate) mod hyperspace;
 mod inbox;
 pub(crate) mod info_panel;
 mod keybind_help;
@@ -28,8 +29,10 @@ mod markdown;
 mod menus;
 mod mobile;
 mod navigator;
+pub(crate) mod notepad;
 mod onboarding;
 mod panes;
+pub(crate) mod pomodoro;
 pub(crate) mod pr_actions;
 mod release_notes;
 mod scrollbar;
@@ -42,7 +45,7 @@ pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// `terminal::counts_as_blocked`.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
-mod status;
+pub(crate) mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
@@ -149,16 +152,16 @@ pub(crate) use self::{
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
-        sidebar_missive_copy_url, sidebar_nested_header_at, sidebar_new_menu_layout,
-        sidebar_new_thread_layout, sidebar_new_thread_matches, sidebar_object_action_at,
-        sidebar_object_at, sidebar_object_menu_item_at, sidebar_object_menu_items,
-        sidebar_pull_request_actions, sidebar_pull_request_key, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
-        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_symphony_job_at, sidebar_thread_entries, sidebar_ticket_action_entries,
-        sidebar_ticket_target, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
+        sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
+        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
+        sidebar_object_menu_items, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
+        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
+        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, AgentPanelLocalIdentity, RemoteAgentPanelEntry, SidebarFilterOption,
         SidebarObjectMenuItem, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
@@ -182,7 +185,7 @@ pub(crate) use self::{
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::ViewLayout;
+use crate::app::state::{Palette, ViewLayout};
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -563,6 +566,11 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
+    let sidebar_hover_targets = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_sidebar_hover_targets(app, sidebar_area)
+    };
     let sidebar_footer_work_hit_area = if app.sidebar_collapsed {
         Rect::default()
     } else {
@@ -598,6 +606,15 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_refresh_hit_area(sidebar_area)
     };
+    let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
+    let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
+    let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
+    let hyperspace_pause_hit_area = hyperspace::pause_hit_area(app, hyperspace_rect);
+    // The caret has to stay inside the rows the panel actually got, which is
+    // only known once the sidebar geometry above resolved.
+    app.notepad
+        .sync_scroll(notepad::notepad_body_rect(notepad_rect).height);
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let DockGeometry {
@@ -608,6 +625,7 @@ fn compute_view_internal(
         close: dock_tab_close_rect,
         plus: dock_plus_rect,
         maximize: dock_maximize_rect,
+        auto_open: dock_auto_open_rect,
         body: dock_body_rect,
     } = dock_geometry(
         dock_area,
@@ -739,9 +757,15 @@ fn compute_view_internal(
         usage_hit_areas,
         sidebar_footer_ticket_hit_area,
         sidebar_footer_missive_hit_area,
+        notepad_rect,
+        notepad_tab_hit_areas,
+        pomodoro_hit_area,
+        hyperspace_rect,
+        hyperspace_pause_hit_area,
         sidebar_footer_refresh_hit_area,
         workspace_card_areas,
         agent_card_areas,
+        sidebar_hover_targets,
         visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -782,6 +806,8 @@ fn compute_view_internal(
         } else {
             Vec::new()
         },
+        status_work_links: Vec::new(),
+        status_segments: Vec::new(),
         scratchpad_link_rows: if !app.dock_collapsed
             && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
         {
@@ -804,6 +830,7 @@ fn compute_view_internal(
         dock_tab_close_rect,
         dock_plus_rect,
         dock_maximize_rect,
+        dock_auto_open_rect,
         dock_surface_card_hit_areas,
         dock_surface_menu_layout: None,
         dock_home_section_hit_areas,
@@ -822,6 +849,17 @@ fn compute_view_internal(
     // The menu anchors on the `+`, so its geometry needs the strip already
     // stored on the view.
     app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
+    // The links follow the title, and the title starts at the sidebar's right
+    // edge, so they are laid out only once this frame's sidebar is on the view.
+    // The row is fitted once here: the status segments, the title, and the
+    // links share one layout pass, and render draws what this stored.
+    if status_bar_is_renderable(app, area) {
+        app.view.status_segments = status::fitted_status_segments(app, status_bar_rect);
+        app.view.status_work_links = status::status_work_links(app, status_bar_rect);
+    } else {
+        app.view.status_segments = Vec::new();
+        app.view.status_work_links = Vec::new();
+    }
     app.sync_copy_mode_search_geometry();
 }
 
@@ -841,6 +879,7 @@ pub(crate) struct DockGeometry {
     pub close: Rect,
     pub plus: Rect,
     pub maximize: Rect,
+    pub auto_open: Rect,
     pub body: Rect,
 }
 
@@ -854,6 +893,7 @@ impl DockGeometry {
             close: Rect::default(),
             plus: Rect::default(),
             maximize: Rect::default(),
+            auto_open: Rect::default(),
             body: Rect::default(),
         }
     }
@@ -879,21 +919,29 @@ fn dock_geometry(
     let [tab_bar, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
 
-    // Width the strip wants: every open tab, the trailing `+`, and the `⤢`
-    // pinned to the right edge. The maximise glyph only claims its two columns
-    // when the tabs do not need them.
+    // Width the strip wants: every open tab, the trailing `+`, and the two
+    // right-edge toggles. Each toggle only claims its columns when the tabs do
+    // not need them, and the maximise glyph keeps the outer cell so its
+    // position does not move when the auto-open toggle drops out.
     let wanted: u16 = labels
         .iter()
         .enumerate()
         .map(|(index, label)| dock::tab_width_label(label, active_index == Some(index)))
         .fold(dock::PLUS_WIDTH, u16::saturating_add);
-    let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
+    let (strip, maximize, auto_open) = if tab_bar.width >= wanted.saturating_add(4) {
+        (
+            Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 4, 1),
+            Rect::new(tab_bar.right() - 1, tab_bar.y, 1, 1),
+            Rect::new(tab_bar.right() - 3, tab_bar.y, 1, 1),
+        )
+    } else if tab_bar.width >= wanted.saturating_add(2) {
         (
             Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 2, 1),
             Rect::new(tab_bar.right() - 1, tab_bar.y, 1, 1),
+            Rect::default(),
         )
     } else {
-        (tab_bar, Rect::default())
+        (tab_bar, Rect::default(), Rect::default())
     };
 
     // The hit areas come from the same layout the strip is drawn from, so the
@@ -909,6 +957,7 @@ fn dock_geometry(
         close,
         plus,
         maximize,
+        auto_open,
         body,
     }
 }
@@ -1011,9 +1060,15 @@ fn compute_mobile_view(
         usage_hit_areas: Vec::new(),
         sidebar_footer_ticket_hit_area: Rect::default(),
         sidebar_footer_missive_hit_area: Rect::default(),
+        notepad_rect: Rect::default(),
+        notepad_tab_hit_areas: Vec::new(),
+        pomodoro_hit_area: Rect::default(),
+        hyperspace_rect: Rect::default(),
+        hyperspace_pause_hit_area: Rect::default(),
         sidebar_footer_refresh_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
+        sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -1041,6 +1096,8 @@ fn compute_mobile_view(
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),
         status_buttons: Vec::new(),
+        status_work_links: Vec::new(),
+        status_segments: Vec::new(),
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
@@ -1057,6 +1114,7 @@ fn compute_mobile_view(
         dock_tab_close_rect: Rect::default(),
         dock_plus_rect: Rect::default(),
         dock_maximize_rect: Rect::default(),
+        dock_auto_open_rect: Rect::default(),
         dock_surface_card_hit_areas: Vec::new(),
         dock_surface_menu_layout: None,
         dock_home_section_hit_areas: Vec::new(),
@@ -1256,6 +1314,10 @@ fn render_with_runtime_registry_inner(
     render_sidebar_object_menu(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
+    notepad::render_notepad_caret(app, frame);
+    // Last, and over everything: a due break reminder outranks whatever the
+    // operator was looking at, which is the point of it.
+    pomodoro::render_overlay(app, frame, frame.area());
 }
 
 fn render_navigation_chrome(
@@ -1364,6 +1426,30 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
         && b.x < a.x.saturating_add(a.width)
         && a.y < b.y.saturating_add(b.height)
         && b.y < a.y.saturating_add(a.height)
+}
+
+/// Opaque backdrop for a modal that has to be answered before work resumes.
+/// `dim_background` only adds the DIM modifier, which several terminals render
+/// as no change at all, so a blocking prompt gets a real veil instead: the
+/// cells behind it are blanked so the work underneath cannot be read past the
+/// dialog.
+fn veil_background(frame: &mut Frame, area: Rect, palette: &Palette) {
+    // The 16-colour theme leaves `surface0` as the terminal's own background,
+    // which would make the veil invisible; `surface1` is a concrete colour in
+    // every bundled theme.
+    let bg = match palette.surface0 {
+        Color::Reset => palette.surface1,
+        color => color,
+    };
+    let style = Style::default().bg(bg).fg(palette.overlay0);
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            cell.reset();
+            cell.set_style(style);
+        }
+    }
 }
 
 fn dim_background(frame: &mut Frame, area: Rect) {
@@ -1819,6 +1905,33 @@ mod tests {
                 assert_eq!(app.dock_tab_at(plus.x, plus.y), None);
             }
         }
+    }
+
+    /// The auto-open toggle sits inside the strip, left of the maximise glyph,
+    /// and is clickable there. Maximise keeps the outer cell either way so its
+    /// position does not move when the strip is too narrow for both.
+    #[test]
+    fn the_auto_open_toggle_sits_left_of_maximise_and_is_clickable() {
+        let (row, app) = strip_row(120, 40, &[crate::app::DockSurface::Files]);
+        let toggle = app.view.dock_auto_open_rect;
+        let maximize = app.view.dock_maximize_rect;
+        assert_eq!(toggle.width, 1);
+        assert_eq!(toggle.y, app.view.dock_tab_bar_rect.y);
+        assert_eq!(toggle.x + 2, maximize.x);
+        let cell = usize::from(toggle.x - app.view.dock_tab_bar_rect.x);
+        assert_eq!(
+            row.chars().nth(cell),
+            Some('◧'),
+            "the toggle is not at {toggle:?} in {row:?}"
+        );
+        assert!(app.on_dock_auto_open(toggle.x, toggle.y));
+        assert!(!app.on_dock_maximize(toggle.x, toggle.y));
+        assert_eq!(app.dock_tab_at(toggle.x, toggle.y), None);
+
+        // A collapsed dock exposes neither control.
+        let mut collapsed = app;
+        collapsed.dock_collapsed = true;
+        assert!(!collapsed.on_dock_auto_open(toggle.x, toggle.y));
     }
 
     #[test]

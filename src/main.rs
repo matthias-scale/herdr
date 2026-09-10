@@ -71,6 +71,7 @@ mod files;
 mod fleet;
 mod ghostty;
 mod handoff_runtime;
+mod hyperspace;
 mod input;
 mod integration;
 mod ipc;
@@ -80,12 +81,14 @@ mod logging;
 mod loop_runs;
 mod metadata_tokens;
 mod noninteractive_process;
+mod notepad;
 mod pane;
 mod pane_graphics_files;
 mod persist;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
+mod pomodoro;
 mod popup_size;
 mod product_announcements;
 mod protocol;
@@ -209,6 +212,33 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Merge strategy for the primary PR action: "merge", "squash", or "rebase".
 # merge_method = "merge"
 
+[notepad]
+# Markdown notes edited at the bottom of the sidebar. Point `dir` at a folder a
+# sync tool already carries, or set git_sync to let herdr pull and push it.
+# enabled = false
+# Notes directory. Empty uses <config dir>/notes. "~" is expanded.
+# dir = ""
+# Note names offered first, in this order. Others follow alphabetically.
+# files = ["todo", "ideas"]
+# Sidebar rows the panel occupies, header included (3-24).
+# height = 8
+# Pull and push the notes directory as a git checkout.
+# git_sync = false
+# git_sync_interval_seconds = 120
+
+[pomodoro]
+# Break reminder. The overlay it raises has to be answered in writing.
+# enabled = false
+# work_minutes = 25
+# short_break_minutes = 5
+# long_break_minutes = 20
+# Work intervals between long breaks (4 x 25min is roughly two hours).
+# long_break_every = 4
+# Characters required to dismiss a due reminder.
+# min_confirm_chars = 3
+# Note in the notepad directory confirmations are appended to. Empty disables it.
+# log_file = "pomodoro-log.md"
+
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
@@ -331,6 +361,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Start with the sidebar collapsed. Changes take effect on the next launch.
 # sidebar_start_collapsed = false
 
+# Idle star-field animation at the bottom of the sidebar. It also has a pause
+# button; this switch removes the panel and gives its rows back to the list.
+# sidebar_animation = true
+
 # Collapsed sidebar presentation: "compact" keeps the narrow status rail, "hidden" uses zero width.
 # sidebar_collapsed_mode = "compact"
 
@@ -410,6 +444,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Off by default. It is the only entry point to the git menu, so turn it on if
 # you want that menu.
 # show_pull_button = false
+
+# Open the dock automatically when the focused pane carries a pull request,
+# ticket, or conversation.
+# Off by default: the status row names each link after the pane title, and a
+# click on that name opens it in the dock.
+# open_dock_on_work_link = false
 
 # Show the split-below and split-right buttons in the top-right action row.
 # Off by default: both splits have keybindings, and the buttons crowd the tab titles.
@@ -524,6 +564,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # auto_settle_inactive = true
 # Stop resumable agent processes when their pane settles.
 # settle_stops_agent = true
+# After a resumed agent comes back up idle, submit one prompt so it continues
+# the work it was doing. Skipped when the agent resumes blocked or already
+# working, and when the pane holds a draft you typed.
+# nudge_resumed_agents = true
+# The prompt sent by nudge_resumed_agents.
+# resume_nudge_message = "continue"
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.

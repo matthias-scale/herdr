@@ -1401,20 +1401,86 @@ pub(crate) fn render_ticket_detail(
     }
 }
 
+/// The two ticket controls the detail draws as buttons. The render and the
+/// input layer share these labels so a click lands on exactly what was drawn.
+/// The rows are spelled out rather than formatted because they are pushed on
+/// every ticket-detail render.
+pub(crate) const TICKET_START_LABEL: &str = "[Start thread ▾]";
+pub(crate) const TICKET_MORE_LABEL: &str = "[⋯]";
+const TICKET_ACTION_ROW: &str = " [Start thread ▾] [⋯]";
+const TICKET_START_ROW: &str = " [Start thread ▾]";
+const TICKET_MORE_ROW: &str = " [⋯]";
+
+/// Which ticket control the pointer is over, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TicketActionControl {
+    StartThread,
+    More,
+}
+
 fn push_ticket_action_rows(lines: &mut Vec<Line<'static>>, palette: &Palette, width: u16) -> usize {
     let style = Style::default().fg(palette.accent);
-    let action_width = crate::ui::text::display_width(" [Start thread ▾] [⋯]");
+    let action_width = crate::ui::text::display_width(TICKET_ACTION_ROW);
     if width >= 60 && action_width <= usize::from(width) {
-        lines.push(Line::styled(" [Start thread ▾] [⋯]", style));
+        lines.push(Line::styled(TICKET_ACTION_ROW, style));
         1
     } else {
-        lines.push(Line::styled(" [Start thread ▾]", style));
-        lines.push(Line::styled(" [⋯]", style));
+        lines.push(Line::styled(TICKET_START_ROW, style));
+        lines.push(Line::styled(TICKET_MORE_ROW, style));
         2
     }
 }
 
-fn ticket_action_menu_anchor(area: Rect, action_rows: usize) -> Rect {
+/// The control under the pointer, given the same geometry the render used.
+///
+/// The action rows follow the heading, so their line indices are 1 and, when
+/// the detail is too narrow for one row, 2. `scroll` is the detail's own
+/// scroll, which moves the buttons with the rest of the body.
+pub(crate) fn ticket_action_control_at(
+    area: Rect,
+    action_rows: usize,
+    scroll: u16,
+    column: u16,
+    row: u16,
+) -> Option<TicketActionControl> {
+    if area.width == 0 || area.height == 0 || column < area.x || column >= area.right() {
+        return None;
+    }
+    let screen_row = |line: u16| -> Option<u16> {
+        let offset = line.checked_sub(scroll)?;
+        let row = area.y.checked_add(offset)?;
+        (row < area.bottom()).then_some(row)
+    };
+    let start_width = crate::ui::text::display_width(TICKET_START_LABEL) as u16;
+    let more_width = crate::ui::text::display_width(TICKET_MORE_LABEL) as u16;
+    let hit = |x: u16, width: u16| column >= x && column < x.saturating_add(width);
+    let start_x = area.x.saturating_add(1);
+    if action_rows <= 1 {
+        if screen_row(1) != Some(row) {
+            return None;
+        }
+        if hit(start_x, start_width) {
+            return Some(TicketActionControl::StartThread);
+        }
+        let more_x = start_x.saturating_add(start_width).saturating_add(1);
+        return hit(more_x, more_width).then_some(TicketActionControl::More);
+    }
+    if screen_row(1) == Some(row) && hit(start_x, start_width) {
+        return Some(TicketActionControl::StartThread);
+    }
+    if screen_row(2) == Some(row) && hit(start_x, more_width) {
+        return Some(TicketActionControl::More);
+    }
+    None
+}
+
+/// Rows of the start-thread dropdown, for hit-testing the same rect the render
+/// draws. Kept beside the render so both read one anchor.
+pub(crate) fn ticket_start_menu_layout(area: Rect) -> Option<crate::ui::dropdown::DropdownLayout> {
+    ticket_menu_layout(area, 12, 1, 2, 0, 42)
+}
+
+pub(crate) fn ticket_action_menu_anchor(area: Rect, action_rows: usize) -> Rect {
     Rect::new(
         area.right().saturating_sub(3),
         area.y.saturating_add(action_rows as u16),
@@ -2055,8 +2121,7 @@ fn render_ticket_start_menu(
     item: &TicketItem<'_>,
     choice: crate::app::state::PrCheckoutChoice,
 ) {
-    let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
-    let Some(layout) = ticket_menu_layout(area, 12, 1, 2, selected, 42) else {
+    let Some(layout) = ticket_start_menu_layout(area) else {
         return;
     };
     let branch = crate::ui::work_list_detail::ticket_worktree_branch(
@@ -3408,6 +3473,41 @@ mod tests {
         for label in ["Start thread ▾", "⋯"] {
             assert!(ticket_actions.contains(label), "{ticket_actions}");
         }
+    }
+
+    #[test]
+    fn ticket_controls_hit_test_the_labels_the_detail_drew() {
+        let area = Rect::new(10, 5, 80, 20);
+        let start_width =
+            u16::try_from(crate::ui::text::display_width(TICKET_START_LABEL)).expect("narrow");
+        let row = area.y + 1;
+        let start = area.x + 1;
+        let more = start + start_width + 1;
+
+        assert_eq!(
+            ticket_action_control_at(area, 1, 0, start, row),
+            Some(TicketActionControl::StartThread)
+        );
+        assert_eq!(
+            ticket_action_control_at(area, 1, 0, more, row),
+            Some(TicketActionControl::More)
+        );
+        // The gap between the two buttons belongs to neither.
+        assert_eq!(
+            ticket_action_control_at(area, 1, 0, start + start_width, row),
+            None
+        );
+        // The heading above them is not a control.
+        assert_eq!(ticket_action_control_at(area, 1, 0, start, area.y), None);
+        // A narrow detail stacks them, and the scroll moves both.
+        assert_eq!(
+            ticket_action_control_at(area, 2, 0, start, row + 1),
+            Some(TicketActionControl::More)
+        );
+        assert_eq!(
+            ticket_action_control_at(area, 1, 1, start, area.y),
+            Some(TicketActionControl::StartThread)
+        );
     }
 
     #[test]
