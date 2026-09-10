@@ -5248,23 +5248,51 @@ impl App {
             return false;
         };
 
-        let plugin_handled = match self.invoke_plugin_link_handler_for_url(&url, info.id) {
-            Ok(handled) => handled,
-            Err(err) => {
-                tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
-                false
-            }
-        };
-        if !plugin_handled && crate::app::actions::safe_web_url(&url).is_none() {
+        if !self.open_pane_link_from(&url, Some(info.id), open_url) {
             return false;
         }
 
         self.last_pane_click = None;
         self.pending_url_click_sources.insert(source_id);
+        true
+    }
+
+    /// Open a link a pane printed, the way a modified click on it would.
+    pub(crate) fn open_pane_link(&mut self, url: String) {
+        #[cfg(target_os = "macos")]
+        self.open_pane_link_from(&url, None, |url| {
+            crate::platform::open_url(url).map(|()| None)
+        });
+        #[cfg(not(target_os = "macos"))]
+        self.open_pane_link_from(&url, None, crate::platform::open_url);
+    }
+
+    /// Plugins get first refusal, because a link handler exists to redirect
+    /// links Herdr would otherwise hand to a browser. Returns whether anything
+    /// took the link.
+    fn open_pane_link_from(
+        &mut self,
+        url: &str,
+        pane_id: Option<crate::layout::PaneId>,
+        open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
+    ) -> bool {
+        let plugin_handled = match pane_id
+            .map(|pane_id| self.invoke_plugin_link_handler_for_url(url, pane_id))
+            .transpose()
+        {
+            Ok(handled) => handled.unwrap_or(false),
+            Err(err) => {
+                tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
+                false
+            }
+        };
         if plugin_handled {
             return true;
         }
-        match open_url(&url) {
+        if crate::app::actions::safe_web_url(url).is_none() {
+            return false;
+        }
+        match open_url(url) {
             Ok(Some(child)) => self.detached_process_children.push(child),
             Ok(None) => {}
             Err(err) => {

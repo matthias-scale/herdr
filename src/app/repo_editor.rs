@@ -195,6 +195,18 @@ impl App {
             argv.push(path.to_string_lossy().into_owned());
         }
 
+        self.open_command_in_pane(argv, &root);
+    }
+
+    /// Split right, land in `cwd`, and run `argv` there.
+    ///
+    /// This is how every in-terminal editor opens: the editor is a program in a
+    /// pane, not a surface Herdr draws, so it wants a shell and a working
+    /// directory rather than an API call.
+    pub(crate) fn open_command_in_pane(&mut self, argv: Vec<String>, cwd: &Path) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
         let before = self
             .state
             .workspaces
@@ -207,7 +219,7 @@ impl App {
                 target_pane_id: None,
                 direction: crate::api::schema::SplitDirection::Right,
                 ratio: None,
-                cwd: Some(root.to_string_lossy().into_owned()),
+                cwd: Some(cwd.to_string_lossy().into_owned()),
                 focus: true,
                 right_click: Default::default(),
                 env: Default::default(),
@@ -237,6 +249,71 @@ impl App {
         };
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         runtime.send_bytes_after(Bytes::from(bytes), EDITOR_SEND_DELAY);
+    }
+
+    /// Hand a path a pane printed to one of this host's editors.
+    ///
+    /// `directory` picks the folder around the path rather than the path
+    /// itself, which is the difference between reading a line and working in
+    /// the checkout it came from.
+    pub(crate) fn open_pane_path_with(
+        &mut self,
+        target: crate::app::state::PaneOpenWith,
+        path: &crate::app::state::PaneMenuPath,
+        directory: bool,
+    ) {
+        use crate::app::state::PaneOpenWith;
+
+        let target_path = if directory {
+            match path.directory() {
+                Some(directory) => directory.to_path_buf(),
+                None => return,
+            }
+        } else {
+            path.path.clone()
+        };
+        // A folder has no line to jump to, and neither does a directory entry.
+        let line = (!directory).then_some(path.line).flatten();
+        let cwd = path
+            .directory()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| target_path.clone());
+        match target {
+            PaneOpenWith::Nvim if !directory => self.open_repo_editor_file(target_path),
+            PaneOpenWith::Nvim => {
+                let mut argv = self
+                    .state
+                    .repo_editor_argv
+                    .clone()
+                    .unwrap_or_else(|| vec!["nvim".to_string()]);
+                argv.push(target_path.to_string_lossy().into_owned());
+                self.open_command_in_pane(argv, &cwd);
+            }
+            PaneOpenWith::Vellum => {
+                let mut argv = vec!["vellum".to_string()];
+                argv.push(target_path.to_string_lossy().into_owned());
+                self.open_command_in_pane(argv, &cwd);
+            }
+            PaneOpenWith::Zed => {
+                let mut argument = target_path.to_string_lossy().into_owned();
+                if let Some(line) = line {
+                    argument.push_str(&format!(":{line}"));
+                }
+                self.spawn_detached("zedr", &argument);
+            }
+        }
+    }
+
+    /// Run a one-shot command that draws nowhere in this terminal. Zed lives on
+    /// another machine, so nothing here waits for it.
+    fn spawn_detached(&mut self, command: &str, argument: &str) {
+        match std::process::Command::new(command).arg(argument).spawn() {
+            Ok(child) => self.detached_process_children.push(child),
+            Err(err) => {
+                tracing::warn!(err = %err, command, "failed to spawn editor");
+                self.show_work_link_notice("could not start the editor");
+            }
+        }
     }
 }
 
