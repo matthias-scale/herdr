@@ -11,7 +11,7 @@ use super::App;
 const RESUME_NUDGE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long the agent has to hold `Idle` before the nudge is submitted. Boot
 /// output can read as idle for a frame before the agent settles on its prompt.
-const RESUME_NUDGE_IDLE_HOLD: Duration = Duration::from_millis(1_500);
+pub(crate) const RESUME_NUDGE_IDLE_HOLD: Duration = Duration::from_millis(1_500);
 /// Gap between the nudge text and its Enter, matching `agent prompt`.
 const RESUME_NUDGE_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 /// Poll interval while a nudge is armed and the agent is still coming up.
@@ -325,7 +325,7 @@ impl App {
     /// Queue a "continue" for a pane that was just resumed into a native agent
     /// session. The resume only replays the conversation; without this the
     /// agent sits at an idle prompt and the work it was doing stops there.
-    fn arm_resume_nudge(
+    pub(crate) fn arm_resume_nudge(
         &mut self,
         pane_id: crate::layout::PaneId,
         terminal_id: &crate::terminal::TerminalId,
