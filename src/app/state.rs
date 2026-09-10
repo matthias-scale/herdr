@@ -6211,7 +6211,8 @@ impl AppState {
             auto_nudge_stalled_agents: false,
             nudge_after: std::time::Duration::from_secs(20 * 60),
             max_nudges: 3,
-            stall_nudge_message: "/status".to_string(),
+            stall_nudge_message:
+                "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.".to_string(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
@@ -6650,7 +6651,10 @@ mod tests {
         assert!(!state.auto_nudge_stalled_agents);
         assert_eq!(state.nudge_after, std::time::Duration::from_secs(20 * 60));
         assert_eq!(state.max_nudges, 3);
-        assert_eq!(state.stall_nudge_message, "/status");
+        assert_eq!(
+            state.stall_nudge_message,
+            "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+        );
     }
 
     fn linear_ownership_ticket(

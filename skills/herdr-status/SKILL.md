@@ -5,6 +5,8 @@ description: "Re-verify and recover work when Herdr sends /status to a stalled a
 
 # Status
 
+Optional: install this skill to use `stall_nudge_message = "/status"` instead of the default plain-text prompt.
+
 Re-open the current objective and verify its state from source artifacts,
 running processes, and checks. Do not answer from memory.
 

@@ -862,17 +862,20 @@ mod tests {
         let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
 
         assert!(app.tick_auto_nudges(now));
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
         assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
 
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(39 * 60)));
         assert_eq!(drain(&mut rx), "");
         assert!(app.tick_auto_nudges(now + Duration::from_secs(40 * 60)));
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
 
         assert!(app.tick_auto_nudges(now + Duration::from_secs(120 * 60)));
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
         assert!(
             app.tick_auto_nudges(now + Duration::from_secs(120 * 60) + STALL_NUDGE_SUBMIT_DELAY)
         );
@@ -888,7 +891,10 @@ mod tests {
         let (mut app, _pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
 
         assert!(app.tick_auto_nudges(now));
-        assert_eq!(drain(&mut rx), "/status");
+        assert_eq!(
+            drain(&mut rx),
+            "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+        );
         assert!(!app.tick_auto_nudges(now + Duration::from_millis(299)));
         assert_eq!(drain(&mut rx), "");
         assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
@@ -901,7 +907,8 @@ mod tests {
         let now = Instant::now();
         let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
         assert!(app.tick_auto_nudges(now));
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
         assert!(app.stall_nudge_episodes.contains_key(&terminal_id));
 
         app.handle_internal_event_with_prefix_sync(crate::events::AppEvent::HookStateReported {
@@ -934,7 +941,8 @@ mod tests {
         app.handle_scheduled_tasks(stale_at, false);
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
         assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 1);
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
     }
 
     /// Pins stale detection while the opt-in nudge action remains disabled.
@@ -994,7 +1002,8 @@ mod tests {
         let (mut app, pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
 
         assert!(app.tick_auto_nudges(now));
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
 
         app.note_human_text(pane_id, "human input");
         tokio::time::sleep(STALL_NUDGE_SUBMIT_DELAY + Duration::from_millis(50)).await;
@@ -1009,7 +1018,8 @@ mod tests {
         let (mut app, pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
 
         assert!(app.tick_auto_nudges(now));
-        assert!(drain(&mut rx).contains("/status"));
+        assert!(drain(&mut rx)
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
 
         app.state
             .pending_human_drafts

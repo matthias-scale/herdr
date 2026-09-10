@@ -2026,8 +2026,8 @@
         {
           "key": "session.stall_nudge_message",
           "type": "string",
-          "default": "\"/status\"",
-          "description": "Prompt submitted to a stalled agent. Use a plain-text status request when the agent does not have the shipped /status skill."
+          "default": "\"Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.\"",
+          "description": "Plain-text prompt submitted to a stalled agent. It works without an agent-specific command or installed skill."
         }
       ]
     },
