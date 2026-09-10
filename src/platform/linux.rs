@@ -593,35 +593,6 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
-/// Get the controlling terminal device of a process.
-pub fn process_tty(pid: u32) -> Option<PathBuf> {
-    if pid == 0 {
-        return None;
-    }
-
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = stat.get(stat.rfind(')')? + 2..)?;
-    // `/proc/<pid>/stat` reports tty_nr as a signed 32-bit device number.
-    let tty_nr: i32 = rest.split_whitespace().nth(4)?.parse().ok()?;
-    if tty_nr == 0 {
-        return None;
-    }
-    let tty_device = u64::from(tty_nr as u32);
-
-    // fd 0 may point at a pipe or /dev/null after shell redirection. tty_nr is
-    // the kernel's controlling-terminal identity; scan every descriptor only
-    // to resolve that identity back to an existing character device path.
-    for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten() {
-        let Ok(target) = std::fs::read_link(entry.path()) else {
-            continue;
-        };
-        if let Some(path) = super::unix_common::verified_character_device(&target, tty_device) {
-            return Some(path);
-        }
-    }
-    None
-}
-
 /// Read a Herdr agent identity hint from a process environment.
 pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     if pid == 0 {

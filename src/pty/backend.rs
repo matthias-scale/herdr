@@ -6,11 +6,14 @@ pub(crate) use unix::*;
 
 #[cfg(windows)]
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+#[cfg(windows)]
+use std::path::PathBuf;
 
 #[cfg(windows)]
 pub(crate) struct SpawnedPty {
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn Child + Send + Sync>,
+    pub tty_name: Option<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -36,5 +39,6 @@ pub(crate) fn spawn_with_portable_pty(
     Ok(SpawnedPty {
         master: pair.master,
         child,
+        tty_name: None,
     })
 }

@@ -1235,10 +1235,6 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
-pub fn process_tty(_pid: u32) -> Option<PathBuf> {
-    None
-}
-
 fn select_pane_foreground_job_cached(shell_pid: u32) -> Option<ForegroundJob> {
     let snapshot = cached_foreground_processes();
     let (job, retry_with_fresh_snapshot) =

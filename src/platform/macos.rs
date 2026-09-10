@@ -1249,26 +1249,6 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(OsStr::from_bytes(&vip_path[..nul])))
 }
 
-/// Get the controlling terminal device of a process.
-pub fn process_tty(pid: u32) -> Option<PathBuf> {
-    if pid == 0 {
-        return None;
-    }
-
-    let tty_device = process_bsdinfo(pid)?.e_tdev;
-    if tty_device == u32::MAX {
-        return None;
-    }
-    for entry in std::fs::read_dir("/dev").ok()?.flatten() {
-        if let Some(path) =
-            super::unix_common::verified_character_device(&entry.path(), u64::from(tty_device))
-        {
-            return Some(path);
-        }
-    }
-    None
-}
-
 /// Platform parity with the Linux snapshot path. Only Linux pays a
 /// full-`/proc`-scan per call, so elsewhere this is the uncached function.
 pub fn session_processes_cached(child_pid: u32) -> Vec<u32> {

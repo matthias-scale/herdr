@@ -100,7 +100,7 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
     panic!("socket did not appear at {}", path.display());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn wait_for_path(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -110,6 +110,75 @@ fn wait_for_path(path: &Path, timeout: Duration) {
         thread::sleep(Duration::from_millis(25));
     }
     panic!("path did not appear at {}", path.display());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pane_process_info_reports_exact_shell_tty_on_macos() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let marker = base.join("shell-tty");
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"tty_ws","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let command = format!("tty > {} && sleep 30", marker.display());
+    assert_eq!(
+        send_request(
+            &socket_path,
+            &serde_json::json!({
+                "id": "tty_send",
+                "method": "pane.send_text",
+                "params": {"pane_id": pane_id, "text": command},
+            })
+            .to_string(),
+        )["result"]["type"],
+        "ok"
+    );
+    assert_eq!(
+        send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"tty_enter","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+                pane_id
+            ),
+        )["result"]["type"],
+        "ok"
+    );
+    wait_for_path(&marker, Duration::from_secs(5));
+
+    let expected = fs::read_to_string(&marker).unwrap().trim().to_string();
+    assert!(
+        expected.starts_with("/dev/ttys"),
+        "unexpected shell TTY {expected:?}"
+    );
+    let process_info = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"tty_info","method":"pane.process_info","params":{{"pane_id":"{}"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(
+        process_info["result"]["process_info"]["tty"], expected,
+        "API tty must equal the exact device reported by the pane shell"
+    );
+
+    cleanup_spawned_herdr(child, base);
 }
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
