@@ -20,7 +20,7 @@ use crate::ipc::LocalStream;
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientInputEvent, ClientKeybindings,
     ClientLaunchMode, ClientMessage, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD,
-    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 /// Minimum accepted attached client size.
@@ -320,6 +320,11 @@ pub(crate) enum ServerEvent {
     },
     /// A client sent an input message.
     ClientInput { client_id: u64, data: Vec<u8> },
+    /// A guarded PTY write was accepted into the actor queue but could not be
+    /// delivered after its live authorization changed.
+    // Unix PTY authorization emits this event; Windows cannot create that path.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    RemoteControlWriteUnknown { client_id: u64, terminal_id: String },
     /// A client reported the one armed Kitty regular-file response.
     GraphicsTransmissionResult {
         client_id: u64,
@@ -541,22 +546,31 @@ pub(crate) fn handle_client_handshake(
         client_id,
     )?;
 
-    // Read the Hello message.
-    let hello: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
-        Ok(msg) => msg,
-        Err(protocol::FramingError::UnexpectedEof) => {
-            debug!(client_id, "client disconnected before handshake");
-            return Ok(());
-        }
-        Err(protocol::FramingError::Oversized { claimed, max }) => {
-            warn!(client_id, claimed, max, "oversized handshake from client");
-            return Ok(());
-        }
-        Err(err) => {
-            debug!(client_id, err = %err, "failed to read client hello");
-            return Ok(());
-        }
-    };
+    // Read the Hello message. A v21 Hello has no build identity field, so it
+    // needs one compatibility decode in order to return version_skew instead
+    // of looking like an unreachable host.
+    let hello: ClientMessage =
+        match protocol::read_frame(&mut stream, MAX_FRAME_SIZE).and_then(|payload| {
+            protocol::decode_frame(&payload).or_else(|_| {
+                protocol::decode_legacy_client_hello(&payload).ok_or_else(|| {
+                    protocol::FramingError::Bincode("unsupported Hello payload".to_owned())
+                })
+            })
+        }) {
+            Ok(msg) => msg,
+            Err(protocol::FramingError::UnexpectedEof) => {
+                debug!(client_id, "client disconnected before handshake");
+                return Ok(());
+            }
+            Err(protocol::FramingError::Oversized { claimed, max }) => {
+                warn!(client_id, claimed, max, "oversized handshake from client");
+                return Ok(());
+            }
+            Err(err) => {
+                debug!(client_id, err = %err, "failed to read client hello");
+                return Ok(());
+            }
+        };
 
     let (
         client_cols,
@@ -595,12 +609,20 @@ pub(crate) fn handle_client_handshake(
                 }
             }
 
-            if build_version.is_empty() {
+            if build_version != crate::build_info::version() {
                 let welcome = ServerMessage::Welcome {
                     version: PROTOCOL_VERSION,
                     build_version: crate::build_info::version(),
                     encoding: RenderEncoding::SemanticFrame,
-                    error: Some("client build identity is missing (version_skew)".to_owned()),
+                    error: Some(format!(
+                        "client build identity does not match this server (version_skew): expected {}, got {}",
+                        crate::build_info::version(),
+                        if build_version.is_empty() {
+                            "<missing>"
+                        } else {
+                            &build_version
+                        }
+                    )),
                 };
                 let _ = protocol::write_message(&mut stream, &welcome);
                 return Ok(());
@@ -768,8 +790,7 @@ fn client_read_loop(
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     while !should_quit.load(Ordering::Acquire) {
-        let msg: ClientMessage = match protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE)
-        {
+        let msg: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
             Ok(msg) => msg,
             Err(protocol::FramingError::UnexpectedEof) => {
                 // Client disconnected.
@@ -1017,7 +1038,22 @@ fn client_read_loop(
 mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
+    use serde::Serialize;
     use std::path::PathBuf;
+
+    #[derive(Serialize)]
+    enum LegacyClientMessageV21 {
+        Hello {
+            version: u32,
+            cols: u16,
+            rows: u16,
+            cell_width_px: u32,
+            cell_height_px: u32,
+            requested_encoding: RenderEncoding,
+            keybindings: ClientKeybindings,
+            launch_mode: ClientLaunchMode,
+        },
+    }
 
     struct TestSocketPath(PathBuf);
 
@@ -1490,6 +1526,163 @@ new_tab = "ctrl+notakey"
             .join()
             .expect("handshake thread join")
             .expect("handshake thread result");
+    }
+
+    #[test]
+    fn v21_hello_reaches_version_skew_instead_of_host_unreachable() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-handshake-v21");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &LegacyClientMessageV21::Hello {
+                version: PROTOCOL_VERSION - 1,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::TerminalAttach,
+            },
+        )
+        .expect("write v21 hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        assert!(matches!(
+            welcome,
+            ServerMessage::Welcome {
+                error: Some(error),
+                ..
+            } if error.contains("older")
+        ));
+        assert!(matches!(
+            server_event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+        ));
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
+    fn hello_requires_exact_server_build_identity() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-handshake-build");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                build_version: "same-protocol-different-build".to_owned(),
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
+                launch_mode: ClientLaunchMode::TerminalAttach,
+            },
+        )
+        .expect("write mismatched build hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        assert!(matches!(
+            welcome,
+            ServerMessage::Welcome {
+                error: Some(error),
+                ..
+            } if error.contains("build identity") && error.contains("same-protocol-different-build")
+        ));
+        assert!(matches!(
+            server_event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+        ));
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
+    fn post_handshake_control_frames_use_the_normal_frame_limit() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-read-frame-cap");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        let oversized_context = crate::api::schema::RemoteControlContext {
+            host: "buildbox".to_owned(),
+            user: "operator".to_owned(),
+            workspace_id: "w1".to_owned(),
+            tab_id: "w1:t1".to_owned(),
+            pane_id: "w1:p1".to_owned(),
+            terminal_id: "terminal".to_owned(),
+            cwd: "x".repeat(MAX_FRAME_SIZE + 1024),
+            foreground_cwd: "/work".to_owned(),
+            tty: "/dev/pts/4".to_owned(),
+            foreground_process: crate::api::schema::RemoteForegroundProcess {
+                pid: 1,
+                process_group_id: 1,
+                name: "agent".to_owned(),
+                argv: vec!["agent".to_owned()],
+                cwd: "/work".to_owned(),
+            },
+            detected_agent: "claude".to_owned(),
+            interactive_ready: true,
+            human_draft: false,
+            state_change_seq: 1,
+            revision: 1,
+            context_epoch: 1,
+        };
+        let write_result = protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::ControlTerminal {
+                target: "buildbox::w1:p1".to_owned(),
+                agent_ref: None,
+                expected_context: Some(Box::new(oversized_context)),
+                takeover: false,
+            },
+        );
+        match write_result {
+            Ok(()) => {}
+            Err(protocol::FramingError::Io(error))
+                if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(error) => panic!("unexpected oversized-frame write error: {error}"),
+        }
+
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "oversized control frame"),
+            ServerEvent::ClientDisconnected { client_id: 7 }
+        ));
+        should_quit.store(true, Ordering::Release);
+        drop(client_stream);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read result");
     }
 
     #[test]

@@ -249,11 +249,12 @@ pub fn client_handshake(
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
 
+    let build_version = expected_version();
     let hello_payload = encode_varint_enum(
         0,
         &[
             &encode_varint_u32(version),
-            &encode_string("test-build"),
+            &encode_string(&build_version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
             &encode_varint_u32(8),  // cell_width_px

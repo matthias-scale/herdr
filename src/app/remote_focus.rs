@@ -249,22 +249,12 @@ impl RemoteFocusOperations {
 }
 
 impl crate::app::App {
+    #[cfg(unix)]
     pub(crate) fn remote_control_context(
         &self,
         agent_ref: &AgentRef,
     ) -> Result<RemoteControlContext, ErrorBody> {
-        #[cfg(unix)]
-        {
-            self.remote_control_context_unix(agent_ref)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = agent_ref;
-            Err(ErrorBody {
-                code: "agent_not_attachable".into(),
-                message: "remote control is supported only for Unix runtimes".into(),
-            })
-        }
+        self.remote_control_context_unix(agent_ref)
     }
 
     #[cfg(unix)]
@@ -331,13 +321,22 @@ impl crate::app::App {
                 message: format!("agent {} is not detected in its pane", agent_ref),
             });
         };
-        if terminal.managed_agent_launch_pending() {
+        if !crate::app::agents::runtime_hosts_agent(runtime, known_agent) {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: format!(
+                    "agent {} is no longer the live foreground process",
+                    agent_ref
+                ),
+            });
+        }
+        if terminal.managed_agent_launch_pending() && !terminal.managed_agent_control_ready() {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),
                 message: "agent launch is still pending".into(),
             });
         }
-        if !terminal.managed_agent_interactive_ready() {
+        if !terminal.managed_agent_control_ready() {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),
                 message: "agent is not interactive_ready".into(),
@@ -517,6 +516,7 @@ impl crate::app::App {
     }
 }
 
+#[cfg(unix)]
 impl crate::server::remote_control::RemoteControlContextProvider for crate::app::App {
     fn fresh_remote_control_context(
         &self,

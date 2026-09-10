@@ -4,14 +4,63 @@
 //! fleet inventory. The server captures a fresh context on the control path and
 //! validates it immediately before the PTY write.
 
-use crate::api::schema::{AgentRef, ErrorBody, RemoteControlContext};
+#[cfg(unix)]
+use crate::api::schema::ErrorBody;
+use crate::api::schema::{AgentRef, RemoteControlContext};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct RemoteControlLease {
     pub(crate) agent_ref: AgentRef,
     pub(crate) context: RemoteControlContext,
+    pub(crate) active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) boundary: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
+impl PartialEq for RemoteControlLease {
+    fn eq(&self, other: &Self) -> bool {
+        self.agent_ref == other.agent_ref && self.context == other.context
+    }
+}
+
+impl Eq for RemoteControlLease {}
+
+impl RemoteControlLease {
+    // The guarded write path exists only on Unix, but Windows test fixtures
+    // still construct a lease to exercise shared protocol state.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn new(agent_ref: AgentRef, context: RemoteControlContext) -> Self {
+        Self {
+            agent_ref,
+            context,
+            active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            boundary: std::sync::Arc::new(std::sync::Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn revoke(&self) {
+        let _boundary = self
+            .boundary
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn write_authorization(
+        &self,
+        on_unknown: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> crate::pty::actor::PtyWriteAuthorization {
+        crate::pty::actor::PtyWriteAuthorization::new(
+            self.context.foreground_process.process_group_id,
+            std::sync::Arc::clone(&self.active),
+            std::sync::Arc::clone(&self.boundary),
+            on_unknown,
+        )
+    }
+}
+
+#[cfg(unix)]
 pub(crate) trait RemoteControlContextProvider {
     fn fresh_remote_control_context(
         &self,
@@ -19,6 +68,7 @@ pub(crate) trait RemoteControlContextProvider {
     ) -> Result<RemoteControlContext, ErrorBody>;
 }
 
+#[cfg(unix)]
 fn refusal(reason: impl Into<String>) -> ErrorBody {
     ErrorBody {
         code: "refused_for_safety".to_owned(),
@@ -26,6 +76,7 @@ fn refusal(reason: impl Into<String>) -> ErrorBody {
     }
 }
 
+#[cfg(unix)]
 fn required(value: &str, field: &str) -> Result<(), ErrorBody> {
     if value.trim().is_empty() {
         Err(refusal(format!(
@@ -36,6 +87,7 @@ fn required(value: &str, field: &str) -> Result<(), ErrorBody> {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn validate_input_owner(owner: Option<u64>, client_id: u64) -> Result<(), ErrorBody> {
     if owner == Some(client_id) {
         Ok(())
@@ -50,6 +102,7 @@ pub(crate) fn validate_input_owner(owner: Option<u64>, client_id: u64) -> Result
 /// Validate a fresh remote context and enqueue bytes without exposing a
 /// check-then-write gap to callers. The caller must invoke this from the
 /// server event loop while it owns the runtime mutation boundary.
+#[cfg(unix)]
 pub(crate) fn validate_and_enqueue(
     configured_host: &str,
     expected_user: &str,
@@ -65,6 +118,7 @@ pub(crate) fn validate_and_enqueue(
     })
 }
 
+#[cfg(unix)]
 pub(crate) fn validate_context(
     configured_host: &str,
     expected_user: &str,
@@ -127,7 +181,7 @@ pub(crate) fn validate_context(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

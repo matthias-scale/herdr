@@ -2,7 +2,10 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     os::fd::{AsRawFd, OwnedFd, RawFd},
-    sync::{mpsc as std_mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc, Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -72,7 +75,51 @@ pub(crate) struct PtyIoActorConfig {
 }
 
 enum PtyIoDataCommand {
-    WriteUserInput(Bytes),
+    WriteUserInput {
+        bytes: Bytes,
+        authorization: Option<PtyWriteAuthorization>,
+    },
+}
+
+/// Authorization carried with a guarded remote write until the actor writes it.
+/// The actor owns the final check because the channel and pending-write queue
+/// outlive the server event-loop turn that accepted the batch.
+#[derive(Clone)]
+pub(crate) struct PtyWriteAuthorization {
+    expected_process_group_id: u32,
+    active: Arc<AtomicBool>,
+    boundary: Arc<Mutex<()>>,
+    reported: Arc<AtomicBool>,
+    on_unknown: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl PtyWriteAuthorization {
+    pub(crate) fn new(
+        expected_process_group_id: u32,
+        active: Arc<AtomicBool>,
+        boundary: Arc<Mutex<()>>,
+        on_unknown: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            expected_process_group_id,
+            active,
+            boundary,
+            reported: Arc::new(AtomicBool::new(false)),
+            on_unknown,
+        }
+    }
+
+    fn is_valid(&self, tty_fd: RawFd) -> bool {
+        self.active.load(Ordering::Acquire)
+            && crate::platform::foreground_process_group_id_for_tty_fd(tty_fd)
+                == Some(self.expected_process_group_id)
+    }
+
+    fn report_unknown(&self) {
+        if !self.reported.swap(true, Ordering::AcqRel) {
+            (self.on_unknown)();
+        }
+    }
 }
 
 enum PtyIoControlCommand {
@@ -97,6 +144,7 @@ pub(crate) struct PtyIoActorHandle {
 #[derive(Debug)]
 struct UserWriteGate {
     accepting: bool,
+    remote_owner: Option<u64>,
 }
 
 impl PtyIoActorHandle {
@@ -123,10 +171,13 @@ impl PtyIoActorHandle {
             .user_writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !user_writes.accepting {
+        if !user_writes.accepting || user_writes.remote_owner.is_some() {
             return Err(mpsc::error::SendError(bytes));
         }
-        permit.send(PtyIoDataCommand::WriteUserInput(bytes));
+        permit.send(PtyIoDataCommand::WriteUserInput {
+            bytes,
+            authorization: None,
+        });
         self.wake_actor();
         Ok(())
     }
@@ -142,20 +193,92 @@ impl PtyIoActorHandle {
         if !user_writes.accepting {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
-        match self
-            .data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(bytes))
-        {
+        if user_writes.remote_owner.is_some() {
+            return Err(mpsc::error::TrySendError::Closed(bytes));
+        }
+        drop(user_writes);
+        match self.data_tx.try_send(PtyIoDataCommand::WriteUserInput {
+            bytes,
+            authorization: None,
+        }) {
             Ok(()) => {
                 self.wake_actor();
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput(bytes))) => {
-                Err(mpsc::error::TrySendError::Full(bytes))
+            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput {
+                bytes,
+                authorization: None,
+            })) => Err(mpsc::error::TrySendError::Full(bytes)),
+            Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput {
+                bytes,
+                authorization: None,
+            })) => Err(mpsc::error::TrySendError::Closed(bytes)),
+            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput {
+                authorization: Some(_),
+                ..
+            }))
+            | Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput {
+                authorization: Some(_),
+                ..
+            })) => unreachable!("unguarded input cannot carry remote authorization"),
+        }
+    }
+
+    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        let mut user_writes = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match user_writes.remote_owner {
+            None => {
+                user_writes.remote_owner = Some(owner_id);
+                true
             }
-            Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput(bytes))) => {
-                Err(mpsc::error::TrySendError::Closed(bytes))
+            Some(existing) => existing == owner_id,
+        }
+    }
+
+    pub(crate) fn release_remote_owner(&self, owner_id: u64) {
+        let mut user_writes = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if user_writes.remote_owner == Some(owner_id) {
+            user_writes.remote_owner = None;
+        }
+    }
+
+    pub(crate) fn try_write_controlled_user_input(
+        &self,
+        owner_id: u64,
+        bytes: Bytes,
+        authorization: PtyWriteAuthorization,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        let user_writes = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !user_writes.accepting || user_writes.remote_owner != Some(owner_id) {
+            return Err(mpsc::error::TrySendError::Closed(bytes));
+        }
+        drop(user_writes);
+        match self.data_tx.try_send(PtyIoDataCommand::WriteUserInput {
+            bytes,
+            authorization: Some(authorization),
+        }) {
+            Ok(()) => {
+                self.wake_actor();
+                Ok(())
             }
+            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput {
+                bytes,
+                authorization: Some(_),
+            })) => Err(mpsc::error::TrySendError::Full(bytes)),
+            Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput {
+                bytes,
+                authorization: Some(_),
+            })) => Err(mpsc::error::TrySendError::Closed(bytes)),
+            Err(_) => unreachable!("controlled input command lost its authorization"),
         }
     }
 
@@ -367,6 +490,7 @@ impl PtyIoActor {
         let wake_pipe = fd::create_wake_pipe()?;
         let user_writes = Arc::new(Mutex::new(UserWriteGate {
             accepting: !config.initially_quiesced,
+            remote_owner: None,
         }));
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let response_order = Arc::new(Mutex::new(()));
@@ -374,7 +498,7 @@ impl PtyIoActor {
             data_tx,
             control_tx,
             wake: wake_pipe.writer,
-            user_writes,
+            user_writes: Arc::clone(&user_writes),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
         };
@@ -392,6 +516,7 @@ impl PtyIoActor {
             pending_writes: VecDeque::new(),
             current_write_offset: 0,
             wake_read_fd: wake_pipe.read_fd,
+            user_writes: Arc::clone(&user_writes),
             controls,
             response_order,
             on_read: config.on_read,
@@ -421,9 +546,10 @@ struct PtyIoActorRunner {
     data_rx: mpsc::Receiver<PtyIoDataCommand>,
     control_rx: std_mpsc::Receiver<PtyIoControlCommand>,
     state: ActorState,
-    pending_writes: VecDeque<Bytes>,
+    pending_writes: VecDeque<(Bytes, Option<PtyWriteAuthorization>, bool)>,
     current_write_offset: usize,
     wake_read_fd: OwnedFd,
+    user_writes: Arc<Mutex<UserWriteGate>>,
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
     on_read: ReadCallback,
@@ -434,7 +560,17 @@ struct PtyIoActorRunner {
 impl PtyIoActorRunner {
     fn enqueue_write(&mut self, bytes: Bytes) {
         if !bytes.is_empty() {
-            self.pending_writes.push_back(bytes);
+            self.pending_writes.push_back((bytes, None, false));
+        }
+    }
+
+    fn enqueue_write_with_authorization(
+        &mut self,
+        bytes: Bytes,
+        authorization: Option<PtyWriteAuthorization>,
+    ) {
+        if !bytes.is_empty() {
+            self.pending_writes.push_back((bytes, authorization, true));
         }
     }
 
@@ -489,6 +625,8 @@ impl PtyIoActorRunner {
         }
 
         if let Some(on_reader_exit) = self.on_reader_exit.take() {
+            self.report_unknown_pending_writes();
+            self.report_unknown_queued_writes();
             on_reader_exit();
         }
         debug!(pane = self.pane_id, "PTY actor exiting");
@@ -543,9 +681,14 @@ impl PtyIoActorRunner {
 
     fn handle_data_command(&mut self, command: PtyIoDataCommand) -> bool {
         match command {
-            PtyIoDataCommand::WriteUserInput(bytes) => {
+            PtyIoDataCommand::WriteUserInput {
+                bytes,
+                authorization,
+            } => {
                 if self.state == ActorState::Running {
-                    self.enqueue_write(bytes);
+                    self.enqueue_write_with_authorization(bytes, authorization);
+                } else if let Some(authorization) = authorization {
+                    authorization.report_unknown();
                 }
             }
         }
@@ -587,6 +730,8 @@ impl PtyIoActorRunner {
             }
             PtyIoControlCommand::ReleaseAfterCommit(reply) => {
                 self.state = ActorState::Released;
+                self.report_unknown_pending_writes();
+                self.report_unknown_queued_writes();
                 self.pending_writes.clear();
                 let _ = reply.send(Ok(()));
                 return true;
@@ -641,9 +786,15 @@ impl PtyIoActorRunner {
     }
 
     fn drain_pre_quiesce_commands(&mut self) {
-        while let Ok(PtyIoDataCommand::WriteUserInput(bytes)) = self.data_rx.try_recv() {
+        while let Ok(PtyIoDataCommand::WriteUserInput {
+            bytes,
+            authorization,
+        }) = self.data_rx.try_recv()
+        {
             if self.state != ActorState::Released {
-                self.enqueue_write(bytes);
+                self.enqueue_write_with_authorization(bytes, authorization);
+            } else if let Some(authorization) = authorization {
+                authorization.report_unknown();
             }
         }
     }
@@ -718,9 +869,39 @@ impl PtyIoActorRunner {
     }
 
     fn flush_pending_writes_once(&mut self) {
-        while let Some(bytes) = self.pending_writes.front() {
+        while let Some((bytes, authorization, user_input)) = self.pending_writes.front() {
+            let authorization_boundary = authorization.as_ref().map(|authorization| {
+                authorization
+                    .boundary
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            });
+            let user_writes = self
+                .user_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *user_input && authorization.is_none() && user_writes.remote_owner.is_some() {
+                drop(user_writes);
+                drop(authorization_boundary);
+                self.pending_writes.pop_front();
+                self.current_write_offset = 0;
+                continue;
+            }
+            if let Some(authorization) = authorization {
+                if !authorization.is_valid(self.file.as_raw_fd()) {
+                    drop(user_writes);
+                    drop(authorization_boundary);
+                    authorization.report_unknown();
+                    self.pending_writes.pop_front();
+                    self.current_write_offset = 0;
+                    continue;
+                }
+            }
             let chunk = &bytes[self.current_write_offset..];
-            match self.file.write(chunk) {
+            let write_result = self.file.write(chunk);
+            drop(user_writes);
+            drop(authorization_boundary);
+            match write_result {
                 Ok(0) => {
                     warn!(pane = self.pane_id, "PTY actor write returned zero bytes");
                     return;
@@ -736,6 +917,7 @@ impl PtyIoActorRunner {
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => return,
                 Err(err) => {
                     warn!(pane = self.pane_id, err = %err, "PTY actor write failed");
+                    self.report_unknown_pending_writes();
                     self.pending_writes.clear();
                     self.current_write_offset = 0;
                     return;
@@ -743,6 +925,24 @@ impl PtyIoActorRunner {
             }
         }
         let _ = self.file.flush();
+    }
+
+    fn report_unknown_pending_writes(&self) {
+        for (_, authorization, _) in &self.pending_writes {
+            if let Some(authorization) = authorization {
+                authorization.report_unknown();
+            }
+        }
+    }
+
+    fn report_unknown_queued_writes(&mut self) {
+        while let Ok(PtyIoDataCommand::WriteUserInput { authorization, .. }) =
+            self.data_rx.try_recv()
+        {
+            if let Some(authorization) = authorization {
+                authorization.report_unknown();
+            }
+        }
     }
 
     fn resize(&self, resize: PtyResize) {
@@ -815,7 +1015,7 @@ mod tests {
         io::{Read, Write},
         os::fd::{AsRawFd, FromRawFd, IntoRawFd},
         os::unix::net::UnixStream,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     fn test_wake_pair() -> (fd::WakeWriter, OwnedFd) {
@@ -880,6 +1080,10 @@ mod tests {
             pending_writes: VecDeque::new(),
             current_write_offset: 0,
             wake_read_fd: wake_pipe.read_fd,
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             on_read: Box::new(|_| PtyReadResult::empty()),
@@ -893,9 +1097,70 @@ mod tests {
     fn actor_ignores_empty_user_input_write() {
         let (mut runner, _peer) = actor_runner_for_unit_test();
 
-        assert!(!runner.handle_data_command(PtyIoDataCommand::WriteUserInput(Bytes::new())));
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::new(),
+                authorization: None,
+            })
+        );
 
         assert!(runner.pending_writes.is_empty());
+    }
+
+    #[test]
+    fn controlled_write_is_dropped_at_flush_after_authorization_is_revoked() {
+        let (mut runner, mut peer) = actor_runner_for_unit_test();
+        peer.set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("peer timeout");
+        let active = Arc::new(AtomicBool::new(false));
+        let unknown = Arc::new(AtomicUsize::new(0));
+        let unknown_for_callback = Arc::clone(&unknown);
+        let authorization = PtyWriteAuthorization::new(
+            1234,
+            active,
+            Arc::new(Mutex::new(())),
+            Arc::new(move || {
+                unknown_for_callback.fetch_add(1, Ordering::AcqRel);
+            }),
+        );
+
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"must-not-reach-pty"),
+                authorization: Some(authorization),
+            })
+        );
+        runner.flush_pending_writes_once();
+
+        let mut received = [0u8; 32];
+        assert!(matches!(
+            peer.read(&mut received),
+            Err(error) if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        ));
+        assert_eq!(unknown.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn remote_owner_excludes_local_and_api_writes_until_release() {
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+
+        assert!(handle.acquire_remote_owner(7));
+        assert!(handle
+            .try_write_user_input(Bytes::from_static(b"local-or-api"))
+            .is_err());
+        handle.release_remote_owner(7);
+        handle
+            .try_write_user_input(Bytes::from_static(b"after-release"))
+            .expect("writes resume after lease release");
+
+        let mut received = [0u8; 13];
+        peer.read_exact(&mut received)
+            .expect("post-release write reaches the actor fd");
+        assert_eq!(&received, b"after-release");
+        handle.shutdown();
     }
 
     #[test]
@@ -1135,9 +1400,10 @@ mod tests {
         let (data_tx, _data_rx) = mpsc::channel(1);
         let (control_tx, _control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"fill"),
+                authorization: None,
+            })
             .expect("fill command queue");
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let (wake, _wake_read_fd) = test_wake_pair();
@@ -1145,7 +1411,10 @@ mod tests {
             data_tx,
             control_tx,
             wake,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::clone(&controls),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1206,6 +1475,10 @@ mod tests {
             pending_writes: VecDeque::new(),
             current_write_offset: 0,
             wake_read_fd: wake_pipe.read_fd,
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
             on_read: Box::new(move |_| PtyReadResult {
@@ -1222,7 +1495,10 @@ mod tests {
             data_tx,
             control_tx,
             wake: wake_pipe.writer,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls,
             response_order,
         };
@@ -1248,13 +1524,19 @@ mod tests {
         appearance.join().expect("appearance thread joins");
         let runner = reader.join().expect("reader thread joins");
 
+        assert_eq!(runner.pending_writes.len(), 2);
         assert_eq!(
-            runner.pending_writes,
-            VecDeque::from([
-                Bytes::from_static(b"live-light"),
-                Bytes::from_static(b"query-light"),
-            ])
+            runner.pending_writes[0].0,
+            Bytes::from_static(b"live-light")
         );
+        assert_eq!(
+            runner.pending_writes[1].0,
+            Bytes::from_static(b"query-light")
+        );
+        assert!(runner
+            .pending_writes
+            .iter()
+            .all(|(_, authorization, _)| { authorization.is_none() }));
     }
 
     #[test]
@@ -1276,16 +1558,20 @@ mod tests {
         let (data_tx, mut data_rx) = mpsc::channel(1);
         let (control_tx, _control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"fill"),
+                authorization: None,
+            })
             .expect("fill data queue");
         let (wake, _wake_read_fd) = test_wake_pair();
         let handle = PtyIoActorHandle {
             data_tx,
             control_tx,
             wake,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1303,14 +1589,14 @@ mod tests {
 
         assert!(matches!(
             data_rx.recv().await,
-            Some(PtyIoDataCommand::WriteUserInput(_))
+            Some(PtyIoDataCommand::WriteUserInput { .. })
         ));
         write
             .await
             .expect("write task joins")
             .expect("write succeeds after capacity opens");
         match data_rx.recv().await {
-            Some(PtyIoDataCommand::WriteUserInput(bytes)) => {
+            Some(PtyIoDataCommand::WriteUserInput { bytes, .. }) => {
                 assert_eq!(bytes, Bytes::from_static(b"wait-for-capacity"));
             }
             _ => panic!("expected queued user input"),
@@ -1322,16 +1608,20 @@ mod tests {
         let (data_tx, mut data_rx) = mpsc::channel(1);
         let (control_tx, control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"fill"),
+                authorization: None,
+            })
             .expect("fill data queue");
         let (wake, _wake_read_fd) = test_wake_pair();
         let handle = PtyIoActorHandle {
             data_tx,
             control_tx,
             wake,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1359,7 +1649,7 @@ mod tests {
             .expect("handoff succeeds");
         assert!(matches!(
             data_rx.recv().await,
-            Some(PtyIoDataCommand::WriteUserInput(_))
+            Some(PtyIoDataCommand::WriteUserInput { .. })
         ));
 
         let err = write.await.expect("write task joins").expect_err(
@@ -1377,16 +1667,20 @@ mod tests {
         let (data_tx, _data_rx) = mpsc::channel(1);
         let (control_tx, control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"fill"),
+                authorization: None,
+            })
             .expect("fill data queue");
         let (wake, _wake_read_fd) = test_wake_pair();
         let handle = PtyIoActorHandle {
             data_tx,
             control_tx,
             wake,
-            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1419,9 +1713,10 @@ mod tests {
         let (data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
         let (_control_tx, control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"queued-before-ack",
-            )))
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"queued-before-ack"),
+                authorization: None,
+            })
             .expect("queued write");
         let mut runner = PtyIoActorRunner {
             pane_id: 1,
@@ -1432,6 +1727,10 @@ mod tests {
             pending_writes: VecDeque::new(),
             current_write_offset: 0,
             wake_read_fd: fd::create_wake_pipe().expect("wake pipe").read_fd,
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             on_read: Box::new(|_| PtyReadResult::empty()),

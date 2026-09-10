@@ -35,6 +35,12 @@ pub(crate) struct OpenSshRunner;
 #[cfg(unix)]
 impl SshRunner for OpenSshRunner {
     fn connect(&self, target: &str) -> Result<Box<dyn ControlStream>, io::Error> {
+        if target.starts_with('-') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SSH target must not begin with '-'",
+            ));
+        }
         let mut command = std::process::Command::new("ssh");
         command
             .arg("-T")
@@ -44,6 +50,7 @@ impl SshRunner for OpenSshRunner {
             .arg("RequestTTY=no")
             .arg("-o")
             .arg("ConnectTimeout=5")
+            .arg("--")
             .arg(target)
             .arg("herdr")
             .arg("remote-control-bridge")
@@ -121,8 +128,8 @@ pub(crate) struct SshRemoteFocusTransport {
 
 impl SshRemoteFocusTransport {
     pub(crate) fn new(fleet: &crate::config::FleetConfig) -> Self {
-        let targets = fleet
-            .hosts
+        let admitted_hosts = crate::fleet::select_hosts(fleet, None).unwrap_or_default();
+        let targets = admitted_hosts
             .iter()
             .filter(|host| !host.local && !host.target.trim().is_empty())
             .map(|host| (host.name.clone(), host.target.clone()))
@@ -212,6 +219,15 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
 }
 
 #[cfg(unix)]
+fn read_initial_welcome(
+    stream: &mut dyn ControlStream,
+) -> Result<ServerMessage, protocol::FramingError> {
+    let payload = protocol::read_frame(stream, MAX_FRAME_SIZE)?;
+    protocol::decode_frame(&payload)
+        .or_else(|error| protocol::decode_legacy_server_welcome(&payload).ok_or(error))
+}
+
+#[cfg(unix)]
 fn run_control_session(
     runner: Arc<dyn SshRunner>,
     target: String,
@@ -251,7 +267,7 @@ fn run_control_session(
         );
         return;
     }
-    let welcome: ServerMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
+    let welcome: ServerMessage = match read_initial_welcome(&mut *stream) {
         Ok(message) => message,
         Err(error) => {
             SshRemoteFocusTransport::fail(
@@ -604,6 +620,39 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v21_welcome_is_classified_as_version_skew() {
+        #[derive(serde::Serialize)]
+        enum LegacyServerMessageV21 {
+            Welcome {
+                version: u32,
+                encoding: RenderEncoding,
+                error: Option<String>,
+            },
+        }
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let input = framed(&LegacyServerMessageV21::Welcome {
+            version: PROTOCOL_VERSION - 1,
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        });
+        let mut transport = transport_with(input, Arc::clone(&output), None);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start(
+                "operation",
+                &AgentRef {
+                    host: "buildbox".to_owned(),
+                    agent: "claude".to_owned(),
+                },
+                "proxy",
+                event_tx,
+            )
+            .expect("thread starts");
+        assert_eq!(receive_failure(&mut event_rx).code, "version_skew");
+    }
+
+    #[test]
     fn ssh_auth_failure_is_not_forwarded_to_the_remote_agent() {
         let mut transport = transport_with_connect_error("Permission denied (publickey)");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
@@ -619,6 +668,15 @@ mod tests {
             )
             .expect("thread starts");
         assert_eq!(receive_failure(&mut event_rx).code, "auth_failed");
+    }
+
+    #[test]
+    fn hostile_ssh_target_is_rejected_before_any_process_spawn() {
+        let result = OpenSshRunner.connect("-oProxyCommand=touch /tmp/herdr-owned");
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]

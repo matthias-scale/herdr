@@ -16,7 +16,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::Value;
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, expected_version, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
@@ -566,11 +566,12 @@ fn client_handshake(
         .map_err(|e| e.to_string())?;
 
     // ClientMessage::Hello = variant 0
+    let build_version = expected_version();
     let hello_payload = encode_varint_enum(
         0,
         &[
             &encode_varint_u32(version),
-            &encode_string("test-build"),
+            &encode_string(&build_version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
             &encode_varint_u32(8),  // cell_width_px

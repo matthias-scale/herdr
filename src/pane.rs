@@ -1280,6 +1280,7 @@ enum PaneRuntimeIo {
     TestChannel {
         sender: mpsc::Sender<Bytes>,
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
+        remote_owner: Arc<Mutex<Option<u64>>>,
     },
 }
 
@@ -1309,6 +1310,70 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.acquire_remote_owner(owner_id),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { remote_owner, .. } => {
+                let mut owner = remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match *owner {
+                    None => {
+                        *owner = Some(owner_id);
+                        true
+                    }
+                    Some(existing) => existing == owner_id,
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn release_remote_owner(&self, owner_id: u64) {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.release_remote_owner(owner_id),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { remote_owner, .. } => {
+                let mut owner = remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *owner == Some(owner_id) {
+                    *owner = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn try_send_controlled_bytes(
+        &self,
+        owner_id: u64,
+        bytes: Bytes,
+        authorization: crate::pty::actor::PtyWriteAuthorization,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => {
+                actor.try_write_controlled_user_input(owner_id, bytes, authorization)
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                let owner = remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *owner != Some(owner_id) {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                sender.try_send(bytes)
+            }
         }
     }
 
@@ -1391,7 +1456,20 @@ impl PaneRuntimeIo {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
             #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                if remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some()
+                {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                sender.send(bytes).await
+            }
         }
     }
 
@@ -1399,7 +1477,20 @@ impl PaneRuntimeIo {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
             #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                if remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some()
+                {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                sender.try_send(bytes)
+            }
         }
     }
 
@@ -1427,10 +1518,22 @@ impl PaneRuntimeIo {
                 });
             }
             #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => {
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
                 let sender = sender.clone();
+                let remote_owner = Arc::clone(remote_owner);
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
+                    if remote_owner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_some()
+                    {
+                        return;
+                    }
                     let _ = sender.send(bytes).await;
                 });
             }
@@ -3313,6 +3416,30 @@ impl PaneRuntime {
         self.io.try_send_bytes(bytes)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.io.acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn release_remote_owner(&self, owner_id: u64) {
+        self.io.release_remote_owner(owner_id);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_send_controlled_bytes(
+        &self,
+        owner_id: u64,
+        bytes: Bytes,
+        authorization: crate::pty::actor::PtyWriteAuthorization,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        if self.suspended {
+            return Ok(());
+        }
+        self.io
+            .try_send_controlled_bytes(owner_id, bytes, authorization)
+    }
+
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
         if self.suspended {
             return;
@@ -3603,6 +3730,7 @@ impl PaneRuntime {
                 io: PaneRuntimeIo::TestChannel {
                     sender: tx,
                     resize_tx,
+                    remote_owner: Arc::new(Mutex::new(None)),
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 resize_count: Cell::new(0),
@@ -4389,6 +4517,7 @@ mod tests {
             io: PaneRuntimeIo::TestChannel {
                 sender: tx,
                 resize_tx,
+                remote_owner: Arc::new(Mutex::new(None)),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
@@ -4428,6 +4557,7 @@ mod tests {
             io: PaneRuntimeIo::TestChannel {
                 sender: tx,
                 resize_tx,
+                remote_owner: Arc::new(Mutex::new(None)),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),

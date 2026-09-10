@@ -466,6 +466,85 @@ pub enum ClientMessage {
     GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
 }
 
+#[derive(Serialize, Deserialize)]
+enum LegacyClientMessageV21 {
+    Hello {
+        version: u32,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        requested_encoding: RenderEncoding,
+        keybindings: ClientKeybindings,
+        launch_mode: ClientLaunchMode,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Serialize, Deserialize)]
+enum LegacyServerMessageV21 {
+    Welcome {
+        version: u32,
+        encoding: RenderEncoding,
+        error: Option<String>,
+    },
+}
+
+pub(crate) fn decode_legacy_client_hello(payload: &[u8]) -> Option<ClientMessage> {
+    let (message, consumed) = bincode::serde::decode_from_slice::<LegacyClientMessageV21, _>(
+        payload,
+        bincode::config::standard(),
+    )
+    .ok()?;
+    if consumed != payload.len() {
+        return None;
+    }
+    let LegacyClientMessageV21::Hello {
+        version,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        requested_encoding,
+        keybindings,
+        launch_mode,
+    } = message;
+    Some(ClientMessage::Hello {
+        version,
+        build_version: String::new(),
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        requested_encoding,
+        keybindings,
+        launch_mode,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn decode_legacy_server_welcome(payload: &[u8]) -> Option<ServerMessage> {
+    let (message, consumed) = bincode::serde::decode_from_slice::<LegacyServerMessageV21, _>(
+        payload,
+        bincode::config::standard(),
+    )
+    .ok()?;
+    if consumed != payload.len() {
+        return None;
+    }
+    let LegacyServerMessageV21::Welcome {
+        version,
+        encoding,
+        error,
+    } = message;
+    Some(ServerMessage::Welcome {
+        version,
+        build_version: String::new(),
+        encoding,
+        error,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttachScrollDirection {
     Up,
@@ -962,6 +1041,15 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     reader: &mut R,
     max_frame_size: usize,
 ) -> Result<M, FramingError> {
+    let payload = read_frame(reader, max_frame_size)?;
+    decode_frame(&payload)
+}
+
+/// Reads one length-prefixed payload without selecting a message schema.
+pub fn read_frame<R: Read + ?Sized>(
+    reader: &mut R,
+    max_frame_size: usize,
+) -> Result<Vec<u8>, FramingError> {
     // Read the 4-byte length prefix, reassembling partial reads.
     let mut len_buf = [0u8; LENGTH_PREFIX_BYTES];
     read_exact_or_eof(reader, &mut len_buf)?;
@@ -978,16 +1066,23 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     let mut payload = vec![0u8; claimed_len];
     read_exact_or_eof(reader, &mut payload)?;
 
-    let (msg, consumed) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+    Ok(payload)
+}
+
+pub(crate) fn decode_frame<M: for<'de> Deserialize<'de>>(
+    payload: &[u8],
+) -> Result<M, FramingError> {
+    let (msg, consumed) = bincode::serde::decode_from_slice(payload, bincode::config::standard())
         .map_err(|e| FramingError::Bincode(e.to_string()))?;
 
     // Enforce that the decoder consumed the full payload.
     // Trailing bytes after the decoded message indicate a protocol violation
     // (e.g., a corrupted length prefix or concatenated payloads).
-    if consumed != claimed_len {
+    if consumed != payload.len() {
         return Err(FramingError::Bincode(format!(
-            "decoded {} bytes but payload length was {claimed_len}; trailing bytes are not allowed",
-            consumed
+            "decoded {} bytes but payload length was {}; trailing bytes are not allowed",
+            consumed,
+            payload.len()
         )));
     }
 
@@ -997,7 +1092,7 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
 /// Like `Read::read_exact`, but returns `FramingError::UnexpectedEof`
 /// when the reader hits end-of-stream before filling the buffer, instead
 /// of the generic `io::ErrorKind::UnexpectedEof`.
-fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), FramingError> {
+fn read_exact_or_eof<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> Result<(), FramingError> {
     reader.read_exact(buf).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             FramingError::UnexpectedEof
@@ -1900,6 +1995,52 @@ mod tests {
             check_client_version(PROTOCOL_VERSION),
             VersionCheck::Compatible
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v21_handshake_fixtures_decode_in_both_directions() {
+        let old_hello = LegacyClientMessageV21::Hello {
+            version: PROTOCOL_VERSION - 1,
+            cols: 120,
+            rows: 40,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            requested_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: ClientKeybindings::Server,
+            launch_mode: ClientLaunchMode::TerminalAttach,
+        };
+        let old_hello_payload =
+            bincode::serde::encode_to_vec(old_hello, bincode::config::standard())
+                .expect("encode v21 Hello fixture");
+        assert!(matches!(
+            decode_legacy_client_hello(&old_hello_payload),
+            Some(ClientMessage::Hello {
+                version,
+                build_version,
+                cols: 120,
+                rows: 40,
+                ..
+            }) if version == PROTOCOL_VERSION - 1 && build_version.is_empty()
+        ));
+
+        let old_welcome = LegacyServerMessageV21::Welcome {
+            version: PROTOCOL_VERSION - 1,
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        };
+        let old_welcome_payload =
+            bincode::serde::encode_to_vec(old_welcome, bincode::config::standard())
+                .expect("encode v21 Welcome fixture");
+        assert!(matches!(
+            decode_legacy_server_welcome(&old_welcome_payload),
+            Some(ServerMessage::Welcome {
+                version,
+                build_version,
+                encoding: RenderEncoding::TerminalAnsi,
+                error: None,
+            }) if version == PROTOCOL_VERSION - 1 && build_version.is_empty()
+        ));
     }
 
     #[test]

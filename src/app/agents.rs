@@ -530,7 +530,7 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_agent_name;
+    use super::{runtime_hosts_agent, valid_agent_name};
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {
@@ -549,5 +549,30 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_runtime_agent_check_rejects_a_shell_for_stale_agent_state() {
+        let (events, _event_rx) = tokio::sync::mpsc::channel(8);
+        let runtime = crate::terminal::TerminalRuntime::spawn_shell_command(
+            crate::layout::PaneId::from_raw(42),
+            24,
+            80,
+            std::env::temp_dir(),
+            "sleep 2",
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("spawn test shell");
+
+        assert!(!runtime_hosts_agent(&runtime, crate::detect::Agent::Claude));
+        runtime.shutdown();
     }
 }
