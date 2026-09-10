@@ -5602,6 +5602,10 @@ impl HeadlessServer {
                 .app
                 .start_pending_agent_resumes(self.app.pending_agent_resume_due(now));
         }
+        // The headless server owns its own scheduler, so anything the TUI loop
+        // ticks has to be ticked here too or it only runs for TUI-owned
+        // runtimes. Resumes above, and the nudge that follows them.
+        changed |= self.app.tick_resume_nudges(now);
         changed
     }
 
@@ -8468,6 +8472,68 @@ next_tab = ""
     #[test]
     fn semantic_app_client_marks_git_refresh_due_on_first_attach() {
         app_client_marks_git_refresh_due_on_first_attach(RenderEncoding::SemanticFrame);
+    }
+
+    /// The headless server runs its own scheduler, so a nudge armed by a native
+    /// resume only fires if that scheduler ticks it. Without the tick in
+    /// `handle_scheduled_tasks_headless` this passes in the TUI and does nothing
+    /// behind `herdr server`, which is how #273 shipped inert in 4fa86f16.
+    #[tokio::test]
+    async fn headless_scheduler_fires_a_pending_resume_nudge() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-resume-nudge");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        server.app.arm_resume_nudge(pane_id, &terminal_id, "claude");
+
+        let armed_at = Instant::now();
+        server.handle_scheduled_tasks_headless(armed_at, false);
+        assert!(
+            server.app.pending_resume_nudges.contains_key(&terminal_id),
+            "the nudge should still be waiting out its idle hold"
+        );
+
+        server.handle_scheduled_tasks_headless(
+            armed_at + crate::app::agent_resume::RESUME_NUDGE_IDLE_HOLD,
+            false,
+        );
+
+        assert!(
+            !server.app.pending_resume_nudges.contains_key(&terminal_id),
+            "the headless scheduler never ticked the resume nudge"
+        );
+        let mut sent = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            sent.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            sent.contains("continue"),
+            "expected the nudge to reach the pane, got {sent:?}"
+        );
     }
 
     #[test]
