@@ -474,8 +474,9 @@ pub(crate) fn test_spawn_budget(base: std::time::Duration) -> std::time::Duratio
     }
 }
 
-/// How far a symlink chain is followed before it is treated as a loop.
-const MAX_WRITE_TARGET_SYMLINK_HOPS: usize = 16;
+/// How far a symlink chain is followed before the write is refused. Matches the
+/// kernel's own `MAXSYMLINKS`, so any chain the OS can resolve resolves here.
+const MAX_WRITE_TARGET_SYMLINK_HOPS: usize = 40;
 
 /// Resolve `path` through any symlink chain so an atomic replace lands on the
 /// file the symlink points at instead of replacing the link itself.
@@ -489,9 +490,9 @@ const MAX_WRITE_TARGET_SYMLINK_HOPS: usize = 16;
 /// requires the target to exist and so excludes the dangling-link case a stow
 /// user hits on the very first save. A dangling link resolves to its missing
 /// target, so the write creates the managed file. A chain still unresolved
-/// after [`MAX_WRITE_TARGET_SYMLINK_HOPS`] hops is treated as a loop and
-/// returns `path` itself; an unreadable link is an error, not a silent
-/// fallback onto the link.
+/// after [`MAX_WRITE_TARGET_SYMLINK_HOPS`] hops, or an unreadable link, is an
+/// error: the caller must fail the save rather than fall back onto replacing a
+/// link whose target it could not determine.
 pub(crate) fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
     let mut current = path.to_path_buf();
     for _ in 0..MAX_WRITE_TARGET_SYMLINK_HOPS {
@@ -514,14 +515,20 @@ pub(crate) fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
         };
     }
     // The budget is spent, but the last hop may already have landed on a real
-    // file. Only a path that is still a symlink here is treated as a loop.
+    // file. Only a path that is still a symlink here is unresolved, and writing
+    // to any path in that chain would replace a link the operator manages.
     match std::fs::symlink_metadata(&current) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             tracing::warn!(
                 path = %path.display(),
-                "symlink chain too deep; writing to the path itself"
+                "symlink chain deeper than the kernel resolves; refusing the write"
             );
-            Ok(path.to_path_buf())
+            // ErrorKind::FilesystemLoop is still unstable, so the kind stays
+            // Other and the message carries the reason.
+            Err(std::io::Error::other(format!(
+                "{} exceeds {MAX_WRITE_TARGET_SYMLINK_HOPS} symlink hops",
+                path.display()
+            )))
         }
         _ => Ok(current),
     }
@@ -598,14 +605,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_write_target_gives_up_on_a_symlink_loop() {
+    fn resolve_write_target_refuses_a_symlink_loop() {
         let dir = symlink_scratch_dir();
         let first = dir.join("config.toml");
         let second = dir.join("other.toml");
         std::os::unix::fs::symlink("other.toml", &first).expect("symlink");
         std::os::unix::fs::symlink("config.toml", &second).expect("symlink");
 
-        assert_eq!(resolve_write_target(&first).expect("resolve"), first);
+        let error = resolve_write_target(&first).expect_err("a loop has no write target");
+        assert!(
+            error.to_string().contains("symlink hops"),
+            "unexpected error: {error}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
