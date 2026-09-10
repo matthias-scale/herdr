@@ -181,6 +181,77 @@ pub struct AgentPromptParams {
     pub wait: Option<AgentPromptWaitOptions>,
 }
 
+/// The additive request shape for `agent.focus`. Exactly one of `target` and
+/// `agent_ref` must be present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = require_one_focus_target)]
+pub struct AgentFocusParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<super::AgentRef>,
+}
+
+fn require_one_focus_target(schema: &mut schemars::Schema) {
+    let _ = schema.insert(
+        "oneOf".into(),
+        serde_json::json!([
+            {
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
+                "not": {"required": ["agent_ref"]}
+            },
+            {
+                "properties": {"agent_ref": {"not": {"type": "null"}}},
+                "required": ["agent_ref"],
+                "not": {"required": ["target"]}
+            }
+        ]),
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentFocusStatusParams {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteFocusState {
+    Connecting,
+    Active,
+    Failed,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteControlContext {
+    pub host: String,
+    pub user: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    pub terminal_id: String,
+    pub cwd: String,
+    pub foreground_cwd: String,
+    pub tty: String,
+    pub foreground_process: RemoteForegroundProcess,
+    pub interactive_ready: bool,
+    pub human_draft: bool,
+    pub state_change_seq: u64,
+    pub revision: u64,
+    pub context_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteForegroundProcess {
+    pub pid: u32,
+    pub process_group_id: u32,
+    pub name: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     /// Cross-host identity. Older remote servers may omit this while fleet

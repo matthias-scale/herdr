@@ -379,6 +379,96 @@ fn request_round_trips_for_agent_explain() {
 }
 
 #[test]
+fn agent_focus_requests_support_legacy_target_and_agent_ref_forms() {
+    let legacy = serde_json::json!({
+        "id": "focus-target",
+        "method": "agent.focus",
+        "params": {"target": "w1:p3"}
+    });
+    let request: Request = serde_json::from_value(legacy.clone()).expect("legacy focus request");
+    assert_eq!(
+        serde_json::to_value(request).expect("legacy request JSON"),
+        legacy
+    );
+
+    let remote = serde_json::json!({
+        "id": "focus-ref",
+        "method": "agent.focus",
+        "params": {"agent_ref": "buildbox::w1:p3"}
+    });
+    let request: Request = serde_json::from_value(remote.clone()).expect("agent ref request");
+    assert_eq!(
+        serde_json::to_value(request).expect("agent ref request JSON"),
+        remote
+    );
+
+    let status = serde_json::json!({
+        "id": "focus-status",
+        "method": "agent.focus.status",
+        "params": {"operation_id": "remote-focus-1"}
+    });
+    let request: Request = serde_json::from_value(status.clone()).expect("focus status request");
+    assert_eq!(
+        serde_json::to_value(request).expect("focus status request JSON"),
+        status
+    );
+}
+
+#[test]
+fn remote_focus_schema_requires_exclusive_targets_and_state_details() {
+    let schema = protocol_schema_document();
+    let focus_params = schema
+        .pointer("/schemas/request/$defs/AgentFocusParams")
+        .expect("agent focus params schema");
+    assert_eq!(
+        focus_params["oneOf"],
+        serde_json::json!([
+            {
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
+                "not": {"required": ["agent_ref"]}
+            },
+            {
+                "properties": {"agent_ref": {"not": {"type": "null"}}},
+                "required": ["agent_ref"],
+                "not": {"required": ["target"]}
+            }
+        ])
+    );
+
+    let variants = schema
+        .pointer("/schemas/success_response/$defs/ResponseResult/oneOf")
+        .and_then(serde_json::Value::as_array)
+        .expect("response result variants");
+    let status = variants
+        .iter()
+        .find(|variant| {
+            variant["properties"]["type"]["const"]
+                == serde_json::Value::String("agent_focus_status".into())
+        })
+        .expect("agent focus status schema");
+    assert_eq!(
+        status["allOf"],
+        serde_json::json!([
+            {
+                "if": {"properties": {"state": {"const": "active"}}},
+                "then": {
+                    "properties": {"context": {"not": {"type": "null"}}},
+                    "required": ["context"]
+                }
+            },
+            {
+                "if": {"properties": {"state": {"const": "failed"}}},
+                "then": {
+                    "properties": {"error": {"not": {"type": "null"}}},
+                    "required": ["error"]
+                }
+            }
+        ])
+    );
+}
+
+#[test]
 fn notification_show_request_parses() {
     let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
     let request: Request = serde_json::from_str(json).unwrap();

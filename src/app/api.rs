@@ -126,6 +126,13 @@ impl App {
                 self.state.provider_usage = *snapshot;
                 changed && self.state.status_bar_enabled
             }
+            AppEvent::RemoteFocusTransition {
+                operation_id,
+                transition,
+            } => {
+                self.apply_remote_focus_transition(&operation_id, *transition);
+                false
+            }
             AppEvent::ConnectivityProbed { reachable } => {
                 self.connectivity_probe_in_flight = false;
                 self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
@@ -311,6 +318,14 @@ impl App {
             )),
             _ => None,
         };
+        if let AppEvent::RemoteFocusTransition {
+            operation_id,
+            transition,
+        } = ev
+        {
+            self.apply_remote_focus_transition(&operation_id, *transition);
+            return None;
+        }
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
         }
@@ -1603,7 +1618,12 @@ impl App {
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
-            Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
+            Method::AgentFocus(params) => {
+                return self.handle_agent_focus_params(request.id, params)
+            }
+            Method::AgentFocusStatus(params) => {
+                return self.handle_agent_focus_status(request.id, params)
+            }
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {

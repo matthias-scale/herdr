@@ -57,6 +57,13 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only fleet host inventory poll completed.
     FleetRefreshed { snapshot: crate::fleet::Snapshot },
+    /// A remote focus transport advanced a server-owned operation. The wire
+    /// transport will construct this event when the next slice lands.
+    #[allow(dead_code)]
+    RemoteFocusTransition {
+        operation_id: String,
+        transition: Box<crate::app::remote_focus::RemoteFocusTransition>,
+    },
     /// A read-only Symphony Temporal workflow poll completed.
     SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
     /// The focused repository's scratchpad file changed on disk; reload it.
