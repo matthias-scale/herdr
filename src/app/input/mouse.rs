@@ -103,6 +103,21 @@ pub(super) enum MouseAction {
     OpenUrl {
         url: String,
     },
+    /// Run one entry of the ticket detail's `[⋯]` menu.
+    DockTicketAction {
+        action: crate::ui::ticket_actions::TicketAction,
+    },
+    /// Start a thread on the focused ticket in the picked checkout.
+    DockTicketStartThread {
+        choice: crate::app::state::PrCheckoutChoice,
+    },
+}
+
+/// What a click inside the ticket detail did: handled here, or an app-level
+/// action the runtime has to run.
+enum TicketClick {
+    Consumed,
+    Action(MouseAction),
 }
 
 enum MobileMouseResult {
@@ -797,6 +812,17 @@ impl AppState {
             // section headers fold on click too. Resolved from the previewed
             // surface, because the dock tab underneath it may be anything.
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if self
+                    .dock_object_preview
+                    .as_ref()
+                    .is_some_and(|object| object.surface == crate::app::DockSurface::Linear)
+                {
+                    match self.click_dock_ticket_control(mouse.column, mouse.row) {
+                        Some(TicketClick::Action(action)) => return Some(action),
+                        Some(TicketClick::Consumed) => return None,
+                        None => {}
+                    }
+                }
                 if let Some((object_key, section)) = self
                     .dock_object_preview
                     .as_ref()
@@ -1238,6 +1264,15 @@ impl AppState {
                 if in_dock && self.dock_tab == Some(crate::app::DockSurface::Hosts) {
                     if let Some(name) = self.click_dock_host_row(mouse.column, mouse.row) {
                         return Some(MouseAction::OpenFleetHost { name });
+                    }
+                }
+                // The ticket buttons and their dropdowns sit above the section
+                // headers, so they claim the click first.
+                if in_dock && self.dock_tab == Some(crate::app::DockSurface::Linear) {
+                    match self.click_dock_ticket_control(mouse.column, mouse.row) {
+                        Some(TicketClick::Action(action)) => return Some(action),
+                        Some(TicketClick::Consumed) => return None,
+                        None => {}
                     }
                 }
                 // A section header folds on click. This runs before the plain
@@ -2283,6 +2318,140 @@ impl AppState {
     /// `surface`, accounting for the scroll offset the render applies. The
     /// surface is passed in because the same renderers back the dock tab and the
     /// collapsed-dock preview, which resolve it differently.
+    /// Ticket context for hit-testing the action menu. The app-level twin adds
+    /// the repo, which a click does not need.
+    fn dock_ticket_action_context_for_hit(
+        &self,
+    ) -> Option<crate::ui::ticket_actions::TicketActionContext> {
+        let key = crate::ui::dock::linear::focused_ticket_key(self)?;
+        let ticket_id = key.ticket_id.as_deref()?;
+        let ticket = self
+            .work_index_snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .find(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))?;
+        Some(crate::ui::ticket_actions::TicketActionContext::from_ticket(
+            ticket,
+            self.work_item_detail_cache.get(&key),
+            self.work_index_session.linear.viewer.as_deref(),
+            self.work_index_session.linear_viewer_identity(),
+            crate::ui::dock::pr::focused_pr_key(self).is_some(),
+        ))
+    }
+
+    /// A click inside the ticket detail: its two buttons and, while one is
+    /// open, its dropdown. `None` leaves the click to the callers below.
+    fn click_dock_ticket_control(&mut self, column: u16, row: u16) -> Option<TicketClick> {
+        // Same precedence the keyboard uses: a pending write owns the surface
+        // until it is answered, and a comment draft owns it until it is sent or
+        // dropped. Without this a click could reopen the menu over either and
+        // replace a half-typed comment with an empty one.
+        if self.dock_pending_write.is_some() || self.dock_ticket_comment_draft.is_some() {
+            return None;
+        }
+        if let Some(state) = self.dock_ticket_action_menu {
+            let Some(index) = self.dock_ticket_menu_row_at(column, row) else {
+                self.dock_ticket_action_menu = None;
+                return Some(TicketClick::Consumed);
+            };
+            let entries = self
+                .dock_ticket_action_context_for_hit()
+                .map(|context| crate::ui::ticket_actions::ticket_action_table(&context, state.page))
+                .unwrap_or_default();
+            let Some(entry) = entries.get(index).filter(|entry| entry.enabled()) else {
+                return Some(TicketClick::Consumed);
+            };
+            let action = entry.action;
+            if let Some(menu) = self.dock_ticket_action_menu.as_mut() {
+                menu.selected = index;
+            }
+            return Some(TicketClick::Action(MouseAction::DockTicketAction {
+                action,
+            }));
+        }
+        if self.dock_ticket_start_menu.is_some() {
+            let Some(index) = self.dock_ticket_menu_row_at(column, row) else {
+                self.dock_ticket_start_menu = None;
+                return Some(TicketClick::Consumed);
+            };
+            let choice = if index == 0 {
+                crate::app::state::PrCheckoutChoice::CurrentCheckout
+            } else {
+                crate::app::state::PrCheckoutChoice::NewWorktree
+            };
+            return Some(TicketClick::Action(MouseAction::DockTicketStartThread {
+                choice,
+            }));
+        }
+        match self.dock_ticket_action_at(column, row)? {
+            crate::ui::work_view::TicketActionControl::StartThread => {
+                self.dock_linear_focused = true;
+                self.dock_ticket_start_menu = Some(Default::default());
+            }
+            crate::ui::work_view::TicketActionControl::More => {
+                self.dock_linear_focused = true;
+                self.dock_ticket_action_menu = Some(Default::default());
+            }
+        }
+        Some(TicketClick::Consumed)
+    }
+
+    /// Ticket control under the pointer in the Linear dock surface.
+    ///
+    /// The detail draws `[Start thread ▾]` and `[⋯]` as buttons, so a click has
+    /// to reach them; before this they were keyboard-only (`c` and `m`) and a
+    /// click did nothing.
+    fn dock_ticket_action_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<crate::ui::work_view::TicketActionControl> {
+        let area = super::dock_detail_area(self);
+        if !self.point_in_rect(area, column, row) {
+            return None;
+        }
+        let key = crate::ui::dock::linear::focused_ticket_key(self)?;
+        let layout = crate::ui::dock::linear::focused_ticket_layout(self, area)?;
+        // Clamped exactly as the render clamps it, so a click near the bottom
+        // of a short detail resolves to the line that was drawn.
+        let max_scroll = layout.lines.len().saturating_sub(usize::from(area.height));
+        let scroll = self
+            .dock_object_views
+            .get(&key)
+            .map(|view| usize::from(view.scroll))
+            .unwrap_or(0)
+            .min(max_scroll);
+        crate::ui::work_view::ticket_action_control_at(
+            area,
+            layout.action_rows,
+            u16::try_from(scroll).unwrap_or(u16::MAX),
+            column,
+            row,
+        )
+    }
+
+    /// Row of an open ticket dropdown under the pointer. `None` means the click
+    /// fell outside the menu, which dismisses it the way Esc does.
+    fn dock_ticket_menu_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let area = super::dock_detail_area(self);
+        if let Some(state) = self.dock_ticket_action_menu {
+            let layout = crate::ui::dock::linear::focused_ticket_layout(self, area)?;
+            let context = self.dock_ticket_action_context_for_hit()?;
+            let anchor = crate::ui::work_view::ticket_action_menu_anchor(area, layout.action_rows);
+            let layout = crate::ui::ticket_actions::ticket_action_menu_layout(
+                anchor, area, &context, state,
+            )?;
+            return crate::ui::dropdown::hit_test(&layout, column, row);
+        }
+        if self.dock_ticket_start_menu.is_some() {
+            let layout = crate::ui::work_view::ticket_start_menu_layout(area)?;
+            return crate::ui::dropdown::hit_test(&layout, column, row);
+        }
+        None
+    }
+
     fn dock_detail_section_at(
         &self,
         surface: crate::app::DockSurface,

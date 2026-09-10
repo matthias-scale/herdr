@@ -174,6 +174,60 @@ fn work_item_detail_request(
             });
         return Some((crate::app::state::DockHomeSection::Prs, selection, true));
     }
+    // A collapsed dock still renders a sidebar-selected ticket into the pane
+    // area (`ui::dock::render_object_preview`), so that host needs its detail
+    // too.
+    if presentation.collapsed {
+        if let Some(object) = presentation
+            .object_preview
+            .as_ref()
+            .filter(|object| object.surface == crate::app::DockSurface::Linear)
+        {
+            return Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(object.key.clone()),
+                }),
+                true,
+            ));
+        }
+    }
+    // The Linear surface owns a ticket detail exactly the way the pull-request
+    // surface owns a PR detail. Without this branch the request fell through to
+    // the home block, which reports the detail as hidden, so a server-backed
+    // client showed a ticket header with no description, criteria, or comments.
+    if !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Linear) {
+        let selection = presentation
+            .active_tab_index
+            .or_else(|| {
+                presentation
+                    .open_surfaces
+                    .iter()
+                    .position(|surface| *surface == crate::app::DockSurface::Linear)
+            })
+            .and_then(|index| presentation.tab_bindings.get(index))
+            .and_then(Option::as_ref)
+            .map(|binding| &binding.object)
+            .filter(|object| object.surface == crate::app::DockSurface::Linear)
+            .or_else(|| {
+                presentation
+                    .context_objects
+                    .iter()
+                    .find(|object| object.surface == crate::app::DockSurface::Linear)
+            })
+            // Keyed exactly as `dock::linear::focused_ticket_key` keys it, so the
+            // fetched detail lands in the entry the render reads.
+            .map(|object| crate::app::state::WorkItemKey {
+                repo: String::new(),
+                pr_number: None,
+                pr_url: None,
+                ticket_id: Some(object.key.clone()),
+            });
+        return Some((crate::app::state::DockHomeSection::Tickets, selection, true));
+    }
     let selection = match presentation.home_section {
         crate::app::state::DockHomeSection::Prs => presentation.home_selection.clone(),
         crate::app::state::DockHomeSection::Tickets => presentation.home_ticket_selection.clone(),
@@ -6391,6 +6445,60 @@ mod tests {
         assert_eq!(
             work_item_detail_request(&client),
             Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
+        );
+    }
+
+    #[test]
+    fn focused_headless_linear_dock_requests_its_ticket_detail() {
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Linear);
+        client.dock_presentation.open_surfaces = vec![crate::app::DockSurface::Linear];
+        client.dock_presentation.active_tab_index = Some(0);
+        client.dock_presentation.tab_bindings = vec![Some(crate::app::state::DockTabBinding {
+            object: crate::app::state::DockObjectRef {
+                surface: crate::app::DockSurface::Linear,
+                key: "SCA-3313".into(),
+            },
+            origin: crate::app::state::DockTabOrigin::Context,
+        })];
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some("SCA-3313".into()),
+                }),
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn a_collapsed_linear_preview_requests_its_ticket_detail_too() {
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = true;
+        client.dock_presentation.object_preview = Some(crate::app::state::DockObjectRef {
+            surface: crate::app::DockSurface::Linear,
+            key: "SCA-3313".into(),
+        });
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((
+                crate::app::state::DockHomeSection::Tickets,
+                Some(crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some("SCA-3313".into()),
+                }),
+                true
+            ))
         );
     }
 

@@ -5006,6 +5006,12 @@ impl App {
                         self.state.clear_home();
                         self.focus_toast_target_via_api()
                     }
+                    MouseAction::DockTicketAction { action } => {
+                        self.activate_dock_ticket_action(action)
+                    }
+                    MouseAction::DockTicketStartThread { choice } => {
+                        self.open_dock_ticket_thread(choice)
+                    }
                     MouseAction::RefreshDockFiles => self.force_dock_files_refresh(),
                     MouseAction::SortDockFiles => self.state.cycle_dock_files_sort(),
                     MouseAction::PreviewDockFile(path) => self.preview_dock_file(path),
@@ -6270,6 +6276,119 @@ mod tests {
         // to the plain focus behaviour and folds nothing.
         click(&mut app, header_row - 1);
         assert_eq!(collapsed_sections(&app, &key), vec![section]);
+    }
+
+    #[test]
+    fn clicking_the_ticket_buttons_opens_the_menus_a_click_can_then_pick_from() {
+        let mut app = dock_linear_test_app();
+        let area = ratatui::layout::Rect::new(0, 20, 100, 20);
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.dock_rect = area;
+        app.state.view.dock_body_rect = area;
+        app.work_index_linearis_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
+        let click = |app: &mut App, column, row| {
+            app.handle_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        // Both controls share the action row under the heading.
+        let action_row = area.y + 1;
+        let more_column = area.x
+            + 1
+            + u16::try_from(
+                crate::ui::text::display_width(crate::ui::work_view::TICKET_START_LABEL) + 1,
+            )
+            .expect("a narrow label");
+
+        click(&mut app, area.x + 3, action_row);
+        assert!(
+            app.state.dock_ticket_start_menu.is_some(),
+            "clicking [Start thread] opens its menu"
+        );
+
+        // A click outside an open menu dismisses it, exactly as Esc does.
+        click(&mut app, area.x + 3, area.bottom() - 1);
+        assert!(app.state.dock_ticket_start_menu.is_none());
+
+        click(&mut app, more_column, action_row);
+        assert!(
+            app.state.dock_ticket_action_menu.is_some(),
+            "clicking [⋯] opens the action menu"
+        );
+
+        // The transition submenu is the first entry, so picking it by click
+        // proves a menu row activates rather than only moving a cursor.
+        let menu_area = dock_detail_area(&app.state);
+        let layout = crate::ui::dock::linear::focused_ticket_layout(&app.state, menu_area)
+            .expect("a ticket detail layout");
+        let anchor = crate::ui::work_view::ticket_action_menu_anchor(menu_area, layout.action_rows);
+        let context = app
+            .dock_ticket_action_context()
+            .expect("a focused ticket context");
+        let menu = crate::ui::ticket_actions::ticket_action_menu_layout(
+            anchor,
+            menu_area,
+            &context,
+            app.state.dock_ticket_action_menu.expect("an open menu"),
+        )
+        .expect("a menu layout");
+        let transition_row = crate::ui::ticket_actions::ticket_action_table(
+            &context,
+            crate::ui::ticket_actions::TicketActionMenuPage::Actions,
+        )
+        .iter()
+        .position(|entry| entry.action == crate::ui::ticket_actions::TicketAction::TransitionMenu)
+        .expect("a transition entry");
+        click(
+            &mut app,
+            menu.list_rect.x + 1,
+            menu.list_rect.y + u16::try_from(transition_row).expect("a visible row"),
+        );
+        assert_eq!(
+            app.state.dock_ticket_action_menu.map(|menu| menu.page),
+            Some(crate::ui::ticket_actions::TicketActionMenuPage::Transitions),
+            "clicking an entry runs it instead of only moving the cursor"
+        );
+    }
+
+    #[test]
+    fn a_ticket_button_click_never_overtakes_a_draft_or_a_pending_write() {
+        let mut app = dock_linear_test_app();
+        let area = ratatui::layout::Rect::new(0, 20, 100, 20);
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        app.state.view.dock_rect = area;
+        app.state.view.dock_body_rect = area;
+        let click = |app: &mut App| {
+            app.handle_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: area.x + 3,
+                row: area.y + 1,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+
+        app.state.dock_ticket_comment_draft = Some("half-written".into());
+        click(&mut app);
+        assert_eq!(
+            app.state.dock_ticket_comment_draft.as_deref(),
+            Some("half-written"),
+            "a click must not reopen the menu over a typed draft"
+        );
+        assert!(app.state.dock_ticket_start_menu.is_none());
+
+        app.state.dock_ticket_comment_draft = None;
+        app.state.dock_pending_write = Some(crate::work_index::WorkItemWrite::TransitionTicket {
+            identifier: "SCA-1".into(),
+            state: "Done".into(),
+        });
+        click(&mut app);
+        assert!(
+            app.state.dock_ticket_start_menu.is_none(),
+            "a pending confirmation owns the surface until it is answered"
+        );
     }
 
     #[test]

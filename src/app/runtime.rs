@@ -486,8 +486,16 @@ impl App {
         let dock_pr_selection = dock_pr_visible
             .then(|| crate::ui::dock::pr::focused_pr_key(&self.state))
             .flatten();
-        let dock_linear_visible = !self.state.dock_collapsed
-            && self.state.dock_tab == Some(crate::app::DockSurface::Linear);
+        // A collapsed dock still previews a ticket in the pane area, and that
+        // host renders the same detail, so it counts as visible.
+        let dock_linear_visible = if self.state.dock_collapsed {
+            self.state
+                .dock_object_preview
+                .as_ref()
+                .is_some_and(|object| object.surface == crate::app::DockSurface::Linear)
+        } else {
+            self.state.dock_tab == Some(crate::app::DockSurface::Linear)
+        };
         let dock_linear_selection = dock_linear_visible
             .then(|| crate::ui::dock::linear::focused_ticket_key(&self.state))
             .flatten();
