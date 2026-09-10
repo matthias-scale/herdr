@@ -2880,9 +2880,14 @@ pub enum ContextMenuKind {
         /// Work link under the click, when the clicked cell carries one that is
         /// not already bound to every pane of this window.
         linkable_work_link: Option<PaneMenuWorkLinkAction>,
+        /// Whatever link the clicked cell carries, matched to no pattern. A
+        /// pull request and a paste-bin URL are equally copyable.
+        link: Option<String>,
     },
 }
 
+/// Label of the pane menu entry that copies the clicked link.
+pub const COPY_LINK_ITEM: &str = "Copy link";
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
 /// Label of the pane menu entry that binds the clicked ticket to the window.
@@ -3043,11 +3048,15 @@ impl ContextMenuState {
                 has_manual_label,
                 right_click_passthrough,
                 linkable_work_link,
+                link,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
                 if let Some(action) = linkable_work_link {
                     items.push(action.menu_item());
+                }
+                if link.is_some() {
+                    items.push(COPY_LINK_ITEM);
                 }
                 if *has_manual_label {
                     items.push("Clear pane name");
