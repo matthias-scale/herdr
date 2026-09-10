@@ -5664,6 +5664,7 @@ impl HeadlessServer {
         // ticks has to be ticked here too or it only runs for TUI-owned
         // runtimes. Resumes above, and the nudge that follows them.
         changed |= self.app.tick_resume_nudges(now);
+        changed |= self.app.tick_auto_nudges(now);
         changed
     }
 
@@ -8645,6 +8646,59 @@ next_tab = ""
         assert!(
             sent.contains("continue"),
             "expected the nudge to reach the pane, got {sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_fires_a_stalled_agent_auto_nudge() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        server.app.state.auto_nudge_stalled_agents = true;
+        let mut workspace = crate::workspace::Workspace::test_new("headless-auto-nudge");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        workspace.tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - server.app.state.nudge_after);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.supervisor_stale = true;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert!(server.app.stall_nudge_episodes.contains_key(&terminal_id));
+        let mut sent = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            sent.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            sent.contains("/status"),
+            "expected the auto-nudge to reach the pane, got {sent:?}"
         );
     }
 

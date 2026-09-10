@@ -563,6 +563,7 @@ impl App {
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
         changed |= self.tick_resume_nudges(now);
+        changed |= self.tick_auto_nudges(now);
         changed
     }
 
@@ -1096,6 +1097,7 @@ impl App {
                 .flatten(),
             self.pending_agent_resume_deadline,
             self.next_resume_nudge_deadline(),
+            self.next_auto_nudge_deadline(now),
             self.session_save_deadline,
             self.loop_receipt_fallback_deadline,
             self.selection_autoscroll_deadline,
@@ -1192,6 +1194,65 @@ mod tests {
             is_focused: true,
         });
         (app, pane_id)
+    }
+
+    #[tokio::test]
+    async fn runtime_scheduler_ticks_stalled_agent_auto_nudge() {
+        let now = Instant::now();
+        let mut config = crate::config::Config::default();
+        config.session.auto_nudge_stalled_agents = true;
+        let mut app = super::super::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("runtime-auto-nudge");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        workspace.tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - Duration::from_secs(20 * 60));
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.supervisor_stale = true;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        assert_eq!(app.next_auto_nudge_deadline(now), Some(now));
+        assert!(app
+            .next_headless_loop_deadline_with_client_refresh(now, false, false)
+            .is_some_and(|deadline| deadline <= now));
+        app.handle_scheduled_tasks(now, false);
+
+        let mut sent = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            sent.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            sent.contains("/status"),
+            "expected auto-nudge, got {sent:?}"
+        );
     }
 
     #[test]

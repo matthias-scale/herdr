@@ -332,6 +332,15 @@ pub struct SessionConfig {
     pub nudge_resumed_agents: bool,
     /// Prompt submitted by `nudge_resumed_agents`. Default: "continue".
     pub resume_nudge_message: String,
+    /// Nudge stalled agent panes after both their status declaration and pane
+    /// activity have gone quiet. Default: false.
+    pub auto_nudge_stalled_agents: bool,
+    /// Initial quiet period before a stalled pane is nudged. Default: 20.
+    pub nudge_after_minutes: u64,
+    /// Maximum nudges sent during one stale-status episode. Default: 3.
+    pub max_nudges: u32,
+    /// Prompt submitted to a stalled pane. Default: "/status".
+    pub stall_nudge_message: String,
 }
 
 impl Default for SessionConfig {
@@ -350,6 +359,10 @@ impl Default for SessionConfig {
             settle_stops_agent: true,
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),
+            auto_nudge_stalled_agents: false,
+            nudge_after_minutes: 20,
+            max_nudges: 3,
+            stall_nudge_message: "/status".to_string(),
         }
     }
 }
@@ -2252,6 +2265,15 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_agent_nudge_config_defaults_are_opt_in_and_bounded() {
+        let session = SessionConfig::default();
+        assert!(!session.auto_nudge_stalled_agents);
+        assert_eq!(session.nudge_after_minutes, 20);
+        assert_eq!(session.max_nudges, 3);
+        assert_eq!(session.stall_nudge_message, "/status");
+    }
 
     #[test]
     fn four_way_split_defaults_are_collision_safe_and_legacy_names_keep_edges() {

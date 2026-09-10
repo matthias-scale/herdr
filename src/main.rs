@@ -576,6 +576,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # nudge_resumed_agents = true
 # The prompt sent by nudge_resumed_agents.
 # resume_nudge_message = "continue"
+# Nudge an agent when both its status declaration and pane activity have gone quiet.
+# auto_nudge_stalled_agents = false
+# Initial quiet period and maximum sends in one stale-status episode.
+# nudge_after_minutes = 20
+# max_nudges = 3
+# The prompt sent to a stalled agent. `/status` uses the shipped skill where supported.
+# stall_nudge_message = "/status"
+# Agents without `/status` support can instead use a plain-text fallback such as:
+# stall_nudge_message = "Re-check your work, report its current status, and continue if needed."
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
@@ -1167,6 +1176,15 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
         assert!(DEFAULT_CONFIG.contains("[source_control]\n# Merge strategy"));
         assert!(DEFAULT_CONFIG.contains("# merge_method = \"merge\""));
+    }
+
+    #[test]
+    fn default_config_documents_stalled_agent_nudge_and_plain_text_fallback() {
+        assert!(DEFAULT_CONFIG.contains("# auto_nudge_stalled_agents = false"));
+        assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 20"));
+        assert!(DEFAULT_CONFIG.contains("# max_nudges = 3"));
+        assert!(DEFAULT_CONFIG.contains("# stall_nudge_message = \"/status\""));
+        assert!(DEFAULT_CONFIG.contains("Agents without `/status` support"));
     }
 
     #[test]

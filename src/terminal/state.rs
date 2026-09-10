@@ -1571,6 +1571,23 @@ impl TerminalState {
                 .is_some_and(|authority| authority.state != AgentState::Working)
     }
 
+    /// True while the pane claims subagents are still running.
+    ///
+    /// The claim comes either from the live transcript scan or from the agent's
+    /// own `closing_agents` token. Neither source expires on its own: the token is
+    /// written without a TTL, and transcript rows simply stop arriving when the
+    /// parent stalls. So a parent that said "3 agents running" keeps reading busy
+    /// forever unless the watchdog ages the claim out.
+    pub(crate) fn declares_running_subagents(&self) -> bool {
+        self.active_subagents
+            .or_else(|| {
+                self.metadata_tokens
+                    .get("closing_agents")
+                    .and_then(|value| value.parse::<u32>().ok())
+            })
+            .is_some_and(|count| count > 0)
+    }
+
     pub fn agent_status_watchdog_deadline(&self) -> Option<Instant> {
         let authority = self.hook_authority.as_ref()?;
         if self.supervisor_stale {
@@ -1586,6 +1603,11 @@ impl TerminalState {
             // A declared wait belongs to a working report; a finished report that
             // is still holding sub-processes gets the plain silence budget.
             _ if self.subprocess_held_working() => AGENT_STALE_SILENCE,
+            // A parent parked on subagents has ended its own turn, so it reports idle
+            // with an idle screen and neither branch above can see it. The claim is
+            // still a declaration nobody has re-verified, and it earns the same silence
+            // budget as any other.
+            _ if self.declares_running_subagents() => AGENT_STALE_SILENCE,
             _ => return None,
         };
         authority.reported_at.checked_add(age)
@@ -5412,6 +5434,91 @@ mod tests {
         );
         assert!(!terminal.supervisor_stale);
         assert!(terminal.agent_status_watchdog_deadline().is_some());
+    }
+
+    /// Builds a pane whose parent has ended its turn while declaring that
+    /// subagents remain active.
+    fn subagent_claim_terminal(now: Instant) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::path(test_session_path(
+                "subagent-watchdog.jsonl",
+            )),
+            Some(999),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), Some("3".into()))]),
+            None,
+            now,
+        ));
+        assert_eq!(terminal.state, AgentState::Idle);
+        terminal
+    }
+
+    #[test]
+    fn a_subagent_claim_goes_stale_when_the_silence_runs_out() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+
+        assert!(terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_some());
+        assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn a_fresh_report_resets_the_subagent_claim_watchdog() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the subagent claim stale");
+
+        let refreshed_at = now + AGENT_STALE_SILENCE + Duration::from_secs(1);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1001),
+            refreshed_at,
+        );
+
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(),
+            refreshed_at.checked_add(AGENT_STALE_SILENCE)
+        );
+    }
+
+    #[test]
+    fn a_non_working_authority_without_a_subagent_claim_has_no_watchdog() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), None)]),
+            None,
+            now,
+        ));
+
+        assert!(terminal.agent_status_watchdog_deadline().is_none());
     }
 
     #[test]

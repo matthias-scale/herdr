@@ -9,6 +9,7 @@ mod add_project;
 pub(crate) mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
+pub(crate) mod auto_nudge;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
@@ -281,6 +282,9 @@ pub struct App {
     /// be nudged back into their work, keyed by the terminal they run in.
     pub(crate) pending_resume_nudges:
         std::collections::HashMap<crate::terminal::TerminalId, agent_resume::ResumeNudge>,
+    /// Runtime-only nudge budgets for currently stale agent declarations.
+    pub(crate) stall_nudge_episodes:
+        std::collections::HashMap<crate::terminal::TerminalId, auto_nudge::StallNudgeEpisode>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -1194,6 +1198,12 @@ impl App {
             settle_stops_agent: config.session.settle_stops_agent,
             nudge_resumed_agents: config.session.nudge_resumed_agents,
             resume_nudge_message: config.session.resume_nudge_message.clone(),
+            auto_nudge_stalled_agents: config.session.auto_nudge_stalled_agents,
+            nudge_after: std::time::Duration::from_secs(
+                config.session.nudge_after_minutes.saturating_mul(60),
+            ),
+            max_nudges: config.session.max_nudges,
+            stall_nudge_message: config.session.stall_nudge_message.clone(),
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
@@ -1437,6 +1447,7 @@ impl App {
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             pending_resume_nudges: std::collections::HashMap::new(),
+            stall_nudge_episodes: std::collections::HashMap::new(),
             session_save_deadline: None,
             session_save_scheduled_revision: None,
             session_save_thread: None,
@@ -2330,6 +2341,14 @@ impl App {
             self.state
                 .resume_nudge_message
                 .clone_from(&config.session.resume_nudge_message);
+            self.state.auto_nudge_stalled_agents = config.session.auto_nudge_stalled_agents;
+            self.state.nudge_after = std::time::Duration::from_secs(
+                config.session.nudge_after_minutes.saturating_mul(60),
+            );
+            self.state.max_nudges = config.session.max_nudges;
+            self.state
+                .stall_nudge_message
+                .clone_from(&config.session.stall_nudge_message);
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session
