@@ -165,18 +165,7 @@ impl App {
     async fn handle_key_inner(&mut self, key: TerminalKey) -> Option<super::TerminalInputTarget> {
         // A due break reminder outranks every other surface, panes included:
         // an overlay that can be typed past is not a reminder.
-        if self.state.pomodoro.prompt.is_some() {
-            self.state
-                .handle_pomodoro_prompt_key(key.as_key_event(), std::time::Instant::now());
-            self.apply_notepad_request();
-            return None;
-        }
-        if self.state.notepad.focused
-            && self
-                .state
-                .handle_notepad_key(key.as_key_event(), std::time::Instant::now())
-        {
-            self.apply_notepad_request();
+        if self.intercept_notepad_key(&key) {
             return None;
         }
         if self.state.popup_pane.is_some() {
@@ -4385,7 +4374,7 @@ impl App {
             }
             return;
         }
-        if self.state.mode != Mode::Terminal {
+        if self.state.mode != Mode::Terminal || self.state.notepad.focused {
             self.paste_into_active_text_input(text);
             return;
         }
