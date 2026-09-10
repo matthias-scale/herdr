@@ -1522,20 +1522,17 @@ impl AppState {
                         self.toggle_sidebar_group(&key);
                         return None;
                     }
-                    // A fleet row cannot take focus here, so the first click
-                    // selects it and a click on the row already selected opens
-                    // its host. No timing is involved, so it behaves the same
-                    // over a slow link as it does locally.
+                    // A fleet row opens on one click, the way a local row does.
+                    // Attaching is idempotent -- an already attached host is
+                    // focused rather than dialled again -- so nothing is lost by
+                    // dropping the select-then-open step this used to need.
                     if let Some(agent_ref) = crate::ui::remote_agent_row_at(self, mouse.row) {
                         self.sidebar_selected_work_group = None;
-                        if self.sidebar_selected_remote_agent.as_ref() == Some(&agent_ref) {
-                            return Some(MouseAction::OpenFleetHost {
-                                name: agent_ref.host.clone(),
-                            });
-                        }
-                        self.sidebar_selected_remote_agent = Some(agent_ref);
+                        self.sidebar_selected_remote_agent = Some(agent_ref.clone());
                         self.mark_sidebar_projection_changed();
-                        return None;
+                        return Some(MouseAction::OpenFleetHost {
+                            name: agent_ref.host.clone(),
+                        });
                     }
                     if let Some(key) =
                         crate::ui::sidebar_unassigned_spawn_at(self, mouse.column, mouse.row)
@@ -3634,7 +3631,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_fleet_row_selects_it_then_opens_its_host() {
+    fn clicking_a_fleet_row_attaches_to_its_host_on_the_first_click() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
@@ -3664,28 +3661,64 @@ mod tests {
         assert_eq!(
             app.state.sidebar_selected_remote_agent.as_ref(),
             Some(&agent_ref),
-            "the first click picks the fleet row"
+            "the click picks the fleet row"
         );
-        assert!(
-            app.state.toast.is_none(),
-            "selecting must not launch a host"
-        );
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            row.rect.x + 2,
-            row.rect.y,
-        ));
-
-        // No fleet inventory is polled in this fixture, so the launch stops at
+        // No fleet inventory is polled in this fixture, so the attach stops at
         // its own guard -- which is exactly the proof the click reached it.
-        let toast = app.state.toast.clone().expect("the second click attaches");
+        let toast = app.state.toast.clone().expect("one click attaches");
         assert_eq!(toast.title, "host launch failed");
         assert!(
             toast.context.contains("fleet inventory"),
             "{}",
             toast.context
         );
+    }
+
+    #[test]
+    fn attaching_to_a_host_twice_returns_to_the_pane_already_open() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["ub1".into()],
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "ub1".into(),
+                target: "ub1".into(),
+                local: false,
+                session: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                entries: Vec::new(),
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        let argv = crate::fleet::host_attach_argv(&app.state.fleet_snapshot.hosts[0])
+            .expect("an ssh target yields an attach argv");
+        // The host is already attached: the workspace's only pane runs it.
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("the test pane owns a terminal")
+            .launch_argv = Some(argv);
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        app.open_fleet_host("ub1");
+
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a second attach must not dial the host again"
+        );
+        assert!(app.state.toast.is_none(), "{:?}", app.state.toast);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
     }
 
     #[test]
