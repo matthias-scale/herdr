@@ -183,6 +183,10 @@ pub struct AgentPromptParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
+    /// Cross-host identity. Older remote servers may omit this while fleet
+    /// inventory remains version-skew tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<super::AgentRef>,
     pub terminal_id: String,
     #[serde(default)]
     pub work_context: crate::work_context::PaneWorkContext,
@@ -199,6 +203,8 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub usage_limited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

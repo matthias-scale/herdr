@@ -715,6 +715,9 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let agent_host_name = config.remote.fleet.resolved_self_name();
+        let local_agent_panel_identities =
+            crate::ui::local_agent_panel_identities(&workspaces, &agent_host_name);
         let dock_default_surfaces = dock_surfaces_from_config(&config.panel);
         let dock_tab = dock_default_surfaces.first().copied();
 
@@ -823,6 +826,10 @@ impl App {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
+            agent_host_name,
+            local_agent_panel_identities,
+            remote_agent_panel_entries: Vec::new(),
+            sidebar_selected_remote_agent: None,
             dock_symphony: None,
             symphony_detail: None,
             work_view: None,
@@ -1518,6 +1525,7 @@ impl App {
         app.state.detach_exits = false;
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
@@ -2349,6 +2357,15 @@ impl App {
             self.state.dock_default_surfaces = dock_surfaces_from_config(&config.panel);
         }
 
+        if !invalid_section("remote") {
+            let agent_host_name = config.remote.fleet.resolved_self_name();
+            if self.state.agent_host_name != agent_host_name {
+                self.state.agent_host_name = agent_host_name;
+                self.refresh_remote_agent_panel_entries();
+                self.state.mark_sidebar_projection_changed();
+            }
+        }
+
         if !invalid_section("linear") {
             self.state.linear_default_layout = config.linear.default_layout.into();
         }
@@ -3152,6 +3169,51 @@ mod tests {
             app.state.dock_default_surfaces
         );
         assert_eq!(app.state.dock_tab, Some(state::DockSurface::Files));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn handoff_restoration_warms_local_identity_cache() {
+        let mut source = state::AppState::test_new();
+        source.workspaces = vec![Workspace::test_new("handoff")];
+        source.ensure_test_terminals();
+        source.active = Some(0);
+        source.selected = 0;
+        let snapshot = crate::persist::capture(
+            &source.workspaces,
+            &source.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            source.active,
+            source.selected,
+            source.sidebar_width,
+            source.sidebar_section_split,
+            source.collapsed_space_keys.clone(),
+            source.prio_panel_collapsed,
+        );
+        let mut imports = std::collections::HashMap::new();
+
+        let app = App::new_from_handoff(
+            &Config::default(),
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+            &snapshot,
+            &mut imports,
+            &[],
+        )
+        .expect("restore handoff");
+
+        let workspace = &app.state.workspaces[0];
+        let pane_id = workspace.tabs[0].root_pane;
+        let cached = app
+            .state
+            .local_agent_panel_identities
+            .get(&pane_id)
+            .expect("warm local identity cache");
+        assert_eq!(cached.workspace_id, workspace.id);
+        assert_eq!(cached.local_target.ws_idx, 0);
+        assert_eq!(cached.local_target.tab_idx, 0);
+        assert_eq!(cached.local_target.pane_id, pane_id);
     }
 
     #[cfg(unix)]
@@ -4910,7 +4972,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[remote.fleet]\nself_name = \"laptop\"\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -4945,6 +5007,7 @@ mod tests {
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.headless_size, (160, 50));
+        assert_eq!(app.state.agent_host_name, "laptop");
         assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
         assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
         assert!(app

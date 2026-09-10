@@ -109,6 +109,7 @@ local pane.
 
 ```toml
 [remote.fleet]
+self_name = "laptop"
 refresh_interval_ms = 15000
 timeout_ms = 5000
 heartbeat_stale_ms = 1800000
@@ -118,6 +119,10 @@ name = "workbox"
 target = "workbox"
 session = "agents"
 ```
+
+`self_name` identifies agents owned by this server. It defaults to the system
+hostname, so set it when the configured fleet name should differ from that
+hostname. Agent references use `host::agent`, for example `workbox::w1:p1`.
 
 The optional `session` value adds `--session` when the host opens. Hosts marked
 `local = true` use the local API socket for inventory reads and never poll over SSH.

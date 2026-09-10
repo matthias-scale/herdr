@@ -972,10 +972,20 @@ impl App {
     }
 
     fn focus_next_blocked_window(&mut self) {
-        let Some((ws_idx, pane_id)) = next_blocked_window_target(&self.state) else {
+        let Some(target) = next_blocked_window_target(&self.state) else {
             return;
         };
-        self.focus_pane_internal_via_api(ws_idx, pane_id);
+        match target {
+            BlockedPaneTarget::Local {
+                ws_idx, pane_id, ..
+            } => {
+                self.state.sidebar_selected_remote_agent = None;
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+            }
+            BlockedPaneTarget::Remote(agent_ref) => {
+                select_remote_agent_row(&mut self.state, agent_ref);
+            }
+        }
     }
 
     pub(crate) fn close_active_tab_via_api_requires_confirmation(&mut self) -> bool {
@@ -2073,8 +2083,18 @@ pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
 /// limits and unanswered gates, ignored the stale-supervisor projection the
 /// sidebar renders, and could not reach a blocked pane inside a tab that rolled
 /// up to another state.
-fn blocked_pane_cycle(state: &AppState) -> Vec<((usize, usize, crate::layout::PaneId), bool)> {
-    crate::ui::all_agent_panel_entries(state)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlockedPaneTarget {
+    Local {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    Remote(crate::api::schema::AgentRef),
+}
+
+fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
+    let mut panes = crate::ui::all_agent_panel_entries(state)
         .into_iter()
         .map(|entry| {
             let blocked = crate::terminal::counts_as_blocked(
@@ -2082,12 +2102,30 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<((usize, usize, crate::layout::Pa
                 entry.open_blockers,
                 entry.usage_limited,
             ) && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
-            ((entry.ws_idx, entry.tab_idx, entry.pane_id), blocked)
+            (
+                BlockedPaneTarget::Local {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                    pane_id: entry.pane_id,
+                },
+                blocked,
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    panes.extend(state.remote_agent_panel_entries.iter().map(|entry| {
+        (
+            BlockedPaneTarget::Remote(entry.agent_ref.clone()),
+            crate::terminal::counts_as_blocked(
+                entry.state,
+                entry.open_blockers,
+                entry.usage_limited,
+            ),
+        )
+    }));
+    panes
 }
 
-fn next_blocked_window_target(state: &AppState) -> Option<(usize, crate::layout::PaneId)> {
+fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
     let panes = blocked_pane_cycle(state);
     if panes.is_empty() {
         return None;
@@ -2106,24 +2144,60 @@ fn next_blocked_window_target(state: &AppState) -> Option<(usize, crate::layout:
     // the first blocked pane, is what keeps every blocked pane reachable when
     // one is skipped instead of answered. The active window is the fallback
     // anchor: a pane that carries no agent panel entry still has a position.
-    let start = focused
-        .and_then(|focused| {
-            panes
-                .iter()
-                .position(|((ws_idx, _, pane_id), _)| (*ws_idx, *pane_id) == focused)
+    let selected_remote = state.sidebar_selected_remote_agent.as_ref();
+    let start = selected_remote
+        .and_then(|selected| {
+            panes.iter().position(|(target, _)| {
+                matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
+            })
         })
         .or_else(|| {
-            active_window.and_then(|window| {
-                panes
-                    .iter()
-                    .rposition(|((ws_idx, tab_idx, _), _)| (*ws_idx, *tab_idx) == window)
-            })
+            focused
+                .and_then(|focused| {
+                    panes.iter().position(|(target, _)| {
+                        matches!(
+                            target,
+                            BlockedPaneTarget::Local { ws_idx, pane_id, .. }
+                                if (*ws_idx, *pane_id) == focused
+                        )
+                    })
+                })
+                .or_else(|| {
+                    active_window.and_then(|window| {
+                        panes.iter().rposition(|(target, _)| {
+                            matches!(
+                                target,
+                                BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
+                                    if (*ws_idx, *tab_idx) == window
+                            )
+                        })
+                    })
+                })
         })
         .map_or(0, |current| current + 1);
     (0..panes.len()).find_map(|offset| {
-        let ((ws_idx, _, pane_id), blocked) = panes[(start + offset) % panes.len()];
-        blocked.then_some((ws_idx, pane_id))
+        let (target, blocked) = &panes[(start + offset) % panes.len()];
+        blocked.then(|| target.clone())
     })
+}
+
+fn select_remote_agent_row(state: &mut AppState, agent_ref: crate::api::schema::AgentRef) {
+    state.sidebar_selected_remote_agent = Some(agent_ref.clone());
+    if let Some(target_row) = crate::ui::sidebar_rows(state).iter().position(|row| {
+        matches!(
+            row,
+            crate::ui::SidebarRow::RemoteAgent { entry, .. }
+                if entry.agent_ref == agent_ref
+        )
+    }) {
+        state.workspace_scroll = crate::ui::sidebar_row_scroll_for_target(
+            state,
+            state.view.sidebar_rect,
+            state.workspace_scroll,
+            target_row,
+        );
+    }
+    state.mark_sidebar_projection_changed();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2761,8 +2835,18 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NextBlockedWindow => {
-            if let Some((ws_idx, pane_id)) = next_blocked_window_target(state) {
-                state.focus_pane_in_workspace(ws_idx, pane_id);
+            if let Some(target) = next_blocked_window_target(state) {
+                match target {
+                    BlockedPaneTarget::Local {
+                        ws_idx, pane_id, ..
+                    } => {
+                        state.sidebar_selected_remote_agent = None;
+                        state.focus_pane_in_workspace(ws_idx, pane_id);
+                    }
+                    BlockedPaneTarget::Remote(agent_ref) => {
+                        select_remote_agent_row(state, agent_ref);
+                    }
+                }
             }
             leave_navigate_mode(state);
         }
@@ -3685,6 +3769,46 @@ mod tests {
             NavigateAction::NextBlockedWindow,
             &[(1, 0), (0, 0)],
         );
+    }
+
+    #[test]
+    fn next_blocked_window_selects_remote_row_without_focusing_a_local_pane() {
+        let mut app = app_with_global_window_fixture();
+        let original_window = active_window(&app.state);
+        let original_pane = app.state.workspaces[original_window.0]
+            .focused_pane_id()
+            .expect("focused local pane");
+        let mut remote = crate::ui::all_agent_panel_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("agent panel fixture");
+        remote.state = crate::detect::AgentState::Idle;
+        remote.open_blockers = true;
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, remote),
+        )];
+
+        app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
+
+        assert_eq!(active_window(&app.state), original_window);
+        assert_eq!(
+            app.state.workspaces[original_window.0].focused_pane_id(),
+            Some(original_pane)
+        );
+        assert_eq!(
+            app.state
+                .sidebar_selected_remote_agent
+                .as_ref()
+                .map(ToString::to_string),
+            Some("ub2::pane/with/slash".into())
+        );
+
+        assert!(!app
+            .state
+            .focus_pane_in_workspace(original_window.0, original_pane));
+        assert!(app.state.sidebar_selected_remote_agent.is_none());
     }
 
     #[test]

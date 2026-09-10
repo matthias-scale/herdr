@@ -3356,6 +3356,16 @@ pub struct AppState {
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     /// Server-owned fleet inventory, refreshed off the render thread.
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
+    /// This server's configured component in cross-host agent references.
+    pub(crate) agent_host_name: String,
+    /// Local row identity materialized when the sidebar projection changes.
+    pub(crate) local_agent_panel_identities:
+        std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
+    /// TUI projection materialized only when the fleet snapshot changes.
+    pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Read-only remote row selected by blocked navigation. Activation remains
+    /// reserved for the later remote-control slice.
+    pub(crate) sidebar_selected_remote_agent: Option<crate::api::schema::AgentRef>,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
     /// Which job the dock's Symphony surface is bound to. Client presentation
     /// state: the runtime knows nothing about which panel is open.
@@ -4694,6 +4704,7 @@ impl AppState {
     pub(crate) fn release_surface_focus_to_pane(&mut self) {
         self.release_dock_focus_to_pane();
         self.sidebar_selected_work_group = None;
+        self.sidebar_selected_remote_agent = None;
         self.sidebar_object_menu = None;
         self.sidebar_selected_settled = None;
         self.sidebar_settled_menu_target = None;
@@ -5505,9 +5516,15 @@ impl AppState {
     }
 
     pub(crate) fn mark_sidebar_projection_changed(&mut self) {
+        self.refresh_local_agent_panel_identities();
         self.sidebar_projection_revision = self.sidebar_projection_revision.wrapping_add(1);
         self.workspace_scroll = 0;
         self.mobile_switcher_scroll = 0;
+    }
+
+    pub(crate) fn refresh_local_agent_panel_identities(&mut self) {
+        self.local_agent_panel_identities =
+            crate::ui::local_agent_panel_identities(&self.workspaces, &self.agent_host_name);
     }
 
     pub(crate) fn sidebar_shows_spaces_tree(&self) -> bool {
@@ -5796,6 +5813,10 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
+            agent_host_name: "localhost".to_string(),
+            local_agent_panel_identities: std::collections::HashMap::new(),
+            remote_agent_panel_entries: Vec::new(),
+            sidebar_selected_remote_agent: None,
             symphony_detail: None,
             dock_symphony: None,
             work_view: None,
