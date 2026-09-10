@@ -60,6 +60,28 @@ impl App {
 mod tests {
     use super::*;
 
+    fn app_with_local_agent(self_name: &str) -> App {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.self_name = Some(self_name.to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+            );
+        app
+    }
+
     #[test]
     fn fleet_api_returns_cached_host_and_agent_inventory() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -104,5 +126,42 @@ mod tests {
             snapshot["hosts"][0]["agents"][0]["agent_ref"],
             snapshot["hosts"][1]["agents"][0]["agent_ref"]
         );
+    }
+
+    #[test]
+    fn local_fleet_alias_keeps_agent_list_identity() {
+        let mut app = app_with_local_agent("laptop");
+        let agent_response: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_agent_list("agents".into())).expect("agent list");
+        let crate::api::schema::ResponseResult::AgentList { agents } = agent_response.result else {
+            panic!("expected agent list response");
+        };
+        let agent_ref = agents[0].agent_ref.clone().expect("agent list identity");
+        app.state.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "local".into(),
+                target: String::new(),
+                local: true,
+                session: None,
+                state: HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                entries: vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "local",
+                    agents[0].clone(),
+                )],
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let fleet_response: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_fleet_list("fleet".into())).expect("fleet list");
+        let crate::api::schema::ResponseResult::FleetList { snapshot } = fleet_response.result
+        else {
+            panic!("expected fleet list response");
+        };
+        assert_eq!(snapshot.hosts[0].agents[0].agent_ref, agent_ref);
     }
 }

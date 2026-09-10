@@ -1077,7 +1077,10 @@ impl FleetRow {
             .collect::<Vec<_>>();
         let gate_summary = gates.first().map(gate_summary);
         let id = agent.name.clone().unwrap_or_else(|| agent.pane_id.clone());
-        let agent_ref = crate::api::schema::AgentRef::new(host, agent.pane_id.clone()).ok()?;
+        let agent_ref = agent
+            .agent_ref
+            .clone()
+            .or_else(|| crate::api::schema::AgentRef::new(host, agent.pane_id.clone()).ok())?;
         let handle = agent_ref.to_string();
         let model = agent.tokens.get("model").cloned();
         let effort = agent.tokens.get("effort").cloned();

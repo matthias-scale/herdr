@@ -1637,10 +1637,14 @@ impl Default for FleetConfig {
 
 impl FleetConfig {
     pub(crate) fn resolved_self_name(&self) -> String {
+        self.resolved_self_name_with_hostname(crate::platform::hostname())
+    }
+
+    pub(crate) fn resolved_self_name_with_hostname(&self, hostname: Option<String>) -> String {
         self.self_name
             .clone()
             .filter(|name| !name.trim().is_empty() && !name.contains("::"))
-            .or_else(crate::platform::hostname)
+            .or(hostname)
             .filter(|name| !name.trim().is_empty() && !name.contains("::"))
             .unwrap_or_else(|| "localhost".to_string())
     }

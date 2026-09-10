@@ -34,10 +34,8 @@ enum RuntimeExitAction {
 
 impl App {
     pub(crate) fn refresh_remote_agent_panel_entries(&mut self) {
-        self.state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(
-            &self.state.fleet_snapshot,
-            &self.state.agent_host_name,
-        );
+        self.state.remote_agent_panel_entries =
+            crate::ui::remote_agent_panel_entries(&self.state.fleet_snapshot);
         if self
             .state
             .sidebar_selected_remote_agent

@@ -1116,12 +1116,11 @@ fn collect_agent_panel_entries_with_runtimes(
 /// entries through `Arc` and never re-read or re-materialize fleet evidence.
 pub(crate) fn remote_agent_panel_entries(
     snapshot: &crate::fleet::Snapshot,
-    self_name: &str,
 ) -> Vec<std::sync::Arc<AgentPanelEntry>> {
     snapshot
         .hosts
         .iter()
-        .filter(|host| !host.local && host.name != self_name)
+        .filter(|host| !host.local)
         .flat_map(|host| host.entries.iter())
         .filter_map(|row| {
             if row.source == crate::fleet::EvidenceSource::Host || row.error.is_some() {
@@ -7166,7 +7165,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let entries = remote_agent_panel_entries(&snapshot, "local");
+        let entries = remote_agent_panel_entries(&snapshot);
         assert_eq!(
             entries
                 .iter()
@@ -7213,6 +7212,49 @@ pub(crate) mod tests {
             .position(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
             .expect("remote row");
         assert!(local < remote, "local agents must precede remote hosts");
+    }
+
+    #[test]
+    fn remote_projection_keeps_a_host_named_like_self() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "laptop",
+                false,
+                vec![crate::fleet::FleetRow::test_run_row(
+                    "laptop", "reviewer", false,
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let entries = remote_agent_panel_entries(&snapshot);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_ref.host, "laptop");
+    }
+
+    #[test]
+    fn hostname_failure_keeps_a_remote_host_named_localhost() {
+        let self_name =
+            crate::config::FleetConfig::default().resolved_self_name_with_hostname(None);
+        assert_eq!(self_name, "localhost");
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "localhost",
+                false,
+                vec![crate::fleet::FleetRow::test_run_row(
+                    "localhost",
+                    "reviewer",
+                    false,
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let entries = remote_agent_panel_entries(&snapshot);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_ref.host, "localhost");
     }
 
     /// Build a workspace whose tabs each sit in a different directory. Separate
