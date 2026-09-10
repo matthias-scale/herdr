@@ -136,6 +136,22 @@ pub(crate) fn resolve(configured: &[ProjectConfig]) -> Vec<Project> {
     projects
 }
 
+impl crate::app::state::AppState {
+    /// The project the sidebar is scoped to. An id that no longer resolves
+    /// reads as no scope, so deleting a project from the config shows
+    /// everything again instead of emptying the sidebar.
+    pub(crate) fn scoped_project(&self) -> Option<&Project> {
+        let id = self.sidebar_work_filter.project.as_deref()?;
+        self.projects.iter().find(|project| project.id == id)
+    }
+
+    /// Whether the sidebar offers a project scope at all. One project is every
+    /// project, and scoping to it would filter nothing.
+    pub(crate) fn sidebar_project_scope_available(&self) -> bool {
+        self.projects.len() > 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

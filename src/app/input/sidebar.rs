@@ -166,6 +166,84 @@ impl AppState {
         true
     }
 
+    pub(crate) fn open_sidebar_project_menu(&mut self) {
+        self.sidebar_new_menu = None;
+        self.sidebar_new_thread = None;
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_object_menu = None;
+        self.sidebar_search_active = false;
+        self.sidebar_project_menu = Some(Default::default());
+    }
+
+    pub(crate) fn sidebar_project_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_project_menu_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    /// Apply the row at `position` in the filtered list. Row 0 of the unfiltered
+    /// list clears the scope; every other row names a project.
+    pub(crate) fn accept_sidebar_project_menu(&mut self, position: usize) -> bool {
+        let Some((index, _)) = crate::ui::sidebar_project_menu_matches(self)
+            .get(position)
+            .cloned()
+        else {
+            return false;
+        };
+        let project = match index.checked_sub(1) {
+            Some(project) => match self.projects.get(project) {
+                Some(project) => Some(project.id.clone()),
+                None => return false,
+            },
+            None => None,
+        };
+        self.sidebar_project_menu = None;
+        let mut filter = self.sidebar_work_filter.clone();
+        filter.project = project;
+        self.set_sidebar_work_filter(filter);
+        true
+    }
+
+    pub(crate) fn handle_sidebar_project_menu_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut menu) = self.sidebar_project_menu.take() else {
+            return false;
+        };
+        let match_count = {
+            self.sidebar_project_menu = Some(menu.clone());
+            let count = crate::ui::sidebar_project_menu_matches(self).len();
+            self.sidebar_project_menu = None;
+            count
+        };
+        match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Up => menu.filter.move_selection(-1, match_count),
+            KeyCode::Down => menu.filter.move_selection(1, match_count),
+            KeyCode::Backspace => menu.filter.pop(),
+            KeyCode::Enter => {
+                let selected = menu.filter.selected;
+                self.sidebar_project_menu = Some(menu);
+                self.accept_sidebar_project_menu(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() && ('1'..='9').contains(&character) =>
+            {
+                let selected = character.to_digit(10).unwrap_or(1) as usize - 1;
+                self.sidebar_project_menu = Some(menu);
+                self.accept_sidebar_project_menu(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                menu.filter.push(character);
+            }
+            _ => {}
+        }
+        self.sidebar_project_menu = Some(menu);
+        true
+    }
+
     pub(crate) fn handle_sidebar_search_key(&mut self, key: KeyEvent) -> bool {
         if !self.sidebar_search_active {
             return false;
@@ -291,6 +369,7 @@ impl AppState {
         }
         self.sidebar_new_menu_item_at(col, row).is_some()
             || self.sidebar_new_thread_item_at(col, row).is_some()
+            || self.sidebar_project_menu_item_at(col, row).is_some()
             || self.sidebar_group_menu_item_at(col, row).is_some()
             || self.sidebar_filter_menu_item_at(col, row).is_some()
             || crate::ui::sidebar_object_menu_item_at(self, self.screen_rect(), col, row).is_some()

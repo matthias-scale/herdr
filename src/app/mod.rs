@@ -805,6 +805,7 @@ impl App {
             sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
+            sidebar_project_menu: None,
             sidebar_refresh_requested: false,
             sidebar_refreshing: false,
             sidebar_selected_work_group: None,

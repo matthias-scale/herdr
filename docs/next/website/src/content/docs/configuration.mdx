@@ -263,6 +263,20 @@ With no `[[projects]]` configured the composer groups everything under
 the repo chip only when the selected group holds at least one checkout.
 Selecting a repo sets the composer's directory.
 
+Projects are also the sidebar's scope. With more than one project configured,
+the header line ends in a project chip: click it, or open it from the sidebar,
+to filter the whole list to one project's threads. Type to narrow the list, move
+with Up and Down, and pick with Enter or `1`–`9`. The first row, **All
+projects**, clears the scope. A thread belongs to a project when its checkout is
+inside one of the project's repositories or when it is a linked worktree of one,
+so worktrees stay with the repository they came from. The scope is per client
+and persists across attaches; a scope whose project later disappears from the
+config reads as no scope rather than an empty sidebar.
+
+`prefix+alt+c` opens the same project list as a spawn target: it starts a new
+Home thread in the project you pick, which is also what the sidebar's
+new-thread icon does.
+
 ## Custom command keybindings
 
 Custom commands use the same keybinding syntax.

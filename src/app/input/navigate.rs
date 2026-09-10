@@ -192,6 +192,11 @@ impl App {
                 self.begin_tui_workspace_create("tui.key.workspace.create");
             }
             NavigateAction::NewThread => {
+                // The picker takes keys through the sidebar's input path, so
+                // opening it without giving the sidebar the keyboard would draw
+                // a filter box that nothing can type into.
+                self.state.sidebar_focused = true;
+                self.state.sidebar_collapsed = false;
                 self.state.open_sidebar_new_thread();
                 leave_navigate_mode(&mut self.state);
             }
@@ -2603,6 +2608,8 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NewThread => {
+            state.sidebar_focused = true;
+            state.sidebar_collapsed = false;
             state.open_sidebar_new_thread();
             leave_navigate_mode(state);
         }

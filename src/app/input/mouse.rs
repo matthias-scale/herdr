@@ -411,10 +411,14 @@ impl AppState {
         let filter_anchor = self.sidebar_filter_anchor_rect();
         let filter_anchor_hit =
             group_menu_enabled && self.point_in_rect(filter_anchor, mouse.column, mouse.row);
-        // The filter chip sits inside the mode anchor, so it claims the click
-        // first; the rest of the header still opens the mode dropdown.
+        let project_anchor = crate::ui::sidebar_project_anchor_rect(self, self.view.sidebar_rect);
+        let project_anchor_hit =
+            group_menu_enabled && self.point_in_rect(project_anchor, mouse.column, mouse.row);
+        // The filter and project chips sit inside the mode anchor, so they claim
+        // the click first; the rest of the header still opens the mode dropdown.
         let group_anchor_hit = group_menu_enabled
             && !filter_anchor_hit
+            && !project_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_menu.is_some() {
             if let Some(index) = self.sidebar_new_menu_item_at(mouse.column, mouse.row) {
@@ -538,6 +542,33 @@ impl AppState {
                 }
                 self.sidebar_settled_menu_target = None;
                 self.sidebar_settled_menu_delete_armed = false;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_project_menu.is_some() {
+            if let Some(index) = self.sidebar_project_menu_item_at(mouse.column, mouse.row) {
+                if let Some(menu) = self.sidebar_project_menu.as_mut() {
+                    menu.filter.selected = index;
+                }
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && project_anchor_hit {
+            if self.sidebar_project_menu.is_some() {
+                self.sidebar_project_menu = None;
+            } else {
+                self.open_sidebar_project_menu();
+            }
+            return None;
+        }
+        if self.sidebar_project_menu.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                match self.sidebar_project_menu_item_at(mouse.column, mouse.row) {
+                    Some(index) => {
+                        self.accept_sidebar_project_menu(index);
+                    }
+                    None => self.sidebar_project_menu = None,
+                }
             }
             return None;
         }

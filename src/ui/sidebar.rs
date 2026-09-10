@@ -1475,7 +1475,56 @@ fn sidebar_query_parts(query: &str) -> (Vec<&str>, Vec<&str>) {
 /// The tree is showing a filtered subset, so a workspace that contributes no
 /// entry is noise and gets dropped rather than rendered as an empty header.
 fn sidebar_rows_are_filtered(app: &AppState) -> bool {
-    !app.sidebar_work_filter.query.is_empty() || app.sidebar_starred_only
+    !app.sidebar_work_filter.query.is_empty()
+        || app.sidebar_starred_only
+        || app.sidebar_work_filter.project.is_some()
+}
+
+/// The scoped project's checkouts, resolved once per rows pass. This is view
+/// computation, so the per-entry test must stay a comparison against an already
+/// built list rather than a walk of the config.
+struct ProjectScope<'a> {
+    names: Vec<&'a str>,
+    paths: Vec<&'a std::path::Path>,
+}
+
+fn sidebar_project_scope(app: &AppState) -> Option<ProjectScope<'_>> {
+    let project = app.scoped_project()?;
+    Some(ProjectScope {
+        names: project
+            .repos
+            .iter()
+            .map(|repo| repo.name.as_str())
+            .collect(),
+        paths: project
+            .repos
+            .iter()
+            .map(|repo| repo.path.as_path())
+            .collect(),
+    })
+}
+
+impl ProjectScope<'_> {
+    fn holds(&self, app: &AppState, entry: &AgentPanelEntry) -> bool {
+        if let Some(cwd) = app
+            .workspaces
+            .get(entry.ws_idx)
+            .map(|workspace| workspace.identity_cwd.as_path())
+        {
+            if self.paths.iter().any(|path| cwd.starts_with(path)) {
+                return true;
+            }
+        }
+        // A linked worktree is checked out beside the repository rather than
+        // inside it, so no project root scans its path. The repository name is
+        // what still ties it to the project.
+        entry_repo_label(app, entry).is_some_and(|label| {
+            let name = label.rsplit('/').next().unwrap_or(label.as_str());
+            self.names
+                .iter()
+                .any(|repo| repo.eq_ignore_ascii_case(name))
+        })
+    }
 }
 
 fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool {
@@ -1568,6 +1617,9 @@ fn compact_sidebar_rows_inner(
     .filter(|entry| !app.sidebar_starred_only || entry.starred)
     .filter(|entry| sidebar_entry_matches_query(app, entry))
     .collect::<Vec<_>>();
+    if let Some(scope) = sidebar_project_scope(app) {
+        entries.retain(|entry| scope.holds(app, entry));
+    }
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -5674,17 +5726,41 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         new_menu,
     );
     let mode_anchor = sidebar_group_mode_anchor_rect(area);
+    let project_chip_rect = sidebar_project_anchor_rect(app, area);
     if mode_anchor.width > 0 {
+        let label = sidebar_header_mode_label(app);
+        let chip = sidebar_project_chip(app);
+        // The chip owns fixed columns at the end of the line, so the view label
+        // truncates into what is left instead of pushing the chip off-screen.
+        let label = label
+            .strip_suffix(&chip)
+            .map(str::to_string)
+            .unwrap_or(label);
         frame.render_widget(
             Paragraph::new(Span::styled(
                 truncate_end(
-                    &sidebar_header_mode_label(app),
-                    usize::from(mode_anchor.width),
+                    &label,
+                    usize::from(mode_anchor.width.saturating_sub(project_chip_rect.width)),
                 ),
                 Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
             )),
             mode_anchor,
         );
+        if project_chip_rect.width > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate_end(&chip, usize::from(project_chip_rect.width)),
+                    Style::default()
+                        .fg(if app.sidebar_work_filter.project.is_some() {
+                            p.accent
+                        } else {
+                            p.overlay0
+                        })
+                        .add_modifier(Modifier::BOLD),
+                )),
+                project_chip_rect,
+            );
+        }
     }
     let overflow_style = if app.global_menu_attention_badge_visible() {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
@@ -6538,11 +6614,54 @@ pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
         SidebarGroupMode::Missive => Some(app.sidebar_work_filter.missive_label()),
         SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => None,
     };
-    match filters {
+    let label = match filters {
         Some(filters) => format!("{view} · {filters} ▾"),
         None => view,
-    }
+    };
+    format!("{label}{}", sidebar_project_chip(app))
 }
+
+/// The trailing ` · <project> ▾` segment of the header line. Empty when only
+/// one project is configured, because scoping to it would filter nothing.
+pub(crate) fn sidebar_project_chip(app: &AppState) -> String {
+    if !app.sidebar_project_scope_available() {
+        return String::new();
+    }
+    let label = app
+        .scoped_project()
+        .map(|project| project.label.clone())
+        .unwrap_or_else(|| ALL_PROJECTS_LABEL.to_string());
+    format!(" · {label} ▾")
+}
+
+pub(crate) const ALL_PROJECTS_LABEL: &str = "All projects";
+
+/// The project chip's hit area: the tail of the header line.
+pub(crate) fn sidebar_project_anchor_rect(app: &AppState, area: Rect) -> Rect {
+    let chip = sidebar_project_chip(app);
+    if chip.is_empty() {
+        return Rect::default();
+    }
+    let mode_anchor = sidebar_group_mode_anchor_rect(area);
+    let width = u16::try_from(display_width(&chip)).unwrap_or(u16::MAX);
+    // The chip closes the header line and keeps its own columns, so a default
+    // 26-column sidebar still offers the scope instead of hiding it behind a
+    // width nobody has. The view label keeps at least MODE_LABEL_MIN_WIDTH and
+    // the chip truncates into whatever is left.
+    let width = width.min(mode_anchor.width.saturating_sub(MODE_LABEL_MIN_WIDTH));
+    if width == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        mode_anchor.right().saturating_sub(width),
+        mode_anchor.y,
+        width,
+        1,
+    )
+}
+
+/// Columns the view label keeps before the project chip may take any.
+const MODE_LABEL_MIN_WIDTH: u16 = 10;
 
 /// The `· <filter> ▾` half of the header line, which opens the filter dropdown.
 /// Empty outside the work-item modes, where there is nothing to filter.
@@ -6565,12 +6684,17 @@ pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
     if offset >= mode_anchor.width {
         return Rect::default();
     }
-    Rect::new(
-        mode_anchor.x.saturating_add(offset),
-        mode_anchor.y,
-        mode_anchor.width.saturating_sub(offset),
-        1,
-    )
+    let x = mode_anchor.x.saturating_add(offset);
+    let width = mode_anchor.width.saturating_sub(offset);
+    // The project chip owns the tail of the same line, so the filter half stops
+    // where the chip starts instead of swallowing it.
+    let chip = sidebar_project_anchor_rect(app, area);
+    let width = if chip.width > 0 {
+        width.min(chip.x.saturating_sub(x))
+    } else {
+        width
+    };
+    Rect::new(x, mode_anchor.y, width, 1)
 }
 
 pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
@@ -6717,6 +6841,113 @@ pub(super) fn render_sidebar_new_thread(app: &AppState, frame: &mut Frame) {
             };
             Line::from(Span::styled(
                 format!("{} {accelerator} {label}", if selected { "▸" } else { " " }),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
+}
+
+/// The rows of the project-scope picker: every configured project, under one
+/// row that clears the scope.
+pub(crate) fn sidebar_project_menu_labels(app: &AppState) -> Vec<String> {
+    std::iter::once(ALL_PROJECTS_LABEL.to_string())
+        .chain(app.projects.iter().map(|project| project.label.clone()))
+        .collect()
+}
+
+pub(crate) fn sidebar_project_menu_matches(app: &AppState) -> Vec<(usize, String)> {
+    let labels = sidebar_project_menu_labels(app);
+    let query = app
+        .sidebar_project_menu
+        .as_ref()
+        .map(|state| state.filter.query.as_str())
+        .unwrap_or_default();
+    super::dropdown::filter_items(&labels, query)
+        .into_iter()
+        .map(|(index, label)| (index, label.to_string()))
+        .collect()
+}
+
+pub(crate) fn sidebar_project_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let state = app.sidebar_project_menu.as_ref()?;
+    let matches = sidebar_project_menu_matches(app);
+    let width = matches
+        .iter()
+        .map(|(_, label)| display_width(label).saturating_add(4))
+        .max()
+        .unwrap_or(20);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor: sidebar_project_anchor_rect(app, app.view.sidebar_rect),
+            item_count: matches.len(),
+            selected: state.filter.selected,
+            has_filter: true,
+            max_rows: 9,
+            min_width: u16::try_from(width).unwrap_or(u16::MAX),
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_project_menu(app: &AppState, frame: &mut Frame) {
+    let Some(state) = app.sidebar_project_menu.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_project_menu_layout(app, frame.area()) else {
+        return;
+    };
+    let matches = sidebar_project_menu_matches(app);
+    let scoped = app.sidebar_work_filter.project.as_deref();
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    if let Some(filter) = layout.filter_rect {
+        frame.render_widget(
+            Paragraph::new(format!(" 🔍 {}▏", state.filter.query)).style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg),
+            ),
+            filter,
+        );
+    }
+    let lines = matches
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(position, (index, label))| {
+            let selected = position == state.filter.selected;
+            // The scope in force is marked, so the list says what is on as well
+            // as what can be picked.
+            let active = match index.checked_sub(1) {
+                Some(project) => app
+                    .projects
+                    .get(project)
+                    .is_some_and(|project| Some(project.id.as_str()) == scoped),
+                None => scoped.is_none(),
+            };
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                format!(
+                    "{} {} {label}",
+                    if selected { "▸" } else { " " },
+                    if active { "•" } else { " " }
+                ),
                 style,
             ))
         })
@@ -17034,6 +17265,166 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.handle_sidebar_new_thread_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
         );
         assert!(app.sidebar_new_thread.is_none());
+    }
+
+    #[test]
+    fn project_scope_narrows_the_sidebar_and_survives_a_deleted_project() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let mut app = app_with_agents(&["scalable-work", "personal-work"]);
+        app.workspaces[0].identity_cwd = std::path::PathBuf::from("/tmp/t3-scope/110x");
+        app.workspaces[1].identity_cwd =
+            std::path::PathBuf::from("/tmp/t3-scope/agent-box-bootstrap");
+        app.projects = vec![
+            Project {
+                id: "scalable".into(),
+                label: "scalable".into(),
+                repos: vec![ProjectRepo {
+                    name: "110x".into(),
+                    path: "/tmp/t3-scope/110x".into(),
+                }],
+            },
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: vec![ProjectRepo {
+                    name: "agent-box-bootstrap".into(),
+                    path: "/tmp/t3-scope/agent-box-bootstrap".into(),
+                }],
+            },
+        ];
+
+        let labels = |app: &AppState| {
+            sidebar_rows(app)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some(entry.primary_label.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(&app).len(), 2, "no scope shows every project");
+
+        let mut filter = app.sidebar_work_filter.clone();
+        filter.project = Some("scalable".into());
+        app.set_sidebar_work_filter(filter);
+        assert_eq!(
+            labels(&app),
+            vec!["scalable-work"],
+            "the scope hides the other project's threads"
+        );
+
+        // The config can lose a project while a client still holds its id.
+        app.projects.remove(0);
+        assert_eq!(
+            labels(&app).len(),
+            2,
+            "a scope that no longer resolves shows everything instead of nothing"
+        );
+    }
+
+    #[test]
+    fn project_chip_owns_the_header_tail_only_when_scoping_is_offered() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let mut app = AppState::test_new();
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app, area);
+        assert_eq!(
+            sidebar_project_anchor_rect(&app, app.view.sidebar_rect),
+            Rect::default(),
+            "one implicit project is every project, so there is nothing to pick"
+        );
+
+        app.projects = vec![
+            Project {
+                id: "scalable".into(),
+                label: "scalable".into(),
+                repos: vec![ProjectRepo {
+                    name: "110x".into(),
+                    path: "/tmp/t3-chip/110x".into(),
+                }],
+            },
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: Vec::new(),
+            },
+        ];
+        assert!(sidebar_header_mode_label(&app).ends_with("· All projects ▾"));
+        let chip = sidebar_project_anchor_rect(&app, app.view.sidebar_rect);
+        let mode = sidebar_group_mode_anchor_rect(app.view.sidebar_rect);
+        assert!(
+            chip.width > 0,
+            "a default-width sidebar still offers the scope: {mode:?}"
+        );
+        assert_eq!(
+            chip.right(),
+            mode.right(),
+            "the chip closes the header line"
+        );
+
+        // A work-item view puts its own filter chip on the same line. Whatever
+        // width it gets, it must stop where the project chip starts.
+        app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
+        let filter = sidebar_filter_anchor_rect(&app, app.view.sidebar_rect);
+        let chip = sidebar_project_anchor_rect(&app, app.view.sidebar_rect);
+        assert!(
+            filter.width == 0 || filter.right() <= chip.x,
+            "the work filter chip overlaps the project chip: {filter:?} {chip:?}"
+        );
+    }
+
+    #[test]
+    fn project_menu_picks_a_project_and_clears_the_scope() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let mut app = AppState::test_new();
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        app.projects = vec![
+            Project {
+                id: "scalable".into(),
+                label: "scalable".into(),
+                repos: vec![ProjectRepo {
+                    name: "110x".into(),
+                    path: "/tmp/t3-menu/110x".into(),
+                }],
+            },
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: Vec::new(),
+            },
+        ];
+
+        app.open_sidebar_project_menu();
+        assert_eq!(
+            sidebar_project_menu_matches(&app)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            vec!["All projects", "scalable", "personal"]
+        );
+
+        app.sidebar_project_menu
+            .as_mut()
+            .expect("project menu")
+            .filter
+            .set_query("pers");
+        assert!(app.accept_sidebar_project_menu(0));
+        assert_eq!(
+            app.sidebar_work_filter.project.as_deref(),
+            Some("personal"),
+            "the filtered row applies its own project, not its position"
+        );
+        assert!(app.sidebar_project_menu.is_none());
+
+        app.open_sidebar_project_menu();
+        assert!(app.accept_sidebar_project_menu(0));
+        assert_eq!(
+            app.sidebar_work_filter.project, None,
+            "the first unfiltered row clears the scope"
+        );
     }
 
     #[test]
