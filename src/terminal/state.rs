@@ -3581,7 +3581,7 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::AgentDetection;
+    use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
@@ -5480,6 +5480,65 @@ mod tests {
             .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    /// AC3: A stale unverified subagent claim stays non-quiet and cannot auto-settle as Done.
+    #[test]
+    fn a_stale_subagent_claim_never_becomes_done_or_auto_settles() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the subagent claim stale");
+        assert!(terminal.supervisor_stale);
+
+        let active_subagents = terminal
+            .metadata_tokens
+            .get("closing_agents")
+            .and_then(|value| value.parse::<u32>().ok());
+        assert!(!session_is_quiet(
+            terminal.state,
+            false,
+            active_subagents,
+            terminal.holds_shell,
+        ));
+        assert_eq!(
+            derive_completion_tier(
+                terminal.state,
+                terminal.closing_contract.as_deref(),
+                terminal.closing_contract_met,
+                terminal.closing_idle,
+                false,
+                active_subagents,
+                terminal.holds_shell,
+                true,
+            ),
+            None
+        );
+
+        let mut state = AppState::test_new();
+        let workspace = Workspace::test_new("stale-subagent-claim");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .pane_state(pane_id)
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        terminal.id = terminal_id.clone();
+        state.terminals.insert(terminal_id, terminal);
+        state.workspaces.push(workspace);
+        state.auto_settle_inactive = false;
+        state.auto_settle_finished = false;
+        state.settle_done_after = Duration::ZERO;
+        let pane = state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane");
+        pane.seen = false;
+        pane.done_since = Some(now);
+
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_000), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
     }
 
     #[test]
