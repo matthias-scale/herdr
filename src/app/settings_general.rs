@@ -18,11 +18,35 @@ pub(crate) enum GeneralRow {
     AddProjectStartDir,
     DefaultPanelSurfaces,
     DeleteConfirmation,
+    Notepad,
+    NotepadHeight,
+    BreakTimer,
+    BreakTimerWorkMinutes,
+    BreakTimerShortMinutes,
+    BreakTimerLongMinutes,
 }
 
 /// The inactivity thresholds `enter` cycles through on the days row. A settings
 /// screen has no number field, and the useful values are few.
 const SETTLE_DAY_LADDER: [u64; 5] = [1, 3, 7, 14, 30];
+
+/// Sidebar rows the notepad may occupy. Small enough to stay a list, large
+/// enough to hold a short to-do list without scrolling.
+const NOTEPAD_HEIGHT_LADDER: [u64; 4] = [6, 8, 12, 16];
+
+/// Minutes per focus interval, per short break, and per long break.
+const WORK_MINUTE_LADDER: [u64; 5] = [20, 25, 30, 45, 50];
+const SHORT_BREAK_MINUTE_LADDER: [u64; 3] = [3, 5, 10];
+const LONG_BREAK_MINUTE_LADDER: [u64; 3] = [15, 20, 30];
+
+/// The next entry above `current`, wrapping to the first one at the top.
+fn next_in_ladder(ladder: &[u64], current: u64) -> u64 {
+    ladder
+        .iter()
+        .copied()
+        .find(|value| *value > current)
+        .unwrap_or(ladder[0])
+}
 
 impl GeneralRow {
     pub(crate) const ALL: &'static [Self] = &[
@@ -36,6 +60,12 @@ impl GeneralRow {
         Self::AddProjectStartDir,
         Self::DefaultPanelSurfaces,
         Self::DeleteConfirmation,
+        Self::Notepad,
+        Self::NotepadHeight,
+        Self::BreakTimer,
+        Self::BreakTimerWorkMinutes,
+        Self::BreakTimerShortMinutes,
+        Self::BreakTimerLongMinutes,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -50,6 +80,12 @@ impl GeneralRow {
             Self::AddProjectStartDir => "Add project starts in",
             Self::DefaultPanelSurfaces => "Default panel surfaces",
             Self::DeleteConfirmation => "Delete confirmation",
+            Self::Notepad => "Sidebar notepad",
+            Self::NotepadHeight => "Notepad height",
+            Self::BreakTimer => "Break timer",
+            Self::BreakTimerWorkMinutes => "Minutes per focus interval",
+            Self::BreakTimerShortMinutes => "Minutes per short break",
+            Self::BreakTimerLongMinutes => "Minutes per long break",
         }
     }
 
@@ -60,6 +96,8 @@ impl GeneralRow {
             Self::NudgeResumedAgents => {
                 Some("after a restart, tell an idle resumed agent to carry on")
             }
+            Self::Notepad => Some("markdown notes under the workspace list"),
+            Self::BreakTimer => Some("countdown in the sidebar footer, break prompt on expiry"),
             _ => None,
         }
     }
@@ -77,12 +115,19 @@ impl GeneralRow {
             Self::AddProjectStartDir => ("ui", "add_project_start_dir"),
             Self::DefaultPanelSurfaces => ("panel", "default_surfaces"),
             Self::DeleteConfirmation => ("ui", "confirm_close"),
+            Self::Notepad => ("notepad", "enabled"),
+            Self::NotepadHeight => ("notepad", "height"),
+            Self::BreakTimer => ("pomodoro", "enabled"),
+            Self::BreakTimerWorkMinutes => ("pomodoro", "work_minutes"),
+            Self::BreakTimerShortMinutes => ("pomodoro", "short_break_minutes"),
+            Self::BreakTimerLongMinutes => ("pomodoro", "long_break_minutes"),
         }
     }
 
     /// The bracketed value on the right of the row.
     pub(crate) fn value(self, state: &AppState) -> String {
         let on_off = |value: bool| if value { "on" } else { "off" }.to_string();
+        let minutes = |value: std::time::Duration| value.as_secs().div_ceil(60).to_string();
         match self {
             Self::ProjectGrouping => on_off(state.combine_repos_across_hosts),
             Self::AutoSettleFinished => on_off(state.auto_settle_finished),
@@ -115,6 +160,12 @@ impl GeneralRow {
                 }
             }
             Self::DeleteConfirmation => on_off(state.confirm_close),
+            Self::Notepad => on_off(state.notepad.enabled),
+            Self::NotepadHeight => state.notepad.height.to_string(),
+            Self::BreakTimer => on_off(state.pomodoro.enabled),
+            Self::BreakTimerWorkMinutes => minutes(state.pomodoro.work),
+            Self::BreakTimerShortMinutes => minutes(state.pomodoro.short_break),
+            Self::BreakTimerLongMinutes => minutes(state.pomodoro.long_break),
         }
     }
 
@@ -162,17 +213,43 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
         GeneralRow::NudgeResumedAgents => toggle(state.nudge_resumed_agents),
         GeneralRow::HideWhitespace => toggle(state.dock_diff_ignore_whitespace),
         GeneralRow::DeleteConfirmation => toggle(state.confirm_close),
+        GeneralRow::Notepad => toggle(state.notepad.enabled),
+        GeneralRow::BreakTimer => toggle(state.pomodoro.enabled),
+        GeneralRow::NotepadHeight => Some(ConfigEdit::Integer {
+            section,
+            key,
+            value: next_in_ladder(&NOTEPAD_HEIGHT_LADDER, u64::from(state.notepad.height)),
+        }),
+        GeneralRow::BreakTimerWorkMinutes => Some(ConfigEdit::Integer {
+            section,
+            key,
+            value: next_in_ladder(
+                &WORK_MINUTE_LADDER,
+                state.pomodoro.work.as_secs().div_ceil(60),
+            ),
+        }),
+        GeneralRow::BreakTimerShortMinutes => Some(ConfigEdit::Integer {
+            section,
+            key,
+            value: next_in_ladder(
+                &SHORT_BREAK_MINUTE_LADDER,
+                state.pomodoro.short_break.as_secs().div_ceil(60),
+            ),
+        }),
+        GeneralRow::BreakTimerLongMinutes => Some(ConfigEdit::Integer {
+            section,
+            key,
+            value: next_in_ladder(
+                &LONG_BREAK_MINUTE_LADDER,
+                state.pomodoro.long_break.as_secs().div_ceil(60),
+            ),
+        }),
         GeneralRow::SettleAfterDays => {
             let current = state.settle_after.as_secs().div_ceil(24 * 60 * 60);
-            let next = SETTLE_DAY_LADDER
-                .iter()
-                .copied()
-                .find(|days| *days > current)
-                .unwrap_or(SETTLE_DAY_LADDER[0]);
             Some(ConfigEdit::Integer {
                 section,
                 key,
-                value: next,
+                value: next_in_ladder(&SETTLE_DAY_LADDER, current),
             })
         }
         GeneralRow::NewThreadWorkspace => {
@@ -208,7 +285,7 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), total);
-        assert_eq!(total, 10);
+        assert_eq!(total, 16);
     }
 
     #[test]
@@ -257,6 +334,69 @@ mod tests {
                 section: "session",
                 key: "settle_after_days",
                 value: 1
+            })
+        );
+    }
+
+    #[test]
+    fn the_notepad_and_break_timer_rows_edit_their_own_sections() {
+        let mut state = AppState::test_new();
+        assert_eq!(GeneralRow::Notepad.value(&state), "off");
+        assert_eq!(GeneralRow::BreakTimer.value(&state), "off");
+        assert_eq!(GeneralRow::BreakTimerWorkMinutes.value(&state), "25");
+        assert_eq!(GeneralRow::BreakTimerShortMinutes.value(&state), "5");
+        assert_eq!(GeneralRow::BreakTimerLongMinutes.value(&state), "20");
+
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::Notepad),
+            Some(ConfigEdit::Bool {
+                section: "notepad",
+                key: "enabled",
+                value: true
+            })
+        );
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::BreakTimer),
+            Some(ConfigEdit::Bool {
+                section: "pomodoro",
+                key: "enabled",
+                value: true
+            })
+        );
+
+        state.notepad.enabled = true;
+        assert_eq!(GeneralRow::Notepad.value(&state), "on");
+    }
+
+    #[test]
+    fn the_minute_and_height_ladders_wrap() {
+        let mut state = AppState::test_new();
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::BreakTimerWorkMinutes),
+            Some(ConfigEdit::Integer {
+                section: "pomodoro",
+                key: "work_minutes",
+                value: 30
+            })
+        );
+
+        state.pomodoro.work = std::time::Duration::from_secs(50 * 60);
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::BreakTimerWorkMinutes),
+            Some(ConfigEdit::Integer {
+                section: "pomodoro",
+                key: "work_minutes",
+                value: 20
+            })
+        );
+
+        state.notepad.height = 16;
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::NotepadHeight),
+            Some(ConfigEdit::Integer {
+                section: "notepad",
+                key: "height",
+                value: 6
             })
         );
     }

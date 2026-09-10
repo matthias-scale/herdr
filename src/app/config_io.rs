@@ -519,7 +519,7 @@ mod general_round_trip_tests {
                     assert_ne!(
                         row.value(&app.state),
                         before,
-                        "{key} did not take effect after the reload"
+                        "{section}.{key} did not take effect after the reload"
                     );
 
                     // Read the file back through a fresh load: the value the
