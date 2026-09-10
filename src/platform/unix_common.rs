@@ -248,6 +248,17 @@ pub(crate) fn volume_used_percent(path: &std::ffi::CStr) -> Option<u8> {
     u8::try_from((used as u128 * 100).div_ceil(total as u128)).ok()
 }
 
+pub(super) fn verified_character_device(path: &Path, device: u64) -> Option<PathBuf> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let path = path.canonicalize().ok()?;
+    if !path.starts_with("/dev") {
+        return None;
+    }
+    let metadata = std::fs::metadata(&path).ok()?;
+    (metadata.file_type().is_char_device() && metadata.rdev() == device).then_some(path)
+}
+
 pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: &std::path::Path) {
     if !env.iter().any(|(key, _)| key == "PWD") {
         env.push(("PWD".to_string(), cwd.display().to_string()));

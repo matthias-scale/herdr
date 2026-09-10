@@ -750,7 +750,9 @@ fn tab_methods_round_trip_over_socket() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
+fn pane_process_info_reports_shell_tty_and_foreground_cwd_without_changing_pane_cwd() {
+    use std::os::unix::fs::FileTypeExt;
+
     let _lock = test_lock();
     let base = unique_test_dir();
     let foreground = base.join("foreground-process");
@@ -844,9 +846,21 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
         ),
     );
     let process_info = &process_info["result"]["process_info"];
-    assert!(process_info["shell_pid"].is_number());
+    let shell_pid = process_info["shell_pid"].as_u64().unwrap() as u32;
     assert_eq!(process_info["foreground_process_group_id"], foreground_pid);
-    assert!(process_info.get("tty").is_none());
+    let tty = PathBuf::from(process_info["tty"].as_str().expect("pane shell TTY"));
+    assert_eq!(
+        tty,
+        fs::read_link(format!("/proc/{shell_pid}/fd/0")).expect("pane shell fd 0")
+    );
+    assert!(tty.starts_with("/dev/pts"), "unexpected TTY {tty:?}");
+    assert!(
+        fs::metadata(&tty)
+            .expect("pane shell TTY metadata")
+            .file_type()
+            .is_char_device(),
+        "pane shell TTY must be a character device: {tty:?}"
+    );
     let foreground_processes = process_info["foreground_processes"].as_array().unwrap();
     let foreground_shell = foreground_processes
         .iter()

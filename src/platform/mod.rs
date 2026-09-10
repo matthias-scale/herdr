@@ -230,6 +230,111 @@ mod fallback;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod process_tty_tests {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::process::CommandExt;
+    #[cfg(target_os = "linux")]
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn process_tty_returns_verified_pty_when_stdin_is_redirected() {
+        let marker = std::env::temp_dir().join(format!(
+            "herdr-process-tty-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open test PTY");
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.arg("-c");
+        command.arg(format!(
+            "exec </dev/null; touch {}; exec sleep 30",
+            marker.display()
+        ));
+        let mut child = pair.slave.spawn_command(command).expect("spawn PTY child");
+        let pid = child.process_id().expect("PTY child pid");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let marker_created = marker.exists();
+        let observed = super::process_tty(pid);
+        #[cfg(target_os = "linux")]
+        let stdin = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok();
+        #[cfg(target_os = "linux")]
+        let stdout = std::fs::read_link(format!("/proc/{pid}/fd/1")).ok();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(marker);
+
+        assert!(
+            marker_created,
+            "test child did not finish redirecting stdin"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(stdin.as_deref(), Some(Path::new("/dev/null")));
+        let tty = observed.expect("controlling TTY");
+        #[cfg(target_os = "linux")]
+        assert_eq!(Some(tty.as_path()), stdout.as_deref());
+        #[cfg(target_os = "linux")]
+        assert!(tty.starts_with("/dev/pts"), "unexpected TTY {tty:?}");
+        #[cfg(target_os = "macos")]
+        assert!(
+            tty.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ttys")),
+            "unexpected TTY {tty:?}"
+        );
+        assert!(
+            std::fs::metadata(&tty)
+                .expect("TTY metadata")
+                .file_type()
+                .is_char_device(),
+            "TTY must be a character device: {tty:?}"
+        );
+    }
+
+    #[test]
+    fn process_tty_returns_none_without_a_controlling_terminal() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: `setsid` is async-signal-safe and this closure performs no allocation.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = command.spawn().expect("spawn detached child");
+
+        let observed = super::process_tty(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(observed, None);
+    }
+}
+
 /// Returns the process job used for the sidebar foreground-process label.
 ///
 /// Windows has no terminal foreground process group, so its implementation
