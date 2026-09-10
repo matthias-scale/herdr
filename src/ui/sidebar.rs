@@ -35,6 +35,14 @@ const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
 const SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH: usize = 16;
 
+/// Focus-star suffix drawn immediately after a starred session's title. Kept to
+/// two display columns (space + glyph) so it costs the title field almost
+/// nothing at narrow sidebar widths.
+pub(crate) const SIDEBAR_STAR_SUFFIX: &str = " \u{2605}";
+/// Below this the title field is too short to give up columns to the star, so a
+/// starred row simply renders without it rather than truncating the name.
+const SIDEBAR_STAR_MIN_TITLE_WIDTH: usize = 6;
+
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
 }
@@ -638,10 +646,16 @@ fn render_compact_agent_row_with_prefix(
             }
         }
     }
-    let title = pad_right(
-        &truncate_end(&layout.title, displayed_title_width),
-        displayed_title_width,
-    );
+    // The star sits inside the title field, right after the name, so it reads as
+    // part of the session's label rather than as another right-hand column.
+    let star_suffix = (entry.starred
+        && displayed_title_width
+            >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
+    .then_some(SIDEBAR_STAR_SUFFIX);
+    let title_text_width =
+        displayed_title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text = truncate_end(&layout.title, title_text_width);
+    let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
     let provider = pad_left(&layout.provider, widths.provider);
     let age = layout
@@ -674,10 +688,19 @@ fn render_compact_agent_row_with_prefix(
     let mut spans = vec![
         Span::styled(prefix, compact_row_style(Style::default(), bg)),
         Span::styled(dot, compact_row_style(dot_style, bg)),
-        Span::styled(title, compact_row_style(title_style, bg)),
+        Span::styled(title_text, compact_row_style(title_style, bg)),
+    ];
+    if let Some(star) = star_suffix {
+        spans.push(Span::styled(
+            star,
+            compact_row_style(Style::default().fg(p.yellow), bg),
+        ));
+    }
+    spans.extend([
+        Span::styled(title_pad, compact_row_style(title_style, bg)),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
-    ];
+    ]);
     if let Some(suffix) = space_suffix.as_deref() {
         spans.push(Span::styled(
             suffix,
@@ -779,6 +802,9 @@ pub(crate) struct AgentPanelEntry {
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
     pub prio: bool,
+    /// User-set focus star on the owning tab. Rendering only: it never
+    /// reorders or regroups the row.
+    pub starred: bool,
     pub state: AgentState,
     /// The last closing-block report still names at least one gate, even if
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
@@ -970,6 +996,7 @@ fn collect_agent_panel_entries_with_runtimes(
                 .map(move |detail| {
                     let space_label = workspace_label.clone();
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    let starred = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.starred);
                     let tab_has_custom_name = ws
                         .tabs
                         .get(detail.tab_idx)
@@ -1025,6 +1052,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         prio,
+                        starred,
                         state: detail.state,
                         open_blockers: detail.open_blockers,
                         completion_tier,
@@ -1401,6 +1429,12 @@ fn sidebar_query_parts(query: &str) -> (Vec<&str>, Vec<&str>) {
         })
 }
 
+/// The tree is showing a filtered subset, so a workspace that contributes no
+/// entry is noise and gets dropped rather than rendered as an empty header.
+fn sidebar_rows_are_filtered(app: &AppState) -> bool {
+    !app.sidebar_work_filter.query.is_empty() || app.sidebar_starred_only
+}
+
 fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool {
     let (terms, _) = sidebar_query_parts(&app.sidebar_work_filter.query);
     if terms.is_empty() {
@@ -1486,6 +1520,9 @@ fn compact_sidebar_rows_inner(
         None => sidebar_thread_entries(app),
     }
     .into_iter()
+    // Cheap scalar gate first: when the star filter is on it discards most
+    // entries before the query matcher builds its haystack string.
+    .filter(|entry| !app.sidebar_starred_only || entry.starred)
     .filter(|entry| sidebar_entry_matches_query(app, entry))
     .collect::<Vec<_>>();
     let has_one_space_label = entries.first().is_some_and(|first| {
@@ -1513,7 +1550,7 @@ fn compact_sidebar_rows_inner(
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
-    if !app.sidebar_work_filter.query.is_empty()
+    if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
         && recently_done.is_empty()
         && settled_entries.is_empty()
@@ -1632,7 +1669,7 @@ fn append_legacy_space_rows(
         if let Some((header_label, _)) = workspace_labels.get(&ws_idx) {
             mark_redundant_space_labels(&mut member_entries, header_label);
         }
-        if !app.sidebar_work_filter.query.is_empty() && member_entries.is_empty() {
+        if sidebar_rows_are_filtered(app) && member_entries.is_empty() {
             continue;
         }
         rows.push(SidebarRow::Workspace {
@@ -5254,6 +5291,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     let search = sidebar_header_search_rect(area);
     let new_thread = sidebar_header_new_thread_rect(area);
     let new_menu = sidebar_header_new_menu_rect(area);
+    let star_filter = sidebar_header_star_filter_rect(area);
     let overflow = sidebar_header_overflow_rect(area);
     frame.render_widget(
         Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
@@ -5282,6 +5320,19 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
             )),
             search,
         );
+    }
+    if star_filter.width > 0 {
+        // Filled glyph while the gate is on, hollow while it is off, so the
+        // control reads as a state and not just as a button.
+        let (glyph, style) = if app.sidebar_starred_only {
+            (
+                "\u{2605}",
+                Style::default().fg(p.yellow).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("\u{2606}", Style::default().fg(p.overlay0))
+        };
+        frame.render_widget(Paragraph::new(Span::styled(glyph, style)), star_filter);
     }
     frame.render_widget(
         Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
@@ -6095,8 +6146,24 @@ pub(crate) fn sidebar_header_new_thread_rect(area: Rect) -> Rect {
     Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
 }
 
+/// Header toggle that gates the tree down to starred sessions. Sits in the
+/// control strip left of the new-thread icon, so the search box shrinks by its
+/// width rather than the icons moving.
+pub(crate) fn sidebar_header_star_filter_rect(area: Rect) -> Rect {
+    let next = sidebar_header_new_thread_rect(area);
+    if next.width == 0 || next.x < area.x.saturating_add(3) {
+        return Rect::default();
+    }
+    Rect::new(next.x.saturating_sub(3), area.y, 2, 1)
+}
+
 pub(crate) fn sidebar_header_search_rect(area: Rect) -> Rect {
-    let control = sidebar_header_new_thread_rect(area);
+    let star = sidebar_header_star_filter_rect(area);
+    let control = if star.width > 0 {
+        star
+    } else {
+        sidebar_header_new_thread_rect(area)
+    };
     if control.width == 0 || control.x <= area.x.saturating_add(1) {
         return Rect::default();
     }
@@ -7804,6 +7871,7 @@ pub(crate) mod tests {
             agent_context: None,
             has_agent: true,
             prio: true,
+            starred: false,
             state,
             open_blockers: false,
             completion_tier: None,
@@ -11412,6 +11480,106 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .join("\n");
             assert!(mobile_text.contains(expected_label), "{width}");
         }
+    }
+
+    #[test]
+    fn the_starred_only_gate_hides_every_unstarred_session() {
+        let mut app =
+            priority_app_with_states(&[AgentState::Working, AgentState::Idle, AgentState::Idle]);
+        app.workspaces[1].tabs[0].starred = true;
+        for ws_idx in 0..3 {
+            app.toggle_workspace_agent_disclosure(ws_idx);
+        }
+
+        let all = sidebar_thread_entries(&app).len();
+        assert!(all >= 3, "the fixture projects one entry per workspace");
+
+        app.sidebar_starred_only = true;
+        let visible: Vec<_> = sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                _ => None,
+            })
+            .collect();
+        assert!(!visible.is_empty(), "the starred session survives the gate");
+        assert!(
+            visible
+                .iter()
+                .all(|(ws_idx, starred)| *ws_idx == 1 && *starred),
+            "only the starred session remains, got {visible:?}"
+        );
+
+        app.sidebar_starred_only = false;
+        let unfiltered = sidebar_rows(&app)
+            .into_iter()
+            .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+            .count();
+        assert!(
+            unfiltered > visible.len(),
+            "clearing the gate brings the other sessions back"
+        );
+    }
+
+    #[test]
+    fn a_starred_session_draws_its_star_directly_after_the_title() {
+        let mut entry = compact_test_entry("focus-session", Some(Agent::Claude));
+        entry.starred = true;
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 40, 1);
+
+        let render = |entry: &AgentPanelEntry| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row_with_prefix(
+                        &app, frame, entry, area, 0, true, None, None,
+                    )
+                })
+                .unwrap();
+            row_text(terminal.backend().buffer(), 0, area.width)
+        };
+
+        let starred = render(&entry);
+        let title_end =
+            starred.find("focus-session").expect("title is drawn") + "focus-session".len();
+        assert_eq!(
+            &starred[title_end..title_end + SIDEBAR_STAR_SUFFIX.len()],
+            SIDEBAR_STAR_SUFFIX,
+            "the star follows the title immediately, got {starred:?}"
+        );
+
+        entry.starred = false;
+        let plain = render(&entry);
+        assert!(
+            !plain.contains(SIDEBAR_STAR_SUFFIX.trim()),
+            "an unstarred row draws no star, got {plain:?}"
+        );
+        assert_eq!(
+            starred.chars().count(),
+            plain.chars().count(),
+            "the star is absorbed by the title field, not appended to the row"
+        );
+    }
+
+    #[test]
+    fn a_narrow_row_drops_the_star_rather_than_eating_the_title() {
+        let mut entry = compact_test_entry("session", Some(Agent::Claude));
+        entry.starred = true;
+        let app = crate::app::state::AppState::test_new();
+        let area = Rect::new(0, 0, 12, 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_compact_agent_row_with_prefix(&app, frame, &entry, area, 0, true, None, None)
+            })
+            .unwrap();
+        let text = row_text(terminal.backend().buffer(), 0, area.width);
+        assert!(
+            !text.contains(SIDEBAR_STAR_SUFFIX.trim()),
+            "no star at this width, got {text:?}"
+        );
     }
 
     #[test]

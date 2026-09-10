@@ -2862,6 +2862,9 @@ pub enum ContextMenuKind {
     Tab {
         ws_idx: usize,
         tab_idx: usize,
+        /// Snapshot of the tab's star at open time, so the entry can read
+        /// "Star" or "Unstar" without the menu reaching back into state.
+        starred: bool,
     },
     Pane {
         ws_idx: usize,
@@ -2875,6 +2878,10 @@ pub enum ContextMenuKind {
         linkable_work_link: Option<PaneMenuWorkLinkAction>,
     },
 }
+
+/// Labels of the session-star entries in the tab context menu.
+pub const STAR_ITEM: &str = "Star";
+pub const UNSTAR_ITEM: &str = "Unstar";
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
@@ -3030,7 +3037,12 @@ impl ContextMenuState {
                 "Open worktree...",
                 if *collapsed { "Expand" } else { "Collapse" },
             ],
-            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { starred, .. } => vec![
+                "New tab",
+                "Rename",
+                if *starred { UNSTAR_ITEM } else { STAR_ITEM },
+                "Close",
+            ],
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -3356,6 +3368,9 @@ pub struct AppState {
     pub(crate) sidebar_filter_menu_selected: usize,
     /// Typed input goes to the persisted sidebar row query while this is set.
     pub(crate) sidebar_search_active: bool,
+    /// Sidebar-only view gate: show just the starred sessions. Pure client
+    /// presentation state — the star itself lives on the tab.
+    pub(crate) sidebar_starred_only: bool,
     /// Downward creation menu anchored to the sidebar header.
     pub(crate) sidebar_new_menu: Option<SidebarNewMenuState>,
     /// Downward recent-project picker. Project paths are derived at render time.
@@ -3954,6 +3969,7 @@ pub(crate) enum SidebarFooterItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlId {
     SidebarNewThread,
+    SidebarStarFilter,
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
@@ -5688,6 +5704,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_new_thread: None,
             sidebar_refresh_requested: false,
@@ -6319,9 +6336,9 @@ impl AppState {
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
                     assert_workspace_index(ws_idx, "context menu workspace")
                 }
-                ContextMenuKind::Tab { ws_idx, tab_idx } => {
-                    assert_tab_index(ws_idx, tab_idx, "context menu tab")
-                }
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                } => assert_tab_index(ws_idx, tab_idx, "context menu tab"),
                 ContextMenuKind::Pane {
                     ws_idx,
                     tab_idx,

@@ -242,6 +242,7 @@ mod tests {
             has_agent: true,
             foreground_process_name: None,
             prio: false,
+            starred: false,
             state: AgentState::Working,
             open_blockers: false,
             completion_tier: None,

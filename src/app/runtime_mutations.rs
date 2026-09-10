@@ -2,7 +2,7 @@ use crate::api::schema::{
     EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
     PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneWorkContextSetParams, PaneZoomParams, TabCreateParams, TabMoveParams, TabPinParams,
-    TabRenameParams, TabTarget, WorkspaceCloseParams, WorkspaceCreateParams,
+    TabRenameParams, TabStarParams, TabTarget, WorkspaceCloseParams, WorkspaceCreateParams,
     WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget,
     WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
@@ -98,6 +98,10 @@ impl App {
 
     pub(crate) fn runtime_tab_pin(&mut self, id: &'static str, params: TabPinParams) -> String {
         self.dispatch_runtime_mutation(id, Method::TabPin(params))
+    }
+
+    pub(crate) fn runtime_tab_star(&mut self, id: &'static str, params: TabStarParams) -> String {
+        self.dispatch_runtime_mutation(id, Method::TabStar(params))
     }
 
     pub(crate) fn runtime_tab_move(&mut self, id: &'static str, params: TabMoveParams) -> String {
