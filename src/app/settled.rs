@@ -544,12 +544,7 @@ mod tests {
 
     fn settle_ready_remote_collision(
         now: Instant,
-    ) -> (
-        AppState,
-        PaneId,
-        crate::work_index::Snapshot,
-        PaneSettlementCandidate,
-    ) {
+    ) -> (AppState, PaneId, crate::work_index::Snapshot) {
         let url = "https://github.com/owner/repo/pull/7";
         let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
             pr_urls: vec![url.into()],
@@ -598,15 +593,10 @@ mod tests {
                 }],
                 ..crate::fleet::Snapshot::default()
             });
-        let candidate = PaneSettlementCandidate {
-            agent_ref: state.remote_agent_panel_entries[0].agent_ref.clone(),
-            ws_idx: 0,
-            pane_id,
-        };
         let mut merged_item = item();
         merged_item.pr_url = Some(url.into());
         merged_item.pr_state = Some("merged".into());
-        (state, pane_id, snapshot(merged_item), candidate)
+        (state, pane_id, snapshot(merged_item))
     }
 
     fn item() -> crate::work_index::WorkItem {
@@ -976,23 +966,62 @@ mod tests {
     }
 
     #[test]
-    fn refresh_never_settles_remote_row_with_colliding_local_pane_id() {
-        let now = Instant::now();
-        let (mut eligibility_probe, _, work, _) = settle_ready_remote_collision(now);
-        assert_eq!(
-            eligibility_probe.refresh_settled_panes_at(Some(&work), now, 1_725_000_003),
-            1,
-            "the colliding local pane must reach settlement before ownership is tested"
-        );
+    fn remote_candidate_never_settles_a_colliding_local_pane() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        state.agent_host_name = "local".into();
+        let candidate = PaneSettlementCandidate {
+            agent_ref: crate::api::schema::AgentRef::new("remote", pane_id.raw().to_string())
+                .expect("valid remote agent reference"),
+            ws_idx: 0,
+            pane_id,
+        };
 
-        let (mut state, pane_id, _, candidate) = settle_ready_remote_collision(now);
-        assert_eq!(candidate.agent_ref.host, "remote");
         assert_eq!(
-            state.settle_owned_candidates(&[candidate], 1_725_000_003),
+            state.settle_owned_candidates(&[candidate], 1_725_000_002),
             0
         );
         assert!(!state.pane_is_settled(0, pane_id));
         assert!(state.pending_pane_settlement_changes.is_empty());
+    }
+
+    #[test]
+    fn refresh_never_settles_remote_row_with_colliding_local_pane_id() {
+        let now = Instant::now();
+        let (mut state, pane_id, work) = settle_ready_remote_collision(now);
+        assert_eq!(state.remote_agent_panel_entries[0].agent_ref.host, "remote");
+        assert_eq!(
+            state.remote_agent_panel_entries[0].agent_ref.agent,
+            pane_id.raw().to_string()
+        );
+        assert_eq!(
+            state.remote_agent_panel_entries[0].entry.pane_id,
+            PaneId::from_raw(0),
+            "remote projection carries no local pane target"
+        );
+
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .finished_since = None;
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&work), now, 1_725_000_003),
+            0,
+            "a fresh finished reading waits through the grace window"
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert!(state.pending_pane_settlement_changes.is_empty());
+
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&work),
+                now + state.settle_finished_after,
+                1_725_000_004
+            ),
+            1,
+            "the eligible local pane settles through the refresh path"
+        );
+        assert!(state.pane_is_settled(0, pane_id));
     }
 
     #[test]
