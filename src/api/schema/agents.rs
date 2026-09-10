@@ -184,11 +184,30 @@ pub struct AgentPromptParams {
 /// The additive request shape for `agent.focus`. Exactly one of `target` and
 /// `agent_ref` must be present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = require_one_focus_target)]
 pub struct AgentFocusParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_ref: Option<super::AgentRef>,
+}
+
+fn require_one_focus_target(schema: &mut schemars::Schema) {
+    let _ = schema.insert(
+        "oneOf".into(),
+        serde_json::json!([
+            {
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
+                "not": {"required": ["agent_ref"]}
+            },
+            {
+                "properties": {"agent_ref": {"not": {"type": "null"}}},
+                "required": ["agent_ref"],
+                "not": {"required": ["target"]}
+            }
+        ]),
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

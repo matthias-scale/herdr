@@ -36,8 +36,9 @@ pub(crate) enum RemoteFocusTransition {
     Closed,
 }
 
-/// The future wire client implements this seam. Implementations may return
-/// immediately and report later states through `AppEvent::RemoteFocusTransition`.
+/// The future wire client implements this seam. Implementations must return
+/// without performing blocking I/O. `Err` reports an immediate start failure;
+/// after `Ok`, deliver state changes through `AppEvent::RemoteFocusTransition`.
 pub(crate) trait RemoteFocusTransport: Send {
     fn start(
         &mut self,
@@ -131,7 +132,7 @@ impl RemoteFocusOperations {
             .count();
         if concurrent >= REMOTE_FOCUS_MAX_CONCURRENT_OPERATIONS {
             return Err(ErrorBody {
-                code: "refused_for_safety".into(),
+                code: "operation_limit_reached".into(),
                 message: format!(
                     "remote focus operation limit reached ({REMOTE_FOCUS_MAX_CONCURRENT_OPERATIONS})"
                 ),
@@ -154,7 +155,7 @@ impl RemoteFocusOperations {
                 self.operations.remove(&operation_id);
             } else {
                 return Err(ErrorBody {
-                    code: "refused_for_safety".into(),
+                    code: "operation_limit_reached".into(),
                     message: "remote focus operation retention limit reached".into(),
                 });
             }
@@ -189,7 +190,7 @@ impl RemoteFocusOperations {
         self.prune(now);
         let Some(operation) = self.operations.get(operation_id) else {
             return Err(ErrorBody {
-                code: "invalid_request".into(),
+                code: "unknown_operation".into(),
                 message: format!("unknown remote focus operation: {operation_id}"),
             });
         };
@@ -454,7 +455,7 @@ mod tests {
         let error = operations
             .begin(agent_ref(), now)
             .expect_err("concurrent cap must reject another operation");
-        assert_eq!(error.code, "refused_for_safety");
+        assert_eq!(error.code, "operation_limit_reached");
         assert_eq!(operations.len(), REMOTE_FOCUS_MAX_CONCURRENT_OPERATIONS);
 
         let first = "remote-focus-1";
@@ -471,7 +472,10 @@ mod tests {
             .get_mut(first)
             .expect("first operation")
             .completed_at = now.checked_sub(REMOTE_FOCUS_TERMINAL_TTL + Duration::from_secs(1));
-        operations.prune(now);
+        let expired = operations
+            .snapshot(first, now)
+            .expect_err("expired operation is no longer queryable");
+        assert_eq!(expired.code, "unknown_operation");
         assert_eq!(operations.len(), REMOTE_FOCUS_MAX_CONCURRENT_OPERATIONS - 1);
 
         let mut retained = RemoteFocusOperations::default();
@@ -501,6 +505,9 @@ mod tests {
             )
             .expect("terminal record is evicted at the retention cap");
         assert_eq!(retained.len(), REMOTE_FOCUS_MAX_RETAINED_OPERATIONS);
-        assert!(retained.snapshot("remote-focus-1", now).is_err());
+        let unknown = retained
+            .snapshot("remote-focus-1", now)
+            .expect_err("evicted operation is no longer queryable");
+        assert_eq!(unknown.code, "unknown_operation");
     }
 }

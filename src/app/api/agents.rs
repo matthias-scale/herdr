@@ -1486,37 +1486,90 @@ mod tests {
     }
 
     #[test]
-    fn self_host_agent_ref_is_byte_identical_and_stays_synchronous() {
-        let mut app = app_with_agent();
-        app.state.agent_host_name = "laptop".into();
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("test terminal")
-            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        let target = app.public_pane_id(0, pane_id).expect("public pane id");
-        let agent_ref = AgentRef::new("laptop", target.clone()).expect("valid agent reference");
+    fn self_host_agent_ref_matches_local_focus_from_fresh_state() {
+        fn fresh_app() -> (App, String, crate::layout::PaneId) {
+            let mut app = app_with_agent();
+            app.state.agent_host_name = "laptop".into();
+            let root_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let pane_id =
+                app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            app.state.ensure_test_terminals();
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("test terminal")
+                .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .expect("test pane")
+                .seen = false;
+            app.state.workspaces[0].tabs[0]
+                .layout
+                .focus_pane(root_pane_id);
+            app.state.active = None;
+            app.state.mode = Mode::Navigate;
+            assert_eq!(
+                app.state.workspaces[0].focused_pane_id(),
+                Some(root_pane_id)
+            );
+            let target = app.public_pane_id(0, pane_id).expect("public pane id");
+            (app, target, pane_id)
+        }
 
-        let target_response = app.handle_agent_focus(
-            "same-id".into(),
-            crate::api::schema::AgentTarget {
-                target: target.clone(),
-            },
-        );
-        let agent_ref_response = app.handle_api_request(Request {
+        fn response_without_instance_ids(response: &str) -> serde_json::Value {
+            let mut response: serde_json::Value =
+                serde_json::from_str(response).expect("focus response");
+            let agent = response
+                .pointer_mut("/result/agent")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("agent info result");
+            for field in [
+                "agent_ref",
+                "terminal_id",
+                "workspace_id",
+                "tab_id",
+                "pane_id",
+            ] {
+                let _ = agent.remove(field);
+            }
+            response
+        }
+
+        let (mut target_app, target, target_pane_id) = fresh_app();
+        let target_response = target_app.handle_api_request(Request {
+            id: "same-id".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: Some(target),
+                agent_ref: None,
+            }),
+        });
+        let (mut agent_ref_app, target, agent_ref_pane_id) = fresh_app();
+        let agent_ref_response = agent_ref_app.handle_api_request(Request {
             id: "same-id".into(),
             method: Method::AgentFocus(AgentFocusParams {
                 target: None,
-                agent_ref: Some(agent_ref),
+                agent_ref: Some(AgentRef::new("laptop", target).expect("valid agent reference")),
             }),
         });
 
-        assert_eq!(agent_ref_response, target_response);
-        assert_eq!(app.remote_focus_operations.len(), 0);
+        assert_eq!(
+            response_without_instance_ids(&agent_ref_response),
+            response_without_instance_ids(&target_response)
+        );
+        for (app, pane_id) in [
+            (&target_app, target_pane_id),
+            (&agent_ref_app, agent_ref_pane_id),
+        ] {
+            assert_eq!(app.state.active, Some(0));
+            assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+            assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+            assert_eq!(app.state.mode, Mode::Terminal);
+            assert_eq!(app.remote_focus_operations.len(), 0);
+        }
         let parsed: SuccessResponse = serde_json::from_str(&agent_ref_response).expect("response");
         assert!(matches!(parsed.result, ResponseResult::AgentInfo { .. }));
     }
@@ -1605,7 +1658,7 @@ mod tests {
             }),
         });
         let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
-        assert_eq!(error.error.code, "invalid_request");
+        assert_eq!(error.error.code, "unknown_operation");
     }
 
     #[test]
