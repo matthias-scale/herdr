@@ -29,7 +29,7 @@ const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 #[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
-const DEFAULT_THREAD_TITLE: &str = "New Thread";
+pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
@@ -261,63 +261,6 @@ fn compact_age(
         .and_then(|instant| status_report_age_compact_label(Some(instant), now))
         .unwrap_or_else(|| "—".to_string());
     (age, instant)
-}
-
-fn title_without_identifier<'a>(identifier: &str, title: &'a str) -> Option<&'a str> {
-    let title = title.trim();
-    let prefix = title.get(..identifier.len())?;
-    if !prefix.eq_ignore_ascii_case(identifier) {
-        return None;
-    }
-    let remainder = title.get(identifier.len()..)?;
-    if !remainder.is_empty()
-        && !remainder.chars().next().is_some_and(|character| {
-            character.is_whitespace() || matches!(character, ':' | '·' | '-')
-        })
-    {
-        return None;
-    }
-    Some(
-        remainder
-            .trim_start()
-            .strip_prefix([':', '·', '-'])
-            .unwrap_or(remainder.trim_start())
-            .trim_start(),
-    )
-}
-
-fn sidebar_tab_title(
-    projection: Option<&crate::workspace::TabDisplayProjection>,
-    fallback: Option<String>,
-) -> Option<String> {
-    let Some(crate::workspace::TabDisplayProjection::Derived {
-        agent,
-        ticket,
-        binding: _,
-        title,
-    }) = projection
-    else {
-        return fallback;
-    };
-    let normalized_title = match (ticket.as_deref(), title.as_deref()) {
-        (Some(identifier), Some(title)) => title_without_identifier(identifier, title)
-            .map(str::to_string)
-            .or_else(|| Some(title.to_string())),
-        (_, title) => title.map(str::to_string),
-    };
-    // Worktree identity belongs to the Spaces and Repo group headers. Agent
-    // rows use the work object and session title only.
-    let label = [ticket.clone(), normalized_title]
-        .into_iter()
-        .flatten()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if label.is_empty() {
-        agent.clone().or(fallback)
-    } else {
-        Some(label)
-    }
 }
 
 fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
@@ -1038,7 +981,10 @@ fn collect_agent_panel_entries_with_runtimes(
                         primary_label: workspace_label.clone(),
                         space_label: space_label.clone(),
                         space_label_redundant: false,
-                        primary_tab_label: sidebar_tab_title(projection.as_ref(), thread_title),
+                        primary_tab_label: crate::workspace::session_title(
+                            projection.as_ref(),
+                            thread_title,
+                        ),
                         tab_has_custom_name,
                         tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
@@ -2100,11 +2046,16 @@ fn sidebar_tab_groups(
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
-                let Some(context) = context.filter(|context| !context.pr_urls.is_empty()) else {
+                // Same source as the work view's groups: a declared pull
+                // request is what the window is working on, and grouping it by
+                // the effective union filed a linked window under the branch's
+                // pull request as well.
+                let urls = preferred_pr_urls(app, &entry);
+                if urls.is_empty() {
                     push_unlinked_tab_group(app, &mut groups, entry);
                     continue;
-                };
-                for url in &context.pr_urls {
+                }
+                for url in &urls {
                     let title_suffix = app
                         .work_index_snapshot
                         .as_ref()
@@ -2115,8 +2066,8 @@ fn sidebar_tab_groups(
                                 .find(|item| item.pr_url.as_deref() == Some(url.as_str()))
                         })
                         .and_then(|item| item.pr_title.as_deref())
-                        .or(context.work_title.as_deref())
-                        .or(context.session_name.as_deref());
+                        .or_else(|| context.and_then(|context| context.work_title.as_deref()))
+                        .or_else(|| context.and_then(|context| context.session_name.as_deref()));
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
                     push_sidebar_tab_group(&mut groups, url.clone(), title, entry.clone(), false);
@@ -2216,7 +2167,7 @@ fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
 /// carries no title: a separator with nothing after it reads as missing text.
 fn work_group_header_title(id: &str, title: Option<&str>) -> String {
     match title.map(str::trim).filter(|title| !title.is_empty()) {
-        Some(title) => match title_without_identifier(id, title) {
+        Some(title) => match crate::workspace::title_without_identifier(id, title) {
             Some("") => id.to_string(),
             Some(title) => format!("{id} · {title}"),
             None => format!("{id} · {title}"),
@@ -7065,6 +7016,53 @@ pub(crate) mod tests {
             .map(|group| group.title)
             .collect::<Vec<_>>();
         assert_eq!(tab_titles, ["▫ alpha", "▫ beta"]);
+    }
+
+    #[test]
+    fn linking_a_pull_request_regroups_only_the_window_it_was_linked_to() {
+        let mut app = app_with_unlinked_tab_directories(&[Some("/work/repo"), Some("/work/repo")]);
+        // Both windows sit in one checkout, so the git tier observes the
+        // branch's pull request for each of them.
+        for tab_idx in 0..2 {
+            let terminal_id = {
+                let tab = &app.workspaces[0].tabs[tab_idx];
+                tab.panes[&tab.root_pane].attached_terminal_id.clone()
+            };
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .replace_git_work_context(crate::work_context::PaneWorkContext {
+                    pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                    ..Default::default()
+                })
+                .expect("git observation");
+        }
+        let linked_terminal_id = {
+            let tab = &app.workspaces[0].tabs[0];
+            tab.panes[&tab.root_pane].attached_terminal_id.clone()
+        };
+        app.terminals
+            .get_mut(&linked_terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                ..Default::default()
+            })
+            .expect("manual link");
+
+        let entries = sidebar_thread_entries(&app);
+        let groups = sidebar_tab_groups(&app, &entries, SidebarGroupMode::RepoPr)
+            .into_iter()
+            .map(|group| (group.key, group.entries.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups,
+            vec![
+                ("https://github.com/o/r/pull/2".to_string(), 1),
+                ("https://github.com/o/r/pull/1".to_string(), 1),
+            ],
+            "the linked window leaves the branch's group instead of joining both"
+        );
     }
 
     #[test]
@@ -14215,7 +14213,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(work_group_header_title("SCA-3165", None), "SCA-3165");
 
         let row_title = |title: &str| {
-            sidebar_tab_title(
+            crate::workspace::session_title(
                 Some(&crate::workspace::TabDisplayProjection::Derived {
                     agent: None,
                     ticket: Some("SCA-3165".into()),
@@ -14241,7 +14239,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
 
         assert_eq!(
-            sidebar_tab_title(Some(&projection), None).as_deref(),
+            crate::workspace::session_title(Some(&projection), None).as_deref(),
             Some("SCA-3165 · Fix sidebar rows")
         );
 
@@ -14252,7 +14250,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             title: None,
         };
         assert_eq!(
-            sidebar_tab_title(Some(&binding_only), Some("New Thread".into())).as_deref(),
+            crate::workspace::session_title(Some(&binding_only), Some("New Thread".into()))
+                .as_deref(),
             Some("codex")
         );
     }

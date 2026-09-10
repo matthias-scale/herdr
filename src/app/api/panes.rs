@@ -5947,13 +5947,13 @@ mod tests {
             serde_json::from_str(&app.handle_pane_report_metadata("stale".into(), stale)).unwrap();
 
         let context = app.state.terminals[&terminal_id].effective_work_context();
-        assert_eq!(context.ticket_ids, vec!["MAT-500", "MAT-3", "SCA-88"]);
+        // The manual declaration owns the link fields outright, so the hook's
+        // ticket and pull request drop out of the effective context while the
+        // fields it does not declare still come from the hook.
+        assert_eq!(context.ticket_ids, vec!["MAT-500"]);
         assert_eq!(
             context.pr_urls,
-            vec![
-                "https://github.com/manual/repo/pull/99",
-                "https://github.com/o/r/pull/3"
-            ]
+            vec!["https://github.com/manual/repo/pull/99"]
         );
         assert_eq!(context.preview_urls, vec!["https://third.vercel.app"]);
         assert_eq!(context.work_title.as_deref(), Some("Manual context"));
@@ -6030,14 +6030,14 @@ mod tests {
         terminal_id: &crate::terminal::TerminalId,
     ) {
         let context = app.state.terminals[terminal_id].effective_work_context();
-        assert_eq!(context.ticket_ids, vec!["MAT-500", "MAT-1"]);
+        // The hook tier is live here, which the preview URL is what proves:
+        // the link fields stay the manual declaration's because a declaration
+        // replaces the tiers below it.
+        assert_eq!(context.ticket_ids, vec!["MAT-500"]);
         assert_eq!(context.preview_urls, vec!["https://hook.vercel.app"]);
         assert_eq!(
             context.pr_urls,
-            vec![
-                "https://github.com/manual/repo/pull/99",
-                "https://github.com/o/r/pull/1"
-            ]
+            vec!["https://github.com/manual/repo/pull/99"]
         );
     }
 

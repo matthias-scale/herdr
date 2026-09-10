@@ -445,6 +445,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # you want that menu.
 # show_pull_button = false
 
+# Open the dock automatically when the focused pane carries a pull request,
+# ticket, or conversation.
+# Off by default: the status row names each link after the pane title, and a
+# click on that name opens it in the dock.
+# open_dock_on_work_link = false
+
 # Show the split-below and split-right buttons in the top-right action row.
 # Off by default: both splits have keybindings, and the buttons crowd the tab titles.
 # show_pane_toggle_buttons = false
