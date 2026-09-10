@@ -1405,7 +1405,8 @@ mod tests {
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
-            agent_ref: crate::api::schema::AgentRef::new("local", "1"),
+            agent_ref: crate::api::schema::AgentRef::new("local", "1")
+                .expect("valid local agent reference"),
             local_target: Some(crate::ui::sidebar::AgentPanelLocalTarget {
                 ws_idx: 0,
                 tab_idx: 0,

@@ -362,10 +362,10 @@ mod tests {
         assert_eq!(agents.len(), 1);
         assert_eq!(
             agents[0].agent_ref.as_ref(),
-            Some(&crate::api::schema::AgentRef::new(
-                "laptop",
-                expected_pane_id
-            ))
+            Some(
+                &crate::api::schema::AgentRef::new("laptop", expected_pane_id)
+                    .expect("valid expected agent reference")
+            )
         );
     }
 

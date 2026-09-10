@@ -14,11 +14,16 @@ pub struct AgentRef {
 }
 
 impl AgentRef {
-    pub fn new(host: impl Into<String>, agent: impl Into<String>) -> Self {
-        Self {
-            host: host.into(),
-            agent: agent.into(),
+    pub fn new(
+        host: impl Into<String>,
+        agent: impl Into<String>,
+    ) -> Result<Self, ParseAgentRefError> {
+        let host = host.into();
+        let agent = agent.into();
+        if host.is_empty() || host.contains(AGENT_REF_SEPARATOR) || agent.is_empty() {
+            return Err(ParseAgentRefError);
         }
+        Ok(Self { host, agent })
     }
 }
 
@@ -51,7 +56,7 @@ impl FromStr for AgentRef {
             .split_once(AGENT_REF_SEPARATOR)
             .filter(|(host, agent)| !host.is_empty() && !agent.is_empty())
             .ok_or(ParseAgentRefError)?;
-        Ok(Self::new(host, agent))
+        Self::new(host, agent)
     }
 }
 
@@ -80,7 +85,8 @@ mod tests {
 
     #[test]
     fn display_parse_and_json_round_trip_paths_with_slashes() {
-        let agent_ref = AgentRef::new("ssh/user@workbox", "workspace/reviewer");
+        let agent_ref =
+            AgentRef::new("ssh/user@workbox", "workspace/reviewer").expect("valid agent reference");
 
         let displayed = agent_ref.to_string();
         assert_eq!(displayed, "ssh/user@workbox::workspace/reviewer");
@@ -98,6 +104,27 @@ mod tests {
     fn parse_rejects_missing_or_empty_components() {
         for invalid in ["agent", "::agent", "host::"] {
             assert!(invalid.parse::<AgentRef>().is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn construction_rejects_values_that_cannot_round_trip() {
+        for (host, agent) in [("a::b", "id"), ("", "id"), ("host", "")] {
+            assert!(
+                AgentRef::new(host, agent).is_err(),
+                "accepted {host:?} {agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn construction_allows_slashes_and_separators_in_agent_ids() {
+        for (host, agent) in [
+            ("ssh/user@workbox", "workspace/reviewer"),
+            ("host", "run::child"),
+        ] {
+            let agent_ref = AgentRef::new(host, agent).expect("valid agent reference");
+            assert_eq!(agent_ref.to_string().parse::<AgentRef>(), Ok(agent_ref));
         }
     }
 }

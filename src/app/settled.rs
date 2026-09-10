@@ -261,11 +261,14 @@ impl AppState {
                         observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
                     }
                     if inactive || (new_work_trigger && finished_ripe) {
+                        let Ok(agent_ref) = crate::api::schema::AgentRef::new(
+                            self.agent_host_name.clone(),
+                            pane_id.raw().to_string(),
+                        ) else {
+                            continue;
+                        };
                         candidates.push(PaneSettlementCandidate {
-                            agent_ref: crate::api::schema::AgentRef::new(
-                                self.agent_host_name.clone(),
-                                pane_id.raw().to_string(),
-                            ),
+                            agent_ref,
                             ws_idx,
                             pane_id: *pane_id,
                         });
@@ -910,7 +913,8 @@ mod tests {
         let (mut state, pane_id) = state_with_context(Default::default());
         state.agent_host_name = "local".into();
         let candidate = PaneSettlementCandidate {
-            agent_ref: crate::api::schema::AgentRef::new("remote", pane_id.raw().to_string()),
+            agent_ref: crate::api::schema::AgentRef::new("remote", pane_id.raw().to_string())
+                .expect("valid remote agent reference"),
             ws_idx: 0,
             pane_id,
         };

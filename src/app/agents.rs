@@ -405,11 +405,13 @@ impl App {
             return None;
         }
         let pane = self.pane_info(ws_idx, pane_id)?;
+        let agent_ref = crate::api::schema::AgentRef::new(
+            self.state.agent_host_name.clone(),
+            pane.pane_id.clone(),
+        )
+        .ok()?;
         Some(crate::api::schema::AgentInfo {
-            agent_ref: Some(crate::api::schema::AgentRef::new(
-                self.state.agent_host_name.clone(),
-                pane.pane_id.clone(),
-            )),
+            agent_ref: Some(agent_ref),
             terminal_id: pane.terminal_id,
             work_context: pane.work_context,
             name: terminal.agent_name.clone(),

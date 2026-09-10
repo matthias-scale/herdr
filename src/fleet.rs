@@ -409,22 +409,31 @@ fn snapshot_from_evidence(
         match evidence.agents {
             Ok(agents) => {
                 entries.extend(
-                    agents
-                        .into_iter()
-                        .map(|agent| FleetRow::from_agent(&evidence.host.name, agent, now_s)),
+                    agents.into_iter().filter_map(|agent| {
+                        FleetRow::from_agent(&evidence.host.name, agent, now_s)
+                    }),
                 );
             }
-            Err(error) => entries.push(FleetRow::host_unknown(&evidence.host.name, error)),
+            Err(error) => {
+                if let Some(row) = FleetRow::host_unknown(&evidence.host.name, error) {
+                    entries.push(row);
+                }
+            }
         }
         for run in evidence.runs {
             match run {
-                Ok(run) => entries.push(FleetRow::from_run(
-                    &evidence.host.name,
-                    run,
-                    now_s,
-                    heartbeat_stale_s,
-                )),
-                Err(error) => entries.push(FleetRow::run_error(&evidence.host.name, error)),
+                Ok(run) => {
+                    if let Some(row) =
+                        FleetRow::from_run(&evidence.host.name, run, now_s, heartbeat_stale_s)
+                    {
+                        entries.push(row);
+                    }
+                }
+                Err(error) => {
+                    if let Some(row) = FleetRow::run_error(&evidence.host.name, error) {
+                        entries.push(row);
+                    }
+                }
             }
         }
         let version_skew = evidence
@@ -1010,18 +1019,20 @@ impl FleetRow {
 
     #[cfg(test)]
     pub(crate) fn test_agent_row_with_id(host: &str, name: &str, agent_id: &str) -> Self {
-        let agent_ref = crate::api::schema::AgentRef::new(host, agent_id);
+        let agent_ref =
+            crate::api::schema::AgentRef::new(host, agent_id).expect("valid test agent reference");
         Self::unknown(host, EvidenceSource::Herdr, agent_ref, String::new()).with_test_name(name)
     }
 
     #[cfg(test)]
     pub(crate) fn test_agent_info_row(host: &str, agent: AgentInfo) -> Self {
-        Self::from_agent(host, agent, 0)
+        Self::from_agent(host, agent, 0).expect("valid test agent row")
     }
 
     #[cfg(test)]
     pub(crate) fn test_run_row(host: &str, run_id: &str, blocked: bool) -> Self {
-        let agent_ref = crate::api::schema::AgentRef::new(host, run_id);
+        let agent_ref =
+            crate::api::schema::AgentRef::new(host, run_id).expect("valid test run reference");
         let mut row = Self::unknown(host, EvidenceSource::RunState, agent_ref, String::new());
         row.error = None;
         row.name = Some(run_id.to_string());
@@ -1038,7 +1049,7 @@ impl FleetRow {
         self
     }
 
-    fn from_agent(host: &str, agent: AgentInfo, now_s: u64) -> Self {
+    fn from_agent(host: &str, agent: AgentInfo, now_s: u64) -> Option<Self> {
         let agent_info = agent.clone();
         let liveness = match agent.agent_status {
             AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
@@ -1066,7 +1077,7 @@ impl FleetRow {
             .collect::<Vec<_>>();
         let gate_summary = gates.first().map(gate_summary);
         let id = agent.name.clone().unwrap_or_else(|| agent.pane_id.clone());
-        let agent_ref = crate::api::schema::AgentRef::new(host, agent.pane_id.clone());
+        let agent_ref = crate::api::schema::AgentRef::new(host, agent.pane_id.clone()).ok()?;
         let handle = agent_ref.to_string();
         let model = agent.tokens.get("model").cloned();
         let effort = agent.tokens.get("effort").cloned();
@@ -1075,7 +1086,7 @@ impl FleetRow {
             .agent_session
             .as_ref()
             .map(|session| session.value.clone());
-        Self {
+        Some(Self {
             host: host.into(),
             agent_ref,
             source: EvidenceSource::Herdr,
@@ -1102,10 +1113,10 @@ impl FleetRow {
             error: None,
             native_session,
             agent_info: Some(agent_info),
-        }
+        })
     }
 
-    fn from_run(host: &str, run: RunState, now_s: u64, heartbeat_stale_s: u64) -> Self {
+    fn from_run(host: &str, run: RunState, now_s: u64, heartbeat_stale_s: u64) -> Option<Self> {
         let heartbeat_at = parse_utc_timestamp(&run.last_heartbeat);
         let age_s = heartbeat_at.and_then(|heartbeat| now_s.checked_sub(heartbeat));
         let fresh = age_s.is_some_and(|age| age <= heartbeat_stale_s);
@@ -1126,13 +1137,15 @@ impl FleetRow {
         let gate_summary = blocked_reason
             .as_ref()
             .map(|reason| format!("windowless run blocked: {reason}"));
-        let parent_handle =
-            run.parent.run_id.as_ref().map(|run_id| {
-                crate::api::schema::AgentRef::new(&run.parent.host, run_id).to_string()
-            });
-        let agent_ref = crate::api::schema::AgentRef::new(host, run.run_id.clone());
+        let parent_handle = run
+            .parent
+            .run_id
+            .as_ref()
+            .and_then(|run_id| crate::api::schema::AgentRef::new(&run.parent.host, run_id).ok())
+            .map(|agent_ref| agent_ref.to_string());
+        let agent_ref = crate::api::schema::AgentRef::new(host, run.run_id.clone()).ok()?;
         let handle = agent_ref.to_string();
-        Self {
+        Some(Self {
             host: host.into(),
             agent_ref,
             source: EvidenceSource::RunState,
@@ -1167,25 +1180,25 @@ impl FleetRow {
             error: None,
             native_session: None,
             agent_info: None,
-        }
+        })
     }
 
-    fn host_unknown(host: &str, error: String) -> Self {
-        Self::unknown(
+    fn host_unknown(host: &str, error: String) -> Option<Self> {
+        Some(Self::unknown(
             host,
             EvidenceSource::Host,
-            crate::api::schema::AgentRef::new(host, "STATUS_UNKNOWN"),
+            crate::api::schema::AgentRef::new(host, "STATUS_UNKNOWN").ok()?,
             error,
-        )
+        ))
     }
 
-    fn run_error(host: &str, error: String) -> Self {
-        Self::unknown(
+    fn run_error(host: &str, error: String) -> Option<Self> {
+        Some(Self::unknown(
             host,
             EvidenceSource::RunState,
-            crate::api::schema::AgentRef::new(host, "RUN_STATE_ERROR"),
+            crate::api::schema::AgentRef::new(host, "RUN_STATE_ERROR").ok()?,
             error,
-        )
+        ))
     }
 
     fn unknown(
@@ -1741,7 +1754,7 @@ mod tests {
                 "pr": 42
             }]),
         );
-        let row = FleetRow::from_agent("ub1", agent, 1_777_000_000);
+        let row = FleetRow::from_agent("ub1", agent, 1_777_000_000).expect("valid fleet row");
         assert!(row.blocked);
         assert_eq!(row.liveness, Liveness::Unknown);
         assert_eq!(row.state, "blocked_liveness_unknown");
@@ -1756,11 +1769,13 @@ mod tests {
         let agent = agent(AgentStatus::Idle, serde_json::json!([]));
         assert!(agent.agent_ref.is_none());
 
-        let row = FleetRow::from_agent("configured/alias", agent, 1_777_000_000);
+        let row = FleetRow::from_agent("configured/alias", agent, 1_777_000_000)
+            .expect("valid fleet row");
 
         assert_eq!(
             row.agent_ref,
             crate::api::schema::AgentRef::new("configured/alias", "p1")
+                .expect("valid expected agent reference")
         );
     }
 
@@ -1874,7 +1889,8 @@ mod tests {
             "ub1",
             agent(AgentStatus::Stale, serde_json::json!([])),
             1_777_000_000,
-        );
+        )
+        .expect("valid fleet row");
         assert!(!row.blocked);
         assert_eq!(row.liveness, Liveness::Unknown);
         assert_eq!(row.state, "status_unknown");
@@ -1939,7 +1955,7 @@ mod tests {
         let mut parent = FleetRow::unknown(
             "mac",
             EvidenceSource::RunState,
-            crate::api::schema::AgentRef::new("mac", "parent"),
+            crate::api::schema::AgentRef::new("mac", "parent").expect("valid parent reference"),
             "fixture".into(),
         );
         parent.liveness = Liveness::Terminal;
@@ -1947,7 +1963,7 @@ mod tests {
         let mut child = FleetRow::unknown(
             "ub1",
             EvidenceSource::RunState,
-            crate::api::schema::AgentRef::new("ub1", "child"),
+            crate::api::schema::AgentRef::new("ub1", "child").expect("valid child reference"),
             "fixture".into(),
         );
         child.liveness = Liveness::Live;
@@ -1981,13 +1997,15 @@ mod tests {
                 }]),
             ),
             1_777_000_000,
-        );
+        )
+        .expect("valid blocked fleet row");
         blocked.handle = "ub1/b".into();
         let working = FleetRow::from_agent(
             "mac",
             agent(AgentStatus::Working, serde_json::json!([])),
             1_777_000_000,
-        );
+        )
+        .expect("valid working fleet row");
         let mut rows = vec![working, blocked];
         sort_rows(&mut rows);
         assert_eq!(rows[0].handle, "ub1/b");

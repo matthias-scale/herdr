@@ -1018,7 +1018,7 @@ fn collect_agent_panel_entries_with_runtimes(
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
-                .map(move |detail| {
+                .filter_map(move |detail| {
                     let local_target = AgentPanelLocalTarget {
                         ws_idx,
                         tab_idx: detail.tab_idx,
@@ -1064,11 +1064,11 @@ fn collect_agent_panel_entries_with_runtimes(
                         detail.holds_shell,
                         has_closing_block_tokens,
                     );
-                    AgentPanelEntry {
-                        agent_ref: crate::api::schema::AgentRef::new(
-                            app.agent_host_name.clone(),
-                            agent_id,
-                        ),
+                    let agent_ref =
+                        crate::api::schema::AgentRef::new(app.agent_host_name.clone(), agent_id)
+                            .ok()?;
+                    Some(AgentPanelEntry {
+                        agent_ref,
                         local_target: Some(local_target),
                         host_label: None,
                         ws_idx,
@@ -1106,7 +1106,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         holds_shell: detail.holds_shell,
                         gate_count: detail.gate_count,
                         tab_first_pane: false,
-                    }
+                    })
                 })
         })
         .collect()
@@ -7824,7 +7824,8 @@ pub(crate) mod tests {
     #[test]
     fn remote_rows_render_the_host_token_at_narrow_and_normal_widths() {
         let mut entry = compact_test_entry("remote task", Some(Agent::Codex));
-        entry.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1");
+        entry.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
+            .expect("valid remote agent reference");
         entry.local_target = None;
         entry.host_label = Some("ub2".into());
         let app = AppState::test_new();
@@ -8171,7 +8172,8 @@ pub(crate) mod tests {
             state_label.to_string(),
         );
         AgentPanelEntry {
-            agent_ref: crate::api::schema::AgentRef::new("localhost", "p1"),
+            agent_ref: crate::api::schema::AgentRef::new("localhost", "p1")
+                .expect("valid local agent reference"),
             local_target: Some(AgentPanelLocalTarget {
                 ws_idx: 0,
                 tab_idx: 0,

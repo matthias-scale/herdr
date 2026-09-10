@@ -3503,7 +3503,8 @@ mod tests {
             .into_iter()
             .next()
             .expect("agent panel fixture");
-        remote.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash");
+        remote.agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
+            .expect("valid remote agent reference");
         remote.local_target = None;
         remote.host_label = Some("ub2".into());
         remote.state = crate::detect::AgentState::Idle;

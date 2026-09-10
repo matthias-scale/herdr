@@ -3169,8 +3169,10 @@ mod tests {
         app.state.dock_pr_focused = true;
         app.state.dock_chooser_focused = true;
         app.state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
-        app.state.sidebar_selected_remote_agent =
-            Some(crate::api::schema::AgentRef::new("ub2", "remote-pane"));
+        app.state.sidebar_selected_remote_agent = Some(
+            crate::api::schema::AgentRef::new("ub2", "remote-pane")
+                .expect("valid remote agent reference"),
+        );
         app.state.sidebar_selected_settled = Some(crate::app::state::PaneFocusTarget {
             workspace_id: app.state.workspaces[0].id.clone(),
             pane_id: _pane_id,
