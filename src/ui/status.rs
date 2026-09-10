@@ -178,9 +178,18 @@ fn focused_pane_title_layout(
     );
     let mut links_width = 0usize;
     let mut kept: Vec<(crate::app::state::DockObjectRef, String)> = Vec::new();
+    let title_of_record = fit_focused_pane_title(&repo, &thread, usize::MAX).unwrap_or_default();
     for object in &app.dock_context_objects {
         let label = app.dock_object_label(object);
         if label.is_empty() {
+            continue;
+        }
+        // The title already carries the ticket it was derived from. Naming it
+        // twice on one row buys nothing, and the title stays clickable-free.
+        if title_of_record
+            .to_lowercase()
+            .contains(&label.to_lowercase())
+        {
             continue;
         }
         let cost = WORK_LINK_GAP + display_width(&label);
@@ -283,14 +292,17 @@ fn focused_pane_title_parts(app: &AppState) -> Option<(String, String)> {
                 .filter(|repo| !repo.is_empty())
                 .map(str::to_string)
         })?;
-    let title = terminal
-        .manual_label
-        .clone()
-        .or_else(|| context.session_name.clone())
-        .or_else(|| context.work_title.clone())
-        .or_else(|| terminal.terminal_title_stripped())
-        .or_else(|| terminal.terminal_title.clone())?;
-    let title = subject_of(title.trim());
+    // The sidebar row for this pane reads the same function, so the two
+    // surfaces cannot name one session differently.
+    let tab_idx = workspace.active_tab;
+    let projection = workspace.tab_display_projection(&app.terminals, tab_idx);
+    let title = crate::workspace::session_title(
+        projection.as_ref(),
+        workspace
+            .tab_display_name_from(&app.terminals, tab_idx)
+            .or_else(|| Some(super::sidebar::DEFAULT_THREAD_TITLE.to_string())),
+    )?;
+    let title = title.trim();
     (!title.is_empty()).then(|| (repo, title.to_string()))
 }
 
@@ -308,17 +320,6 @@ fn fit_focused_pane_title(repo: &str, thread: &str, width: usize) -> Option<Stri
         return Some(repo.to_string());
     }
     Some(truncate_end(&full, width))
-}
-
-/// Agents prefix their title with identity -- `cc · herdr · rename the pane`.
-/// The sidebar and the tab already name the agent and the workspace, so the
-/// status row keeps only the trailing subject: the one thing nothing else on
-/// screen says. A title without the separator is already its own subject.
-fn subject_of(title: &str) -> &str {
-    title
-        .rsplit(" · ")
-        .find(|part| !part.trim().is_empty())
-        .map_or(title, str::trim)
 }
 
 /// Left-aligned quick-access buttons. The status bar's own segments are
@@ -2056,6 +2057,7 @@ mod tests {
         terminal.set_terminal_title(Some("Fix billing".into()));
         terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
             repo: Some("herdrdev/herdr".into()),
+            session_name: Some("Fix billing".into()),
             pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
             ticket_ids: vec!["SCA-3165".into()],
             ..Default::default()
@@ -2077,7 +2079,8 @@ mod tests {
                 .iter()
                 .map(|link| link.label.as_str())
                 .collect::<Vec<_>>(),
-            ["#159", "SCA-3165"]
+            ["#159"],
+            "the ticket is already in the title and is not repeated"
         );
 
         let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("status terminal");
@@ -2093,7 +2096,7 @@ mod tests {
             .collect::<Vec<_>>();
         let rendered = columns.concat();
         assert!(
-            rendered.contains("herdr / Fix billing  #159  SCA-3165"),
+            rendered.contains("herdr / SCA-3165 · Fix billing  #159"),
             "links follow the title with a gap between them: {rendered:?}"
         );
 
@@ -2106,17 +2109,44 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_title_drops_the_agent_and_workspace_prefix() {
+    fn the_status_row_title_is_the_title_the_sidebar_row_shows() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal");
+        terminal.set_terminal_title(Some("cc · herdr · Fix billing".into()));
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            repo: Some("herdrdev/herdr".into()),
+            session_name: Some("Fix billing".into()),
+            ticket_ids: vec!["SCA-3165".into()],
+            ..Default::default()
+        });
+
+        let sidebar_title = crate::ui::sidebar::agent_panel_entries_from(
+            &app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+        )
+        .into_iter()
+        .find(|entry| entry.ws_idx == 0)
+        .and_then(|entry| entry.primary_tab_label)
+        .expect("the sidebar names this session");
+
         assert_eq!(
-            subject_of("cc · herdr · rename the pane"),
-            "rename the pane"
+            focused_pane_title_parts(&app).map(|(_, title)| title),
+            Some(sidebar_title),
+            "one session, one title"
         );
-        // A trailing empty segment falls back to the last one that says something.
-        assert_eq!(subject_of("cc · herdr ·   "), "herdr");
-        assert_eq!(subject_of("Fix billing"), "Fix billing");
-        // A bare separator is not the agent prefix shape and must survive.
-        assert_eq!(subject_of("a·b"), "a·b");
-        assert_eq!(subject_of("修复 · 标题"), "标题");
     }
 
     #[test]

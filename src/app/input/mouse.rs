@@ -3230,7 +3230,8 @@ mod tests {
         terminal.set_terminal_title(Some("Fix billing".into()));
         terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
             repo: Some("herdrdev/herdr".into()),
-            ticket_ids: vec!["SCA-3165".into()],
+            session_name: Some("Fix billing".into()),
+            pr_urls: vec!["https://github.com/herdrdev/herdr/pull/159".into()],
             ..Default::default()
         });
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 24));
@@ -3245,8 +3246,8 @@ mod tests {
             .status_work_links
             .first()
             .cloned()
-            .expect("the status row names the ticket");
-        assert_eq!(link.label, "SCA-3165");
+            .expect("the status row names the pull request");
+        assert_eq!(link.label, "#159");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -3257,10 +3258,10 @@ mod tests {
         assert!(!app.state.dock_collapsed, "the click opens the dock");
         assert_eq!(
             app.state.dock_tab,
-            Some(crate::app::DockSurface::Linear),
-            "on the ticket that was clicked"
+            Some(crate::app::DockSurface::Pr),
+            "on the link that was clicked"
         );
-        assert_eq!(app.state.dock_tab_label(0), "SCA-3165");
+        assert_eq!(app.state.dock_tab_label(0), "#159");
     }
 
     #[test]
