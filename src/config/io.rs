@@ -797,6 +797,9 @@ pub fn write_actions_atomically(
         .parse::<toml::Value>()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
+    // Keep a dotfiles-managed symlink intact: write to its target.
+    let resolved = crate::platform::resolve_write_target(path)?;
+    let path = resolved.as_path();
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
@@ -916,6 +919,45 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn symlink_scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-config-symlink-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_actions_atomically_follows_a_symlinked_config() {
+        let dir = symlink_scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&target, "onboarding = false\n").expect("seed");
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+
+        let actions = vec![crate::config::ActionConfig {
+            name: "build".into(),
+            command: "just check".into(),
+            key: Some("prefix+ctrl+b".into()),
+            ..Default::default()
+        }];
+        write_actions_atomically(&link, &actions).expect("write actions");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "action save replaced the managed symlink with a regular file"
+        );
+        let written = std::fs::read_to_string(&target).expect("read target");
+        assert!(written.contains("onboarding = false"));
+        assert!(written.contains("name = \"build\""));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {
