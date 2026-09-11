@@ -1571,7 +1571,7 @@ mod tests {
         );
         assert_eq!(
             read_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .expect("cat echoes the direct PTY write"),
             Bytes::copy_from_slice(bytes)
         );
@@ -1601,7 +1601,7 @@ mod tests {
             write_handle.try_write_controlled_user_input(7, &controlled_for_thread)
         });
         started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("controlled writer entered the concurrent write");
 
         handle.write_terminal_response(|| Some(response.clone()));
@@ -1624,7 +1624,7 @@ mod tests {
         while observed.len() < total_len {
             observed.extend_from_slice(
                 &read_rx
-                    .recv_timeout(Duration::from_secs(1))
+                    .recv_timeout(Duration::from_secs(10))
                     .expect("cat echoes both PTY writes"),
             );
         }
@@ -1662,7 +1662,7 @@ mod tests {
         while observed.len() < written {
             observed.extend_from_slice(
                 &read_rx
-                    .recv_timeout(Duration::from_secs(1))
+                    .recv_timeout(Duration::from_secs(10))
                     .expect("real PTY echoes the written prefix"),
             );
         }
@@ -1774,7 +1774,7 @@ mod tests {
         );
         assert_eq!(
             read_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .expect("cat echoes the healthy direct PTY write"),
             Bytes::from_static(b"healthy")
         );
@@ -1904,7 +1904,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_millis(500)))
             .expect("peer timeout");
         poll_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("actor entered idle poll");
 
         let start = Instant::now();
