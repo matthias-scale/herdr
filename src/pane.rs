@@ -22,7 +22,7 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(unix)]
-use crate::pty::actor::PtyWriteGuard;
+use crate::pty::actor::ControlledWriteResult;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
 
@@ -1283,8 +1283,6 @@ enum PaneRuntimeIo {
         sender: mpsc::Sender<Bytes>,
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
         remote_owner: Arc<Mutex<Option<u64>>>,
-        #[cfg(unix)]
-        write_guard: PtyWriteGuard,
     },
 }
 
@@ -1338,24 +1336,6 @@ impl PaneRuntimeIo {
     }
 
     #[cfg(unix)]
-    fn remote_control_guard(&self) -> PtyWriteGuard {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.remote_control_guard(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { write_guard, .. } => write_guard.clone(),
-        }
-    }
-
-    #[cfg(unix)]
-    fn revoke_remote_control(&self) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.remote_control_guard().revoke(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { write_guard, .. } => write_guard.revoke(),
-        }
-    }
-
-    #[cfg(unix)]
     fn release_remote_owner(&self, owner_id: u64) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_remote_owner(owner_id),
@@ -1372,16 +1352,9 @@ impl PaneRuntimeIo {
     }
 
     #[cfg(unix)]
-    fn try_send_controlled_bytes(
-        &self,
-        owner_id: u64,
-        bytes: Bytes,
-        authorization: crate::pty::actor::PtyWriteAuthorization,
-    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+    fn try_send_controlled_bytes(&self, owner_id: u64, bytes: &[u8]) -> ControlledWriteResult {
         match self {
-            PaneRuntimeIo::Actor(actor) => {
-                actor.try_write_controlled_user_input(owner_id, bytes, authorization)
-            }
+            PaneRuntimeIo::Actor(actor) => actor.try_write_controlled_user_input(owner_id, bytes),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel {
                 sender,
@@ -1392,9 +1365,12 @@ impl PaneRuntimeIo {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if *owner != Some(owner_id) {
-                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                    return ControlledWriteResult::Refused;
                 }
-                sender.try_send(bytes)
+                match sender.try_send(Bytes::copy_from_slice(bytes)) {
+                    Ok(()) => ControlledWriteResult::Written,
+                    Err(_) => ControlledWriteResult::DeliveryUnknown { written: 0 },
+                }
             }
         }
     }
@@ -2357,6 +2333,7 @@ impl PaneRuntime {
                 }
             });
             let exit_events = events.clone();
+            let poison_events = events.clone();
             let suppress_pane_died_on_exit = suppress_pane_died.clone();
             let on_reader_exit = Box::new(move || {
                 if !suppress_pane_died_on_exit.load(Ordering::Acquire) {
@@ -2370,6 +2347,13 @@ impl PaneRuntime {
                 initially_quiesced: true,
                 on_read,
                 on_reader_exit: Some(on_reader_exit),
+                on_user_writes_poisoned: Some(Arc::new(move || {
+                    if let Err(err) =
+                        poison_events.try_send(AppEvent::RemoteControlGatePoisoned { pane_id })
+                    {
+                        warn!(pane = pane_id.raw(), err = %err, "failed to report poisoned PTY user-write gate");
+                    }
+                })),
             })?)
         };
 
@@ -2526,6 +2510,8 @@ impl PaneRuntime {
             let first_output_for_read = first_output.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
+            #[cfg(unix)]
+            let poison_events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
@@ -2583,6 +2569,14 @@ impl PaneRuntime {
                 initially_quiesced: false,
                 on_read,
                 on_reader_exit: None,
+                #[cfg(unix)]
+                on_user_writes_poisoned: Some(Arc::new(move || {
+                    if let Err(err) =
+                        poison_events.try_send(AppEvent::RemoteControlGatePoisoned { pane_id })
+                    {
+                        warn!(pane = pane_id.raw(), err = %err, "failed to report poisoned PTY user-write gate");
+                    }
+                })),
             })?)
         };
 
@@ -3444,16 +3438,6 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
-    pub(crate) fn remote_control_guard(&self) -> PtyWriteGuard {
-        self.io.remote_control_guard()
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn revoke_remote_control(&self) {
-        self.io.revoke_remote_control();
-    }
-
-    #[cfg(unix)]
     pub(crate) fn release_remote_owner(&self, owner_id: u64) {
         self.io.release_remote_owner(owner_id);
     }
@@ -3462,14 +3446,12 @@ impl PaneRuntime {
     pub(crate) fn try_send_controlled_bytes(
         &self,
         owner_id: u64,
-        bytes: Bytes,
-        authorization: crate::pty::actor::PtyWriteAuthorization,
-    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        bytes: &[u8],
+    ) -> ControlledWriteResult {
         if self.suspended {
-            return Ok(());
+            return ControlledWriteResult::Refused;
         }
-        self.io
-            .try_send_controlled_bytes(owner_id, bytes, authorization)
+        self.io.try_send_controlled_bytes(owner_id, bytes)
     }
 
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
@@ -3763,8 +3745,6 @@ impl PaneRuntime {
                     sender: tx,
                     resize_tx,
                     remote_owner: Arc::new(Mutex::new(None)),
-                    #[cfg(unix)]
-                    write_guard: PtyWriteGuard::new(),
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 resize_count: Cell::new(0),
@@ -4552,8 +4532,6 @@ mod tests {
                 sender: tx,
                 resize_tx,
                 remote_owner: Arc::new(Mutex::new(None)),
-                #[cfg(unix)]
-                write_guard: PtyWriteGuard::new(),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
@@ -4594,8 +4572,6 @@ mod tests {
                 sender: tx,
                 resize_tx,
                 remote_owner: Arc::new(Mutex::new(None)),
-                #[cfg(unix)]
-                write_guard: PtyWriteGuard::new(),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),

@@ -320,11 +320,6 @@ pub(crate) enum ServerEvent {
     },
     /// A client sent an input message.
     ClientInput { client_id: u64, data: Vec<u8> },
-    /// A guarded PTY write was accepted into the actor queue but could not be
-    /// delivered after its live authorization changed.
-    // Unix PTY authorization emits this event; Windows cannot create that path.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    RemoteControlWriteUnknown { client_id: u64, terminal_id: String },
     /// A client reported the one armed Kitty regular-file response.
     GraphicsTransmissionResult {
         client_id: u64,

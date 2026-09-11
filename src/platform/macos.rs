@@ -660,9 +660,11 @@ pub fn descendant_processes(root_pid: u32) -> Vec<ForegroundProcess> {
 }
 
 fn listed_pids(kind: u32, value: u32) -> Vec<u32> {
+    const MAX_FOREGROUND_PROCESSES: usize = 64;
     let mut capacity = 16usize;
 
     for _ in 0..8 {
+        capacity = capacity.min(MAX_FOREGROUND_PROCESSES + 1);
         let mut pids = vec![0 as libc::pid_t; capacity];
         let buffer_bytes = pids.len() * std::mem::size_of::<libc::pid_t>();
         let returned_bytes = unsafe {
@@ -680,9 +682,15 @@ fn listed_pids(kind: u32, value: u32) -> Vec<u32> {
         let returned_bytes = returned_bytes as usize;
         let count = returned_bytes / std::mem::size_of::<libc::pid_t>();
         if returned_bytes < buffer_bytes {
+            if count > MAX_FOREGROUND_PROCESSES {
+                return Vec::new();
+            }
             return collect_positive_pids(pids, count);
         }
-        capacity = capacity.saturating_mul(2);
+        if capacity == MAX_FOREGROUND_PROCESSES + 1 {
+            return Vec::new();
+        }
+        capacity = capacity.saturating_mul(2).min(MAX_FOREGROUND_PROCESSES + 1);
     }
 
     Vec::new()
@@ -775,6 +783,7 @@ fn process_argv0_name(pid: u32) -> Option<String> {
 
 /// Raw `sysctl(KERN_PROCARGS2)` call. Returns the full buffer.
 fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
+    const MAX_PROCESS_ARGS_BYTES: usize = 64 * 1024;
     unsafe {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
 
@@ -788,7 +797,7 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
             std::ptr::null_mut(),
             0,
         );
-        if ret != 0 || size == 0 {
+        if ret != 0 || size == 0 || size > MAX_PROCESS_ARGS_BYTES {
             return None;
         }
 

@@ -63,6 +63,8 @@ pub(crate) use super::unix_common::{
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
 const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";
 const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
+const FOREGROUND_PROBE_MAX_PROCESSES: usize = 64;
+const FOREGROUND_PROBE_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessDetectionMode {
@@ -414,9 +416,20 @@ fn process_tree_pids(
 
     let mut pids = Vec::new();
     while let Some(pid) = pending.pop_front() {
+        if pids.len() >= FOREGROUND_PROBE_MAX_PROCESSES {
+            return Vec::new();
+        }
         pids.push(pid);
-        for tid in task_ids(pid) {
-            for child_pid in task_children(pid, tid) {
+        let tids = task_ids(pid);
+        if tids.len() > FOREGROUND_PROBE_MAX_PROCESSES {
+            return Vec::new();
+        }
+        for tid in tids {
+            let children = task_children(pid, tid);
+            if children.len() > FOREGROUND_PROBE_MAX_PROCESSES {
+                return Vec::new();
+            }
+            for child_pid in children {
                 if child_pid > 0 && visited.insert(child_pid) {
                     pending.push_back(child_pid);
                 }
@@ -432,18 +445,37 @@ fn process_task_ids(pid: u32) -> Vec<u32> {
         .flatten()
         .flatten()
         .filter_map(|entry| numeric_file_name(&entry))
+        .take(FOREGROUND_PROBE_MAX_PROCESSES + 1)
         .collect()
 }
 
 fn process_task_children(pid: u32, tid: u32) -> Vec<u32> {
-    let Some(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")).ok()
-    else {
-        return Vec::new();
+    let Some(children) = read_proc_text(format!("/proc/{pid}/task/{tid}/children")) else {
+        return vec![0; FOREGROUND_PROBE_MAX_PROCESSES + 1];
     };
     children
         .split_whitespace()
         .filter_map(|child| child.parse::<u32>().ok())
+        .take(FOREGROUND_PROBE_MAX_PROCESSES + 1)
         .collect()
+}
+
+fn read_proc_text(path: String) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    match read_limited_reader(file, FOREGROUND_PROBE_MAX_BYTES).ok()? {
+        LimitedRead::Complete(bytes) => String::from_utf8(bytes).ok(),
+        LimitedRead::Empty => Some(String::new()),
+        LimitedRead::Oversized => None,
+    }
+}
+
+fn read_proc_bytes(path: String) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    match read_limited_reader(file, FOREGROUND_PROBE_MAX_BYTES).ok()? {
+        LimitedRead::Complete(bytes) => Some(bytes),
+        LimitedRead::Empty => Some(Vec::new()),
+        LimitedRead::Oversized => None,
+    }
 }
 
 fn numeric_file_name(entry: &std::fs::DirEntry) -> Option<u32> {
@@ -482,7 +514,7 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
 pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
     // /proc/<pid>/stat format: "pid (comm) state ppid pgrp session tty_nr tpgid ..."
     // The (comm) field can contain spaces and parens, so we find the last ')' first.
-    let stat = std::fs::read_to_string(format!("/proc/{child_pid}/stat")).ok()?;
+    let stat = read_proc_text(format!("/proc/{child_pid}/stat"))?;
     let rest = stat.get(stat.rfind(')')? + 2..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     // After (comm): state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5)
@@ -496,7 +528,7 @@ pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
 }
 
 fn process_pgrp_and_comm(pid: u32) -> Option<(i32, String)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let stat = read_proc_text(format!("/proc/{pid}/stat"))?;
     process_pgrp_and_comm_from_stat(&stat)
 }
 
@@ -596,7 +628,7 @@ fn parent_pid_from_stat(stat: &str) -> Option<u32> {
 }
 
 fn process_argv(pid: u32) -> Option<Vec<String>> {
-    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let bytes = read_proc_bytes(format!("/proc/{pid}/cmdline"))?;
     if bytes.is_empty() {
         return None;
     }
@@ -622,7 +654,7 @@ pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     if pid == 0 {
         return None;
     }
-    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let environ = read_proc_bytes(format!("/proc/{pid}/environ"))?;
     super::parse_agent_env_hint(&environ)
 }
 

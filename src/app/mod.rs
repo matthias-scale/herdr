@@ -378,6 +378,11 @@ impl TerminalInputTarget {
     pub(crate) fn new(terminal_id: crate::terminal::TerminalId) -> Self {
         Self { terminal_id }
     }
+
+    #[cfg(unix)]
+    pub(crate) fn terminal_id(&self) -> &crate::terminal::TerminalId {
+        &self.terminal_id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2716,6 +2721,8 @@ impl App {
         lease_key: input::InputLeaseKey,
         key: crate::input::TerminalKey,
         plan: input::RepeatPlan,
+        before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
     ) {
         match plan {
             input::RepeatPlan::Forwarded(target) => {
@@ -2749,9 +2756,12 @@ impl App {
                     ) {
                         break;
                     }
-                    if let Some(target) =
-                        self.handle_terminal_key_headless_from(source_id, key.clone())
-                    {
+                    if let Some(target) = self.handle_terminal_key_headless_from_with_hook(
+                        source_id,
+                        key.clone(),
+                        before_terminal_input,
+                        controlled_owners,
+                    ) {
                         if tracked {
                             self.input_leases.insert_forwarded(
                                 lease_key,
@@ -2805,6 +2815,7 @@ impl App {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn route_client_events(
         &mut self,
         events: Vec<crate::raw_input::RawInputEvent>,
@@ -2818,6 +2829,23 @@ impl App {
         source_id: InputSourceId,
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
+    ) {
+        self.route_client_events_from_with_human_input_hook(
+            source_id,
+            events,
+            apply_host_terminal_theme,
+            &mut |_| {},
+            None,
+        );
+    }
+
+    pub(crate) fn route_client_events_from_with_human_input_hook(
+        &mut self,
+        source_id: InputSourceId,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        apply_host_terminal_theme: bool,
+        before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
     ) {
         self.begin_contract_false_positive_input_burst();
         for event in events {
@@ -2899,7 +2927,12 @@ impl App {
                             }
                             let initial_context = self.terminal_input_context();
                             let target = if initial_context.is_some() {
-                                self.handle_terminal_key_headless_from(source_id, key.clone())
+                                self.handle_terminal_key_headless_from_with_hook(
+                                    source_id,
+                                    key.clone(),
+                                    before_terminal_input,
+                                    controlled_owners,
+                                )
                             } else {
                                 self.handle_non_terminal_key_headless(key.clone());
                                 None
@@ -2912,7 +2945,14 @@ impl App {
                                 resulting_context.as_ref(),
                                 target,
                             );
-                            self.execute_repeat_plan_headless(source_id, lease_key, key, plan);
+                            self.execute_repeat_plan_headless(
+                                source_id,
+                                lease_key,
+                                key,
+                                plan,
+                                before_terminal_input,
+                                controlled_owners,
+                            );
                         }
                         crossterm::event::KeyEventKind::Repeat => {
                             let current_context = self.terminal_input_context();
@@ -2921,7 +2961,14 @@ impl App {
                                 &key,
                                 current_context.as_ref(),
                             );
-                            self.execute_repeat_plan_headless(source_id, lease_key, key, plan);
+                            self.execute_repeat_plan_headless(
+                                source_id,
+                                lease_key,
+                                key,
+                                plan,
+                                before_terminal_input,
+                                controlled_owners,
+                            );
                         }
                         crossterm::event::KeyEventKind::Release => {
                             if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
@@ -2933,7 +2980,11 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Text(text) => {
                     self.state.clear_hovered_control();
-                    self.handle_text_commit_headless(text.as_str());
+                    self.handle_text_commit_headless_with_hook(
+                        text.as_str(),
+                        before_terminal_input,
+                        controlled_owners,
+                    );
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
                     if self.state.popup_pane.is_some() || self.state.mouse_capture {
@@ -2967,6 +3018,21 @@ impl App {
                                         focused,
                                     ) {
                                         let has_text = !text.is_empty();
+                                        if has_text {
+                                            if let Some(terminal_id) =
+                                                ws.terminal_id(focused).cloned()
+                                            {
+                                                #[cfg(unix)]
+                                                if let Some(owner_id) = controlled_owners
+                                                    .and_then(|owners| owners.get(&terminal_id))
+                                                {
+                                                    runtime.release_remote_owner(*owner_id);
+                                                }
+                                                before_terminal_input(&TerminalInputTarget::new(
+                                                    terminal_id,
+                                                ));
+                                            }
+                                        }
                                         let sent = runtime.try_send_paste(text).is_ok();
                                         if sent && has_text {
                                             self.retire_blocked_hook_authority_for_pane(
@@ -3146,7 +3212,9 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -3470,6 +3538,100 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[cfg(unix)]
+    fn test_app_with_focused_runtime() -> (
+        App,
+        crate::terminal::TerminalId,
+        tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("remote-control-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        let (runtime, input_rx) = TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        (app, terminal_id, input_rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_human_input_routed_to_controlled_pane_ends_remote_lease() {
+        let (mut app, terminal_id, mut input_rx) = test_app_with_focused_runtime();
+        let owner_id = 41;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        {
+            let runtime = app
+                .state
+                .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+                .expect("focused runtime");
+            assert!(runtime.acquire_remote_owner(owner_id));
+        }
+        let controlled_owners = std::collections::HashMap::from([(terminal_id.clone(), owner_id)]);
+
+        app.route_client_events_from_with_human_input_hook(
+            9,
+            vec![
+                crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: 2,
+                    row: 2,
+                    modifiers: KeyModifiers::empty(),
+                }),
+                crate::raw_input::RawInputEvent::OuterFocusGained,
+            ],
+            false,
+            &mut |_| {},
+            Some(&controlled_owners),
+        );
+        assert!(!app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("focused runtime")
+            .acquire_remote_owner(99));
+
+        app.route_client_events_from_with_human_input_hook(
+            9,
+            vec![raw_key(
+                KeyCode::Char('x'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+            &mut |_| {},
+            Some(&controlled_owners),
+        );
+        assert!(app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("focused runtime")
+            .acquire_remote_owner(owner_id));
+        assert!(input_rx.try_recv().is_ok());
+
+        app.route_client_events_from_with_human_input_hook(
+            9,
+            vec![crate::raw_input::RawInputEvent::Paste(
+                "clipboard-image".into(),
+            )],
+            false,
+            &mut |_| {},
+            Some(&controlled_owners),
+        );
+        assert!(app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("focused runtime")
+            .acquire_remote_owner(owner_id));
+        assert!(input_rx.try_recv().is_ok());
     }
 
     #[test]

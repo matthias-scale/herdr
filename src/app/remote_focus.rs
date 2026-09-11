@@ -342,15 +342,6 @@ impl crate::app::App {
                 message: format!("agent {} is not detected in its pane", agent_ref),
             });
         };
-        if !crate::app::agents::runtime_hosts_agent(runtime, known_agent) {
-            return Err(ErrorBody {
-                code: "refused_for_safety".into(),
-                message: format!(
-                    "agent {} is no longer the live foreground process",
-                    agent_ref
-                ),
-            });
-        }
         if terminal.managed_agent_launch_pending() && !terminal.managed_agent_control_ready() {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),
@@ -369,22 +360,6 @@ impl crate::app::App {
                 message: "effective remote user is unavailable".into(),
             });
         };
-        let Some(cwd) = terminal.cwd.to_str().filter(|cwd| !cwd.trim().is_empty()) else {
-            return Err(ErrorBody {
-                code: "refused_for_safety".into(),
-                message: "terminal cwd is unavailable".into(),
-            });
-        };
-        let Some(foreground_cwd) = runtime
-            .foreground_cwd()
-            .and_then(|cwd| cwd.to_str().map(str::to_owned))
-            .filter(|cwd| !cwd.trim().is_empty())
-        else {
-            return Err(ErrorBody {
-                code: "refused_for_safety".into(),
-                message: "foreground cwd is unavailable".into(),
-            });
-        };
         let Some(tty) = runtime
             .tty_name()
             .and_then(|tty| tty.to_str().map(str::to_owned))
@@ -399,6 +374,15 @@ impl crate::app::App {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),
                 message: "terminal shell process is unavailable".into(),
+            });
+        };
+        let Some(cwd) = crate::platform::process_cwd(shell_pid)
+            .and_then(|cwd| cwd.to_str().map(str::to_owned))
+            .filter(|cwd| !cwd.trim().is_empty())
+        else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "terminal cwd is unavailable".into(),
             });
         };
         let Some(job) = crate::detect::foreground_job(shell_pid) else {
@@ -418,15 +402,25 @@ impl crate::app::App {
                 message: "foreground process identity is unavailable".into(),
             });
         };
-        let Some(process_cwd) = crate::platform::process_cwd(process.pid)
+        if !crate::app::agents::runtime_hosts_agent_in_job(&job, known_agent) {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: format!(
+                    "agent {} is no longer the live foreground process",
+                    agent_ref
+                ),
+            });
+        }
+        let Some(foreground_cwd) = crate::platform::process_cwd(process.pid)
             .and_then(|cwd| cwd.to_str().map(str::to_owned))
             .filter(|cwd| !cwd.trim().is_empty())
         else {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),
-                message: "foreground process cwd is unavailable".into(),
+                message: "foreground cwd is unavailable".into(),
             });
         };
+        let process_cwd = foreground_cwd.clone();
         let Some(argv) = process.argv.clone() else {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),

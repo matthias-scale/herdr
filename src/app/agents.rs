@@ -491,15 +491,29 @@ pub(super) fn runtime_hosts_agent(
     live_runtime_agent(runtime) == Some(expected)
 }
 
-fn live_runtime_agent(runtime: &crate::terminal::TerminalRuntime) -> Option<crate::detect::Agent> {
-    let job = crate::detect::foreground_job(runtime.child_pid()?)?;
-    crate::detect::identify_agent_in_job(&job)
+#[cfg(unix)]
+pub(super) fn runtime_hosts_agent_in_job(
+    job: &crate::platform::ForegroundJob,
+    expected: crate::detect::Agent,
+) -> bool {
+    // The remote-control context already captured this job. Reuse it instead
+    // of making runtime_hosts_agent perform a second live process probe.
+    live_agent_in_job(job) == Some(expected)
+}
+
+fn live_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<crate::detect::Agent> {
+    crate::detect::identify_agent_in_job(job)
         .map(|(agent, _)| agent)
         .or_else(|| {
             job.processes
                 .iter()
                 .find_map(|process| crate::platform::process_agent_hint(process.pid))
         })
+}
+
+fn live_runtime_agent(runtime: &crate::terminal::TerminalRuntime) -> Option<crate::detect::Agent> {
+    let job = crate::detect::foreground_job(runtime.child_pid()?)?;
+    live_agent_in_job(&job)
 }
 
 pub(super) enum AgentStartError {

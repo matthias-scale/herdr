@@ -12,8 +12,6 @@ use crate::api::schema::{AgentRef, RemoteControlContext};
 pub(crate) struct RemoteControlLease {
     pub(crate) agent_ref: AgentRef,
     pub(crate) context: RemoteControlContext,
-    #[cfg(unix)]
-    pub(crate) write_guard: crate::pty::actor::PtyWriteGuard,
 }
 
 impl PartialEq for RemoteControlLease {
@@ -29,43 +27,7 @@ impl RemoteControlLease {
     // still construct a lease to exercise shared protocol state.
     #[cfg(test)]
     pub(crate) fn new(agent_ref: AgentRef, context: RemoteControlContext) -> Self {
-        #[cfg(unix)]
-        {
-            Self::new_with_guard(agent_ref, context, crate::pty::actor::PtyWriteGuard::new())
-        }
-        #[cfg(not(unix))]
         Self { agent_ref, context }
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn new_with_guard(
-        agent_ref: AgentRef,
-        context: RemoteControlContext,
-        write_guard: crate::pty::actor::PtyWriteGuard,
-    ) -> Self {
-        write_guard.activate(context.context_epoch);
-        Self {
-            agent_ref,
-            context,
-            write_guard,
-        }
-    }
-
-    pub(crate) fn revoke(&self) {
-        #[cfg(unix)]
-        self.write_guard.revoke();
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn write_authorization(
-        &self,
-        on_unknown: std::sync::Arc<dyn Fn() + Send + Sync>,
-    ) -> crate::pty::actor::PtyWriteAuthorization {
-        self.write_guard.authorization(
-            self.context.foreground_process.process_group_id,
-            self.context.context_epoch,
-            on_unknown,
-        )
     }
 }
 
@@ -108,20 +70,19 @@ pub(crate) fn validate_input_owner(owner: Option<u64>, client_id: u64) -> Result
     }
 }
 
-/// Validate a fresh remote context and enqueue bytes without exposing a
-/// check-then-write gap to callers. The caller must invoke this from the
-/// server event loop while it owns the runtime mutation boundary.
-#[cfg(unix)]
-pub(crate) fn validate_and_enqueue(
+/// Validate a fresh remote context before the caller writes directly to the
+/// PTY master in the same server-event-loop turn.
+#[cfg(all(test, unix))]
+pub(crate) fn validate_and_write(
     configured_host: &str,
     expected_user: &str,
     expected: &RemoteControlContext,
     current: &RemoteControlContext,
     data: &[u8],
-    enqueue: impl FnOnce(&[u8]) -> Result<(), String>,
+    write: impl FnOnce(&[u8]) -> Result<(), String>,
 ) -> Result<(), ErrorBody> {
     validate_context(configured_host, expected_user, expected, current)?;
-    enqueue(data).map_err(|error| ErrorBody {
+    write(data).map_err(|error| ErrorBody {
         code: "connection_lost".to_owned(),
         message: format!("remote PTY write failed: {error}; delivery is unknown"),
     })
@@ -228,7 +189,7 @@ mod tests {
         let mut current = expected.clone();
         mutated(&mut current);
         let writes = std::cell::Cell::new(0_u8);
-        let result = validate_and_enqueue(
+        let result = validate_and_write(
             "buildbox",
             "operator",
             &expected,
@@ -249,7 +210,7 @@ mod tests {
     fn assert_refused_for_configured_fact(configured_host: &str, expected_user: &str) {
         let expected = context();
         let writes = std::cell::Cell::new(0_u8);
-        let result = validate_and_enqueue(
+        let result = validate_and_write(
             configured_host,
             expected_user,
             &expected,
@@ -373,7 +334,7 @@ mod tests {
         let before = draft.clone();
         let writes = std::cell::Cell::new(0_u8);
         let result =
-            validate_and_enqueue("buildbox", "operator", &expected, &current, &draft, |_| {
+            validate_and_write("buildbox", "operator", &expected, &current, &draft, |_| {
                 writes.set(writes.get().saturating_add(1));
                 Ok(())
             });
@@ -386,11 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn revalidation_revokes_before_the_next_write() {
+    fn revalidation_refuses_before_the_next_write() {
         let expected = context();
         let mut current = expected.clone();
         let writes = std::cell::Cell::new(0_u8);
-        assert!(validate_and_enqueue(
+        assert!(validate_and_write(
             "buildbox",
             "operator",
             &expected,
@@ -403,7 +364,7 @@ mod tests {
         )
         .is_ok());
         current.revision += 1;
-        let result = validate_and_enqueue(
+        let result = validate_and_write(
             "buildbox",
             "operator",
             &expected,
@@ -425,7 +386,7 @@ mod tests {
     fn blocked_agent_is_allowed_when_other_facts_match() {
         let expected = context();
         let writes = std::cell::Cell::new(0_u8);
-        let result = validate_and_enqueue(
+        let result = validate_and_write(
             "buildbox",
             "operator",
             &expected,
@@ -441,9 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_pty_enqueue_reports_unknown_delivery() {
+    fn failed_pty_write_reports_unknown_delivery() {
         let expected = context();
-        let result = validate_and_enqueue(
+        let result = validate_and_write(
             "buildbox",
             "operator",
             &expected,
@@ -451,10 +412,7 @@ mod tests {
             b"answer",
             |_| Err("runtime disconnected".to_owned()),
         );
-        assert_eq!(
-            result.expect_err("enqueue must fail").code,
-            "connection_lost"
-        );
+        assert_eq!(result.expect_err("write must fail").code, "connection_lost");
     }
 
     #[test]

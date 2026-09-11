@@ -499,16 +499,6 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
-    pub(crate) fn remote_control_guard(&self) -> crate::pty::actor::PtyWriteGuard {
-        self.0.remote_control_guard()
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn revoke_remote_control(&self) {
-        self.0.revoke_remote_control();
-    }
-
-    #[cfg(unix)]
     pub(crate) fn release_remote_owner(&self, owner_id: u64) {
         self.0.release_remote_owner(owner_id);
     }
@@ -517,14 +507,12 @@ impl TerminalRuntime {
     pub(crate) fn try_send_controlled_bytes(
         &self,
         owner_id: u64,
-        bytes: Bytes,
-        authorization: crate::pty::actor::PtyWriteAuthorization,
-    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        bytes: &[u8],
+    ) -> crate::pty::actor::ControlledWriteResult {
         if self.is_suspended() {
-            return Ok(());
+            return crate::pty::actor::ControlledWriteResult::Refused;
         }
-        self.0
-            .try_send_controlled_bytes(owner_id, bytes, authorization)
+        self.0.try_send_controlled_bytes(owner_id, bytes)
     }
 
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
