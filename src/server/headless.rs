@@ -9016,15 +9016,27 @@ next_tab = ""
         tokio::sync::mpsc::Receiver<Bytes>,
     ) {
         let workspace = crate::workspace::Workspace::test_new("controlled-test");
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        let (terminal_id_string, control_rx) =
+            install_controlled_runtime_client(server, client_id, workspace, runtime);
+        (terminal_id_string, control_rx, input_rx)
+    }
+
+    #[cfg(unix)]
+    fn install_controlled_runtime_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        workspace: crate::workspace::Workspace,
+        runtime: crate::terminal::TerminalRuntime,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
         let pane_id = workspace.tabs[0].root_pane;
         let terminal_id = workspace
             .terminal_id(pane_id)
             .expect("focused terminal")
             .clone();
-        let (runtime, input_rx) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                80, 24, 0, b"", 4,
-            );
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
@@ -9066,7 +9078,47 @@ next_tab = ""
             .get(&terminal_id)
             .expect("controlled runtime")
             .acquire_remote_owner(client_id));
-        (terminal_id_string, control_rx, input_rx)
+        (terminal_id_string, control_rx)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn install_controlled_live_test_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let workspace = crate::workspace::Workspace::test_new("controlled-live-test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "stty -echo -icanon min 1 time 0; printf __herdr_control_ready__; exec sleep 30"
+                    .to_owned(),
+            ],
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            server.app.event_tx.clone(),
+            server.app.render_notify.clone(),
+            server.app.render_dirty.clone(),
+        )
+        .expect("spawn live controlled test runtime");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !runtime.visible_text().contains("__herdr_control_ready__") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "live controlled test runtime did not become ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        install_controlled_runtime_client(server, client_id, workspace, runtime)
     }
 
     #[cfg(unix)]
@@ -9168,6 +9220,138 @@ next_tab = ""
             .acquire_remote_owner(99));
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: a real partial controlled PTY result ends the server lease without retrying.
+    async fn partial_real_controlled_write_ends_server_lease_without_retry() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx) = install_controlled_live_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal")
+            .clone();
+        let expected = match &server.clients[&7].mode {
+            ClientConnectionMode::TerminalAttach {
+                control: Some(lease),
+                ..
+            } => lease.context.clone(),
+            _ => panic!("controlled test client has no lease"),
+        };
+        let provider = MutableSequencedContextProvider {
+            contexts: std::sync::Mutex::new(
+                [expected]
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<_>>(),
+            ),
+        };
+        let payload = vec![b'x'; 1024 * 1024];
+
+        assert!(!server.forward_control_bytes_with_provider_for_test(
+            7,
+            payload.clone(),
+            &provider,
+        ));
+        let ServerMessage::ControlError { code, message } =
+            read_server_message(control_rx.recv().expect("partial-write control error"))
+        else {
+            panic!("expected partial-write control error");
+        };
+        assert_eq!(code, "connection_lost");
+        let written = message
+            .strip_prefix("controlled PTY delivery became unknown after ")
+            .and_then(|message| message.strip_suffix(" bytes; no retry"))
+            .and_then(|written| written.parse::<usize>().ok())
+            .expect("partial byte count in control error");
+        assert!(written > 0 && written < payload.len(), "written={written}");
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"retry-must-not-arrive".to_vec(),
+        }));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .expect("live runtime")
+            .acquire_remote_owner(99));
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: a real EAGAIN controlled PTY result ends the server lease without retrying.
+    async fn eagain_real_controlled_write_ends_server_lease_without_retry() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx) = install_controlled_live_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal")
+            .clone();
+        let runtime = server
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .expect("live runtime");
+        // Fill the kernel input queue one byte at a time so the server payload
+        // below observes a stable, real zero-byte EAGAIN result.
+        let mut reached_eagain = false;
+        for _ in 0..131_072 {
+            match runtime.try_send_controlled_bytes(7, b"f") {
+                crate::pty::actor::ControlledWriteResult::Written => {}
+                crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written: 0 } => {
+                    reached_eagain = true;
+                    break;
+                }
+                crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written } => {
+                    panic!("one-byte EAGAIN setup partially wrote {written} bytes")
+                }
+                crate::pty::actor::ControlledWriteResult::Refused => {
+                    panic!("controlled owner unexpectedly refused during EAGAIN setup")
+                }
+            }
+        }
+        assert!(reached_eagain, "real PTY input buffer did not reach EAGAIN");
+
+        let expected = match &server.clients[&7].mode {
+            ClientConnectionMode::TerminalAttach {
+                control: Some(lease),
+                ..
+            } => lease.context.clone(),
+            _ => panic!("controlled test client has no lease"),
+        };
+        let provider = MutableSequencedContextProvider {
+            contexts: std::sync::Mutex::new(
+                [expected]
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<_>>(),
+            ),
+        };
+        assert!(!server.forward_control_bytes_with_provider_for_test(
+            7,
+            b"eagain-payload-must-not-arrive".to_vec(),
+            &provider,
+        ));
+        let ServerMessage::ControlError { code, message } =
+            read_server_message(control_rx.recv().expect("EAGAIN control error"))
+        else {
+            panic!("expected EAGAIN control error");
+        };
+        assert_eq!(code, "connection_lost");
+        assert!(message.contains("after 0 bytes; no retry"), "{message}");
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"retry-must-not-arrive".to_vec(),
+        }));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .expect("live runtime")
+            .acquire_remote_owner(99));
+        shutdown_test_runtimes(&mut server);
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     // AC3: an EAGAIN result is delivery-unknown and ends the lease automatically.
@@ -9231,7 +9415,7 @@ next_tab = ""
     // AC1: a clipboard-image paste uses the human-input lease termination path before pane write.
     async fn clipboard_image_paste_ends_human_control_before_forwarding() {
         let mut server = test_headless_server();
-        let (terminal_id, _control_rx, mut input_rx) =
+        let (terminal_id, control_rx, mut input_rx) =
             install_controlled_test_client(&mut server, 7);
         let mut app_client = test_app_client(Some(true), 1);
         app_client.pending_terminal_attach = false;
@@ -9261,6 +9445,85 @@ next_tab = ""
         let forwarded = input_rx.try_recv().expect("clipboard image path forwarded");
         let forwarded = String::from_utf8_lossy(&forwarded);
         assert!(forwarded.contains("herdr-clipboard-images"), "{forwarded}");
+        assert!(!server.forward_control_bytes(7, b"controlled-after-clipboard".to_vec()));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"controlled-after-clipboard".to_vec(),
+        }));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "controlled write must not retry"
+        );
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("clipboard control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "already_controlled" && message.contains("human input")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC1: a server-routed human keystroke ends the remote lease before a later controlled write.
+    async fn human_keystroke_ends_server_remote_lease_before_following_controlled_write() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, mut input_rx) =
+            install_controlled_test_client(&mut server, 7);
+        let mut app_client = test_app_client(Some(true), 1);
+        app_client.pending_terminal_attach = false;
+        server.clients.insert(1, app_client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('x'),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }],
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("human key forwarded"),
+            Bytes::from("x")
+        );
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.forward_control_bytes(7, b"controlled-after-key".to_vec()));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"controlled-after-key".to_vec(),
+        }));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "controlled write must not retry"
+        );
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("human-key control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "already_controlled" && message.contains("human input")
+        ));
     }
 
     #[cfg(unix)]
