@@ -115,14 +115,21 @@ pub(crate) fn render_indicator(
     if area.width == 0 || area.height == 0 || !app.pomodoro.enabled {
         return;
     }
+    let held = app.pomodoro.held();
     let paused = app.pomodoro.paused();
     let glyph = if paused { "‖" } else { "⏱" };
-    let style = if paused {
+    let style = if held {
+        Style::default().fg(app.palette.yellow)
+    } else if paused {
         Style::default().fg(app.palette.overlay0)
     } else {
         Style::default().fg(phase_color(app, app.pomodoro.phase))
     };
-    let label = format!("{glyph} {}", app.pomodoro.label_at(now));
+    let label = if held {
+        format!("{glyph} held")
+    } else {
+        format!("{glyph} {}", app.pomodoro.label_at(now))
+    };
     let line = Line::from(vec![Span::styled(label, style)]);
     frame.render_widget(Paragraph::new(line).right_aligned(), area);
 }
@@ -297,6 +304,35 @@ mod tests {
             pomodoro_hit_area(&app, Rect::new(0, 0, 30, 20)),
             Rect::new(20, 19, 9, 1)
         );
+    }
+
+    #[test]
+    fn f1_held_indicator_names_the_state_in_a_distinct_colour() {
+        let now = std::time::Instant::now();
+        let mut app = state();
+        app.pomodoro.reset(now);
+        app.pomodoro
+            .tick_with_host_focus(now + std::time::Duration::from_secs(25 * 60), false);
+        let sidebar = Rect::new(0, 0, 26, 1);
+        let slot = pomodoro_hit_area(&app, sidebar);
+        assert_ne!(slot, Rect::default());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(26, 1))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render_indicator(&app, frame, slot, now))
+            .expect("draw indicator");
+        let buffer = terminal.backend().buffer();
+        let text: String = (slot.x..slot.right())
+            .map(|x| buffer[(x, slot.y)].symbol())
+            .collect();
+        let held_cell = (slot.x..slot.right())
+            .map(|x| &buffer[(x, slot.y)])
+            .find(|cell| cell.symbol() == "h")
+            .expect("held label");
+
+        assert!(text.contains("⏱ held"), "{text:?}");
+        assert_eq!(held_cell.style().fg, Some(app.palette.yellow));
+        assert_ne!(app.palette.yellow, phase_color(&app, app.pomodoro.phase));
     }
 }
 
