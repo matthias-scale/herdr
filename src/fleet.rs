@@ -1016,6 +1016,8 @@ pub(crate) struct FleetRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
@@ -1156,6 +1158,7 @@ impl FleetRow {
         let model = agent.tokens.get("model").cloned();
         let effort = agent.tokens.get("effort").cloned();
         let work = agent_work(&agent);
+        let title = agent_title(&agent);
         let native_session = agent
             .agent_session
             .as_ref()
@@ -1167,6 +1170,7 @@ impl FleetRow {
             handle,
             agent: agent.agent,
             name: Some(id),
+            title,
             model,
             effort,
             work,
@@ -1226,6 +1230,7 @@ impl FleetRow {
             handle,
             agent: Some(run.agent),
             name: Some(run.run_id),
+            title: None,
             model: Some(run.model),
             effort: Some(run.effort),
             work: Some(if run.branch.is_empty() {
@@ -1289,6 +1294,7 @@ impl FleetRow {
             handle,
             agent: None,
             name: None,
+            title: None,
             model: None,
             effort: None,
             work: None,
@@ -1351,6 +1357,31 @@ fn agent_work(agent: &AgentInfo) -> Option<String> {
             })
         })
         .or_else(|| agent.work_context.work_title.clone())
+}
+
+/// Resolve the title once when fleet evidence arrives. `AgentInfo` has no
+/// client-only tab label, but its runtime title fields follow the same order as
+/// the local projection before both paths call `session_title`.
+fn agent_title(agent: &AgentInfo) -> Option<String> {
+    let title = agent
+        .work_context
+        .session_name
+        .clone()
+        .or_else(|| {
+            agent
+                .terminal_title_stripped
+                .as_ref()
+                .filter(|title| !title.trim().is_empty())
+                .cloned()
+        })
+        .or_else(|| agent.work_context.work_title.clone());
+    let projection = crate::workspace::TabDisplayProjection::Derived {
+        agent: None,
+        ticket: agent.work_context.primary_ticket().map(str::to_string),
+        binding: None,
+        title,
+    };
+    crate::workspace::session_title(Some(&projection), None)
 }
 
 fn gate_recommendation(text: &str) -> Option<String> {
@@ -2151,6 +2182,64 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].as_ref().unwrap().run_id, "ra-260826-test-a1b2c3d");
         assert_eq!(runtime, HostRuntime::default());
+    }
+
+    #[test]
+    fn remote_agent_list_parses_titles_with_legacy_fallback_fields() {
+        let parse_row = |agent: serde_json::Value| {
+            let response = serde_json::json!({
+                "id": "x",
+                "result": {"type": "agent_list", "agents": [agent]}
+            });
+            let output = [
+                serde_json::to_vec(&response).expect("agent response JSON"),
+                REMOTE_RUNS_MARKER.to_vec(),
+            ]
+            .concat();
+            let (agents, runs, _) = parse_remote_output(&output);
+            assert!(runs.is_empty());
+            FleetRow::from_agent(
+                "ub1",
+                false,
+                agents
+                    .expect("valid remote agent list")
+                    .into_iter()
+                    .next()
+                    .expect("one remote agent"),
+                0,
+            )
+            .expect("valid fleet row")
+        };
+        let base = serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {"work_title": "Cost levers from work context"},
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "revision": 1
+        });
+        let mut with_terminal_title = base.clone();
+        with_terminal_title["terminal_title_stripped"] =
+            serde_json::json!("Scalable V2 cost levers handoff");
+
+        assert_eq!(
+            parse_row(with_terminal_title).title.as_deref(),
+            Some("Scalable V2 cost levers handoff")
+        );
+        assert_eq!(
+            parse_row(base.clone()).title.as_deref(),
+            Some("Cost levers from work context"),
+            "older agent-list JSON without a terminal title still parses"
+        );
+        let mut without_title = base;
+        without_title["work_context"] = serde_json::json!({});
+        let fallback = parse_row(without_title);
+        assert_eq!(fallback.title, None);
+        assert_eq!(fallback.name.as_deref(), Some("cl-ceea66cc"));
     }
 
     #[test]

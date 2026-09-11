@@ -3545,6 +3545,9 @@ pub struct AppState {
     /// `collapsed_space_keys`, which folds one space inside the tree; this folds
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
+    /// Remote host groups start folded. This records the inverse only after an
+    /// operator expands one, so new hosts stay folded without refresh-time work.
+    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     pub(crate) sidebar_group_mode: SidebarGroupMode,
     /// Whether the keyboard belongs to the sidebar.
     ///
@@ -5936,6 +5939,7 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
             sidebar_group_menu_open: false,

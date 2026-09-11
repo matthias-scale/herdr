@@ -8708,6 +8708,12 @@
             },
             "state": {
               "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [

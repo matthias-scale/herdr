@@ -13,6 +13,8 @@ pub struct FleetAgentInfo {
     pub agent_ref: super::AgentRef,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub state: String,
     pub source: String,

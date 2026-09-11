@@ -796,7 +796,11 @@ impl AppState {
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
         let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
-        if !self.collapsed_sidebar_groups.remove(&key) {
+        if title.starts_with("host:") {
+            if !self.expanded_remote_host_groups.remove(&key) {
+                self.expanded_remote_host_groups.insert(key);
+            }
+        } else if !self.collapsed_sidebar_groups.remove(&key) {
             self.collapsed_sidebar_groups.insert(key);
         }
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
