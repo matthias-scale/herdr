@@ -427,8 +427,7 @@ fn render_header_status(
         return;
     };
 
-    let (state, seen) = ws.aggregate_state(&app.terminals);
-    let attention_tier = ws.aggregate_attention_tier(&app.terminals);
+    let (state, seen, attention_tier) = ws.aggregate_state_and_attention(&app.terminals);
     let (dot, dot_style) = state_icon(state, seen, app.status_indicators, p);
     let dot_style = match attention_tier {
         crate::terminal::state::AttentionTier::Blocked => dot_style.fg(p.red),
@@ -1193,7 +1192,7 @@ fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
         if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
             continue;
         }
-        match entry.attention_tier {
+        match super::sidebar::entry_attention_tier(&entry) {
             crate::terminal::state::AttentionTier::Blocked => {
                 counts.blocked += 1;
                 continue;
@@ -1453,6 +1452,76 @@ fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mobile_header_aggregates_the_workspace_in_one_pane_pass() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_count = app.workspaces[0].tabs[0].panes.len();
+        crate::workspace::take_aggregate_pane_visits();
+
+        let area = Rect::new(0, 0, 40, 1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .unwrap();
+        terminal
+            .draw(|frame| render_header_status(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        assert_eq!(crate::workspace::take_aggregate_pane_visits(), pane_count);
+    }
+
+    #[test]
+    fn settled_answer_row_is_neutral_in_mobile_switcher() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("answer")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal_state.state = AgentState::Blocked;
+        terminal_state.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose one".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        assert!(app.settle_pane_at(0, pane, 1_725_000_000));
+
+        let area = Rect::new(0, 0, 50, 20);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_switcher_content(&app, &TerminalRuntimeRegistry::new(), frame, area)
+            })
+            .unwrap();
+
+        let dots: Vec<_> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| matches!(cell.symbol(), "●" | "○"))
+            .collect();
+        assert!(dots.iter().any(|cell| cell.fg == app.palette.overlay0));
+        assert!(dots
+            .iter()
+            .all(|cell| cell.fg != app.palette.red && cell.fg != app.palette.peach));
+    }
+
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
             usage_limited: false,
@@ -1478,7 +1547,7 @@ mod tests {
             prio: false,
             starred: false,
             state: AgentState::Idle,
-            attention_tier: crate::terminal::state::AttentionTier::None,
+            attention_tier: None,
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,

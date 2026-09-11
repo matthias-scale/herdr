@@ -3906,7 +3906,7 @@ mod tests {
             .expect("agent panel fixture");
         remote.state = crate::detect::AgentState::Idle;
         remote.open_blockers = true;
-        remote.attention_tier = crate::terminal::state::AttentionTier::Blocked;
+        remote.attention_tier = Some(crate::terminal::state::AttentionTier::Blocked);
         let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
             .expect("valid remote agent reference");
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(

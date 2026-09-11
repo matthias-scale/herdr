@@ -8,6 +8,21 @@ use crate::terminal::{TerminalId, TerminalState};
 
 use super::{Tab, Workspace};
 
+#[cfg(test)]
+thread_local! {
+    static AGGREGATE_PANE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_aggregate_pane_visit() {
+    AGGREGATE_PANE_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn take_aggregate_pane_visits() -> usize {
+    AGGREGATE_PANE_VISITS.with(|visits| visits.replace(0))
+}
+
 /// Detail info for a single pane, used by the agent detail panel.
 pub struct PaneDetail {
     pub pane_id: PaneId,
@@ -177,25 +192,44 @@ impl Workspace {
             .unwrap_or((AgentState::Unknown, true))
     }
 
-    pub(crate) fn aggregate_attention_tier(
+    /// Project lifecycle state and human-attention severity in one pane pass.
+    pub(crate) fn aggregate_state_and_attention(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> AttentionTier {
-        self.tabs
-            .iter()
-            .flat_map(|tab| tab.panes.values())
-            .filter(|pane| pane.settled_at.is_none())
-            .filter_map(|pane| terminals.get(&pane.attached_terminal_id))
-            .map(|terminal| {
-                attention_tier(
-                    terminal.state,
-                    !terminal.closing_gates.is_empty(),
-                    !terminal.closing_items.is_empty(),
-                    terminal.usage_limited,
-                )
-            })
-            .max()
-            .unwrap_or_default()
+    ) -> (AgentState, bool, AttentionTier) {
+        let mut state = (AgentState::Unknown, true);
+        let mut state_priority = pane_attention_priority(state.0, state.1);
+        let mut attention = AttentionTier::None;
+        for tab in &self.tabs {
+            let mut tab_state = (AgentState::Unknown, true);
+            let mut tab_state_priority = pane_attention_priority(tab_state.0, tab_state.1);
+            for pane in tab.panes.values() {
+                #[cfg(test)]
+                record_aggregate_pane_visit();
+                let Some(terminal) = terminals.get(&pane.attached_terminal_id) else {
+                    continue;
+                };
+                let candidate = (terminal.state, pane.seen);
+                let candidate_priority = pane_attention_priority(candidate.0, candidate.1);
+                if candidate_priority >= tab_state_priority {
+                    tab_state = candidate;
+                    tab_state_priority = candidate_priority;
+                }
+                if pane.settled_at.is_none() {
+                    attention = attention.max(attention_tier(
+                        terminal.state,
+                        !terminal.closing_gates.is_empty(),
+                        !terminal.closing_items.is_empty(),
+                        terminal.usage_limited,
+                    ));
+                }
+            }
+            if tab_state_priority >= state_priority {
+                state = tab_state;
+                state_priority = tab_state_priority;
+            }
+        }
+        (state.0, state.1, attention)
     }
 
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
@@ -228,6 +262,25 @@ mod tests {
         let (state, seen) = ws.aggregate_state(&terminals);
         assert_eq!(state, AgentState::Unknown);
         assert!(seen);
+    }
+
+    #[test]
+    fn aggregate_state_and_attention_preserves_missing_tab_unknown_seen_tie() {
+        let mut ws = Workspace::test_new("test");
+        let root = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root).unwrap().seen = false;
+        ws.test_add_tab(None);
+
+        let mut terminals = HashMap::new();
+        let terminal = terminal_for_pane(&ws, root);
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let expected = ws.aggregate_state(&terminals);
+        let (state, seen, attention) = ws.aggregate_state_and_attention(&terminals);
+
+        assert_eq!(expected, (AgentState::Unknown, true));
+        assert_eq!((state, seen), expected);
+        assert_eq!(attention, AttentionTier::None);
     }
 
     #[test]

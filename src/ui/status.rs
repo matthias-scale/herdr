@@ -359,21 +359,10 @@ fn fit_focused_pane_title(repo: &str, thread: &str, width: usize) -> Option<Stri
 ///
 /// The blocked button carries its count so the filter state is readable without
 /// opening another surface.
-pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
-    if area.width == 0 || area.height == 0 {
-        return Vec::new();
-    }
-    let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
-        .into_iter()
-        .filter(|entry| !app.pane_is_settled(entry.ws_idx, entry.pane_id))
-        .fold((0usize, 0usize), |(blocked, attention), entry| {
-            match crate::ui::sidebar::entry_attention_tier(&entry) {
-                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
-                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
-                crate::terminal::state::AttentionTier::None => (blocked, attention),
-            }
-        });
-    let mut specs = vec![
+type StatusButtonSpec = (StatusButtonAction, String, bool);
+
+fn status_button_specs(app: &AppState, blocked: usize, attention: usize) -> [StatusButtonSpec; 6] {
+    [
         (
             StatusButtonAction::Home,
             " home ".to_string(),
@@ -419,7 +408,24 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             },
             app.status_bar_expanded,
         ),
-    ];
+    ]
+}
+
+pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
+        .into_iter()
+        .filter(|entry| !app.pane_is_settled(entry.ws_idx, entry.pane_id))
+        .fold((0usize, 0usize), |(blocked, attention), entry| {
+            match crate::ui::sidebar::entry_attention_tier(&entry) {
+                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
+                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
+                crate::terminal::state::AttentionTier::None => (blocked, attention),
+            }
+        });
+    let specs = status_button_specs(app, blocked, attention);
 
     // The right-aligned segments are load-bearing; buttons yield to them rather
     // than overlapping, and drop whole rather than truncating to an unreadable stub.
@@ -451,14 +457,15 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             );
             width_without_attention <= sidebar_width && full_width > sidebar_width
         };
-    if full_width > budget || attention_crosses_sidebar {
-        specs.retain(|(action, _, _)| *action != StatusButtonAction::Attention);
-    }
+    let omit_attention = full_width > budget || attention_crosses_sidebar;
 
     let mut buttons = Vec::new();
     let mut x = area.x;
     let mut used = 0usize;
     for (action, label, active) in specs {
+        if omit_attention && action == StatusButtonAction::Attention {
+            continue;
+        }
         let width = display_width(&label);
         if used + width > budget {
             break;
@@ -1969,6 +1976,19 @@ mod tests {
         for pair in buttons.windows(2) {
             assert_eq!(pair[0].rect.x + pair[0].rect.width, pair[1].rect.x);
         }
+    }
+
+    #[test]
+    fn status_button_specs_are_a_fixed_array() {
+        let app = AppState::test_new();
+        let [home, work, blocked, attention, dock, detail] = status_button_specs(&app, 2, 3);
+
+        assert_eq!(home.0, StatusButtonAction::Home);
+        assert_eq!(work.0, StatusButtonAction::Work);
+        assert_eq!(blocked.1.trim(), "blocked 2");
+        assert_eq!(attention.1.trim(), "attention 3");
+        assert_eq!(dock.0, StatusButtonAction::Dock);
+        assert_eq!(detail.0, StatusButtonAction::StatusDetail);
     }
 
     #[test]

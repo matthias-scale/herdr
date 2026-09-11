@@ -120,16 +120,18 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     #[cfg(test)]
     ENTRY_ATTENTION_TIER_VISITS.with(|visits| visits.set(visits.get() + 1));
-    if entry.attention_tier != AttentionTier::None {
-        entry.attention_tier
-    } else {
+    entry.attention_tier.unwrap_or_else(|| {
         crate::terminal::state::attention_tier(
             entry.state,
             entry.open_blockers,
             false,
             entry.usage_limited,
         )
-    }
+    })
+}
+
+fn entry_attention_was_cleared(entry: &AgentPanelEntry) -> bool {
+    entry.attention_tier == Some(AttentionTier::None) && entry.state == AgentState::Blocked
 }
 
 #[cfg(test)]
@@ -200,6 +202,9 @@ pub(super) fn agent_panel_label_color(
     }
     if entry_attention_tier(entry) == AttentionTier::Attention {
         return p.peach;
+    }
+    if entry_attention_was_cleared(entry) {
+        return p.overlay0;
     }
     state_label_color(entry.state, entry.seen, p)
 }
@@ -462,6 +467,9 @@ fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
         AttentionTier::Blocked => return p.red,
         AttentionTier::Attention => return p.peach,
         AttentionTier::None => {}
+    }
+    if entry_attention_was_cleared(entry) {
+        return p.overlay0;
     }
     // A session that declared a contract and reported it met is the one kind of
     // done you can act on without reading the pane: close it. That earns its own
@@ -893,8 +901,9 @@ pub(crate) struct AgentPanelEntry {
     /// reorders or regroups the row.
     pub starred: bool,
     pub state: AgentState,
-    /// Runtime-derived human-attention severity. The TUI maps it to colour.
-    pub attention_tier: AttentionTier,
+    /// Runtime-derived human-attention severity. `None` means an older source
+    /// omitted the projection; `Some(AttentionTier::None)` explicitly clears it.
+    pub attention_tier: Option<AttentionTier>,
     /// The last closing-block report still names at least one gate, even if
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
     /// pane stops working.
@@ -1334,7 +1343,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         prio,
                         starred,
                         state: detail.state,
-                        attention_tier: detail.attention_tier,
+                        attention_tier: Some(detail.attention_tier),
                         open_blockers: detail.open_blockers,
                         completion_tier,
                         usage_limited: detail.usage_limited,
@@ -1414,7 +1423,7 @@ pub(crate) fn remote_agent_panel_entries(
                         None,
                         None,
                         false,
-                        crate::terminal::state::attention_tier(state, false, false, false),
+                        None,
                         false,
                         0,
                         None,
@@ -1453,12 +1462,12 @@ pub(crate) fn remote_agent_panel_entries(
                         info.terminal_title.clone(),
                         info.terminal_title_stripped.clone(),
                         has_gates,
-                        crate::terminal::state::attention_tier(
+                        Some(crate::terminal::state::attention_tier(
                             state,
                             has_gates,
                             has_items,
                             usage_limited,
-                        ),
+                        )),
                         usage_limited,
                         usize::from(has_gates) * info.gates.len(),
                         Some(info.state_change_seq),
@@ -1667,7 +1676,8 @@ fn aggregate_tab_entries(
                     *has_agent |= entry.has_agent;
                     *has_current_agent |= entry.agent.is_some();
                     tab_entry.open_blockers |= entry.open_blockers;
-                    tab_entry.attention_tier = tab_entry.attention_tier.max(entry.attention_tier);
+                    tab_entry.attention_tier =
+                        Some(entry_attention_tier(tab_entry).max(entry_attention_tier(entry)));
                     tab_entry.usage_limited |= entry.usage_limited;
                 },
             )
@@ -5448,6 +5458,8 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     // pane, only the reset window.
     let key = if entry.usage_limited {
         "usage"
+    } else if entry_attention_was_cleared(entry) {
+        return "Settled".to_string();
     } else {
         match entry_attention_tier(entry) {
             AttentionTier::Blocked => "blocked",
@@ -6252,8 +6264,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
-                let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-                let attention_tier = ws.aggregate_attention_tier(&app.terminals);
+                let (agg_state, agg_seen, attention_tier) =
+                    ws.aggregate_state_and_attention(&app.terminals);
                 let has_agent = ws.tabs.iter().any(|tab| {
                     tab.panes.values().any(|pane| {
                         app.terminals
@@ -9220,7 +9232,7 @@ pub(crate) mod tests {
 
         let entries = remote_agent_panel_entries(&snapshot);
         let entry = &entries[0].entry;
-        assert_eq!(entry.attention_tier, AttentionTier::Attention);
+        assert_eq!(entry.attention_tier, Some(AttentionTier::Attention));
         assert!(entry_needs_human_attention(entry));
         assert!(!entry_is_blocked(entry));
         let palette = Palette::catppuccin();
@@ -9239,7 +9251,7 @@ pub(crate) mod tests {
         };
         let settled_entries = remote_agent_panel_entries(&settled_snapshot);
         let settled_entry = &settled_entries[0].entry;
-        assert_eq!(settled_entry.attention_tier, AttentionTier::None);
+        assert_eq!(settled_entry.attention_tier, Some(AttentionTier::None));
         assert!(!entry_needs_human_attention(settled_entry));
         assert!(!entry_is_blocked(settled_entry));
     }
@@ -10199,10 +10211,14 @@ pub(crate) mod tests {
             .attached_terminal_id
             .clone();
         app.terminals.get_mut(&terminal_id).unwrap().detected_agent = agent;
-        sidebar_thread_entries(&app)
+        let mut entry = sidebar_thread_entries(&app)
             .into_iter()
             .next()
-            .expect("compact test entry")
+            .expect("compact test entry");
+        // Most compact-row tests mutate lifecycle facts directly, so exercise
+        // the legacy projection path that derives attention from those facts.
+        entry.attention_tier = None;
+        entry
     }
 
     #[test]
@@ -10771,7 +10787,7 @@ pub(crate) mod tests {
             prio: true,
             starred: false,
             state,
-            attention_tier: crate::terminal::state::attention_tier(state, false, false, false),
+            attention_tier: None,
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
@@ -11424,10 +11440,50 @@ pub(crate) mod tests {
             .unwrap()
             .settled_at = Some(1);
         assert_eq!(
-            app.workspaces[1].aggregate_attention_tier(&app.terminals),
+            app.workspaces[1]
+                .aggregate_state_and_attention(&app.terminals)
+                .2,
             AttentionTier::None,
             "settled panes leave the workspace attention roll-up"
         );
+    }
+
+    #[test]
+    fn settled_answer_clears_attention_and_hover_text() {
+        let mut app = app_with_agents(&["answer"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.state = AgentState::Blocked;
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose one".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+
+        let entry = sidebar_thread_entries(&app).remove(0);
+        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.peach);
+        assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
+
+        assert!(app.settle_pane_at(0, pane, 1_725_000_000));
+        assert_eq!(app.terminals[&terminal_id].state, AgentState::Blocked);
+        let settled = sidebar_thread_entries(&app).remove(0);
+        assert_eq!(settled.attention_tier, Some(AttentionTier::None));
+        assert_eq!(entry_attention_tier(&settled), AttentionTier::None);
+        assert_eq!(
+            compact_row_color(&settled, &app.palette),
+            app.palette.overlay0
+        );
+        assert_eq!(agent_dot_tooltip(&settled), "Settled");
     }
 
     /// Owner correction to #77: the same latched gate is not blocking while
@@ -11593,6 +11649,7 @@ pub(crate) mod tests {
         entry.state = AgentState::Blocked;
         entry.usage_limited = true;
         entry.open_blockers = false;
+        entry.attention_tier = None;
 
         let layout = tab_row_layout(
             &entry,
@@ -14696,6 +14753,23 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_ne!(buffer[(detail_area.x, detail_area.y)].symbol(), "");
         assert_ne!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "");
+    }
+
+    #[test]
+    fn collapsed_sidebar_aggregates_each_workspace_in_one_pane_pass() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        let pane_count = app.workspaces[0].tabs[0].panes.len();
+        crate::workspace::take_aggregate_pane_visits();
+
+        let area = Rect::new(0, 0, 4, 12);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .unwrap();
+
+        assert_eq!(crate::workspace::take_aggregate_pane_visits(), pane_count);
     }
 
     /// Two agent tabs in one workspace plus a second workspace, so the
@@ -19952,7 +20026,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         entry.open_blockers = false;
         entry.state = AgentState::Blocked;
-        entry.attention_tier = AttentionTier::Attention;
+        entry.attention_tier = Some(AttentionTier::Attention);
         assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
 
         // A usage limit outranks every lifecycle label.
