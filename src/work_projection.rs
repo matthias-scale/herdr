@@ -904,18 +904,10 @@ impl crate::app::state::AppState {
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
-                    if pane.settled_at.is_some() {
-                        continue;
-                    }
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
-                    let attention_tier = crate::terminal::state::attention_tier(
-                        terminal.state,
-                        !terminal.closing_gates.is_empty(),
-                        !terminal.closing_items.is_empty(),
-                        terminal.usage_limited,
-                    );
+                    let attention_tier = pane.agent_projection(terminal).attention_tier;
                     if attention_tier == crate::terminal::state::AttentionTier::None {
                         continue;
                     }

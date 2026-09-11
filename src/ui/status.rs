@@ -417,7 +417,6 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     }
     let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
         .into_iter()
-        .filter(|entry| !app.pane_is_settled(entry.ws_idx, entry.pane_id))
         .fold((0usize, 0usize), |(blocked, attention), entry| {
             match crate::ui::sidebar::entry_attention_tier(&entry) {
                 crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),

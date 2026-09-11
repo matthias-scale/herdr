@@ -67,6 +67,7 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
     ) {
         entries.sort_by_key(|entry| {
             (
+                std::cmp::Reverse(crate::ui::sidebar::entry_attention_rank(entry)),
                 std::cmp::Reverse(super::api_helpers::tab_attention_priority_with_stale(
                     entry.state,
                     entry.seen,
@@ -375,11 +376,7 @@ fn sort_value(
                 .and_then(|workspace| workspace.public_pane_number(entry.pane_id))
                 .map(|number| EvalValue::Number(number as u64)),
             AgentViewBuiltinSortField::Attention => Some(EvalValue::Number(u64::from(
-                super::api_helpers::tab_attention_priority_with_stale(
-                    entry.state,
-                    entry.seen,
-                    entry.stale,
-                ),
+                crate::ui::sidebar::entry_attention_rank(entry),
             ))),
             AgentViewBuiltinSortField::Status => Some(EvalValue::String(status_name(
                 entry.state,
@@ -556,13 +553,26 @@ mod tests {
     }
 
     #[test]
-    fn priority_sort_surfaces_stale_agents_before_blocked_agents() {
+    fn priority_sort_ranks_yellow_attention_before_stale_lifecycle() {
         let mut state = state_with_agents();
-        let blocked_pane = state.workspaces[0].tabs[0].root_pane;
-        let blocked_terminal = state.workspaces[0].tabs[0].panes[&blocked_pane]
+        let attention_pane = state.workspaces[0].tabs[0].root_pane;
+        let attention_terminal = state.workspaces[0].tabs[0].panes[&attention_pane]
             .attached_terminal_id
             .clone();
-        state.terminals.get_mut(&blocked_terminal).unwrap().state = AgentState::Blocked;
+        state
+            .terminals
+            .get_mut(&attention_terminal)
+            .unwrap()
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
 
         let stale_pane = state.workspaces[1].tabs[0].root_pane;
         let stale_terminal = state.workspaces[1].tabs[0].panes[&stale_pane]
@@ -574,17 +584,34 @@ mod tests {
         state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
 
         let entries = crate::ui::agent_panel_entries(&state);
-        assert!(entries[0].stale);
+        assert_eq!(entries[0].ws_idx, 0);
+        assert_eq!(
+            crate::ui::sidebar::entry_attention_tier(&entries[0]),
+            crate::terminal::state::AttentionTier::Attention
+        );
     }
 
     #[test]
-    fn declarative_attention_sort_surfaces_stale_agents_before_blocked_agents() {
+    fn declarative_attention_sort_uses_the_canonical_tier() {
         let mut state = state_with_agents();
-        let blocked_pane = state.workspaces[0].tabs[0].root_pane;
-        let blocked_terminal = state.workspaces[0].tabs[0].panes[&blocked_pane]
+        let attention_pane = state.workspaces[0].tabs[0].root_pane;
+        let attention_terminal = state.workspaces[0].tabs[0].panes[&attention_pane]
             .attached_terminal_id
             .clone();
-        state.terminals.get_mut(&blocked_terminal).unwrap().state = AgentState::Blocked;
+        state
+            .terminals
+            .get_mut(&attention_terminal)
+            .unwrap()
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Verify".into(),
+            text: "Confirm one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
 
         let stale_pane = state.workspaces[1].tabs[0].root_pane;
         let stale_terminal = state.workspaces[1].tabs[0].panes[&stale_pane]
@@ -604,7 +631,11 @@ mod tests {
         });
 
         let entries = crate::ui::agent_panel_entries(&state);
-        assert!(entries[0].stale);
+        assert_eq!(entries[0].ws_idx, 0);
+        assert_eq!(
+            crate::ui::sidebar::entry_attention_tier(&entries[0]),
+            crate::terminal::state::AttentionTier::Attention
+        );
     }
 
     #[test]

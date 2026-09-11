@@ -41,8 +41,8 @@ pub(crate) mod sidebar;
 pub(crate) use dock::symphony::dashboard_link_rect as dock_symphony_dashboard_link_rect;
 pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// Exposed so the inbox tests can assert the queue and the sidebar answer the
-/// blocked question identically. Both production paths use
-/// `terminal::counts_as_blocked`.
+/// blocked question identically. Both production paths consume the pane's
+/// canonical agent projection.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
 pub(crate) mod status;

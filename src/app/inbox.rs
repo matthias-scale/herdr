@@ -114,14 +114,10 @@ impl crate::app::AppState {
                     if terminal.detected_agent.is_none() {
                         continue;
                     }
-                    if crate::terminal::counts_as_blocked(
-                        terminal.state,
-                        !terminal.closing_gates.is_empty(),
-                        !terminal.closing_items.is_empty(),
-                        terminal.usage_limited,
-                    ) {
+                    let projection = pane.agent_projection(terminal);
+                    if projection.counts_as_blocked() {
                         blocked = blocked.saturating_add(1);
-                    } else if terminal.state == crate::detect::AgentState::Working {
+                    } else if projection.state == crate::detect::AgentState::Working {
                         working = working.saturating_add(1);
                     }
                 }
@@ -138,22 +134,11 @@ impl crate::app::AppState {
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
-                    if pane.settled_at.is_some() {
-                        continue;
-                    }
-                    let attention_tier = crate::terminal::state::attention_tier(
-                        terminal.state,
-                        !terminal.closing_gates.is_empty(),
-                        !terminal.closing_items.is_empty(),
-                        terminal.usage_limited,
-                    );
-                    let included = crate::terminal::needs_human_attention(
-                        terminal.state,
-                        !terminal.closing_gates.is_empty(),
-                        !terminal.closing_items.is_empty(),
-                        terminal.usage_limited,
-                    ) && (include_yellow
-                        || attention_tier == crate::terminal::state::AttentionTier::Blocked);
+                    let projection = pane.agent_projection(terminal);
+                    let attention_tier = projection.attention_tier;
+                    let included = projection.needs_human_attention()
+                        && (include_yellow
+                            || attention_tier == crate::terminal::state::AttentionTier::Blocked);
                     if !included {
                         continue;
                     }

@@ -5437,7 +5437,7 @@ mod tests {
             .pane_info(0, internal_pane_id)
             .expect("reported pane info");
         assert_eq!(pane_info.items[0].text, "Choose the release lane");
-        assert!(!crate::terminal::counts_as_blocked(
+        assert!(!crate::terminal::state::counts_as_blocked(
             projected,
             !terminal.closing_gates.is_empty(),
             !terminal.closing_items.is_empty(),

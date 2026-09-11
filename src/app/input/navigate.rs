@@ -2104,11 +2104,14 @@ enum BlockedPaneTarget {
 }
 
 fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
+    let visible_local = crate::ui::agent_panel_entries(state)
+        .into_iter()
+        .map(|entry| (entry.ws_idx, entry.pane_id))
+        .collect::<std::collections::HashSet<_>>();
     let mut local = crate::ui::all_agent_panel_entries(state)
         .into_iter()
         .map(|entry| {
-            let needs_attention = crate::ui::sidebar::entry_needs_human_attention(&entry)
-                && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
+            let needs_attention = crate::ui::sidebar::entry_needs_human_attention(&entry);
             (
                 BlockedPaneTarget::Local {
                     ws_idx: entry.ws_idx,
@@ -2137,8 +2140,9 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
                 while index < local.len() {
                     let same_tab = matches!(
                         local[index].0,
-                        BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
+                        BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
                             if (ws_idx, tab_idx) == (entry.ws_idx, entry.tab_idx)
+                                && visible_local.contains(&(ws_idx, pane_id))
                     );
                     if same_tab {
                         panes.push(local.remove(index));
@@ -3824,6 +3828,75 @@ mod tests {
             &mut app,
             NavigateAction::NextBlockedWindow,
             &[(2, 0), (1, 0), (0, 0)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_places_query_hidden_sibling_after_visible_targets() {
+        let mut app = app_with_test_workspaces(&["mixed", "later"]);
+        let visible = app.state.workspaces[0].tabs[0].root_pane;
+        let hidden = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let later = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        set_pane_agent_state(
+            &mut app.state,
+            0,
+            0,
+            visible,
+            crate::detect::AgentState::Blocked,
+        );
+        set_pane_agent_state(
+            &mut app.state,
+            0,
+            0,
+            hidden,
+            crate::detect::AgentState::Idle,
+        );
+        set_pane_open_item(&mut app.state, 0, 0, hidden);
+        set_pane_agent_state(
+            &mut app.state,
+            1,
+            0,
+            later,
+            crate::detect::AgentState::Blocked,
+        );
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "test.query".into(),
+            label: None,
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::Status,
+                ),
+                value: crate::api::schema::AgentViewValue::String("blocked".into()),
+            }),
+            sort: Vec::new(),
+        });
+
+        let targets = blocked_pane_cycle(&app.state)
+            .into_iter()
+            .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            targets,
+            vec![
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: visible,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 1,
+                    tab_idx: 0,
+                    pane_id: later,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: hidden,
+                },
+            ]
         );
     }
 

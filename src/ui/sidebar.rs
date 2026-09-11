@@ -130,8 +130,12 @@ pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     })
 }
 
-fn entry_attention_was_cleared(entry: &AgentPanelEntry) -> bool {
-    entry.attention_tier == Some(AttentionTier::None) && entry.state == AgentState::Blocked
+pub(crate) fn entry_attention_rank(entry: &AgentPanelEntry) -> u8 {
+    match entry_attention_tier(entry) {
+        AttentionTier::None => 0,
+        AttentionTier::Attention => 1,
+        AttentionTier::Blocked => 2,
+    }
 }
 
 #[cfg(test)]
@@ -202,9 +206,6 @@ pub(super) fn agent_panel_label_color(
     }
     if entry_attention_tier(entry) == AttentionTier::Attention {
         return p.peach;
-    }
-    if entry_attention_was_cleared(entry) {
-        return p.overlay0;
     }
     state_label_color(entry.state, entry.seen, p)
 }
@@ -467,9 +468,6 @@ fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
         AttentionTier::Blocked => return p.red,
         AttentionTier::Attention => return p.peach,
         AttentionTier::None => {}
-    }
-    if entry_attention_was_cleared(entry) {
-        return p.overlay0;
     }
     // A session that declared a contract and reported it met is the one kind of
     // done you can act on without reading the pane: close it. That earns its own
@@ -1991,16 +1989,11 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
 /// Status buckets for the Status group sort: whoever waits on a human first,
 /// then active work, then everything finished or idle.
 fn sidebar_sort_status_rank(entry: &AgentPanelEntry) -> u8 {
-    if entry.state == AgentState::Blocked
-        || entry.gate_count > 0
-        || entry.open_blockers
-        || entry.usage_limited
-    {
-        0
-    } else if entry.state == AgentState::Working {
-        1
-    } else {
-        2
+    match entry_attention_tier(entry) {
+        AttentionTier::Blocked => 0,
+        AttentionTier::Attention => 1,
+        AttentionTier::None if entry.state == AgentState::Working => 2,
+        AttentionTier::None => 3,
     }
 }
 
@@ -5458,8 +5451,6 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     // pane, only the reset window.
     let key = if entry.usage_limited {
         "usage"
-    } else if entry_attention_was_cleared(entry) {
-        return "Settled".to_string();
     } else {
         match entry_attention_tier(entry) {
             AttentionTier::Blocked => "blocked",
@@ -11483,7 +11474,7 @@ pub(crate) mod tests {
             compact_row_color(&settled, &app.palette),
             app.palette.overlay0
         );
-        assert_eq!(agent_dot_tooltip(&settled), "Settled");
+        assert_eq!(agent_dot_tooltip(&settled), "Unknown");
     }
 
     /// Owner correction to #77: the same latched gate is not blocking while
@@ -20238,24 +20229,42 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn status_sort_ranks_blocked_then_working_then_idle_by_recency() {
+    fn status_sort_ranks_blocked_then_attention_then_lifecycle() {
         let mut app = sort_app(&[
             sort_tab("idle-a", "acme/one", AgentState::Idle, 3),
             sort_tab("work-b", "acme/one", AgentState::Working, 5),
-            sort_tab("blocked-c", "acme/one", AgentState::Blocked, 1),
-            sort_tab("blocked-d", "acme/one", AgentState::Blocked, 9),
+            sort_tab("answer-c", "acme/one", AgentState::Idle, 7),
+            sort_tab("blocked-d", "acme/one", AgentState::Blocked, 1),
+            sort_tab("blocked-e", "acme/one", AgentState::Blocked, 9),
         ]);
+        let attention_pane = app.workspaces[0].tabs[2].root_pane;
+        let attention_terminal = app.workspaces[0].tabs[2].panes[&attention_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&attention_terminal)
+            .unwrap()
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Status);
         assert_eq!(
             sidebar_tab_order(&app),
-            vec![3, 2, 1, 0],
-            "blocked first (newest change leading), then working, then idle"
+            vec![4, 3, 2, 1, 0],
+            "blocked first, then yellow attention, then working and idle"
         );
 
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Recent);
         assert_eq!(
             sidebar_tab_order(&app),
-            vec![3, 1, 0, 2],
+            vec![4, 2, 1, 0, 3],
             "recent sorts by the most recent state change alone"
         );
     }

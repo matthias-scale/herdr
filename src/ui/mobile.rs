@@ -1189,9 +1189,6 @@ impl GlobalAgentCounts {
 fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
     let mut counts = GlobalAgentCounts::default();
     for entry in crate::ui::all_agent_panel_entries(app) {
-        if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
-            continue;
-        }
         match super::sidebar::entry_attention_tier(&entry) {
             crate::terminal::state::AttentionTier::Blocked => {
                 counts.blocked += 1;
@@ -1514,7 +1511,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .filter(|cell| matches!(cell.symbol(), "●" | "○"))
+            .filter(|cell| matches!(cell.symbol(), "●" | "○" | "·"))
             .collect();
         assert!(dots.iter().any(|cell| cell.fg == app.palette.overlay0));
         assert!(dots
