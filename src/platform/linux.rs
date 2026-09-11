@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    ffi::{CStr, CString},
     io::Write,
-    os::fd::RawFd,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
@@ -47,6 +48,204 @@ pub(crate) use super::unix_common::{
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
 const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";
 const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
+const HOST_TERMINAL_WRITE_DEBOUNCE: Duration = Duration::from_millis(100);
+const HOST_TERMINAL_WRITE_DEBOUNCE_LIMIT: Duration = Duration::from_millis(500);
+
+/// An inotify watch for writes made through the controlling terminal's device path.
+pub(crate) struct HostTerminalWriteWatcher {
+    inotify_fd: OwnedFd,
+}
+
+impl HostTerminalWriteWatcher {
+    /// Waits for one quiet-period-delimited group of terminal writes.
+    pub(crate) fn wait_for_write(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        if !poll_readable(self.inotify_fd.as_raw_fd(), timeout)? {
+            return Ok(false);
+        }
+        let mut modified = drain_inotify(self.inotify_fd.as_raw_fd())?;
+        let debounce_deadline = Instant::now() + HOST_TERMINAL_WRITE_DEBOUNCE_LIMIT;
+
+        while poll_readable(
+            self.inotify_fd.as_raw_fd(),
+            HOST_TERMINAL_WRITE_DEBOUNCE
+                .min(debounce_deadline.saturating_duration_since(Instant::now())),
+        )? {
+            modified |= drain_inotify(self.inotify_fd.as_raw_fd())?;
+            if Instant::now() >= debounce_deadline {
+                break;
+            }
+        }
+        Ok(modified)
+    }
+}
+
+/// Arms a by-path watch for the controlling terminal and moves Herdr's own
+/// stdout and matching stderr writes onto `/dev/tty`, whose inode is not watched.
+pub(crate) fn prepare_host_terminal_write_watcher(
+) -> std::io::Result<Option<HostTerminalWriteWatcher>> {
+    let Some(terminal_path) = controlling_terminal_path(libc::STDOUT_FILENO)? else {
+        return Ok(None);
+    };
+    let redirect_stderr =
+        tty_path(libc::STDERR_FILENO).is_ok_and(|stderr_path| stderr_path == terminal_path);
+    let terminal = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+    // If fd 1 already came from /dev/tty, watching its reported path would
+    // observe the repaint writes too and create a permanent feedback loop.
+    if same_open_file(libc::STDOUT_FILENO, terminal.as_raw_fd())? {
+        return Ok(None);
+    }
+    let watcher = watch_terminal_path(&terminal_path)?;
+
+    let saved_stdout = duplicate_fd(libc::STDOUT_FILENO)?;
+    let saved_stderr = redirect_stderr
+        .then(|| duplicate_fd(libc::STDERR_FILENO))
+        .transpose()?;
+
+    // SAFETY: both descriptors are valid, and dup2 atomically retargets fd 1.
+    if unsafe { libc::dup2(terminal.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if redirect_stderr {
+        // SAFETY: both descriptors are valid, and dup2 atomically retargets fd 2.
+        if unsafe { libc::dup2(terminal.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: saved_stdout is a duplicate of the original fd 1.
+            let _ = unsafe { libc::dup2(saved_stdout.as_raw_fd(), libc::STDOUT_FILENO) };
+            if let Some(saved_stderr) = saved_stderr.as_ref() {
+                // SAFETY: saved_stderr is a duplicate of the original fd 2.
+                let _ = unsafe { libc::dup2(saved_stderr.as_raw_fd(), libc::STDERR_FILENO) };
+            }
+            return Err(error);
+        }
+    }
+
+    Ok(Some(watcher))
+}
+
+fn controlling_terminal_path(fd: RawFd) -> std::io::Result<Option<CString>> {
+    // SAFETY: these calls inspect process and descriptor state without retaining pointers.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return Ok(None);
+    }
+    // SAFETY: getsid reads the calling process's session id.
+    let process_session = unsafe { libc::getsid(0) };
+    // SAFETY: tcgetsid reads the session id associated with this terminal descriptor.
+    let terminal_session = unsafe { libc::tcgetsid(fd) };
+    if process_session < 0 || terminal_session != process_session {
+        return Ok(None);
+    }
+    tty_path(fd).map(Some)
+}
+
+fn tty_path(fd: RawFd) -> std::io::Result<CString> {
+    let mut path = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    // SAFETY: path is writable for its full length and fd remains open for the call.
+    let result = unsafe { libc::ttyname_r(fd, path.as_mut_ptr(), path.len()) };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result));
+    }
+    // SAFETY: ttyname_r returned success and wrote a NUL-terminated path.
+    Ok(unsafe { CStr::from_ptr(path.as_ptr()) }.to_owned())
+}
+
+fn watch_terminal_path(path: &CStr) -> std::io::Result<HostTerminalWriteWatcher> {
+    // SAFETY: inotify_init1 returns a new owned descriptor on success.
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fd was returned above and ownership is transferred exactly once.
+    let inotify_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: path is NUL-terminated and remains alive for the call.
+    if unsafe { libc::inotify_add_watch(inotify_fd.as_raw_fd(), path.as_ptr(), libc::IN_MODIFY) }
+        < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(HostTerminalWriteWatcher { inotify_fd })
+}
+
+fn duplicate_fd(fd: RawFd) -> std::io::Result<OwnedFd> {
+    // SAFETY: fcntl duplicates fd and returns a new owned descriptor on success.
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: duplicate is a new descriptor whose ownership transfers here.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+fn same_open_file(left: RawFd, right: RawFd) -> std::io::Result<bool> {
+    let mut left_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let mut right_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: each pointer references writable storage for one libc::stat value.
+    if unsafe { libc::fstat(left, left_stat.as_mut_ptr()) } < 0
+        || unsafe { libc::fstat(right, right_stat.as_mut_ptr()) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: both fstat calls succeeded and initialized their output values.
+    let (left_stat, right_stat) = unsafe { (left_stat.assume_init(), right_stat.assume_init()) };
+    Ok(left_stat.st_dev == right_stat.st_dev && left_stat.st_ino == right_stat.st_ino)
+}
+
+fn poll_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    loop {
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor points to one initialized pollfd for the duration of the call.
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result > 0 {
+            if descriptor.revents & libc::POLLIN != 0 {
+                return Ok(true);
+            }
+            return Err(std::io::Error::other("host terminal write watcher stopped"));
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn drain_inotify(fd: RawFd) -> std::io::Result<bool> {
+    let mut events = [0_u8; 4096];
+    let mut modified = false;
+    loop {
+        // SAFETY: events is writable for the supplied length and fd remains open.
+        let read = unsafe { libc::read(fd, events.as_mut_ptr().cast(), events.len()) };
+        if read > 0 {
+            let mut offset = 0_usize;
+            while offset + std::mem::size_of::<libc::inotify_event>() <= read as usize {
+                // SAFETY: the kernel writes an aligned sequence of complete inotify_event values.
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        events.as_ptr().add(offset).cast::<libc::inotify_event>(),
+                    )
+                };
+                modified |= event.mask & libc::IN_MODIFY != 0;
+                offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
+            }
+            continue;
+        }
+        if read == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::WouldBlock => return Ok(modified),
+            std::io::ErrorKind::Interrupted => continue,
+            _ => return Err(error),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessDetectionMode {
@@ -1092,6 +1291,54 @@ fn process_session_id(pid: u32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_terminal_write_watch_reports_by_path_pty_write() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: openpty initializes both output descriptors; optional metadata is unused.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "openpty failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: openpty returned two new owned descriptors on success.
+        let _master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: openpty returned two new owned descriptors on success.
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let path = tty_path(slave.as_raw_fd()).expect("slave tty path");
+        let mut watcher = watch_terminal_path(&path).expect("watch slave tty path");
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(OsStr::from_bytes(path.to_bytes()))
+            .expect("open slave tty by path");
+
+        writer
+            .write_all(b"scheduled reboot\n")
+            .expect("write slave tty");
+
+        assert!(
+            watcher
+                .wait_for_write(Duration::from_secs(1))
+                .expect("wait for terminal write"),
+            "inotify should report the by-path pty write"
+        );
+    }
 
     /// The snapshot is the whole point: within the TTL a newly spawned
     /// same-session process must NOT appear, and after the TTL it must. The

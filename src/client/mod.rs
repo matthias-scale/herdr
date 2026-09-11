@@ -1239,6 +1239,8 @@ enum ClientLoopEvent {
     ServerMessage(ServerMessage),
     /// Server reader thread exited (connection lost).
     ServerDisconnected,
+    /// Another process wrote directly to the full-app client's host terminal.
+    HostTerminalWrite,
     /// Timer tick.
     Timer,
 }
@@ -1777,6 +1779,26 @@ async fn run_client_loop(
     // Channel for events from the stdin, resize, and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
 
+    let host_terminal_write_watcher =
+        if state.attach_escape.is_none() && negotiated_encoding == RenderEncoding::SemanticFrame {
+            match crate::platform::prepare_host_terminal_write_watcher() {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    warn!(%err, "failed to watch the host terminal for foreign writes");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    if let Some(watcher) = host_terminal_write_watcher {
+        let watcher_tx = event_tx.clone();
+        let watcher_quit = should_quit.clone();
+        std::thread::spawn(move || {
+            host_terminal_write_loop(watcher, watcher_tx, &watcher_quit);
+        });
+    }
+
     // Spawn the stdin reader thread.
     let will_query_host_terminal_theme = host_terminal_queries_enabled(
         state.attach_escape.is_some(),
@@ -2092,6 +2114,17 @@ async fn run_client_loop(
                 };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
+                }
+            }
+            ClientLoopEvent::HostTerminalWrite => {
+                if let Some((frame, encoded)) =
+                    encode_last_frame_repaint(&state.blit_encoder, state.draw_host_cursor)
+                {
+                    // The committed frame may contain stale graphics from an earlier transaction.
+                    let mut stdout = io::stdout();
+                    let _ = stdout.write_all(&encoded.bytes);
+                    let _ = stdout.flush();
+                    state.blit_encoder.commit(frame, encoded);
                 }
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
@@ -2419,6 +2452,30 @@ fn server_reader_thread(
             Err(err) => {
                 warn!(err = %err, "server read error");
                 let _ = event_tx.blocking_send(ClientLoopEvent::ServerDisconnected);
+                break;
+            }
+        }
+    }
+}
+
+fn host_terminal_write_loop(
+    mut watcher: crate::platform::HostTerminalWriteWatcher,
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: &Arc<AtomicBool>,
+) {
+    while !should_quit.load(Ordering::Acquire) {
+        match watcher.wait_for_write(Duration::from_millis(100)) {
+            Ok(false) => {}
+            Ok(true) => {
+                if event_tx
+                    .blocking_send(ClientLoopEvent::HostTerminalWrite)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(err) => {
+                warn!(%err, "host terminal write watcher stopped");
                 break;
             }
         }
@@ -2793,6 +2850,19 @@ fn forward_clipboard(data: &str) {
 // ---------------------------------------------------------------------------
 // Frame output
 // ---------------------------------------------------------------------------
+
+fn encode_last_frame_repaint(
+    encoder: &render_ansi::BlitEncoder,
+    suppress_visible_cursor: bool,
+) -> Option<(protocol::FrameData, render_ansi::EncodedBlit)> {
+    let frame = encoder.last_frame()?.clone();
+    let encoded = if suppress_visible_cursor {
+        encoder.encode_with_suppressed_visible_cursor(&frame, true)
+    } else {
+        encoder.encode(&frame, true)
+    };
+    Some((frame, encoded))
+}
 
 fn write_encoded_frame_with_graphics(
     mut writer: impl io::Write,
@@ -3528,6 +3598,38 @@ mod tests {
         write_encoded_frame_with_graphics(&mut output, b"text", b"").unwrap();
 
         assert_eq!(output, b"text");
+    }
+
+    #[test]
+    fn foreign_terminal_write_reemits_full_last_frame() {
+        let frame = protocol::FrameData {
+            cells: vec![
+                protocol::CellData {
+                    symbol: "R".to_owned(),
+                    fg: 0,
+                    bg: 0,
+                    modifier: 0,
+                    skip: false,
+                    hyperlink: None,
+                };
+                6
+            ],
+            width: 3,
+            height: 2,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+        let mut encoder = render_ansi::BlitEncoder::new();
+        let initial = encoder.encode(&frame, false);
+        encoder.commit(frame, initial);
+
+        let (frame, encoded) = encode_last_frame_repaint(&encoder, false).expect("committed frame");
+
+        assert!(encoded.full);
+        assert_eq!(frame, *encoder.last_frame().expect("last frame"));
+        assert!(!encoded.bytes.windows(4).any(|bytes| bytes == b"\x1b[2J"));
+        assert!(encoded.bytes.iter().filter(|byte| **byte == b'R').count() >= 6);
     }
 
     #[test]
