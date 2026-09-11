@@ -3613,6 +3613,31 @@ mod tests {
     }
 
     #[test]
+    fn inferred_pr_change_rebinds_case_variant_derived_repo() {
+        let mut terminal = test_terminal();
+        terminal
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    git_observation: crate::work_context::PaneWorkContext {
+                        repo: Some("owner/repo".into()),
+                        pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .expect("restore git tier");
+
+        assert!(terminal
+            .set_inferred_pr_url("https://github.com/new/repo/pull/2".into())
+            .expect("infer cross-repository pull request"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.repo.as_deref(), Some("new/repo"));
+    }
+
+    #[test]
     fn inferring_same_pr_keeps_git_role_and_owner() {
         let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
 

@@ -298,8 +298,11 @@ impl PaneWorkContext {
     }
 
     fn repo_is_derived_from_primary_pr(&self) -> bool {
-        self.repo.is_some()
-            && self.primary_pr().and_then(repo_slug_from_pr_url).as_ref() == self.repo.as_ref()
+        self.repo.as_deref().is_some_and(|repo| {
+            self.primary_pr()
+                .and_then(repo_slug_from_pr_url)
+                .is_some_and(|pr_repo| repo_slugs_match(repo, &pr_repo))
+        })
     }
 
     /// Reset metadata whose meaning is scoped to the primary pull request.
@@ -308,14 +311,14 @@ impl PaneWorkContext {
     fn reset_pr_bound_fields_if_pr_changed(
         &mut self,
         previous: &Self,
-        repo_replaced: bool,
+        preserve_repo: bool,
     ) -> bool {
         if self.pr_urls == previous.pr_urls {
             return false;
         }
         self.role = None;
         self.active_owner = false;
-        let reset_repo = !repo_replaced && previous.repo_is_derived_from_primary_pr();
+        let reset_repo = !preserve_repo && previous.repo_is_derived_from_primary_pr();
         if reset_repo {
             self.repo = None;
         }
@@ -512,7 +515,6 @@ impl PaneWorkContextState {
         }
         patch.validate_collisions()?;
         let pr_urls_supplied = patch.pr_urls.is_some();
-        let repo_supplied = patch.repo.is_some();
         let repo_cleared = patch.clear_fields.contains(&PaneWorkContextField::Repo);
         // A pull request implies its repository only when this patch actually
         // binds one, and never when the same patch clears the repository. A
@@ -559,7 +561,9 @@ impl PaneWorkContextState {
         }
         candidate.set_latest_work_items();
         candidate.pr_urls = normalize_pr_urls(candidate.pr_urls)?;
-        candidate.reset_pr_bound_fields_if_pr_changed(&self.manual, repo_supplied);
+        // Manual repository state is authoritative even when its value happens
+        // to equal the repository implied by the previous pull request.
+        candidate.reset_pr_bound_fields_if_pr_changed(&self.manual, true);
         if let Some(role) = patched_role {
             candidate.role = Some(role);
         }
@@ -2797,7 +2801,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_manual_pr_rebinds_derived_repo_and_clears_role_and_owner() {
+    fn changing_manual_pr_preserves_repo_and_clears_role_and_owner() {
         let mut state = PaneWorkContextState::default();
         state
             .apply_manual_patch(PaneWorkContextPatch {
@@ -2814,9 +2818,70 @@ mod tests {
                 ..PaneWorkContextPatch::default()
             })
             .unwrap());
-        assert_eq!(state.effective().repo.as_deref(), Some("new/repo"));
+        assert_eq!(state.effective().repo.as_deref(), Some("old/repo"));
         assert_eq!(state.effective().role, None);
         assert!(!state.effective().active_owner);
+    }
+
+    #[test]
+    fn changing_only_manual_pr_preserves_an_explicit_equal_repo() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                repo: Some("o/r".into()),
+                pr_urls: Some(vec!["https://github.com/o/r/pull/1".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind explicit repository and pull request");
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/new/repo/pull/2".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("change only the pull request");
+
+        assert_eq!(state.manual().repo.as_deref(), Some("o/r"));
+        assert_eq!(
+            state.manual().primary_pr(),
+            Some("https://github.com/new/repo/pull/2")
+        );
+    }
+
+    #[test]
+    fn manual_pr_patch_implies_repo_when_manual_tier_has_none() {
+        let mut state = PaneWorkContextState::default();
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/1".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind pull request");
+
+        assert_eq!(state.manual().repo.as_deref(), Some("o/r"));
+    }
+
+    #[test]
+    fn higher_tier_pr_does_not_borrow_case_variant_derived_repo() {
+        let state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    pr_urls: vec!["https://github.com/other/repo/pull/2".into()],
+                    ..Default::default()
+                },
+                git_observation: PaneWorkContext {
+                    repo: Some("owner/repo".into()),
+                    pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )
+        .expect("restore tiered work context");
+
+        assert_eq!(state.effective().repo, None);
     }
 
     #[test]
