@@ -278,6 +278,7 @@ impl App {
                     self.request_repaint();
                 }
                 self.state.outer_terminal_focus = Some(true);
+                self.state.pomodoro.resume_held(std::time::Instant::now());
                 self.state.mark_active_pane_seen();
                 true
             }
@@ -348,7 +349,7 @@ impl App {
         let mut changed = self.take_due_agent_activity_refresh(now);
         changed |= self.handle_loop_receipt_fallback(now);
         changed |= self.tick_notepad(now);
-        changed |= self.tick_pomodoro(now);
+        changed |= self.tick_pomodoro(now, self.state.outer_terminal_focus != Some(false));
         changed |= self.tick_sidebar_animation(now);
         let mut resized = false;
 

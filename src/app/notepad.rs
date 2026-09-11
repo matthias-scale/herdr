@@ -193,15 +193,19 @@ impl super::App {
     }
 
     /// Advances the break timer. Returns whether the frame changed.
-    pub(crate) fn tick_pomodoro(&mut self, now: Instant) -> bool {
-        let tick = self.state.pomodoro.tick(now);
+    pub(crate) fn tick_pomodoro(&mut self, now: Instant, host_focused: bool) -> bool {
+        let tick = self.state.pomodoro.tick_with_host_focus(now, host_focused);
         if tick.phase_ended {
             // The overlay is the reminder; the sound is what reaches an operator
             // who is looking at another window.
             if self.state.local_sound_playback && self.state.sound.allows(None) {
                 crate::sound::play(crate::sound::Sound::Request, &self.state.sound);
             }
-            tracing::debug!("pomodoro phase ended; prompting for confirmation");
+            if self.state.pomodoro.held() {
+                tracing::debug!("pomodoro phase ended; holding until host focus returns");
+            } else {
+                tracing::debug!("pomodoro phase ended; prompting for confirmation");
+            }
         }
         tick.changed
     }

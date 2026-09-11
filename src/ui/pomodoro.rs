@@ -23,6 +23,8 @@ use crate::pomodoro::PomodoroPhase;
 
 /// Width of `⏱ 25:00` plus a leading space.
 const INDICATOR_WIDTH: u16 = 9;
+/// Width of `⏱ 0:00 held` plus a leading space.
+const HELD_INDICATOR_WIDTH: u16 = 14;
 /// Columns the footer icon strip already owns.
 const FOOTER_ICON_COLUMNS: u16 = 13;
 const PROMPT_WIDTH: u16 = 62;
@@ -85,13 +87,18 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         return Rect::default();
     }
     let content_width = sidebar.width.saturating_sub(1);
-    if content_width < FOOTER_ICON_COLUMNS + INDICATOR_WIDTH {
+    let indicator_width = if app.pomodoro.held() {
+        HELD_INDICATOR_WIDTH
+    } else {
+        INDICATOR_WIDTH
+    };
+    if content_width < FOOTER_ICON_COLUMNS + indicator_width {
         return Rect::default();
     }
     Rect::new(
-        sidebar.x + content_width - INDICATOR_WIDTH,
+        sidebar.x + content_width - indicator_width,
         sidebar.bottom().saturating_sub(1),
-        INDICATOR_WIDTH,
+        indicator_width,
         1,
     )
 }
@@ -115,14 +122,18 @@ pub(crate) fn render_indicator(
     if area.width == 0 || area.height == 0 || !app.pomodoro.enabled {
         return;
     }
+    let held = app.pomodoro.held();
     let paused = app.pomodoro.paused();
     let glyph = if paused { "‖" } else { "⏱" };
-    let style = if paused {
+    let style = if held {
+        Style::default().fg(app.palette.yellow)
+    } else if paused {
         Style::default().fg(app.palette.overlay0)
     } else {
         Style::default().fg(phase_color(app, app.pomodoro.phase))
     };
-    let label = format!("{glyph} {}", app.pomodoro.label_at(now));
+    let held_label = if held { " held" } else { "" };
+    let label = format!("{glyph} {}{held_label}", app.pomodoro.label_at(now));
     let line = Line::from(vec![Span::styled(label, style)]);
     frame.render_widget(Paragraph::new(line).right_aligned(), area);
 }
@@ -297,6 +308,31 @@ mod tests {
             pomodoro_hit_area(&app, Rect::new(0, 0, 30, 20)),
             Rect::new(20, 19, 9, 1)
         );
+    }
+
+    #[test]
+    fn f1_held_indicator_names_the_state_in_a_distinct_colour() {
+        let now = std::time::Instant::now();
+        let mut app = state();
+        app.pomodoro.reset(now);
+        app.pomodoro
+            .tick_with_host_focus(now + std::time::Duration::from_secs(25 * 60), false);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 1))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render_indicator(&app, frame, Rect::new(0, 0, 20, 1), now))
+            .expect("draw indicator");
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        let held_cell = buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "h")
+            .expect("held label");
+
+        assert!(text.contains("0:00 held"), "{text:?}");
+        assert_eq!(held_cell.style().fg, Some(app.palette.yellow));
+        assert_ne!(app.palette.yellow, phase_color(&app, app.pomodoro.phase));
     }
 }
 
