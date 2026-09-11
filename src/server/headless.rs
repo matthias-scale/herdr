@@ -9851,7 +9851,20 @@ next_tab = ""
                 .expect("proxy terminal");
             let label = terminal.manual_label.as_deref().expect("identity line");
             assert!(label.starts_with("buildbox::"), "identity line: {label}");
-            assert!(label.contains("/dev/pts/"), "identity line: {label}");
+            // The line must carry the server's real tty path, whatever the
+            // platform names it ("/dev/pts/N" on Linux, "/dev/ttysNNN" on
+            // macOS), so compare against the live remote runtime instead of a
+            // hardcoded prefix.
+            let remote_tty = remote
+                .app
+                .terminal_runtimes
+                .get(&remote_terminal_id)
+                .and_then(|runtime| runtime.tty_name().map(Path::to_path_buf))
+                .expect("remote pane tty");
+            assert!(
+                label.contains(remote_tty.to_str().expect("utf-8 tty path")),
+                "identity line: {label}"
+            );
         }
         // No complete frame yet (nothing was ever rendered to this client):
         // input stays refused and is not buffered.
