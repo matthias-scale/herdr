@@ -9403,6 +9403,23 @@ next_tab = ""
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
+    // AC6: a real client/server handshake with a higher client version is classified as version_skew.
+    async fn real_control_handshake_classifies_higher_version_as_version_skew() {
+        let (mut server, agent_ref, _) = guarded_control_handshake_test_server();
+        let transition =
+            run_real_guarded_control_handshake(&mut server, &agent_ref, None, PROTOCOL_VERSION + 1);
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Failed(error) => {
+                assert_eq!(error.code, "version_skew");
+            }
+            other => panic!("expected client-classified version_skew, got {other:?}"),
+        }
+        assert!(server.clients.is_empty());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
     // AC2: a context change between control batches prevents the second PTY write.
     async fn forward_control_bytes_refreshes_context_for_each_batch() {
         let mut server = test_headless_server();

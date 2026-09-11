@@ -1641,6 +1641,76 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    // AC5: local and controlled writes to one real PTY stay whole under lease and write-lock contention.
+    fn local_and_controlled_writes_are_whole_on_one_real_pty_under_contention() {
+        let (handle, read_rx, child, _foreground_group) = actor_handle_for_real_pty(true);
+        let local = Bytes::from_static(b"local-payload");
+        let controlled = b"controlled-payload";
+
+        handle
+            .try_write_user_input(local.clone())
+            .expect("local input reaches the real PTY actor");
+        assert_eq!(
+            read_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("cat echoes the local PTY write"),
+            local
+        );
+
+        assert!(handle.acquire_remote_owner(7));
+        let write_guard = handle
+            .pty_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let controlled_handle = handle.clone();
+        let controlled_write = std::thread::spawn(move || {
+            started_tx.send(()).expect("controlled writer started");
+            controlled_handle.try_write_controlled_user_input(7, controlled)
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("controlled writer entered the concurrent write");
+
+        let local_during_control_handle = handle.clone();
+        let local_during_control = std::thread::spawn(move || {
+            local_during_control_handle
+                .try_write_user_input(Bytes::from_static(b"local-during-control"))
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !controlled_write.is_finished(),
+            "controlled write bypassed the shared PTY lock"
+        );
+        assert!(
+            read_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a PTY write escaped while the shared lock was held"
+        );
+        drop(write_guard);
+
+        assert_eq!(
+            controlled_write.join().expect("controlled writer joins"),
+            ControlledWriteResult::Written
+        );
+        assert!(
+            local_during_control
+                .join()
+                .expect("local writer joins")
+                .is_err(),
+            "local input must be refused while the controlled lease is held"
+        );
+        assert_eq!(
+            read_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("cat echoes the controlled PTY write"),
+            Bytes::copy_from_slice(controlled)
+        );
+        handle.shutdown();
+        reap_test_pty(child);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn foreground_agent_change_with_same_process_group_writes_zero_bytes() {
         assert_context_change_writes_zero_bytes(|context| {
             context.foreground_process.name = "other-agent".into()
