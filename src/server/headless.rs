@@ -8996,10 +8996,9 @@ next_tab = ""
     }
 
     #[tokio::test]
-    async fn detached_working_report_without_a_foreground_scan_is_not_nudged() {
+    async fn headless_scheduler_working_report_uses_the_busy_budget() {
         let mut server = test_headless_server();
-        server.app.state.auto_nudge_stalled_agents = true;
-        let workspace = crate::workspace::Workspace::test_new("headless-working-unscanned");
+        let workspace = crate::workspace::Workspace::test_new("headless-working-watchdog");
         let pane_id = workspace.tabs[0].root_pane;
         let terminal_id = workspace
             .terminal_id(pane_id)
@@ -9008,15 +9007,6 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.ensure_test_terminals();
-        let (runtime, mut rx) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                80, 24, 1024, b"", 4,
-            );
-        server
-            .app
-            .terminal_runtimes
-            .insert(terminal_id.clone(), runtime);
-
         server.app.handle_internal_event_with_prefix_sync(
             crate::events::AppEvent::HookStateReported {
                 pane_id,
@@ -9034,22 +9024,111 @@ next_tab = ""
         let reported_at = server.app.state.terminals[&terminal_id]
             .status_reported_at()
             .expect("working report timestamp");
-        server.app.state.workspaces[0].tabs[0]
-            .panes
-            .get_mut(&pane_id)
-            .expect("root pane")
-            .activity
-            .set_last_at(reported_at);
-
         server.handle_scheduled_tasks_headless(
             reported_at + server.app.state.agent_stale_after,
             false,
         );
-
-        assert_eq!(server.app.last_foreground_process_refresh_generation, 0);
         assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
-        assert!(!server.app.stall_nudge_episodes.contains_key(&terminal_id));
-        assert!(rx.try_recv().is_err());
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + crate::terminal::state::AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+            false,
+        );
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_subprocess_held_report_uses_configured_budget() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-subprocess-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_foreground_process(Some("cargo".into()), true, now);
+
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_subagent_claim_uses_configured_budget() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-subagent-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_active_subagents(Some(1));
+
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
     }
 
     /// AC6: terminal-attach draft bytes suppress a stalled-agent auto-nudge.

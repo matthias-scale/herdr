@@ -5577,11 +5577,10 @@ mod tests {
                 started,
             )
             .expect("working report accepted");
-        terminal.set_foreground_process(None, false, started);
 
-        let updates = app
-            .state
-            .mark_due_agent_status_stale_at(started + app.state.agent_stale_after);
+        let updates = app.state.mark_due_agent_status_stale_at(
+            started + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+        );
         assert_eq!(updates.len(), 1);
         for update in &updates {
             app.emit_pane_state_update(update);

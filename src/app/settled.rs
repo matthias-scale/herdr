@@ -1125,7 +1125,6 @@ mod tests {
 
     fn stale_state(screen_state: Option<AgentState>, quiet_since: Instant) -> (AppState, PaneId) {
         let (mut state, pane_id) = state_with_context(Default::default());
-        let stale_after = state.agent_stale_after;
         let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -1143,9 +1142,11 @@ mod tests {
             Some(1_000),
             quiet_since,
         );
-        terminal.set_foreground_process(None, false, quiet_since);
         terminal
-            .mark_agent_status_stale_at(quiet_since + stale_after, stale_after)
+            .mark_agent_status_stale_at(
+                quiet_since + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+                state.agent_stale_after,
+            )
             .expect("working report should become stale");
         assert!(terminal.supervisor_stale);
         if screen_state.is_none() {

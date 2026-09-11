@@ -510,9 +510,6 @@ pub struct TerminalState {
     /// Last background observation of the pane's distinct foreground process.
     pub(crate) foreground_process_name: Option<String>,
     foreground_process_active: bool,
-    /// When the cached foreground fact was applied. A report newer than this
-    /// makes a cached idle result unknown for that working interval.
-    foreground_process_observed_at: Option<Instant>,
     pub last_agent_state_change_seq: Option<u64>,
     /// When this pane most recently entered `Blocked`. Cleared on any transition
     /// out of it, so it always measures the current wait rather than a past one.
@@ -594,7 +591,6 @@ impl TerminalState {
             claude_subagent_observations: None,
             foreground_process_name: None,
             foreground_process_active: false,
-            foreground_process_observed_at: None,
             last_agent_state_change_seq: None,
             blocked_since: None,
             agent_active_since: None,
@@ -878,7 +874,6 @@ impl TerminalState {
         now: Instant,
     ) -> Option<TerminalStateMutation> {
         if self.foreground_process_name == name && self.foreground_process_active == active {
-            self.foreground_process_observed_at = Some(now);
             return None;
         }
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
@@ -887,7 +882,6 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         self.foreground_process_name = name;
         self.foreground_process_active = active;
-        self.foreground_process_observed_at = Some(now);
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1614,17 +1608,7 @@ impl TerminalState {
                 .as_ref()
                 .and(authority.eta_s)
                 .map(|eta_s| Duration::from_secs(eta_s).saturating_add(DECLARED_WAIT_GRACE))
-                .unwrap_or_else(|| {
-                    let foreground_may_be_busy = self.foreground_process_active
-                        || self
-                            .foreground_process_observed_at
-                            .is_none_or(|observed_at| observed_at < authority.reported_at);
-                    if foreground_may_be_busy {
-                        AGENT_BUSY_STALE_SILENCE
-                    } else {
-                        stale_after
-                    }
-                }),
+                .unwrap_or(AGENT_BUSY_STALE_SILENCE),
             // A declared wait belongs to a working report; a finished report that
             // is still holding sub-processes gets the plain silence budget.
             _ if self.subprocess_held_working() => stale_after,
@@ -3905,9 +3889,8 @@ mod tests {
                 started,
             )
             .expect("working report accepted");
-        terminal.set_foreground_process(None, false, started);
         terminal
-            .mark_agent_status_stale_at(started + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the report stale");
 
         terminal.set_detected_state_with_screen_signals_at(
@@ -3918,7 +3901,7 @@ mod tests {
             false,
             false,
             true,
-            started + TEST_AGENT_STALE_AFTER + Duration::from_secs(1),
+            started + AGENT_BUSY_STALE_SILENCE + Duration::from_secs(1),
         );
 
         assert!(terminal.hook_authority.is_none());
@@ -3945,15 +3928,14 @@ mod tests {
                 started,
             )
             .expect("working report accepted");
-        terminal.set_foreground_process(None, false, started);
         assert!(terminal
             .mark_agent_status_stale_at(
-                started + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                started + AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
                 TEST_AGENT_STALE_AFTER,
             )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(started + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER,)
             .is_some());
 
         let mut waiting = test_terminal();
@@ -3978,7 +3960,7 @@ mod tests {
     }
 
     #[test]
-    fn working_report_with_a_live_agent_child_keeps_the_busy_budget() {
+    fn working_report_uses_the_busy_budget() {
         let started = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
@@ -3991,8 +3973,6 @@ mod tests {
             Some(1),
             started,
         );
-        terminal.set_foreground_process(Some("cargo".into()), true, started);
-
         assert_eq!(
             terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
             started.checked_add(AGENT_BUSY_STALE_SILENCE),
@@ -4006,37 +3986,6 @@ mod tests {
         assert!(terminal
             .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER,)
             .is_some());
-    }
-
-    #[test]
-    fn working_report_newer_than_an_idle_scan_keeps_the_busy_budget() {
-        let observed_at = Instant::now();
-        let reported_at = observed_at + Duration::from_secs(1);
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        terminal.set_foreground_process(None, false, observed_at);
-        terminal
-            .set_hook_authority_at(
-                "herdr:claude-closing-block".into(),
-                "claude".into(),
-                AgentState::Working,
-                None,
-                None,
-                Some(1),
-                reported_at,
-            )
-            .expect("working report accepted");
-
-        assert_eq!(
-            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
-            reported_at.checked_add(AGENT_BUSY_STALE_SILENCE)
-        );
-        assert!(terminal
-            .mark_agent_status_stale_at(
-                reported_at + TEST_AGENT_STALE_AFTER,
-                TEST_AGENT_STALE_AFTER,
-            )
-            .is_none());
     }
 
     #[test]
@@ -4251,76 +4200,6 @@ mod tests {
             Some(started + Duration::from_secs(2))
         );
         assert_eq!(restored.agent_activity_owner, source.agent_activity_owner);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn live_handoff_keeps_an_unobserved_working_report_on_the_busy_budget() {
-        let reported_at = Instant::now();
-        let mut source = test_terminal();
-        source
-            .set_hook_authority_at(
-                "herdr:codex-closing-block".into(),
-                "codex".into(),
-                AgentState::Working,
-                None,
-                None,
-                Some(1),
-                reported_at,
-            )
-            .expect("working report accepted");
-        let captured_at = reported_at + Duration::from_secs(10 * 60);
-        let encoded = serde_json::to_string(
-            &source
-                .terminal_agent_handoff_state(captured_at)
-                .expect("working report handoff state"),
-        )
-        .expect("serialize handoff state");
-        let handoff: TerminalAgentHandoffState =
-            serde_json::from_str(&encoded).expect("deserialize handoff state");
-
-        let restored_at = captured_at + Duration::from_secs(1);
-        let mut restored = test_terminal();
-        restored.restore_terminal_agent_handoff_state(handoff, restored_at);
-
-        assert!(restored
-            .mark_agent_status_stale_at(restored_at, TEST_AGENT_STALE_AFTER)
-            .is_none());
-        assert_eq!(
-            restored.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
-            restored
-                .status_reported_at()
-                .and_then(|at| at.checked_add(AGENT_BUSY_STALE_SILENCE))
-        );
-    }
-
-    #[test]
-    fn cold_restore_rederived_working_report_starts_with_unknown_foreground_evidence() {
-        let restored_at = Instant::now();
-        let mut restored = test_terminal();
-        restored.set_detected_state(Some(Agent::Codex), AgentState::Working);
-        restored
-            .set_hook_authority_at(
-                "herdr:codex-closing-block".into(),
-                "codex".into(),
-                AgentState::Working,
-                None,
-                None,
-                Some(1),
-                restored_at,
-            )
-            .expect("post-restore working report accepted");
-
-        assert!(restored
-            .mark_agent_status_stale_at(
-                restored_at + TEST_AGENT_STALE_AFTER,
-                TEST_AGENT_STALE_AFTER,
-            )
-            .is_none());
-        assert_eq!(
-            restored.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
-            restored_at.checked_add(AGENT_BUSY_STALE_SILENCE)
-        );
     }
 
     #[test]
