@@ -16,7 +16,7 @@ const STRICT_THRESHOLD_STEP: Duration = Duration::from_nanos(1);
 struct DonePaneTarget {
     pane_id: PaneId,
     ws_idx: usize,
-    done_since: Instant,
+    done_for: Duration,
     workspace: String,
     workspace_id: String,
     agent_kind: String,
@@ -70,11 +70,10 @@ impl AppState {
             .filter_map(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
                 (!self.is_active_pane(ws_idx, tab_idx, pane_id)
                     && !self.workspaces[ws_idx].tabs[tab_idx].pinned)
-                    .then(|| pane_reap_since(pane, terminal))
+                    .then(|| pane_reap_age(pane, terminal, now))
                     .flatten()
             })
-            .filter_map(|reap_since| strict_deadline(reap_since, self.reap_done_after))
-            .map(|deadline| deadline.max(now))
+            .filter_map(|reap_age| strict_age_deadline(now, reap_age, self.reap_done_after))
             .min()
     }
 
@@ -92,7 +91,9 @@ impl AppState {
                     && !self.is_active_pane(*ws_idx, *tab_idx, *pane_id)
                     && !self.workspaces[*ws_idx].tabs[*tab_idx].pinned
             })
-            .filter_map(|(_, _, _, pane, _)| pane.activity.deadline_after(self.settle_done_after))
+            .filter_map(|(_, _, _, pane, _)| {
+                pane.activity.quiet_deadline_after(self.settle_done_after)
+            })
             .map(|deadline| deadline.max(now))
             .min()
     }
@@ -103,8 +104,8 @@ impl AppState {
         }
         self.done_panes()
             .filter_map(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
-                let reap_since = pane_reap_since(pane, terminal)?;
-                (now.saturating_duration_since(reap_since) > self.reap_done_after
+                let reap_age = pane_reap_age(pane, terminal, now)?;
+                (reap_age > self.reap_done_after
                     && !self.is_active_pane(ws_idx, tab_idx, pane_id)
                     && !self.workspaces[ws_idx].tabs[tab_idx].pinned)
                     .then_some(pane_id)
@@ -122,8 +123,8 @@ impl AppState {
         let tab = workspace.tabs.get(tab_idx)?;
         let pane = tab.panes.get(&pane_id)?;
         let terminal = self.terminals.get(&pane.attached_terminal_id)?;
-        let done_since = pane_reap_since(pane, terminal)?;
-        if now.saturating_duration_since(done_since) <= self.reap_done_after
+        let done_for = pane_reap_age(pane, terminal, now)?;
+        if done_for <= self.reap_done_after
             || self.is_active_pane(ws_idx, tab_idx, pane_id)
             || tab.pinned
         {
@@ -133,7 +134,7 @@ impl AppState {
         Some(DonePaneTarget {
             pane_id,
             ws_idx,
-            done_since,
+            done_for,
             workspace: workspace.display_name_from_terminals(&self.terminals),
             workspace_id: workspace.id.clone(),
             agent_kind: terminal
@@ -187,7 +188,7 @@ impl App {
             let Some(public_pane_id) = self.public_pane_id(target.ws_idx, target.pane_id) else {
                 continue;
             };
-            let done_for_seconds = now.saturating_duration_since(target.done_since).as_secs();
+            let done_for_seconds = target.done_for.as_secs();
             let target_param = PaneTarget {
                 pane_id: public_pane_id.clone(),
             };
@@ -260,23 +261,35 @@ pub(crate) fn pane_is_quiet(
     )
 }
 
-fn pane_reap_since(
+fn pane_reap_age(
     pane: &crate::pane::PaneState,
     terminal: &crate::terminal::TerminalState,
-) -> Option<Instant> {
+    now: Instant,
+) -> Option<Duration> {
     if pane_is_done(pane, terminal) {
-        return pane.done_since;
+        return pane
+            .done_since
+            .map(|done_since| now.saturating_duration_since(done_since));
     }
     (pane.settled_at.is_some()
         && !crate::app::settled::pane_has_resume_plan(terminal)
         && pane_is_quiet(pane, terminal))
-    .then(|| pane.activity.last_at())
+    .then(|| pane.activity.quiet_for(now))
+    .flatten()
 }
 
 fn strict_deadline(done_since: Instant, threshold: Duration) -> Option<Instant> {
     done_since
         .checked_add(threshold)
         .and_then(|deadline| deadline.checked_add(STRICT_THRESHOLD_STEP))
+}
+
+fn strict_age_deadline(now: Instant, age: Duration, threshold: Duration) -> Option<Instant> {
+    if age > threshold {
+        return Some(now);
+    }
+    now.checked_add(threshold.saturating_sub(age))?
+        .checked_add(STRICT_THRESHOLD_STEP)
 }
 
 fn cleanup_reaped_worktree(
@@ -450,7 +463,26 @@ mod tests {
         pane.done_since = None;
         pane.settled_at = Some(1_725_000_022);
         pane.activity.set_last_at(quiet_since);
+        pane.activity.observe_quiet(true, quiet_since);
 
+        assert_eq!(app.due_done_pane_ids(now), vec![pane_id]);
+    }
+
+    #[test]
+    fn restored_unresumable_settled_pane_reaps_with_an_unrepresentable_quiet_age() {
+        let now = Instant::now();
+        let (mut app, pane_id) = lifecycle_state(AgentState::Idle, true, now);
+        let pane = app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane");
+        pane.done_since = None;
+        pane.settled_at = Some(1_725_000_023);
+        pane.activity.restore_unix_timestamp_at(0, now, u64::MAX);
+        pane.activity
+            .restore_quiet_unix_timestamp_at(0, now, u64::MAX);
+
+        assert_eq!(app.next_done_reap_deadline(now), Some(now));
         assert_eq!(app.due_done_pane_ids(now), vec![pane_id]);
     }
 

@@ -129,6 +129,9 @@ pub struct PaneSnapshot {
     /// Unix timestamp of the pane's last meaningful activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<u64>,
+    /// Unix timestamp of the latest observed not-quiet to quiet transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_since_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,6 +493,10 @@ fn capture_tab(
                     pane.activity
                         .unix_timestamp_at(captured_at, captured_at_unix)
                 }),
+                quiet_since_at: pane.and_then(|pane| {
+                    pane.activity
+                        .quiet_unix_timestamp_at(captured_at, captured_at_unix)
+                }),
                 settled_at: pane.and_then(|pane| pane.settled_at),
                 settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
                 settled_auto_label: terminal
@@ -629,6 +636,7 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use ratatui::layout::{Direction, Rect};
 
@@ -1238,6 +1246,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: Some(1_725_000_000),
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
                 settled_auto_label: Some("#7 Fix restore".into()),
@@ -1255,6 +1264,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1930,6 +1940,32 @@ mod tests {
     }
 
     #[test]
+    fn capture_persists_the_observed_quiet_clock() {
+        let mut state = state_with_workspaces(&["quiet"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let quiet_since = Instant::now() - Duration::from_secs(90);
+        let pane = state.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.activity.observe_quiet(true, quiet_since);
+
+        let captured = capture_from_state(&state);
+        let saved = &captured.workspaces[0].tabs[0].panes[&pane_id.raw()];
+
+        assert!(saved.quiet_since_at.is_some());
+    }
+
+    #[test]
+    fn pane_snapshot_without_a_quiet_clock_stays_compatible() {
+        let legacy = serde_json::json!({
+            "cwd": "/tmp",
+            "work_context": {}
+        });
+
+        let pane: PaneSnapshot = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(pane.quiet_since_at, None);
+    }
+
+    #[test]
     fn old_unversioned_snapshot_loads_as_version_0() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
         let snap = parse_snapshot(json).unwrap();
@@ -1957,6 +1993,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1976,6 +2013,7 @@ mod tests {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,

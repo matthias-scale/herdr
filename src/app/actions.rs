@@ -3394,12 +3394,7 @@ impl AppState {
                 holds_shell,
                 stale_resolution,
             } => {
-                self.apply_pane_process_state_at(
-                    pane_id,
-                    holds_shell,
-                    stale_resolution,
-                    Instant::now(),
-                );
+                self.apply_pane_process_state(pane_id, holds_shell, stale_resolution);
                 Vec::new()
             }
             AppEvent::HookStateReported {
@@ -3602,12 +3597,11 @@ impl AppState {
         self.update_terminal_state_at(pane_id, Instant::now(), update)
     }
 
-    fn apply_pane_process_state_at(
+    fn apply_pane_process_state(
         &mut self,
         pane_id: PaneId,
         holds_shell: bool,
         stale_resolution: Option<(AgentState, bool)>,
-        now: Instant,
     ) {
         let Some(ws_idx) = self
             .workspaces
@@ -3621,17 +3615,11 @@ impl AppState {
         };
         let terminal_id = pane.attached_terminal_id.clone();
         let seen = pane.seen;
-        let Some((previous_state, previous_holds_shell, state, changed)) =
+        let Some((previous_state, state, changed)) =
             self.terminals.get_mut(&terminal_id).map(|terminal| {
                 let previous_state = terminal.sidebar_projection(seen).0;
-                let previous_holds_shell = terminal.holds_shell;
                 let changed = terminal.set_process_state(holds_shell, stale_resolution);
-                (
-                    previous_state,
-                    previous_holds_shell,
-                    terminal.sidebar_projection(seen).0,
-                    changed,
-                )
+                (previous_state, terminal.sidebar_projection(seen).0, changed)
             })
         else {
             return;
@@ -3642,17 +3630,15 @@ impl AppState {
         self.mark_sidebar_projection_changed();
 
         let projected_state_changed = previous_state != state;
-        if !projected_state_changed && previous_holds_shell == holds_shell {
+        if !projected_state_changed {
             return;
         }
         let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) else {
             return;
         };
-        pane.activity.note(now);
         let entered_active_state =
             projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
         let unsettled = entered_active_state && pane.settled_at.take().is_some();
-        self.mark_session_dirty();
 
         if unsettled {
             let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -3662,6 +3648,7 @@ impl AppState {
                     pane_id,
                     settled_at: None,
                 });
+            self.mark_session_dirty();
         }
     }
 

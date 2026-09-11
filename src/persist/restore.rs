@@ -62,7 +62,7 @@ type RestoredTab = (
 type RestoreFailures<T> = (T, usize);
 
 fn restore_pane_activity(pane: &mut PaneState, saved: Option<&super::snapshot::PaneSnapshot>) {
-    let Some(last_activity_at) = saved.and_then(|pane| pane.last_activity_at) else {
+    let Some(saved) = saved else {
         return;
     };
     let now = std::time::Instant::now();
@@ -70,8 +70,14 @@ fn restore_pane_activity(pane: &mut PaneState, saved: Option<&super::snapshot::P
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    pane.activity
-        .restore_unix_timestamp_at(last_activity_at, now, now_unix);
+    if let Some(last_activity_at) = saved.last_activity_at {
+        pane.activity
+            .restore_unix_timestamp_at(last_activity_at, now, now_unix);
+    }
+    if let Some(quiet_since_at) = saved.quiet_since_at {
+        pane.activity
+            .restore_quiet_unix_timestamp_at(quiet_since_at, now, now_unix);
+    }
 }
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
@@ -1114,7 +1120,39 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    #[test]
+    fn restore_pane_activity_restores_the_quiet_clock() {
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let saved = super::super::snapshot::PaneSnapshot {
+            cwd: "/tmp".into(),
+            last_activity_at: Some(now_unix.saturating_sub(120)),
+            quiet_since_at: Some(now_unix.saturating_sub(60)),
+            settled_at: None,
+            settled_work_key: None,
+            settled_auto_label: None,
+            work_context: Default::default(),
+            work_context_tiers: None,
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+        };
+        let mut pane = PaneState::new(TerminalId::alloc());
+
+        restore_pane_activity(&mut pane, Some(&saved));
+
+        let quiet_for = pane.activity.quiet_for(Instant::now()).unwrap();
+        assert!(quiet_for >= Duration::from_secs(60));
+        assert!(quiet_for < Duration::from_secs(65));
+    }
 
     fn agent_session_snapshot(
         blocked: Option<super::super::snapshot::PaneAgentBlockedSnapshot>,
@@ -1296,12 +1334,13 @@ mod tests {
                     .expect("valid session id"),
             });
         let quiet_for = std::time::Duration::from_secs(31 * 60);
-        state.workspaces[0].tabs[0]
+        let quiet_since = std::time::Instant::now() - quiet_for;
+        let pane = state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
-            .expect("root pane")
-            .activity
-            .set_last_at(std::time::Instant::now() - quiet_for);
+            .expect("root pane");
+        pane.activity.set_last_at(quiet_since);
+        pane.activity.observe_quiet(true, quiet_since);
         let snapshot = crate::persist::capture(
             &state.workspaces,
             &state.terminals,
@@ -1331,7 +1370,10 @@ mod tests {
         );
         let cold_pane = &cold_workspaces[0].tabs[0].panes[&cold_workspaces[0].tabs[0].root_pane];
         assert!(
-            cold_pane.activity.inactive_for(std::time::Instant::now()) >= quiet_for,
+            cold_pane
+                .activity
+                .quiet_for(std::time::Instant::now())
+                .is_some_and(|age| age >= quiet_for),
             "cold restore reset the quiet clock"
         );
 
@@ -1352,8 +1394,8 @@ mod tests {
         assert!(
             handoff_pane
                 .activity
-                .inactive_for(std::time::Instant::now())
-                >= quiet_for,
+                .quiet_for(std::time::Instant::now())
+                .is_some_and(|age| age >= quiet_for),
             "live handoff reset the quiet clock"
         );
         assert!(handoff_runtimes.is_empty());
@@ -1605,6 +1647,7 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             last_activity_at: None,
+                            quiet_since_at: None,
                             settled_at: None,
                             settled_work_key: None,
                             settled_auto_label: Some("#3 Restore context".into()),
@@ -1739,6 +1782,7 @@ mod tests {
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
                                 last_activity_at: None,
+                                quiet_since_at: None,
                                 settled_at: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
@@ -1756,6 +1800,7 @@ mod tests {
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
                                 last_activity_at: None,
+                                quiet_since_at: None,
                                 settled_at: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
@@ -1819,6 +1864,7 @@ mod tests {
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
                     last_activity_at: None,
+                    quiet_since_at: None,
                     settled_at: None,
                     settled_work_key: None,
                     settled_auto_label: None,
@@ -1835,6 +1881,7 @@ mod tests {
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
             last_activity_at: None,
+            quiet_since_at: None,
             settled_at: None,
             settled_work_key: None,
             settled_auto_label: None,
@@ -2026,6 +2073,7 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             last_activity_at: None,
+                            quiet_since_at: None,
                             settled_at: None,
                             settled_work_key: None,
                             settled_auto_label: None,
@@ -2275,6 +2323,7 @@ mod tests {
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
                 last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,

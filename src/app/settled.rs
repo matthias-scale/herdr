@@ -229,15 +229,19 @@ impl AppState {
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
             for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
                 for (pane_id, pane) in &tab.panes {
-                    if pane.settled_at.is_some() {
-                        continue;
-                    }
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
                     let state = terminal.sidebar_projection(pane.seen).0;
                     let open_blockers = !terminal.closing_gates.is_empty();
                     let quiet = crate::app::pane_lifecycle::pane_is_quiet(pane, terminal);
+                    let quiet_observation_changed = pane.activity.quiet_observation_changes(quiet);
+                    if pane.settled_at.is_some() {
+                        if quiet_observation_changed {
+                            arm_writes.push((ws_idx, *pane_id, pane.finished_since, quiet));
+                        }
+                        continue;
+                    }
                     if crate::terminal::counts_as_blocked(
                         state,
                         open_blockers,
@@ -246,6 +250,9 @@ impl AppState {
                         // Settling suspends the agent and would bury an
                         // unanswered question. A blocking pane is never a
                         // settle candidate, no matter how old the work reads.
+                        if quiet_observation_changed {
+                            arm_writes.push((ws_idx, *pane_id, pane.finished_since, quiet));
+                        }
                         continue;
                     }
                     let context = terminal.effective_work_context();
@@ -253,8 +260,8 @@ impl AppState {
                     let new_work_trigger = work_key
                         .as_ref()
                         .is_some_and(|key| pane.settled_work_key.as_ref() != Some(key));
-                    let quiet_for = pane.activity.inactive_for(now);
-                    let inactive = self.auto_settle_inactive && quiet_for >= self.settle_after;
+                    let inactive_for = pane.activity.inactive_for(now);
+                    let inactive = self.auto_settle_inactive && inactive_for >= self.settle_after;
                     let new_work_trigger = self.auto_settle_finished && new_work_trigger;
                     // A finished reading is evidence, not a verdict. A pull
                     // request reads merged while its agent works the follow-up,
@@ -265,7 +272,7 @@ impl AppState {
                     let finished_since = pane.finished_since.unwrap_or(now);
                     let finished_ripe = now.saturating_duration_since(finished_since)
                         >= self.settle_finished_after
-                        && quiet_for >= self.settle_finished_after;
+                        && inactive_for >= self.settle_finished_after;
                     // A quiet agent has no work running and no human decision
                     // pending. Use the pane activity clock rather than the
                     // transient unread-Done clock, which focus clears.
@@ -273,11 +280,12 @@ impl AppState {
                         && !self.is_active_pane(ws_idx, tab_idx, *pane_id)
                         && !tab.pinned
                         && quiet
-                        && quiet_for >= self.settle_done_after;
+                        && pane.activity.quiet_for(now).unwrap_or_default()
+                            >= self.settle_done_after;
                     let holding = new_work_trigger && !finished_ripe;
                     let armed = holding.then_some(finished_since);
-                    if pane.finished_since != armed {
-                        arm_writes.push((ws_idx, *pane_id, armed));
+                    if pane.finished_since != armed || quiet_observation_changed {
+                        arm_writes.push((ws_idx, *pane_id, armed, quiet));
                     }
                     // Recording the observed key consumes the one-shot trigger,
                     // so it must wait until the grace window resolves.
@@ -310,14 +318,19 @@ impl AppState {
                 pane.settled_work_key.clone_from(work_key);
             }
         }
-        for (ws_idx, pane_id, armed) in &arm_writes {
+        let mut quiet_clock_changed = false;
+        for (ws_idx, pane_id, armed, quiet) in &arm_writes {
             if let Some(pane) = self.workspaces[*ws_idx]
                 .tabs
                 .iter_mut()
                 .find_map(|tab| tab.panes.get_mut(pane_id))
             {
                 pane.finished_since = *armed;
+                quiet_clock_changed |= pane.activity.observe_quiet(*quiet, now);
             }
+        }
+        if quiet_clock_changed {
+            self.mark_session_dirty();
         }
         self.settle_owned_candidates(&candidates, now_unix)
     }
@@ -1099,6 +1112,7 @@ mod tests {
         pane.seen = false;
         pane.done_since = Some(done_since);
         pane.activity.set_last_at(done_since);
+        pane.activity.observe_quiet(true, done_since);
         state.settle_done_after = Duration::from_secs(30 * 60);
         // Isolate the Done trigger from the other two.
         state.auto_settle_inactive = false;
@@ -1141,6 +1155,7 @@ mod tests {
             holds_shell: false,
             stale_resolution: screen_state.map(|state| (state, false)),
         });
+        let _ = state.refresh_settled_panes_at(None, quiet_since, 1_724_999_999);
         (state, pane_id)
     }
 
@@ -1186,6 +1201,11 @@ mod tests {
         state.active = Some(0);
         state.focus_pane_in_workspace(0, pane_id);
         assert!(state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert_eq!(
+            state.refresh_settled_panes_at(None, now, 1_725_000_035),
+            0,
+            "focus blocks settling while the quiet clock is observed"
+        );
         let other = Workspace::test_new("other");
         let other_pane = other.tabs[0].root_pane;
         state.workspaces.push(other);
@@ -1262,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_resolution_event_restarts_the_quiet_window() {
+    fn stale_resolution_event_starts_the_quiet_window_at_the_evaluator() {
         let now = Instant::now();
         let old_activity = now - Duration::from_secs(2 * 60 * 60);
         let (mut state, pane_id) = stale_state(Some(AgentState::Working), old_activity);
@@ -1273,27 +1293,23 @@ mod tests {
             stale_resolution: Some((AgentState::Idle, false)),
         });
 
-        let event_at = state.workspaces[0].tabs[0].panes[&pane_id]
-            .activity
-            .last_at();
-        assert!(event_at > old_activity);
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_040), 0);
         assert_eq!(
             state.refresh_settled_panes_at(
                 None,
-                event_at + state.settle_done_after - Duration::from_nanos(1),
-                1_725_000_040,
+                now + state.settle_done_after - Duration::from_nanos(1),
+                1_725_001_839,
             ),
             0
         );
         assert_eq!(
-            state
-                .refresh_settled_panes_at(None, event_at + state.settle_done_after, 1_725_000_041,),
+            state.refresh_settled_panes_at(None, now + state.settle_done_after, 1_725_001_840,),
             1
         );
     }
 
     #[test]
-    fn held_shell_end_event_restarts_the_quiet_window() {
+    fn held_shell_end_event_starts_the_quiet_window_at_the_evaluator() {
         let now = Instant::now();
         let old_activity = now - Duration::from_secs(2 * 60 * 60);
         let (mut state, pane_id) = stale_state(Some(AgentState::Idle), old_activity);
@@ -1302,9 +1318,7 @@ mod tests {
             holds_shell: true,
             stale_resolution: Some((AgentState::Idle, false)),
         });
-        let held_at = state.workspaces[0].tabs[0].panes[&pane_id]
-            .activity
-            .last_at();
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_042), 0);
 
         state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
             pane_id,
@@ -1312,21 +1326,17 @@ mod tests {
             stale_resolution: Some((AgentState::Idle, false)),
         });
 
-        let event_at = state.workspaces[0].tabs[0].panes[&pane_id]
-            .activity
-            .last_at();
-        assert!(event_at > held_at);
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_043), 0);
         assert_eq!(
             state.refresh_settled_panes_at(
                 None,
-                event_at + state.settle_done_after - Duration::from_nanos(1),
-                1_725_000_042,
+                now + state.settle_done_after - Duration::from_nanos(1),
+                1_725_001_841,
             ),
             0
         );
         assert_eq!(
-            state
-                .refresh_settled_panes_at(None, event_at + state.settle_done_after, 1_725_000_043,),
+            state.refresh_settled_panes_at(None, now + state.settle_done_after, 1_725_001_842,),
             1
         );
     }
