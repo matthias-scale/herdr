@@ -162,6 +162,65 @@ impl SshRemoteFocusTransport {
     }
 
     #[cfg(unix)]
+    fn start_with_options(
+        &mut self,
+        operation_id: &str,
+        agent_ref: &AgentRef,
+        version: u32,
+        build_version: String,
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Result<(), ErrorBody> {
+        let Some(target) = self.targets.get(&agent_ref.host).cloned() else {
+            return Err(ErrorBody {
+                code: "host_unreachable".to_owned(),
+                message: format!("remote host alias {} is not configured", agent_ref.host),
+            });
+        };
+        let operation_id = operation_id.to_owned();
+        let agent_ref = agent_ref.clone();
+        let runner = Arc::clone(&self.runner);
+        std::thread::Builder::new()
+            .name(format!("herdr-remote-focus-{operation_id}"))
+            .spawn(move || {
+                run_control_session(
+                    runner,
+                    target,
+                    operation_id,
+                    agent_ref,
+                    version,
+                    build_version,
+                    expected_context,
+                    event_tx,
+                )
+            })
+            .map_err(|error| ErrorBody {
+                code: "host_unreachable".to_owned(),
+                message: format!("failed to start remote focus connection: {error}"),
+            })?;
+        Ok(())
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn start_with_expected_context_and_version_for_test(
+        &mut self,
+        operation_id: &str,
+        agent_ref: &AgentRef,
+        expected_context: Option<crate::api::schema::RemoteControlContext>,
+        version: u32,
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Result<(), ErrorBody> {
+        self.start_with_options(
+            operation_id,
+            agent_ref,
+            version,
+            crate::build_info::version().to_owned(),
+            expected_context.map(Box::new),
+            event_tx,
+        )
+    }
+
+    #[cfg(unix)]
     fn fail(
         event_tx: &tokio::sync::mpsc::Sender<crate::events::AppEvent>,
         operation_id: &str,
@@ -205,25 +264,14 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         }
         #[cfg(unix)]
         {
-            let Some(target) = self.targets.get(&agent_ref.host).cloned() else {
-                return Err(ErrorBody {
-                    code: "host_unreachable".to_owned(),
-                    message: format!("remote host alias {} is not configured", agent_ref.host),
-                });
-            };
-            let operation_id = operation_id.to_owned();
-            let agent_ref = agent_ref.clone();
-            let runner = Arc::clone(&self.runner);
-            std::thread::Builder::new()
-                .name(format!("herdr-remote-focus-{operation_id}"))
-                .spawn(move || {
-                    run_control_session(runner, target, operation_id, agent_ref, event_tx)
-                })
-                .map_err(|error| ErrorBody {
-                    code: "host_unreachable".to_owned(),
-                    message: format!("failed to start remote focus connection: {error}"),
-                })?;
-            Ok(())
+            self.start_with_options(
+                operation_id,
+                agent_ref,
+                PROTOCOL_VERSION,
+                crate::build_info::version().to_owned(),
+                None,
+                event_tx,
+            )
         }
     }
 }
@@ -243,6 +291,9 @@ fn run_control_session(
     target: String,
     operation_id: String,
     agent_ref: AgentRef,
+    version: u32,
+    build_version: String,
+    expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) {
     let mut stream = match runner.connect(&target) {
@@ -258,8 +309,8 @@ fn run_control_session(
         }
     };
     let hello = ClientMessage::Hello {
-        version: PROTOCOL_VERSION,
-        build_version: crate::build_info::version(),
+        version,
+        build_version,
         cols: 120,
         rows: 40,
         cell_width_px: 0,
@@ -335,7 +386,7 @@ fn run_control_session(
         &ClientMessage::ControlTerminal {
             target: agent_ref.to_string(),
             agent_ref: Some(agent_ref),
-            expected_context: None,
+            expected_context,
             takeover: false,
         },
     ) {

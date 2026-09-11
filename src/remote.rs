@@ -9,6 +9,10 @@ pub(crate) use attach::*;
 #[allow(unused_imports)]
 pub(crate) use control::SshRemoteFocusTransport;
 #[cfg(unix)]
+// Test-only transport seams are re-exported for the real socket handshake harness.
+#[allow(unused_imports)]
+pub(crate) use control::{ControlStream, SshRunner};
+#[cfg(unix)]
 pub(crate) use host_unix::{run_remote_client_bridge, run_remote_control_bridge};
 
 #[cfg(windows)]

@@ -6917,7 +6917,7 @@ mod tests {
     use super::*;
 
     use crate::app::AppState;
-    use crate::protocol::{CellData, CursorState};
+    use crate::protocol::{CellData, CursorState, PROTOCOL_VERSION};
     use unicode_width::UnicodeWidthStr;
 
     #[path = "pane_graphics.rs"]
@@ -9119,6 +9119,286 @@ next_tab = ""
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
         install_controlled_runtime_client(server, client_id, workspace, runtime)
+    }
+
+    #[cfg(unix)]
+    struct LocalSocketControlStream(crate::ipc::LocalStream);
+
+    #[cfg(unix)]
+    impl std::io::Read for LocalSocketControlStream {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
+    impl std::io::Write for LocalSocketControlStream {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            std::io::Write::write(&mut self.0, buffer)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            std::io::Write::flush(&mut self.0)
+        }
+    }
+
+    #[cfg(unix)]
+    impl crate::remote::ControlStream for LocalSocketControlStream {}
+
+    #[cfg(unix)]
+    struct LocalSocketControlRunner {
+        socket_path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl crate::remote::SshRunner for LocalSocketControlRunner {
+        fn connect(&self, _target: &str) -> io::Result<Box<dyn crate::remote::ControlStream>> {
+            Ok(Box::new(LocalSocketControlStream(
+                crate::ipc::connect_local_stream(&self.socket_path)?,
+            )))
+        }
+    }
+
+    #[cfg(unix)]
+    fn guarded_control_handshake_test_server() -> (
+        HeadlessServer,
+        api::schema::AgentRef,
+        api::schema::RemoteControlContext,
+    ) {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("guarded-control-handshake");
+        let pane_id = workspace.tabs[0].root_pane;
+        let workspace_id = workspace.id.clone();
+        let pane_id_string = format!("{workspace_id}:p1");
+        let agent_ref = api::schema::AgentRef::new("buildbox", &pane_id_string)
+            .expect("valid guarded handshake agent reference");
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "exec sleep 30".to_owned(),
+            ],
+            &crate::pane::PaneLaunchEnv::from_extra(vec![(
+                "HERDR_AGENT".to_owned(),
+                "claude".to_owned(),
+            )]),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            server.app.event_tx.clone(),
+            server.app.render_notify.clone(),
+            server.app.render_dirty.clone(),
+        )
+        .expect("spawn guarded handshake runtime");
+
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.agent_host_name = "buildbox".to_owned();
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("guarded handshake terminal")
+            .clone();
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("guarded handshake terminal state");
+        let now = Instant::now();
+        terminal.begin_managed_agent(
+            "claude".to_owned(),
+            crate::detect::Agent::Claude,
+            now,
+            Duration::ZERO,
+            Duration::from_secs(30),
+        );
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        assert!(terminal.reconcile_managed_agent_at(now + Duration::from_millis(1), false));
+        terminal.last_agent_state_change_seq = Some(1);
+        assert!(terminal.managed_agent_control_ready());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let context = loop {
+            match server.app.remote_control_context(&agent_ref) {
+                Ok(context) => break context,
+                Err(_error) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    let terminal_id = server.app.state.workspaces[0]
+                        .terminal_id(pane_id)
+                        .expect("guarded handshake terminal")
+                        .clone();
+                    let runtime = server
+                        .app
+                        .terminal_runtimes
+                        .get(&terminal_id)
+                        .expect("guarded handshake runtime");
+                    let child_pid = runtime.child_pid().unwrap_or_default();
+                    panic!(
+                        "guarded handshake runtime did not expose a valid context: {}: {}; pid={child_pid}, job={:?}, hint={:?}",
+                        error.code,
+                        error.message,
+                        crate::detect::foreground_job(child_pid),
+                        crate::platform::process_agent_hint(child_pid),
+                    );
+                }
+            }
+        };
+        (server, agent_ref, context)
+    }
+
+    #[cfg(unix)]
+    fn run_real_guarded_control_handshake(
+        server: &mut HeadlessServer,
+        agent_ref: &api::schema::AgentRef,
+        expected_context: Option<api::schema::RemoteControlContext>,
+        version: u32,
+    ) -> crate::app::remote_focus::RemoteFocusTransition {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: agent_ref.host.clone(),
+                target: "local-test-control-socket".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = crate::remote::SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(LocalSocketControlRunner {
+                socket_path: server.client_socket_path.clone(),
+            }),
+        );
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start_with_expected_context_and_version_for_test(
+                "guarded-control-handshake",
+                agent_ref,
+                expected_context,
+                version,
+                event_tx,
+            )
+            .expect("control client thread starts");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            server
+                .accept_client_connections()
+                .expect("accept control client connection");
+            while let Ok(event) = server.server_event_rx.try_recv() {
+                match event {
+                    ServerEvent::ClientConnected { .. }
+                    | ServerEvent::ClientControlTerminal { .. } => {
+                        server.handle_server_event(event);
+                    }
+                    ServerEvent::ClientDisconnected { .. }
+                    | ServerEvent::ClientWriterDrained { .. } => {
+                        server.handle_server_event(event);
+                    }
+                    other => panic!("unexpected server event in control handshake: {other:?}"),
+                }
+            }
+            match event_rx.try_recv() {
+                Ok(AppEvent::RemoteFocusTransition { transition, .. }) => {
+                    let transition = *transition;
+                    if matches!(
+                        transition,
+                        crate::app::remote_focus::RemoteFocusTransition::Active(_)
+                    ) {
+                        let client_id = server
+                            .clients
+                            .keys()
+                            .next()
+                            .copied()
+                            .expect("active control client remains registered");
+                        server.remove_client(client_id);
+                        assert!(!server.clients.contains_key(&client_id));
+                    }
+                    return transition;
+                }
+                Ok(other) => panic!("unexpected client event in control handshake: {other:?}"),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("control handshake did not complete: {error}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: the real client/server control handshake returns ControlReady for a matching context.
+    async fn real_control_handshake_returns_control_ready_to_matching_client() {
+        let (mut server, agent_ref, expected_context) = guarded_control_handshake_test_server();
+        let transition =
+            run_real_guarded_control_handshake(&mut server, &agent_ref, None, PROTOCOL_VERSION);
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Active(context) => {
+                assert_eq!(context.host, "buildbox");
+                assert_eq!(context.terminal_id, expected_context.terminal_id);
+            }
+            other => panic!("expected client-classified ControlReady, got {other:?}"),
+        }
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: the real guarded server emits ControlError for a context mismatch and the client classifies it.
+    async fn real_control_handshake_classifies_context_mismatch_as_typed_error() {
+        let (mut server, agent_ref, mut expected) = guarded_control_handshake_test_server();
+        expected.revision = expected.revision.saturating_add(1);
+        let transition = run_real_guarded_control_handshake(
+            &mut server,
+            &agent_ref,
+            Some(expected),
+            PROTOCOL_VERSION,
+        );
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Failed(error) => {
+                assert_eq!(error.code, "refused_for_safety");
+                assert!(error.message.contains("context"));
+            }
+            other => panic!("expected client-classified ControlError, got {other:?}"),
+        }
+        assert!(server.clients.is_empty());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: a real client/server protocol version mismatch is classified as version_skew.
+    async fn real_control_handshake_classifies_version_mismatch_as_version_skew() {
+        let (mut server, agent_ref, _) = guarded_control_handshake_test_server();
+        let transition = run_real_guarded_control_handshake(
+            &mut server,
+            &agent_ref,
+            None,
+            PROTOCOL_VERSION.saturating_sub(1),
+        );
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Failed(error) => {
+                assert_eq!(error.code, "version_skew");
+            }
+            other => panic!("expected client-classified version_skew, got {other:?}"),
+        }
+        assert!(server.clients.is_empty());
+        shutdown_test_runtimes(&mut server);
     }
 
     #[cfg(unix)]
