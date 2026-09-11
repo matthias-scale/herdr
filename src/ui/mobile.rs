@@ -38,7 +38,7 @@ pub(crate) struct MobileSwitcherAreas {
     pub viewport: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     Section(&'static str),
     NewWorkspace,
@@ -55,6 +55,8 @@ pub(crate) enum MobileSwitcherTarget {
         tab_idx: usize,
         pane_id: PaneId,
     },
+    NestedHeader(String),
+    RemoteAgent(crate::api::schema::AgentRef),
     Menu(usize),
 }
 
@@ -145,9 +147,11 @@ fn mobile_switcher_target_for_row(
             ws_idx: entry.ws_idx,
             tab_idx: entry.tab_idx,
         },
-        SidebarRow::RemoteAgent { .. }
-        | SidebarRow::SectionHeader { .. }
-        | SidebarRow::NestedHeader { .. }
+        SidebarRow::RemoteAgent { entry, .. } => {
+            MobileSwitcherTarget::RemoteAgent(entry.agent_ref.clone())
+        }
+        SidebarRow::NestedHeader { key, .. } => MobileSwitcherTarget::NestedHeader(key.clone()),
+        SidebarRow::SectionHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty => return None,
     })

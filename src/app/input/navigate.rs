@@ -992,7 +992,7 @@ impl App {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
             }
             BlockedPaneTarget::Remote(agent_ref) => {
-                select_remote_agent_row(&mut self.state, agent_ref);
+                self.state.select_remote_agent_row(agent_ref);
             }
         }
     }
@@ -2190,25 +2190,6 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
     })
 }
 
-fn select_remote_agent_row(state: &mut AppState, agent_ref: crate::api::schema::AgentRef) {
-    state.sidebar_selected_remote_agent = Some(agent_ref.clone());
-    if let Some(target_row) = crate::ui::sidebar_rows(state).iter().position(|row| {
-        matches!(
-            row,
-            crate::ui::SidebarRow::RemoteAgent { entry, .. }
-                if entry.agent_ref == agent_ref
-        )
-    }) {
-        state.workspace_scroll = crate::ui::sidebar_row_scroll_for_target(
-            state,
-            state.view.sidebar_rect,
-            state.workspace_scroll,
-            target_row,
-        );
-    }
-    state.mark_sidebar_projection_changed();
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavigateAction {
     NewWorkspace,
@@ -2861,7 +2842,7 @@ pub(super) fn execute_navigate_action_in_context(
                         state.focus_pane_in_workspace(ws_idx, pane_id);
                     }
                     BlockedPaneTarget::Remote(agent_ref) => {
-                        select_remote_agent_row(state, agent_ref);
+                        state.select_remote_agent_row(agent_ref);
                     }
                 }
             }
@@ -3804,8 +3785,18 @@ mod tests {
         let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
             .expect("valid remote agent reference");
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
-            crate::ui::RemoteAgentPanelEntry::new(agent_ref, remote),
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
         )];
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 10));
+        let collapse_key = crate::ui::sidebar::remote_host_collapse_key("ub2");
+        let expansion_key = format!(
+            "{}:{collapse_key}",
+            app.state.sidebar_group_mode.collapse_namespace()
+        );
+        assert!(!app
+            .state
+            .expanded_remote_host_groups
+            .contains(&expansion_key));
 
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 
@@ -3820,6 +3811,15 @@ mod tests {
                 .as_ref()
                 .map(ToString::to_string),
             Some("ub2::pane/with/slash".into())
+        );
+        assert!(app
+            .state
+            .expanded_remote_host_groups
+            .contains(&expansion_key));
+        assert!(
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .iter()
+                .any(|area| area.agent_ref == agent_ref)
         );
 
         assert!(!app

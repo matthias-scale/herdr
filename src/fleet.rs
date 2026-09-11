@@ -1363,18 +1363,24 @@ fn agent_work(agent: &AgentInfo) -> Option<String> {
 /// client-only tab label, but its runtime title fields follow the same order as
 /// the local projection before both paths call `session_title`.
 fn agent_title(agent: &AgentInfo) -> Option<String> {
-    let title = agent
-        .work_context
-        .session_name
-        .clone()
-        .or_else(|| {
-            agent
-                .terminal_title_stripped
-                .as_ref()
-                .filter(|title| !title.trim().is_empty())
-                .cloned()
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let title = agent.work_context.session_name.clone().or_else(|| {
+        crate::workspace::agent_title_from_terminal_or_work(crate::workspace::AgentTitleContext {
+            terminal_title: agent.terminal_title_stripped.as_deref(),
+            work_title: agent.work_context.work_title.as_deref(),
+            cwd: agent.cwd.as_deref().map(Path::new),
+            home: home.as_deref(),
+            agent_name: agent.name.as_deref(),
+            agent_label: agent.agent.as_deref(),
+            display_agent: agent.display_agent.as_deref(),
+            detected_agent: agent
+                .agent
+                .as_deref()
+                .and_then(crate::detect::parse_agent_label),
         })
-        .or_else(|| agent.work_context.work_title.clone());
+    });
     let projection = crate::workspace::TabDisplayProjection::Derived {
         agent: None,
         ticket: agent.work_context.primary_ticket().map(str::to_string),
@@ -2185,7 +2191,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_agent_list_parses_titles_with_legacy_fallback_fields() {
+    fn remote_agent_list_applies_local_title_rules_and_legacy_fallbacks() {
         let parse_row = |agent: serde_json::Value| {
             let response = serde_json::json!({
                 "id": "x",
@@ -2230,6 +2236,21 @@ mod tests {
             parse_row(with_terminal_title).title.as_deref(),
             Some("Scalable V2 cost levers handoff")
         );
+        let mut with_composed_title = base.clone();
+        with_composed_title["terminal_title_stripped"] = serde_json::json!("codex — Fix billing");
+        assert_eq!(
+            parse_row(with_composed_title).title.as_deref(),
+            Some("Fix billing"),
+            "the fleet projection strips the same leading agent identity as a local tab"
+        );
+        let mut with_cwd_title = base.clone();
+        with_cwd_title["cwd"] = serde_json::json!("/work/herdr");
+        with_cwd_title["terminal_title_stripped"] = serde_json::json!("codex — herdr");
+        assert_eq!(
+            parse_row(with_cwd_title).title.as_deref(),
+            Some("Cost levers from work context"),
+            "an agent-and-cwd title yields to the declared work title"
+        );
         assert_eq!(
             parse_row(base.clone()).title.as_deref(),
             Some("Cost levers from work context"),
@@ -2237,6 +2258,7 @@ mod tests {
         );
         let mut without_title = base;
         without_title["work_context"] = serde_json::json!({});
+        without_title["terminal_title_stripped"] = serde_json::json!("Codex");
         let fallback = parse_row(without_title);
         assert_eq!(fallback.title, None);
         assert_eq!(fallback.name.as_deref(), Some("cl-ceea66cc"));

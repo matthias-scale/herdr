@@ -1535,8 +1535,7 @@ impl AppState {
                     // dropping the select-then-open step this used to need.
                     if let Some(agent_ref) = crate::ui::remote_agent_row_at(self, mouse.row) {
                         self.sidebar_selected_work_group = None;
-                        self.sidebar_selected_remote_agent = Some(agent_ref.clone());
-                        self.mark_sidebar_projection_changed();
+                        self.select_remote_agent_row(agent_ref.clone());
                         return Some(MouseAction::OpenFleetHost {
                             name: agent_ref.host.clone(),
                             focus_agent: Some(agent_ref.agent.clone()),
@@ -2303,6 +2302,18 @@ impl AppState {
             }) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
+            }
+            Some(crate::ui::MobileSwitcherTarget::NestedHeader(key)) => {
+                self.toggle_sidebar_group(&key);
+            }
+            Some(crate::ui::MobileSwitcherTarget::RemoteAgent(agent_ref)) => {
+                self.sidebar_selected_work_group = None;
+                self.select_remote_agent_row(agent_ref.clone());
+                self.close_workspace_picker();
+                return MobileMouseResult::Action(MouseAction::OpenFleetHost {
+                    name: agent_ref.host,
+                    focus_agent: Some(agent_ref.agent),
+                });
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
                 let actions = global_menu_actions(self);
@@ -3724,6 +3735,69 @@ mod tests {
             1,
             "one header click reveals the host's rows"
         );
+    }
+
+    #[test]
+    fn mobile_switcher_toggles_remote_host_and_opens_remote_agent() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
+        )];
+        app.state.mode = Mode::Navigate;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let target_col = viewport.x + 2;
+        let header_row = (viewport.y..viewport.bottom())
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, target_col, *row),
+                    Some(crate::ui::MobileSwitcherTarget::NestedHeader(ref key))
+                        if key == "host:ub2"
+                )
+            })
+            .expect("remote host header");
+
+        let header_result = app.state.handle_mobile_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target_col,
+            header_row,
+        ));
+        assert!(matches!(header_result, MobileMouseResult::Consumed));
+
+        let remote_row = (viewport.y..viewport.bottom())
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, target_col, *row),
+                    Some(crate::ui::MobileSwitcherTarget::RemoteAgent(ref target))
+                        if target == &agent_ref
+                )
+            })
+            .expect("expanded remote agent row");
+        let result = app.state.handle_mobile_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target_col,
+            remote_row,
+        ));
+        let MobileMouseResult::Action(MouseAction::OpenFleetHost { name, focus_agent }) = result
+        else {
+            panic!("remote row tap must open its fleet host");
+        };
+        assert_eq!(name, "ub2");
+        assert_eq!(focus_agent.as_deref(), Some("pane/1"));
+        assert_eq!(
+            app.state.sidebar_selected_remote_agent.as_ref(),
+            Some(&agent_ref)
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
