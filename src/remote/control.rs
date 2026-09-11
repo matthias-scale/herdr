@@ -260,20 +260,43 @@ impl SshRemoteFocusTransport {
         std::thread::Builder::new()
             .name(format!("herdr-remote-focus-{operation_id}"))
             .spawn(move || {
-                run_control_session(
-                    runner,
-                    target,
-                    operation_id,
-                    agent_ref,
-                    version,
-                    build_version,
-                    expected_context,
-                    channels,
-                    sessions,
-                    detached,
-                    detach_requested,
-                    event_tx,
-                )
+                // A panic anywhere in the session must not bypass teardown:
+                // the registration, the detach flag, and the app-side proxy
+                // operation would otherwise stay leased forever.
+                let cleanup_sessions = Arc::clone(&sessions);
+                let cleanup_detached = Arc::clone(&detached);
+                let cleanup_operation_id = operation_id.clone();
+                let cleanup_event_tx = event_tx.clone();
+                let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_control_session(
+                        runner,
+                        target,
+                        operation_id,
+                        agent_ref,
+                        version,
+                        build_version,
+                        expected_context,
+                        channels,
+                        sessions,
+                        detached,
+                        detach_requested,
+                        event_tx,
+                    )
+                }));
+                if let Err(payload) = panicked {
+                    SshRemoteFocusTransport::fail(
+                        &cleanup_event_tx,
+                        &cleanup_operation_id,
+                        "connection_lost",
+                        "remote control session panicked; delivery of the last accepted batch is unknown",
+                    );
+                    finish_control_session(
+                        &cleanup_sessions,
+                        &cleanup_operation_id,
+                        &cleanup_detached,
+                    );
+                    std::panic::resume_unwind(payload);
+                }
             })
             .map_err(|error| ErrorBody {
                 code: "host_unreachable".to_owned(),
@@ -734,6 +757,7 @@ mod tests {
         input: Cursor<Vec<u8>>,
         output: Arc<Mutex<Vec<u8>>>,
         fail_at: Option<u64>,
+        panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
     }
 
@@ -741,7 +765,7 @@ mod tests {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             // The handshake reads through the whole stream before the split;
             // the gate only holds the post-split reader.
-            read_fake_input(&mut self.input, self.fail_at, None, buffer)
+            read_fake_input(&mut self.input, self.fail_at, None, None, buffer)
         }
     }
 
@@ -766,6 +790,7 @@ mod tests {
                 Box::new(FakeReader {
                     input: this.input,
                     fail_at: this.fail_at,
+                    panic_at: this.panic_at,
                     read_gate: this.read_gate,
                 }),
                 Box::new(FakeWriter {
@@ -778,6 +803,7 @@ mod tests {
     fn read_fake_input(
         input: &mut Cursor<Vec<u8>>,
         fail_at: Option<u64>,
+        panic_at: Option<u64>,
         read_gate: Option<&AtomicBool>,
         buffer: &mut [u8],
     ) -> io::Result<usize> {
@@ -788,6 +814,9 @@ mod tests {
             && input.position() >= input.get_ref().len() as u64
         {
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if panic_at.is_some_and(|offset| input.position() >= offset) {
+            panic!("injected session panic");
         }
         if fail_at.is_some_and(|offset| input.position() >= offset) {
             return Err(io::Error::new(
@@ -801,6 +830,7 @@ mod tests {
     struct FakeReader {
         input: Cursor<Vec<u8>>,
         fail_at: Option<u64>,
+        panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
     }
 
@@ -809,6 +839,7 @@ mod tests {
             read_fake_input(
                 &mut self.input,
                 self.fail_at,
+                self.panic_at,
                 self.read_gate.as_deref(),
                 buffer,
             )
@@ -886,10 +917,28 @@ mod tests {
         transport_with_read_gate(input, output, fail_at, None)
     }
 
+    fn transport_with_panic_at(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        panic_at: u64,
+    ) -> SshRemoteFocusTransport {
+        transport_with_fake_stream(input, output, None, Some(panic_at), None)
+    }
+
     fn transport_with_read_gate(
         input: Vec<u8>,
         output: Arc<Mutex<Vec<u8>>>,
         fail_at: Option<u64>,
+        read_gate: Option<Arc<AtomicBool>>,
+    ) -> SshRemoteFocusTransport {
+        transport_with_fake_stream(input, output, fail_at, None, read_gate)
+    }
+
+    fn transport_with_fake_stream(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        fail_at: Option<u64>,
+        panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
     ) -> SshRemoteFocusTransport {
         let fleet = crate::config::FleetConfig {
@@ -907,6 +956,7 @@ mod tests {
                     input: Cursor::new(input),
                     output,
                     fail_at,
+                    panic_at,
                     read_gate,
                 })),
                 connect_error: None,
@@ -1461,6 +1511,45 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "detach did not reach the wire"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    // A panic inside the session thread must still run teardown: the app
+    // hears a failure (closing the proxy operation) and the session
+    // registration is removed instead of staying leased forever.
+    fn a_session_panic_still_tears_down_registration_and_operation() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let panic_at = input.len() as u64;
+        let mut transport = transport_with_panic_at(input, Arc::clone(&output), panic_at);
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let first = event_rx.blocking_recv().expect("active event");
+        assert!(matches!(
+            first,
+            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "connection_lost");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if transport.sessions.lock().expect("sessions lock").is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the panic left the session registered"
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
