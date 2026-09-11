@@ -1527,6 +1527,82 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
     }
 
     #[test]
+    fn periodic_git_refresh_preserves_hook_assigned_work_items() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("hook-before-git-refresh");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let cwd = app.state.terminals[&terminal_id].cwd.clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .replace_hook_work_context(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-1".into()],
+                pr_urls: vec!["https://github.com/hook/repo/pull/1".into()],
+                ..Default::default()
+            })
+            .expect("hook assignment");
+
+        for generation in 1..=2 {
+            let branch = format!("feat/SCA-{}-git", generation + 1);
+            app.test_begin_git_work_context_refresh(generation);
+            assert!(app.handle_git_work_context_refreshed(
+                generation,
+                vec![GitWorkContextObservation {
+                    pane_id,
+                    input: GitWorkContextInput {
+                        repo: Some("git/repo".into()),
+                        origin_unparsed: false,
+                        cwd: cwd.clone(),
+                        repo_root: Some(PathBuf::from("/git/repo")),
+                        branch: Some(branch.clone()),
+                    },
+                    context: crate::work_context::PaneWorkContext {
+                        ticket_ids: vec![format!("SCA-{}", generation + 1)],
+                        pr_urls: vec![format!(
+                            "https://github.com/git/repo/pull/{}",
+                            generation + 1
+                        )],
+                        branch: Some(branch),
+                        repo: Some("git/repo".into()),
+                        ..Default::default()
+                    },
+                }],
+                Vec::new(),
+            ));
+            let effective = &app.state.terminals[&terminal_id].work_context;
+            assert_eq!(effective.effective().ticket_ids, ["SCA-1"]);
+            assert_eq!(
+                effective.effective().pr_urls,
+                ["https://github.com/hook/repo/pull/1"]
+            );
+            let git = effective.snapshot_tiers().git_observation;
+            assert_eq!(git.ticket_ids, [format!("SCA-{}", generation + 1)]);
+            assert_eq!(
+                git.pr_urls,
+                [format!(
+                    "https://github.com/git/repo/pull/{}",
+                    generation + 1
+                )]
+            );
+        }
+    }
+
+    #[test]
     fn git_work_context_request_during_refresh_is_replayed_after_completion() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(

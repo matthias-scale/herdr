@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use regex::{Regex, RegexBuilder};
@@ -183,6 +183,16 @@ fn missive_link_label(url: &str) -> String {
 
 impl PaneWorkContext {
     pub(crate) fn normalized(self) -> Result<Self, String> {
+        self.normalized_for_write()
+    }
+
+    fn normalized_restored(mut self, tier: &'static str) -> Result<Self, String> {
+        self.keep_restored_primary_work_items(tier);
+        self.normalized_for_write()
+    }
+
+    fn normalized_for_write(mut self) -> Result<Self, String> {
+        self.set_latest_work_items();
         let normalized = Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
@@ -204,6 +214,28 @@ impl PaneWorkContext {
         Ok(normalized)
     }
 
+    /// Enforce the per-agent assignment cardinality while preserving the array
+    /// wire shape. Array order is assignment order, so the last value wins.
+    pub(crate) fn set_latest_work_items(&mut self) {
+        keep_latest_work_item(&mut self.ticket_ids);
+        keep_latest_work_item(&mut self.pr_urls);
+    }
+
+    pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<(), String> {
+        let pr_urls = normalize_pr_urls([url])?;
+        let previous = self.clone();
+        self.pr_urls = pr_urls;
+        if self.reset_pr_bound_fields_if_pr_changed(&previous, false) {
+            self.repo = self.primary_pr().and_then(repo_slug_from_pr_url);
+        }
+        Ok(())
+    }
+
+    fn keep_restored_primary_work_items(&mut self, tier: &'static str) {
+        keep_restored_primary_work_item(&mut self.ticket_ids, "ticket_ids", tier);
+        keep_restored_primary_work_item(&mut self.pr_urls, "pr_urls", tier);
+    }
+
     /// Fill an absent repository from an explicitly bound pull request.
     ///
     /// Applied only to declaration tiers. A pull request URL a human or agent
@@ -222,9 +254,6 @@ impl PaneWorkContext {
 
     pub(crate) fn normalized_spawn_binding(self) -> Result<Self, String> {
         let normalized = self.normalized()?.with_repo_implied_by_pull_request();
-        if normalized.pr_urls.len() > 1 {
-            return Err("a spawn-time binding accepts one pull request".into());
-        }
         if !normalized.pr_urls.is_empty() && normalized.role.is_none() {
             return Err("a spawn-time pull-request binding requires --role".into());
         }
@@ -268,6 +297,40 @@ impl PaneWorkContext {
                 .is_some_and(|candidate| candidate.eq_ignore_ascii_case(pr_url))
     }
 
+    fn repo_is_derived_from_primary_pr(&self) -> bool {
+        self.repo.as_deref().is_some_and(|repo| {
+            self.primary_pr()
+                .and_then(repo_slug_from_pr_url)
+                .is_some_and(|pr_repo| repo_slugs_match(repo, &pr_repo))
+        })
+    }
+
+    /// Reset metadata whose meaning is scoped to the primary pull request.
+    /// Returns whether a derived repository was cleared so an inferred PR can
+    /// bind the replacement repository without overwriting an explicit pin.
+    fn reset_pr_bound_fields_if_pr_changed(
+        &mut self,
+        previous: &Self,
+        preserve_repo: bool,
+    ) -> bool {
+        if self.pr_urls.len() == previous.pr_urls.len()
+            && self
+                .pr_urls
+                .iter()
+                .zip(&previous.pr_urls)
+                .all(|(current, previous)| current.eq_ignore_ascii_case(previous))
+        {
+            return false;
+        }
+        self.role = None;
+        self.active_owner = false;
+        let reset_repo = !preserve_repo && previous.repo_is_derived_from_primary_pr();
+        if reset_repo {
+            self.repo = None;
+        }
+        reset_repo
+    }
+
     #[allow(dead_code)]
     pub fn primary_action_url(&self) -> Option<String> {
         self.primary_ticket()
@@ -279,8 +342,8 @@ impl PaneWorkContext {
 /// Persisted per-tier work context, preserving source provenance across restarts.
 ///
 /// `restored_fallback` carries values whose source tier is unknown (legacy flat
-/// snapshots); live hook/git observations supersede it while `manual` stays
-/// authoritative.
+/// snapshots). It remains below every provenance-aware tier in the effective
+/// view without being mutated by their writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaneWorkContextTiers {
@@ -388,7 +451,7 @@ pub struct PaneWorkContextState {
     hook_turn: PaneWorkContext,
     git_observation: PaneWorkContext,
     /// Legacy restored values with unknown source provenance. Below every live
-    /// tier in precedence; superseded by later hook/git observations.
+    /// tier in precedence and retained independently from later observations.
     restored_fallback: PaneWorkContext,
     effective: PaneWorkContext,
 }
@@ -396,11 +459,11 @@ pub struct PaneWorkContextState {
 impl PaneWorkContextState {
     /// Restore persisted context. When per-tier provenance was persisted it is
     /// reinstalled tier-by-tier; otherwise the legacy flat value becomes a
-    /// restored fallback that later live observations supersede — it is never
-    /// promoted to a manual pin.
+    /// restored fallback below later live observations. It is never promoted
+    /// to a manual pin.
     pub fn from_restored(context: PaneWorkContext) -> Result<Self, String> {
         let mut state = Self {
-            restored_fallback: context.normalized()?,
+            restored_fallback: context.normalized_restored("restored_fallback")?,
             ..Self::default()
         };
         state.recompute();
@@ -414,11 +477,15 @@ impl PaneWorkContextState {
         let Some(tiers) = tiers else {
             return Self::from_restored(flat);
         };
-        let mut manual = tiers.manual.normalized()?;
+        let mut manual = tiers.manual.normalized_restored("manual")?;
         manual.preview_urls.clear();
-        let hook_turn = tiers.hook_turn.normalized()?;
-        let git_observation = tiers.git_observation.normalized()?;
-        let restored_fallback = tiers.restored_fallback.normalized()?;
+        let hook_turn = tiers.hook_turn.normalized_restored("hook_turn")?;
+        let git_observation = tiers
+            .git_observation
+            .normalized_restored("git_observation")?;
+        let restored_fallback = tiers
+            .restored_fallback
+            .normalized_restored("restored_fallback")?;
         let mut state = Self {
             manual,
             hook_turn,
@@ -453,15 +520,14 @@ impl PaneWorkContextState {
             return Err("missing work-context field to set or clear".into());
         }
         patch.validate_collisions()?;
-        let pr_binding_replaced =
-            patch.pr_urls.is_some() || patch.clear_fields.contains(&PaneWorkContextField::PrUrls);
+        let pr_urls_supplied = patch.pr_urls.is_some();
+        let repo_cleared = patch.clear_fields.contains(&PaneWorkContextField::Repo);
         // A pull request implies its repository only when this patch actually
         // binds one, and never when the same patch clears the repository. A
         // patch that merely touches an unrelated field must not re-derive it,
         // or an explicit `--clear repo` would silently come back and an
         // unrelated `--title` edit could relocate the pane.
-        let imply_repo_from_pull_request =
-            patch.pr_urls.is_some() && !patch.clear_fields.contains(&PaneWorkContextField::Repo);
+        let imply_repo_from_pull_request = pr_urls_supplied && !repo_cleared;
         let patched_role = patch.role;
         let patched_active_owner = patch.active_owner;
 
@@ -499,10 +565,11 @@ impl PaneWorkContextState {
                 PaneWorkContextField::ActiveOwner => candidate.active_owner = false,
             }
         }
-        if pr_binding_replaced || candidate.pr_urls.is_empty() {
-            candidate.role = None;
-            candidate.active_owner = false;
-        }
+        candidate.set_latest_work_items();
+        candidate.pr_urls = normalize_pr_urls(candidate.pr_urls)?;
+        // Manual repository state is authoritative even when its value happens
+        // to equal the repository implied by the previous pull request.
+        candidate.reset_pr_bound_fields_if_pr_changed(&self.manual, true);
         if let Some(role) = patched_role {
             candidate.role = Some(role);
         }
@@ -521,7 +588,8 @@ impl PaneWorkContextState {
         Ok(true)
     }
 
-    pub(crate) fn replace_manual_normalized(&mut self, context: PaneWorkContext) -> bool {
+    pub(crate) fn replace_manual_normalized(&mut self, mut context: PaneWorkContext) -> bool {
+        context.set_latest_work_items();
         if context == self.manual {
             return false;
         }
@@ -551,9 +619,7 @@ impl PaneWorkContextState {
     #[allow(dead_code)]
     pub fn replace_hook_turn(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
-        // Any live observation supersedes the unknown-provenance legacy value.
-        let fallback_changed = self.clear_restored_fallback();
-        if context == self.hook_turn && !fallback_changed {
+        if context == self.hook_turn {
             return Ok(false);
         }
         self.hook_turn = context;
@@ -572,7 +638,6 @@ impl PaneWorkContextState {
             return Ok(false);
         }
         self.hook_turn.session_name = session_name;
-        self.clear_restored_fallback();
         self.recompute();
         Ok(true)
     }
@@ -590,9 +655,7 @@ impl PaneWorkContextState {
 
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
-        // Any live observation supersedes the unknown-provenance legacy value.
-        let fallback_changed = self.clear_restored_fallback();
-        if context == self.git_observation && !fallback_changed {
+        if context == self.git_observation {
             return Ok(false);
         }
         self.git_observation = context;
@@ -600,24 +663,32 @@ impl PaneWorkContextState {
         Ok(true)
     }
 
-    fn clear_restored_fallback(&mut self) -> bool {
-        if self.restored_fallback == PaneWorkContext::default() {
-            return false;
-        }
-        self.restored_fallback = PaneWorkContext::default();
-        true
-    }
-
     fn recompute(&mut self) {
-        let (role, active_owner) = [
+        let contexts = [
             &self.manual,
             &self.hook_turn,
             &self.git_observation,
             &self.restored_fallback,
-        ]
-        .into_iter()
-        .find_map(|context| context.role.map(|role| (Some(role), context.active_owner)))
-        .unwrap_or((None, false));
+        ];
+        let pr_tier = contexts
+            .iter()
+            .position(|context| !context.pr_urls.is_empty());
+        let pr_urls = pr_tier
+            .map(|tier| stable_merge([&contexts[tier].pr_urls]))
+            .unwrap_or_default();
+        let role = pr_tier.and_then(|tier| contexts[tier].role);
+        let active_owner = pr_tier.is_some_and(|tier| contexts[tier].active_owner);
+        let effective_pr_repo = pr_urls.first().and_then(|url| repo_slug_from_pr_url(url));
+        let repo = contexts.iter().enumerate().find_map(|(tier, context)| {
+            context.repo.as_ref().and_then(|repo| {
+                (Some(tier) == pr_tier
+                    || !context.repo_is_derived_from_primary_pr()
+                    || effective_pr_repo
+                        .as_ref()
+                        .is_some_and(|pr_repo| repo_slugs_match(repo, pr_repo)))
+                .then(|| repo.clone())
+            })
+        });
         self.effective = PaneWorkContext {
             // Declaration beats observation for the link fields, the same way
             // it does for `repo` and `branch` below. A union let the git tier
@@ -630,12 +701,7 @@ impl PaneWorkContextState {
                 &self.git_observation.ticket_ids,
                 &self.restored_fallback.ticket_ids,
             ]),
-            pr_urls: first_declared([
-                &self.manual.pr_urls,
-                &self.hook_turn.pr_urls,
-                &self.git_observation.pr_urls,
-                &self.restored_fallback.pr_urls,
-            ]),
+            pr_urls,
             preview_urls: stable_merge([
                 &self.manual.preview_urls,
                 &self.hook_turn.preview_urls,
@@ -660,17 +726,11 @@ impl PaneWorkContextState {
                 self.git_observation.branch.as_ref(),
                 self.restored_fallback.branch.as_ref(),
             ]),
-            // Declaration beats observation. The git tier is derived from the
-            // pane cwd, which is a poor proxy for the work: many sessions run
-            // from one shared worktree while operating on other repositories.
-            // Ordering it last is what stops a misleading cwd from misfiling a
-            // pane that has declared its repository.
-            repo: first_present([
-                self.manual.repo.as_ref(),
-                self.hook_turn.repo.as_ref(),
-                self.git_observation.repo.as_ref(),
-                self.restored_fallback.repo.as_ref(),
-            ]),
+            // Explicit repository declarations retain normal tier precedence.
+            // A repository matching a tier's PR is PR-derived and participates
+            // only when that tier supplies the effective PR or both PRs name
+            // the same repository.
+            repo,
             work_title: first_present([
                 self.manual.work_title.as_ref(),
                 self.hook_turn.work_title.as_ref(),
@@ -686,7 +746,35 @@ impl PaneWorkContextState {
             role,
             active_owner,
         };
+        self.effective.set_latest_work_items();
     }
+}
+
+fn keep_latest_work_item<T>(values: &mut Vec<T>) {
+    if values.len() <= 1 {
+        return;
+    }
+    let latest = values.pop();
+    values.clear();
+    values.extend(latest);
+}
+
+fn keep_restored_primary_work_item<T>(
+    values: &mut Vec<T>,
+    field: &'static str,
+    tier: &'static str,
+) {
+    if values.len() <= 1 {
+        return;
+    }
+    let original_count = values.len();
+    values.truncate(1);
+    tracing::warn!(
+        tier,
+        field,
+        original_count,
+        "truncated restored work context to its previously primary assignment"
+    );
 }
 
 fn first_present<const N: usize>(values: [Option<&String>; N]) -> Option<String> {
@@ -745,19 +833,16 @@ fn is_ascii_token_char(byte: u8) -> bool {
 
 pub fn extract_ticket_ids(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
-    let mut seen = HashSet::new();
-    let mut tickets = Vec::new();
+    let mut last_occurrences = HashMap::new();
     for matched in ticket_regex().find_iter(text) {
         let left_ok = matched.start() == 0 || !is_ascii_token_char(bytes[matched.start() - 1]);
         let right_ok = matched.end() == bytes.len() || !is_ascii_token_char(bytes[matched.end()]);
         if left_ok && right_ok {
             let ticket = matched.as_str().to_ascii_uppercase();
-            if seen.insert(ticket.clone()) {
-                tickets.push(ticket);
-            }
+            last_occurrences.insert(ticket, matched.start());
         }
     }
-    tickets
+    values_by_last_occurrence(last_occurrences)
 }
 
 /// Longest candidate a host-only preview URL may be; the preview normalizer rejects anything with a
@@ -785,8 +870,7 @@ fn bounded_candidate(remaining: &str, max_bytes: usize) -> Option<&str> {
 pub fn extract_pr_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://github.com/";
 
-    let mut seen = HashSet::new();
-    let mut urls = Vec::new();
+    let mut last_occurrences = HashMap::new();
     for (start, _) in text.match_indices(PREFIX) {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
@@ -797,11 +881,15 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
         let Ok(url) = normalize_pr_url(candidate) else {
             continue;
         };
-        if seen.insert(url.clone()) {
-            urls.push(url);
-        }
+        last_occurrences.insert(url, start);
     }
-    urls
+    values_by_last_occurrence(last_occurrences)
+}
+
+fn values_by_last_occurrence(last_occurrences: HashMap<String, usize>) -> Vec<String> {
+    let mut values: Vec<_> = last_occurrences.into_iter().collect();
+    values.sort_unstable_by_key(|(_, position)| *position);
+    values.into_iter().map(|(value, _)| value).collect()
 }
 
 /// Split an observed preview URL into its bare root and the full URL as written.
@@ -978,8 +1066,8 @@ pub(crate) fn hook_turn_context(
     }
     ticket_ids.extend(prompt_context.ticket_ids);
 
-    Ok(PaneWorkContext {
-        ticket_ids: normalize_ticket_ids(ticket_ids)?,
+    PaneWorkContext {
+        ticket_ids,
         pr_urls: prompt_context.pr_urls,
         preview_urls: prompt_context.preview_urls,
         missive_urls: prompt_context.missive_urls,
@@ -993,7 +1081,8 @@ pub(crate) fn hook_turn_context(
         session_name: prompt_context.session_name,
         role: None,
         active_owner: false,
-    })
+    }
+    .normalized()
 }
 
 pub(crate) fn normalize_ticket_id(ticket: &str) -> Result<String, String> {
@@ -1266,10 +1355,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ac2_ticket_normalization_uses_ascii_token_boundaries_and_first_seen_order() {
+    fn work_item_extraction_orders_unique_values_by_their_last_occurrence() {
         assert_eq!(
-            extract_ticket_ids("sca-12, MAT-7; SCA-12"),
-            vec!["SCA-12", "MAT-7"]
+            extract_ticket_ids("SCA-1 SCA-2 SCA-1"),
+            vec!["SCA-2", "SCA-1"]
+        );
+        assert_eq!(
+            extract_pr_urls(concat!(
+                "https://github.com/o/r/pull/1 ",
+                "https://github.com/o/r/pull/2 ",
+                "https://github.com/o/r/pull/1"
+            )),
+            vec![
+                "https://github.com/o/r/pull/2",
+                "https://github.com/o/r/pull/1"
+            ]
         );
         assert!(extract_ticket_ids("FORMAT-12 XMAT-3 MAT-4X _SCA-5").is_empty());
     }
@@ -1701,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_tiers_replace_and_merge_with_stable_dedupe() {
+    fn ac1_tiers_replace_and_keep_the_latest_assignment() {
         let mut state = PaneWorkContextState::default();
         state
             .replace_git_observation(PaneWorkContext {
@@ -1727,9 +1827,8 @@ mod tests {
             .unwrap();
 
         // The declaration replaces the tiers below it rather than stacking on
-        // them, so the git-observed SCA-3 is gone; dedupe still applies within
-        // the winning tier.
-        assert_eq!(state.effective().ticket_ids, vec!["MAT-2", "SCA-1"]);
+        // them, and its last assignment wins within the tier.
+        assert_eq!(state.effective().ticket_ids, vec!["SCA-1"]);
         assert_eq!(state.effective().branch.as_deref(), Some("feat/work"));
         assert_eq!(
             state.effective().preview_urls,
@@ -1749,7 +1848,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state.effective().ticket_ids,
-            vec!["MAT-2", "SCA-1"],
+            vec!["SCA-1"],
             "a new hook turn does not outrank the human's declaration"
         );
         assert_eq!(
@@ -1766,6 +1865,65 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state.effective().ticket_ids, vec!["MAT-9"]);
+    }
+
+    #[test]
+    fn inferred_work_items_keep_only_the_most_recent_assignment() {
+        let context = hook_turn_context(
+            Some("Start SCA-1".into()),
+            Some("fix/SCA-2-follow-up"),
+            PaneWorkContext {
+                ticket_ids: vec!["SCA-3".into(), "SCA-4".into(), "SCA-3".into()],
+                pr_urls: vec![
+                    "https://github.com/o/r/pull/3".into(),
+                    "https://github.com/o/r/pull/4".into(),
+                    "https://github.com/o/r/pull/3".into(),
+                ],
+                ..PaneWorkContext::default()
+            },
+        )
+        .expect("valid inferred context");
+
+        assert_eq!(context.ticket_ids, ["SCA-3"]);
+        assert_eq!(context.pr_urls, ["https://github.com/o/r/pull/3"]);
+    }
+
+    #[test]
+    fn source_tier_precedence_is_manual_then_hook_then_git() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-1".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                ticket_ids: vec!["SCA-2".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(state.effective().ticket_ids, ["SCA-1"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/1"]);
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                ticket_ids: Some(vec!["SCA-3".into()]),
+                pr_urls: Some(vec!["https://github.com/o/r/pull/3".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-4".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/4".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(state.effective().ticket_ids, ["SCA-3"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/3"]);
     }
 
     #[test]
@@ -1794,28 +1952,131 @@ mod tests {
     }
 
     #[test]
-    fn hook_pr_url_precedes_git_observation_pr_url() {
+    fn hook_pr_binding_does_not_borrow_git_role_owner_or_repo() {
+        const GIT_PR: &str = "https://github.com/git/repo/pull/1";
+        const HOOK_PR: &str = "https://github.com/hook/repo/pull/2";
         let mut state = PaneWorkContextState::default();
         state
             .replace_git_observation(PaneWorkContext {
-                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                pr_urls: vec![GIT_PR.into()],
+                repo: Some("git/repo".into()),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: true,
                 ..PaneWorkContext::default()
             })
             .unwrap();
         state
             .replace_hook_turn(PaneWorkContext {
+                pr_urls: vec![HOOK_PR.into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().pr_urls, [HOOK_PR]);
+        assert_eq!(state.effective().repo, None);
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+        assert!(!state.effective().is_active_owner_of(GIT_PR));
+        assert!(!state.effective().is_active_owner_of(HOOK_PR));
+    }
+
+    #[test]
+    fn hook_pr_binding_uses_matching_git_derived_repo() {
+        const HOOK_PR: &str = "https://github.com/o/r/pull/2";
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                repo: Some("o/r".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                pr_urls: vec![HOOK_PR.into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().pr_urls, [HOOK_PR]);
+        assert_eq!(state.effective().repo.as_deref(), Some("o/r"));
+    }
+
+    #[test]
+    fn git_pr_binding_does_not_borrow_restored_role_owner_or_repo() {
+        const RESTORED_PR: &str = "https://github.com/restored/repo/pull/1";
+        const GIT_PR: &str = "https://github.com/git/repo/pull/2";
+        let mut state = PaneWorkContextState::from_restored(PaneWorkContext {
+            pr_urls: vec![RESTORED_PR.into()],
+            repo: Some("restored/repo".into()),
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
+            ..PaneWorkContext::default()
+        })
+        .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec![GIT_PR.into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().pr_urls, [GIT_PR]);
+        assert_eq!(state.effective().repo, None);
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+        assert!(!state.effective().is_active_owner_of(RESTORED_PR));
+        assert!(!state.effective().is_active_owner_of(GIT_PR));
+    }
+
+    #[test]
+    fn clearing_hook_turn_reveals_untouched_git_work_item() {
+        let git = PaneWorkContext {
+            ticket_ids: vec!["SCA-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
+            ..PaneWorkContext::default()
+        };
+        let mut state = PaneWorkContextState::default();
+        state.replace_git_observation(git.clone()).unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-2".into()],
                 pr_urls: vec!["https://github.com/o/r/pull/2".into()],
                 ..PaneWorkContext::default()
             })
             .unwrap();
 
-        // The hook does not merely sort ahead of the observation, it replaces
-        // it: the pane said which pull request it is on, so the branch guess
-        // has nothing left to contribute.
-        assert_eq!(
-            state.effective().pr_urls,
-            vec!["https://github.com/o/r/pull/2"]
-        );
+        assert!(state.clear_hook_turn());
+        assert_eq!(state.snapshot_tiers().git_observation, git);
+        assert_eq!(state.effective().ticket_ids, ["SCA-1"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/1"]);
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+    }
+
+    #[test]
+    fn empty_hook_turn_replacement_reveals_untouched_git_work_item() {
+        let git = PaneWorkContext {
+            ticket_ids: vec!["SCA-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            ..PaneWorkContext::default()
+        };
+        let mut state = PaneWorkContextState::default();
+        state.replace_git_observation(git.clone()).unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-2".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert!(state.replace_hook_turn(PaneWorkContext::default()).unwrap());
+        assert_eq!(state.snapshot_tiers().git_observation, git);
+        assert_eq!(state.effective().ticket_ids, ["SCA-1"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/1"]);
     }
 
     #[test]
@@ -2272,6 +2533,69 @@ mod tests {
     }
 
     #[test]
+    fn restore_keeps_each_tiers_previously_primary_work_item_and_ownership() {
+        let context = |first: u64| PaneWorkContext {
+            ticket_ids: vec![format!("SCA-{first}"), format!("SCA-{}", first + 1)],
+            pr_urls: vec![
+                format!("https://github.com/owned/repo/pull/{first}"),
+                format!("https://github.com/other/repo/pull/{}", first + 1),
+            ],
+            repo: Some("owned/repo".into()),
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
+            ..Default::default()
+        };
+        let state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: context(10),
+                hook_turn: context(20),
+                git_observation: context(30),
+                restored_fallback: context(40),
+            }),
+        )
+        .expect("persisted tiers should restore");
+
+        let tiers = state.snapshot_tiers();
+        for (tier, ticket, pr) in [
+            (
+                &tiers.manual,
+                "SCA-10",
+                "https://github.com/owned/repo/pull/10",
+            ),
+            (
+                &tiers.hook_turn,
+                "SCA-20",
+                "https://github.com/owned/repo/pull/20",
+            ),
+            (
+                &tiers.git_observation,
+                "SCA-30",
+                "https://github.com/owned/repo/pull/30",
+            ),
+            (
+                &tiers.restored_fallback,
+                "SCA-40",
+                "https://github.com/owned/repo/pull/40",
+            ),
+        ] {
+            assert_eq!(tier.ticket_ids, [ticket]);
+            assert_eq!(tier.pr_urls, [pr]);
+            assert_eq!(tier.repo.as_deref(), Some("owned/repo"));
+            assert_eq!(tier.role, Some(PaneWorkRole::Ship));
+            assert!(tier.active_owner);
+        }
+        assert_eq!(state.effective().ticket_ids, ["SCA-10"]);
+        assert_eq!(
+            state.effective().pr_urls,
+            ["https://github.com/owned/repo/pull/10"]
+        );
+        assert_eq!(state.effective().repo.as_deref(), Some("owned/repo"));
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+    }
+
+    #[test]
     fn ac25_restored_preview_sources_are_bounded_to_hook_and_git() {
         let preview_urls = |prefix: &str, count: usize| {
             (0..count)
@@ -2318,9 +2642,9 @@ mod tests {
     }
 
     #[test]
-    fn ac1_legacy_flat_restore_is_fallback_not_manual_pin() {
+    fn ac1_legacy_flat_restore_remains_below_live_tiers() {
         // A legacy flat snapshot has unknown provenance: it must load intact
-        // but be superseded by later live hook/git observations.
+        // and remain below later live hook/git observations.
         let mut restored = PaneWorkContextState::from_restored(PaneWorkContext {
             repo: None,
             ticket_ids: vec!["MAT-1".into()],
@@ -2344,9 +2668,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
-        assert!(restored.effective().ticket_ids.is_empty());
-        assert!(restored.effective().pr_urls.is_empty());
-        assert!(restored.effective().work_title.is_none());
+        assert_eq!(restored.effective().ticket_ids, ["MAT-1"]);
+        assert_eq!(
+            restored.effective().pr_urls,
+            ["https://github.com/o/r/pull/2"]
+        );
+        assert_eq!(
+            restored.effective().work_title.as_deref(),
+            Some("Old title")
+        );
 
         restored
             .replace_hook_turn(PaneWorkContext {
@@ -2356,7 +2686,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective().ticket_ids, vec!["SCA-9"]);
-        assert!(restored.effective().pr_urls.is_empty());
+        assert_eq!(
+            restored.effective().pr_urls,
+            ["https://github.com/o/r/pull/2"]
+        );
         assert_eq!(
             restored.effective().work_title.as_deref(),
             Some("New title")
@@ -2477,6 +2810,142 @@ mod tests {
             state.effective().primary_pr(),
             Some("https://github.com/o/r/pull/42")
         );
+    }
+
+    #[test]
+    fn manual_patch_for_same_pr_keeps_role_and_active_owner() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert!(!state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap());
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+    }
+
+    #[test]
+    fn case_variant_inferred_pr_keeps_restored_git_role_and_owner() {
+        let restored = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                git_observation: PaneWorkContext {
+                    pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                    repo: Some("Owner/Repo".into()),
+                    role: Some(PaneWorkRole::Ship),
+                    active_owner: true,
+                    ..PaneWorkContext::default()
+                },
+                ..PaneWorkContextTiers::default()
+            }),
+        )
+        .expect("restore tiered work context");
+        let mut git_observation = restored.snapshot_tiers().git_observation;
+
+        git_observation
+            .set_inferred_pr_url("https://github.com/owner/repo/pull/1".into())
+            .expect("set inferred pull request");
+
+        assert_eq!(git_observation.role, Some(PaneWorkRole::Ship));
+        assert!(git_observation.active_owner);
+        assert_eq!(
+            git_observation.primary_pr(),
+            Some("https://github.com/owner/repo/pull/1")
+        );
+    }
+
+    #[test]
+    fn changing_manual_pr_preserves_repo_and_clears_role_and_owner() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/old/repo/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert!(state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/new/repo/pull/7".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap());
+        assert_eq!(state.effective().repo.as_deref(), Some("old/repo"));
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+    }
+
+    #[test]
+    fn changing_only_manual_pr_preserves_an_explicit_equal_repo() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                repo: Some("o/r".into()),
+                pr_urls: Some(vec!["https://github.com/o/r/pull/1".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind explicit repository and pull request");
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/new/repo/pull/2".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("change only the pull request");
+
+        assert_eq!(state.manual().repo.as_deref(), Some("o/r"));
+        assert_eq!(
+            state.manual().primary_pr(),
+            Some("https://github.com/new/repo/pull/2")
+        );
+    }
+
+    #[test]
+    fn manual_pr_patch_implies_repo_when_manual_tier_has_none() {
+        let mut state = PaneWorkContextState::default();
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/1".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind pull request");
+
+        assert_eq!(state.manual().repo.as_deref(), Some("o/r"));
+    }
+
+    #[test]
+    fn hook_pr_does_not_borrow_git_derived_repo_from_another_repository() {
+        let state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                hook_turn: PaneWorkContext {
+                    pr_urls: vec!["https://github.com/x/y/pull/2".into()],
+                    ..Default::default()
+                },
+                git_observation: PaneWorkContext {
+                    repo: Some("o/r".into()),
+                    pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )
+        .expect("restore tiered work context");
+
+        assert_eq!(state.effective().repo, None);
     }
 
     #[test]

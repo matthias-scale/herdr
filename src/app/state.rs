@@ -7533,10 +7533,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("object terminal state")
             .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
-                pr_urls: vec![
-                    "https://github.com/scalable-so/herdr/pull/159".into(),
-                    "https://github.com/scalable-so/herdr/pull/206".into(),
-                ],
+                pr_urls: vec!["https://github.com/scalable-so/herdr/pull/206".into()],
                 ticket_ids: vec!["SCA-3165".into()],
                 ..Default::default()
             });
@@ -7609,12 +7606,12 @@ mod tests {
                 .iter()
                 .map(|object| state.dock_object_label(object))
                 .collect::<Vec<_>>(),
-            ["#159", "#206", "SCA-3165"],
+            ["#206", "SCA-3165"],
             "the links are still tracked, for the status row to name"
         );
 
         // The click on a named link is what opens it, and it opens the dock.
-        let object = state.dock_context_objects[2].clone();
+        let object = state.dock_context_objects[1].clone();
         state.dock_collapsed = false;
         state.open_dock_object(object.clone(), DockTabOrigin::User);
         assert_eq!(state.dock_tab, Some(DockSurface::Linear));
@@ -7633,7 +7630,7 @@ mod tests {
             (0..state.dock_open_surfaces.len())
                 .map(|index| state.dock_tab_label(index))
                 .collect::<Vec<_>>(),
-            ["#159", "#206", "SCA-3165"]
+            ["#206", "SCA-3165"]
         );
         assert!(state.dock_tab_bindings.iter().all(|binding| {
             binding
@@ -7650,7 +7647,7 @@ mod tests {
 
         assert!(state.focus_pane_in_workspace(0, object_pane));
         state.reconcile_dock_context_tabs();
-        assert_eq!(state.dock_open_surfaces.len(), 4);
+        assert_eq!(state.dock_open_surfaces.len(), 3);
         assert!(state.dock_open_surfaces.contains(&DockSurface::Files));
     }
 
@@ -7659,14 +7656,14 @@ mod tests {
         let (mut state, object_pane, _) = app_with_object_and_bare_panes();
         state.reconcile_dock_context_tabs();
         state.close_dock_surface(DockSurface::Pr);
-        assert_eq!(state.dock_tab_label(0), "#206");
+        assert_eq!(state.dock_tab_label(0), "SCA-3165");
 
         state.reconcile_dock_context_tabs();
         assert_eq!(
             (0..state.dock_open_surfaces.len())
                 .map(|index| state.dock_tab_label(index))
                 .collect::<Vec<_>>(),
-            ["#206", "SCA-3165"]
+            ["SCA-3165"]
         );
 
         let terminal_id = state.workspaces[0]
@@ -7687,7 +7684,7 @@ mod tests {
             (0..state.dock_open_surfaces.len())
                 .map(|index| state.dock_tab_label(index))
                 .collect::<Vec<_>>(),
-            ["#159", "#206", "SCA-3165", "SCA-4000"]
+            ["#206", "SCA-4000"]
         );
     }
 
@@ -7719,7 +7716,7 @@ mod tests {
 
         assert!(state.dock_tab_bindings.iter().any(|binding| binding
             .as_ref()
-            .is_some_and(|binding| binding.object.key.ends_with("/159")
+            .is_some_and(|binding| binding.object.key.ends_with("/206")
                 && binding.origin == DockTabOrigin::User)));
     }
 

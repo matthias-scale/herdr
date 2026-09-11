@@ -768,6 +768,12 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<bool, String> {
+        let mut context = self.work_context.snapshot_tiers().git_observation;
+        context.set_inferred_pr_url(url)?;
+        self.replace_git_work_context(context)
+    }
+
     /// The hook tier is persisted for restore fidelity, but any accepted
     /// mutation that tears down or replaces the session identity that authorized guarded
     /// work-title reports must also drop the hook tier, so stale ticket/PR refs
@@ -3585,6 +3591,85 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    fn terminal_with_restored_git_pr(url: &str) -> TerminalState {
+        let mut terminal = test_terminal();
+        let repo = crate::work_context::repo_slug_from_pr_url(url).expect("PR repository");
+        terminal
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    git_observation: crate::work_context::PaneWorkContext {
+                        pr_urls: vec![url.into()],
+                        repo: Some(repo),
+                        role: Some(crate::work_context::PaneWorkRole::Ship),
+                        active_owner: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .expect("restore git tier");
+        terminal
+    }
+
+    #[test]
+    fn inferred_pr_change_rebinds_repo_only_when_the_repository_changes() {
+        for (next_pr, expected_repo) in [
+            ("https://github.com/o/r/pull/2", "o/r"),
+            ("https://github.com/new/repo/pull/2", "new/repo"),
+        ] {
+            let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+
+            assert!(terminal
+                .set_inferred_pr_url(next_pr.into())
+                .expect("infer different PR"));
+
+            let git = terminal.work_context.snapshot_tiers().git_observation;
+            assert_eq!(git.pr_urls, [next_pr]);
+            assert_eq!(git.repo.as_deref(), Some(expected_repo));
+            assert_eq!(git.role, None);
+            assert!(!git.active_owner);
+        }
+    }
+
+    #[test]
+    fn inferred_pr_change_rebinds_case_variant_derived_repo() {
+        let mut terminal = test_terminal();
+        terminal
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    git_observation: crate::work_context::PaneWorkContext {
+                        repo: Some("owner/repo".into()),
+                        pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .expect("restore git tier");
+
+        assert!(terminal
+            .set_inferred_pr_url("https://github.com/new/repo/pull/2".into())
+            .expect("infer cross-repository pull request"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.repo.as_deref(), Some("new/repo"));
+    }
+
+    #[test]
+    fn inferring_same_pr_keeps_git_role_and_owner() {
+        let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+
+        assert!(!terminal
+            .set_inferred_pr_url("https://github.com/o/r/pull/1".into())
+            .expect("re-infer same PR"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.role, Some(crate::work_context::PaneWorkRole::Ship));
+        assert!(git.active_owner);
     }
 
     fn closing_tokens(items: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {

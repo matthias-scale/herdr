@@ -2017,6 +2017,7 @@ mod tests {
             "branch",
         ]))
         .unwrap();
+        let patch = params.patch.clone();
 
         assert_eq!(params.pane_id, "issue-1");
         assert_eq!(params.patch.ticket_ids.unwrap(), vec!["mat-7", "SCA-2"]);
@@ -2041,6 +2042,12 @@ mod tests {
             params.patch.clear_fields,
             vec![crate::work_context::PaneWorkContextField::Branch]
         );
+
+        let mut state = crate::work_context::PaneWorkContextState::default();
+        state
+            .apply_manual_patch(patch)
+            .expect("parsed CLI patch should be valid");
+        assert_eq!(state.effective().ticket_ids, ["SCA-2"]);
     }
 
     #[test]
