@@ -9786,13 +9786,24 @@ next_tab = ""
             .expect("remote focus operation starts");
         let operation_id = started.operation_id.clone();
 
-        fn drive(remote: &mut HeadlessServer, client: &mut crate::app::App) {
+        // Pumps control-plane traffic only: connections, server events, and
+        // client events. Terminal frames leave the server exclusively through
+        // `render_and_stream`, so driving without it guarantees no frame can
+        // reach the proxy pane while this pump is in use.
+        fn drive_control(remote: &mut HeadlessServer, client: &mut crate::app::App) {
             remote
                 .accept_client_connections()
                 .expect("accept control connection");
             while let Ok(event) = remote.server_event_rx.try_recv() {
                 remote.handle_server_event(event);
             }
+            while let Ok(event) = client.event_rx.try_recv() {
+                client.handle_internal_event_with_render_impact(event);
+            }
+        }
+
+        fn drive(remote: &mut HeadlessServer, client: &mut crate::app::App) {
+            drive_control(remote, client);
             remote.render_and_stream();
             while let Ok(event) = client.event_rx.try_recv() {
                 client.handle_internal_event_with_render_impact(event);
@@ -9803,21 +9814,25 @@ next_tab = ""
             remote: &mut HeadlessServer,
             client: &mut crate::app::App,
             what: &str,
+            pump: fn(&mut HeadlessServer, &mut crate::app::App),
             condition: impl Fn(&mut HeadlessServer, &mut crate::app::App) -> bool,
         ) {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !condition(remote, client) {
                 assert!(Instant::now() < deadline, "timed out waiting for {what}");
-                drive(remote, client);
+                pump(remote, client);
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
 
         // ControlReady activates the operation and stamps the identity line.
+        // Drive the control plane without rendering so the first frame stays
+        // unsent and the input gate stays shut until the test opens it below.
         drive_until(
             &mut remote,
             &mut client,
             "control ready",
+            drive_control,
             |_remote, client| {
                 client
                     .remote_focus_status(&operation_id)
@@ -9838,7 +9853,8 @@ next_tab = ""
             assert!(label.starts_with("buildbox::"), "identity line: {label}");
             assert!(label.contains("/dev/pts/"), "identity line: {label}");
         }
-        // No complete frame yet: input stays refused and is not buffered.
+        // No complete frame yet (nothing was ever rendered to this client):
+        // input stays refused and is not buffered.
         assert!(
             client
                 .terminal_runtimes
@@ -9849,11 +9865,12 @@ next_tab = ""
             "input before the first complete frame is refused"
         );
 
-        // The first complete remote frame opens the gate.
+        // Rendering starts now: the first complete remote frame opens the gate.
         drive_until(
             &mut remote,
             &mut client,
             "first complete frame",
+            drive,
             |_remote, client| {
                 client
                     .remote_focus_operations
@@ -9873,6 +9890,7 @@ next_tab = ""
             &mut remote,
             &mut client,
             "remote echo",
+            drive,
             |_remote, client| {
                 client
                     .terminal_runtimes
@@ -9904,6 +9922,7 @@ next_tab = ""
             &mut remote,
             &mut client,
             "lease release",
+            drive,
             |remote, _client| remote.clients.is_empty(),
         );
         assert!(
