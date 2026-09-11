@@ -2360,7 +2360,7 @@ impl AppState {
         );
     }
 
-    pub(super) fn screen_rect(&self) -> Rect {
+    pub(crate) fn screen_rect(&self) -> Rect {
         if self.view.layout == ViewLayout::Mobile {
             self.view.mobile_header_rect.union(self.view.terminal_area)
         } else {

@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 /// How much text the operator has to type before a due prompt can be dismissed.
 /// A bare Enter is what makes a reminder ignorable, so the prompt refuses one.
 pub const DEFAULT_MIN_CONFIRM_CHARS: usize = 3;
+pub(crate) const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(125);
+pub(crate) const SEND_OFF_DURATION: Duration = Duration::from_secs(6);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PomodoroPhase {
@@ -38,9 +40,17 @@ impl PomodoroPhase {
 pub struct PomodoroPrompt {
     pub ended: PomodoroPhase,
     pub next: PomodoroPhase,
+    pub raised_at: Instant,
     pub input: String,
     /// Set when the operator tried to dismiss the prompt without typing enough.
     pub error: Option<String>,
+}
+
+/// The short acknowledgment shown after a prompt is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PomodoroSendOff {
+    pub started: PomodoroPhase,
+    pub shown_at: Instant,
 }
 
 /// What a confirmed prompt hands back for logging.
@@ -72,6 +82,7 @@ pub struct PomodoroState {
     pub phase: PomodoroPhase,
     pub completed_work_intervals: u32,
     pub prompt: Option<PomodoroPrompt>,
+    pub send_off: Option<PomodoroSendOff>,
     /// The current phase expired while every attached host terminal was unfocused.
     /// It stays at zero until focus returns or the operator changes the timer.
     held: bool,
@@ -83,6 +94,9 @@ pub struct PomodoroState {
     /// Whole seconds last reported to the renderer. Ticking is cheap and happens
     /// on every server wake, so it only reports a change at 1 Hz.
     rendered_secs: u64,
+    /// Last breathing frame reported to the renderer for the visible prompt or
+    /// send-off. The frame number is derived from that view's start instant.
+    rendered_animation_frame: u64,
 }
 
 impl Default for PomodoroState {
@@ -98,10 +112,12 @@ impl Default for PomodoroState {
             phase: PomodoroPhase::Work,
             completed_work_intervals: 0,
             prompt: None,
+            send_off: None,
             held: false,
             deadline: None,
             remaining: work,
             rendered_secs: work.as_secs(),
+            rendered_animation_frame: 0,
         }
     }
 }
@@ -139,6 +155,7 @@ impl PomodoroState {
         if !self.enabled {
             self.deadline = None;
             self.prompt = None;
+            self.send_off = None;
             self.held = false;
         } else if !was_enabled {
             self.reset(now);
@@ -209,6 +226,7 @@ impl PomodoroState {
         self.rendered_secs = self.remaining.as_secs();
         self.deadline = None;
         self.prompt = None;
+        self.send_off = None;
         self.held = false;
         if self.enabled {
             self.start(now);
@@ -222,6 +240,7 @@ impl PomodoroState {
             return;
         }
         self.prompt = None;
+        self.send_off = None;
         self.enter(self.next_phase(), now);
     }
 
@@ -238,38 +257,37 @@ impl PomodoroState {
         if !self.enabled {
             return PomodoroTick::default();
         }
+        let mut tick = PomodoroTick {
+            changed: self.tick_animation(now),
+            phase_ended: false,
+        };
         if self.held {
-            return PomodoroTick {
-                changed: host_focused && self.resume_held(now),
-                phase_ended: false,
-            };
+            tick.changed |= host_focused && self.resume_held(now);
+            return tick;
         }
         let Some(deadline) = self.deadline else {
-            return PomodoroTick::default();
+            return tick;
         };
         if now >= deadline {
             self.deadline = None;
             self.remaining = Duration::ZERO;
             self.rendered_secs = 0;
             if host_focused {
-                self.raise_prompt();
+                self.raise_prompt(now);
             } else {
                 self.held = true;
             }
-            return PomodoroTick {
-                changed: true,
-                phase_ended: true,
-            };
+            tick.changed = true;
+            tick.phase_ended = true;
+            return tick;
         }
         let secs = deadline.saturating_duration_since(now).as_secs();
         if secs == self.rendered_secs {
-            return PomodoroTick::default();
+            return tick;
         }
         self.rendered_secs = secs;
-        PomodoroTick {
-            changed: true,
-            phase_ended: false,
-        }
+        tick.changed = true;
+        tick
     }
 
     /// Resolves a phase that expired while all host terminals were unfocused.
@@ -283,7 +301,7 @@ impl PomodoroState {
         if self.phase.is_break() {
             self.enter(PomodoroPhase::Work, now);
         } else {
-            self.raise_prompt();
+            self.raise_prompt(now);
         }
         true
     }
@@ -304,6 +322,11 @@ impl PomodoroState {
         self.prompt = None;
         let started = self.next_phase();
         self.enter(started, now);
+        self.send_off = Some(PomodoroSendOff {
+            started,
+            shown_at: now,
+        });
+        self.rendered_animation_frame = 0;
         Some(PomodoroConfirmation {
             ended,
             started,
@@ -321,6 +344,38 @@ impl PomodoroState {
         let next = self.next_phase();
         self.enter(next, now);
         self.pause(now);
+    }
+
+    pub fn dismiss_send_off_at(&mut self, now: Instant) -> bool {
+        let visible = self.visible_send_off_at(now).is_some();
+        if visible || self.send_off.is_some() {
+            self.send_off = None;
+            self.rendered_animation_frame = 0;
+        }
+        visible
+    }
+
+    /// The next exact presentation deadline for the breathing animation or
+    /// send-off expiry. No visible Pomodoro card means no deadline.
+    pub(crate) fn animation_deadline(&self) -> Option<Instant> {
+        let started_at = self
+            .prompt
+            .as_ref()
+            .map(|prompt| prompt.raised_at)
+            .or_else(|| self.send_off.map(|send_off| send_off.shown_at))?;
+        let frame =
+            u32::try_from(self.rendered_animation_frame.saturating_add(1)).unwrap_or(u32::MAX);
+        let next_frame = started_at + ANIMATION_FRAME_INTERVAL.saturating_mul(frame);
+        Some(match self.send_off {
+            Some(send_off) => next_frame.min(send_off.shown_at + SEND_OFF_DURATION),
+            None => next_frame,
+        })
+    }
+
+    pub(crate) fn visible_send_off_at(&self, now: Instant) -> Option<&PomodoroSendOff> {
+        self.send_off
+            .as_ref()
+            .filter(|send_off| now < send_off.shown_at + SEND_OFF_DURATION)
     }
 
     /// The phase that follows the current one. A long break replaces the short
@@ -351,13 +406,45 @@ impl PomodoroState {
         self.start(now);
     }
 
-    fn raise_prompt(&mut self) {
+    fn raise_prompt(&mut self, now: Instant) {
         self.prompt = Some(PomodoroPrompt {
             ended: self.phase,
             next: self.next_phase(),
+            raised_at: now,
             input: String::new(),
             error: None,
         });
+        self.rendered_animation_frame = 0;
+    }
+
+    fn tick_animation(&mut self, now: Instant) -> bool {
+        if self
+            .send_off
+            .is_some_and(|send_off| now >= send_off.shown_at + SEND_OFF_DURATION)
+        {
+            self.send_off = None;
+            self.rendered_animation_frame = 0;
+            return true;
+        }
+        let Some(started_at) = self
+            .prompt
+            .as_ref()
+            .map(|prompt| prompt.raised_at)
+            .or_else(|| self.send_off.map(|send_off| send_off.shown_at))
+        else {
+            return false;
+        };
+        let frame = now
+            .saturating_duration_since(started_at)
+            .as_nanos()
+            .checked_div(ANIMATION_FRAME_INTERVAL.as_nanos())
+            .and_then(|frame| u64::try_from(frame).ok())
+            .unwrap_or(u64::MAX);
+        if frame <= self.rendered_animation_frame {
+            return false;
+        }
+        self.rendered_animation_frame = frame;
+        true
     }
 }
 
@@ -467,10 +554,9 @@ mod tests {
         state.tick(now + Duration::from_secs(25 * 60));
         let prompt = state.prompt.clone();
 
-        assert_eq!(
-            state.tick_with_host_focus(now + Duration::from_secs(60 * 60), false),
-            PomodoroTick::default()
-        );
+        let tick = state.tick_with_host_focus(now + Duration::from_secs(60 * 60), false);
+        assert!(tick.changed, "the visible breathing frame advanced");
+        assert!(!tick.phase_ended);
         assert_eq!(state.prompt, prompt);
         assert!(!state.held());
     }
@@ -547,6 +633,87 @@ mod tests {
         assert_eq!(state.completed_work_intervals, 1);
         assert!(state.running());
         assert_eq!(state.remaining_at(now), Duration::from_secs(5 * 60));
+        let send_off = state.send_off.expect("confirm raises the send-off");
+        assert_eq!(send_off.started, PomodoroPhase::ShortBreak);
+        assert_eq!(send_off.shown_at, now);
+    }
+
+    #[test]
+    fn send_off_expires_after_six_seconds_without_blocking_the_timer() {
+        let started = Instant::now();
+        let prompt_at = started + Duration::from_secs(25 * 60);
+        let mut state = enabled_state(started);
+        state.tick(prompt_at);
+        state.prompt.as_mut().expect("prompt").input = "water".into();
+        state.confirm(prompt_at).expect("confirm");
+
+        assert!(state
+            .visible_send_off_at(prompt_at + SEND_OFF_DURATION - Duration::from_millis(1))
+            .is_some());
+        assert!(
+            state
+                .tick(prompt_at + SEND_OFF_DURATION - Duration::from_millis(1))
+                .changed
+        );
+        assert!(state.send_off.is_some());
+        assert!(state.tick(prompt_at + SEND_OFF_DURATION).changed);
+        assert!(state.send_off.is_none());
+        assert!(state.running());
+    }
+
+    #[test]
+    fn send_off_can_be_dismissed_early() {
+        let started = Instant::now();
+        let prompt_at = started + Duration::from_secs(25 * 60);
+        let mut state = enabled_state(started);
+        state.tick(prompt_at);
+        state.prompt.as_mut().expect("prompt").input = "walk".into();
+        state.confirm(prompt_at).expect("confirm");
+
+        assert!(state.dismiss_send_off_at(prompt_at));
+        assert!(state.send_off.is_none());
+        assert!(!state.dismiss_send_off_at(prompt_at));
+    }
+
+    #[test]
+    fn animation_deadlines_exist_only_for_visible_pomodoro_cards() {
+        let started = Instant::now();
+        let mut state = enabled_state(started);
+        assert_eq!(state.animation_deadline(), None);
+
+        let prompt_at = started + Duration::from_secs(25 * 60);
+        state.tick(prompt_at);
+        assert_eq!(
+            state.animation_deadline(),
+            Some(prompt_at + ANIMATION_FRAME_INTERVAL)
+        );
+        state.dismiss_and_pause(prompt_at);
+        assert_eq!(state.animation_deadline(), None);
+    }
+
+    #[test]
+    fn breathing_redraws_at_eight_frames_per_second_at_most() {
+        let started = Instant::now();
+        let prompt_at = started + Duration::from_secs(25 * 60);
+        let mut state = enabled_state(started);
+        state.tick(prompt_at);
+
+        assert_eq!(ANIMATION_FRAME_INTERVAL, Duration::from_millis(125));
+        assert!(
+            !state
+                .tick(prompt_at + ANIMATION_FRAME_INTERVAL - Duration::from_millis(1))
+                .changed
+        );
+        assert!(state.tick(prompt_at + ANIMATION_FRAME_INTERVAL).changed);
+        assert!(
+            !state
+                .tick(prompt_at + ANIMATION_FRAME_INTERVAL + Duration::from_millis(1))
+                .changed
+        );
+        assert_eq!(
+            state.animation_deadline(),
+            Some(prompt_at + ANIMATION_FRAME_INTERVAL * 2)
+        );
     }
 
     #[test]

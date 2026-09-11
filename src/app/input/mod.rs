@@ -4658,6 +4658,19 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        // The send-off owns mouse input until dismissed. Movement and release
+        // cannot affect the UI below it; the first press closes the card.
+        if self.state.pomodoro.send_off.is_some() {
+            let now = std::time::Instant::now();
+            if self.state.pomodoro.visible_send_off_at(now).is_none() {
+                self.state.pomodoro.dismiss_send_off_at(now);
+            } else {
+                if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                    self.state.pomodoro.dismiss_send_off_at(now);
+                }
+                return;
+            }
+        }
         // A due break reminder is the topmost modal and must decide the click
         // before hover, pane focus, or any underlying control can react.
         if self.state.pomodoro.prompt.is_some() {
@@ -5940,6 +5953,10 @@ enabled = true
         }
         app.route_client_input(b"\r".to_vec());
         assert!(app.state.pomodoro.prompt.is_none());
+        assert!(app.state.pomodoro.send_off.is_some());
+        app.state
+            .pomodoro
+            .dismiss_send_off_at(std::time::Instant::now());
 
         app.route_client_input(vec![0x01]);
         app.route_client_input(b"B".to_vec());
@@ -5988,6 +6005,7 @@ enabled = true
         let mouse = format!("\x1b[<0;{};{}M", confirm.x + 1, confirm.y + 1);
         app.route_client_input(mouse.into_bytes());
         assert!(app.state.pomodoro.prompt.is_none());
+        assert!(app.state.pomodoro.send_off.is_some());
 
         let mut app = prompted_app();
         let (_, snooze) = crate::ui::pomodoro::prompt_button_rects(app.state.screen_rect())
@@ -5995,7 +6013,67 @@ enabled = true
         let mouse = format!("\x1b[<0;{};{}M", snooze.x + 1, snooze.y + 1);
         app.route_client_input(mouse.into_bytes());
         assert!(app.state.pomodoro.prompt.is_none());
+        assert!(app.state.pomodoro.send_off.is_none());
         assert!(app.state.pomodoro.paused());
+    }
+
+    #[tokio::test]
+    async fn send_off_key_closes_the_card_without_reaching_the_pane() {
+        let mut app = hidden_sidebar_config_app();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+        let started = std::time::Instant::now();
+        app.state.pomodoro.reset(started);
+        app.state
+            .pomodoro
+            .tick(started + std::time::Duration::from_secs(25 * 60));
+        for key in b"tea" {
+            app.route_client_input(vec![*key]);
+        }
+        app.route_client_input(b"\r".to_vec());
+        assert!(app.state.pomodoro.send_off.is_some());
+
+        app.route_client_input(b"x".to_vec());
+
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the closing key must not reach the pane"
+        );
+    }
+
+    #[test]
+    fn send_off_click_closes_the_card_without_activating_the_ui_below() {
+        let mut app = hidden_sidebar_config_app();
+        let started = std::time::Instant::now();
+        app.state.pomodoro.reset(started);
+        app.state
+            .pomodoro
+            .tick(started + std::time::Duration::from_secs(25 * 60));
+        app.state.pomodoro.prompt.as_mut().expect("prompt").input = "tea".into();
+        app.confirm_pomodoro(started + std::time::Duration::from_secs(25 * 60));
+        assert!(app.state.pomodoro.send_off.is_some());
+        compute_hidden_sidebar(&mut app);
+        let timer = app.state.view.pomodoro_hit_area;
+        assert!(timer.width > 0, "timer control is below the send-off");
+        assert!(app.state.pomodoro.running());
+
+        app.handle_mouse_from_input_source(
+            crate::app::LOCAL_INPUT_SOURCE,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: timer.x,
+                row: timer.y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            app.state.pomodoro.running(),
+            "the timer click was swallowed"
+        );
     }
 
     fn terminal_app_with_blocked_hook() -> (
