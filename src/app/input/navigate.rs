@@ -2104,7 +2104,7 @@ enum BlockedPaneTarget {
 }
 
 fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
-    let mut panes = crate::ui::all_agent_panel_entries(state)
+    let mut local = crate::ui::all_agent_panel_entries(state)
         .into_iter()
         .map(|entry| {
             let needs_attention = crate::ui::sidebar::entry_needs_human_attention(&entry)
@@ -2119,12 +2119,63 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
             )
         })
         .collect::<Vec<_>>();
-    panes.extend(state.remote_agent_panel_entries.iter().map(|entry| {
-        (
-            BlockedPaneTarget::Remote(entry.agent_ref.clone()),
-            crate::ui::sidebar::entry_needs_human_attention(entry),
-        )
-    }));
+    let mut remote = state
+        .remote_agent_panel_entries
+        .iter()
+        .map(|entry| {
+            (
+                BlockedPaneTarget::Remote(entry.agent_ref.clone()),
+                crate::ui::sidebar::entry_needs_human_attention(entry),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut panes = Vec::with_capacity(local.len() + remote.len());
+    for row in crate::ui::sidebar_rows(state) {
+        match row {
+            crate::ui::SidebarRow::Tab { entry, .. } => {
+                let mut index = 0;
+                while index < local.len() {
+                    let same_tab = matches!(
+                        local[index].0,
+                        BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
+                            if (ws_idx, tab_idx) == (entry.ws_idx, entry.tab_idx)
+                    );
+                    if same_tab {
+                        panes.push(local.remove(index));
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            crate::ui::SidebarRow::Agent { entry, .. } => {
+                if let Some(index) = local.iter().position(|(target, _)| {
+                    matches!(
+                        target,
+                        BlockedPaneTarget::Local { ws_idx, pane_id, .. }
+                            if (*ws_idx, *pane_id) == (entry.ws_idx, entry.pane_id)
+                    )
+                }) {
+                    panes.push(local.remove(index));
+                }
+            }
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
+                if let Some(index) = remote.iter().position(|(target, _)| {
+                    matches!(
+                        target,
+                        BlockedPaneTarget::Remote(agent_ref)
+                            if agent_ref == &entry.agent_ref
+                    )
+                }) {
+                    panes.push(remote.remove(index));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Collapsed or filtered rows remain keyboard-reachable after the visible
+    // worklist, preserving the cycle's existing reachability contract.
+    panes.extend(local);
+    panes.extend(remote);
     panes
 }
 
@@ -3748,6 +3799,31 @@ mod tests {
             &mut state,
             NavigateAction::NextBlockedWindow,
             &[(0, 1), (1, 0), (0, 1)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_follows_the_rendered_sidebar_group_order() {
+        let mut app = app_with_test_workspaces(&["main", "other", "worktree"]);
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 2, "repo-key");
+        app.state.ensure_test_terminals();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        for ws_idx in 0..app.state.workspaces.len() {
+            set_tab_agent_state(
+                &mut app.state,
+                ws_idx,
+                0,
+                crate::detect::AgentState::Blocked,
+            );
+        }
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Repo);
+
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextBlockedWindow,
+            &[(2, 0), (1, 0), (0, 0)],
         );
     }
 

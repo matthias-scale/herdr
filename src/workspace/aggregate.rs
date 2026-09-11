@@ -122,12 +122,16 @@ impl Tab {
                     agent_context: terminal.agent_lifecycle_context(),
                     has_agent: terminal.agent_lifecycle_context().is_some(),
                     state,
-                    attention_tier: attention_tier(
-                        state,
-                        !terminal.closing_gates.is_empty(),
-                        !terminal.closing_items.is_empty(),
-                        terminal.usage_limited,
-                    ),
+                    attention_tier: if pane.settled_at.is_some() {
+                        AttentionTier::None
+                    } else {
+                        attention_tier(
+                            state,
+                            !terminal.closing_gates.is_empty(),
+                            !terminal.closing_items.is_empty(),
+                            terminal.usage_limited,
+                        )
+                    },
                     open_blockers: !terminal.closing_gates.is_empty(),
                     gate_count: terminal.closing_gates.len(),
                     closing_idle: terminal.closing_idle,
@@ -376,6 +380,41 @@ mod tests {
         assert_eq!(details[1].pane_id, second);
         assert_eq!(details[0].pane_label.as_deref(), Some("Pane 1"));
         assert_eq!(details[1].pane_label.as_deref(), Some("Pane 2"));
+    }
+
+    #[test]
+    fn settled_pane_details_clear_their_attention_tier() {
+        let mut ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, pane);
+        terminal.state = AgentState::Blocked;
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose one".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        terminals.insert(terminal.id.clone(), terminal);
+
+        assert_eq!(
+            ws.pane_details(&terminals)[0].attention_tier,
+            AttentionTier::Attention
+        );
+
+        ws.tabs[0].panes.get_mut(&pane).unwrap().settled_at = Some(1);
+        assert_eq!(
+            ws.pane_details(&terminals)[0].attention_tier,
+            AttentionTier::None
+        );
     }
 
     #[test]

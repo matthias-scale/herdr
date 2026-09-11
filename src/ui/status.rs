@@ -363,18 +363,16 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
-    let entries = crate::ui::sidebar::all_agent_panel_entries(app)
+    let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
         .into_iter()
         .filter(|entry| !app.pane_is_settled(entry.ws_idx, entry.pane_id))
-        .collect::<Vec<_>>();
-    let blocked = entries
-        .iter()
-        .filter(|entry| crate::ui::sidebar::entry_has_red_dot(entry))
-        .count();
-    let attention = entries
-        .iter()
-        .filter(|entry| crate::ui::sidebar::entry_has_attention_dot(entry))
-        .count();
+        .fold((0usize, 0usize), |(blocked, attention), entry| {
+            match crate::ui::sidebar::entry_attention_tier(&entry) {
+                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
+                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
+                crate::terminal::state::AttentionTier::None => (blocked, attention),
+            }
+        });
     let mut specs = vec![
         (
             StatusButtonAction::Home,
@@ -1971,6 +1969,21 @@ mod tests {
         for pair in buttons.windows(2) {
             assert_eq!(pair[0].rect.x + pair[0].rect.width, pair[1].rect.x);
         }
+    }
+
+    #[test]
+    fn quick_button_counts_classify_each_agent_entry_once() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("quick")];
+        app.ensure_test_terminals();
+        crate::ui::sidebar::take_entry_attention_tier_visits();
+
+        status_buttons(&app, Rect::new(0, 0, 120, 1));
+
+        assert_eq!(
+            crate::ui::sidebar::take_entry_attention_tier_visits(),
+            crate::ui::all_agent_panel_entries(&app).len()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

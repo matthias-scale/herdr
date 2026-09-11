@@ -112,12 +112,14 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
             || !entry.seen)
 }
 
-/// Membership in the Blocked worklist.
+/// Runtime severity shared by dots and the sidebar filter.
 ///
-/// The terminal predicate is the single rule for this section and the inbox.
-/// A human gate blocks only after the pane stops working. Usage limits remain
-/// blocked because the pane cannot proceed until the reset window.
-fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
+/// `entry_is_blocked` narrows this for navigation and the inbox, where a
+/// working pane is not yet a stop. The sidebar filter instead follows the dot
+/// exactly, so a latched Gate remains visible while work resumes.
+pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
+    #[cfg(test)]
+    ENTRY_ATTENTION_TIER_VISITS.with(|visits| visits.set(visits.get() + 1));
     if entry.attention_tier != AttentionTier::None {
         entry.attention_tier
     } else {
@@ -128,6 +130,16 @@ fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
             entry.usage_limited,
         )
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ENTRY_ATTENTION_TIER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_entry_attention_tier_visits() -> usize {
+    ENTRY_ATTENTION_TIER_VISITS.with(|visits| visits.replace(0))
 }
 
 pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
@@ -141,10 +153,6 @@ pub(crate) fn entry_needs_human_attention(entry: &AgentPanelEntry) -> bool {
 
 pub(crate) fn entry_has_red_dot(entry: &AgentPanelEntry) -> bool {
     entry_attention_tier(entry) == AttentionTier::Blocked
-}
-
-pub(crate) fn entry_has_attention_dot(entry: &AgentPanelEntry) -> bool {
-    entry_attention_tier(entry) == AttentionTier::Attention
 }
 
 /// A working pane keeps its blue lifecycle label while a human gate is latched.
@@ -2239,7 +2247,7 @@ fn compact_sidebar_rows_inner(
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
-            .filter(|entry| entry_is_blocked(entry))
+            .filter(|entry| entry_has_red_dot(entry))
             .cloned()
             .collect::<Vec<_>>()
     } else {
@@ -2254,7 +2262,7 @@ fn compact_sidebar_rows_inner(
     let has_remote_entries = has_remote_rows
         && app.remote_agent_panel_entries.iter().any(|entry| {
             remote_sidebar_entry_matches_query(entry, &remote_terms)
-                && (!app.blocked_filter || entry_is_blocked(entry))
+                && (!app.blocked_filter || entry_has_red_dot(entry))
         });
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
@@ -2351,7 +2359,7 @@ fn append_remote_rows(app: &AppState, rows: &mut Vec<SidebarRow>, terms: &[&str]
     let mut groups: Vec<(&str, Vec<&std::sync::Arc<RemoteAgentPanelEntry>>)> = Vec::new();
     for entry in app.remote_agent_panel_entries.iter().filter(|entry| {
         remote_sidebar_entry_matches_query(entry, terms)
-            && (!app.blocked_filter || entry_is_blocked(entry))
+            && (!app.blocked_filter || entry_has_red_dot(entry))
     }) {
         let host = entry.agent_ref.host.as_str();
         match groups.last_mut() {
@@ -5436,14 +5444,16 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     if !entry.has_agent {
         return "No agent".to_string();
     }
-    // A usage limit outranks every lifecycle label: no answer releases the
-    // pane, only the reset window. A gate blocks only once work has stopped.
+    // A usage limit outranks every attention tier: no answer releases the
+    // pane, only the reset window.
     let key = if entry.usage_limited {
         "usage"
-    } else if entry_has_gate(entry) && entry.state != AgentState::Working {
-        "blocked"
     } else {
-        agent_panel_status_key(entry.state, entry.seen)
+        match entry_attention_tier(entry) {
+            AttentionTier::Blocked => "blocked",
+            AttentionTier::Attention => return "Needs attention".to_string(),
+            AttentionTier::None => agent_panel_status_key(entry.state, entry.seen),
+        }
     };
     if let Some(label) = entry.state_labels.get(key) {
         return label.clone();
@@ -9171,7 +9181,7 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["pane/2", "pane/4", "ra-windowless"]
+            ["pane/1", "pane/2", "pane/4", "ra-windowless"]
         );
     }
 
@@ -10014,6 +10024,27 @@ pub(crate) mod tests {
         for pane in app.workspaces[2].tabs[0].panes.values_mut() {
             pane.seen = true;
         }
+        let working_pane = app.workspaces[0].tabs[0].root_pane;
+        let working_terminal_id = app.workspaces[0].tabs[0].panes[&working_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&working_terminal_id)
+            .unwrap()
+            .apply_closing_block_payload(
+                vec![crate::api::schema::ClosingBlockItem {
+                    n: 1,
+                    label: "Gate".into(),
+                    text: "Approve the open PR".into(),
+                    pr: None,
+                    ticket: None,
+                    url: None,
+                    default: None,
+                    default_at: None,
+                }],
+                Vec::new(),
+                Vec::new(),
+            );
         app.reconcile_sidebar_presentation();
         app.blocked_filter = true;
 
@@ -10033,8 +10064,13 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(tab_entries.len(), 1);
-        assert_eq!(tab_entries[0].ws_idx, 1);
+        assert_eq!(
+            tab_entries
+                .iter()
+                .map(|entry| entry.ws_idx)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
         assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
     }
 
@@ -19906,13 +19942,18 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         entry.state = AgentState::Blocked;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
-        // A gate on a working pane does not steal the working label; a gate on
-        // a stopped pane is the thing blocking it.
+        // The tooltip describes the rendered attention tier, even while the
+        // lifecycle state is still working.
         entry.state = AgentState::Working;
         entry.open_blockers = true;
-        assert_eq!(agent_dot_tooltip(&entry), "Working");
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
         entry.state = AgentState::Idle;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        entry.open_blockers = false;
+        entry.state = AgentState::Blocked;
+        entry.attention_tier = AttentionTier::Attention;
+        assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
 
         // A usage limit outranks every lifecycle label.
         entry.usage_limited = true;
