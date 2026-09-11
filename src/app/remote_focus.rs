@@ -615,7 +615,7 @@ impl crate::app::App {
         let mut started = self
             .remote_focus_operations
             .begin(agent_ref.clone(), Instant::now())?;
-        let channels = match self.create_remote_proxy_pane(&agent_ref) {
+        let channels = match self.create_remote_proxy_pane() {
             Ok((pane_id, terminal_id, public_pane_id, channels)) => {
                 started.proxy_pane_id = public_pane_id.clone();
                 self.remote_focus_operations.attach_proxy(
@@ -656,7 +656,6 @@ impl crate::app::App {
     /// the remote control lease.
     fn create_remote_proxy_pane(
         &mut self,
-        agent_ref: &AgentRef,
     ) -> Result<(PaneId, TerminalId, String, RemoteProxyChannels), ErrorBody> {
         let workspace_count = self.state.workspaces.len();
         let ws_idx = self
@@ -689,12 +688,16 @@ impl crate::app::App {
         self.state.terminals.insert(terminal_id.clone(), terminal);
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         let workspace = &mut self.state.workspaces[ws_idx];
+        // No custom tab name: the requested agent_ref is client-supplied
+        // identity that tab chrome would show first and never replace. The
+        // tab falls back to the pane label, which activate_remote_proxy sets
+        // from the server's authoritative ControlContext.
         let tab_idx = workspace.create_tab_from_existing_pane(
             crate::workspace::MovedPane {
                 pane_id,
                 pane_state: crate::pane::PaneState::new(terminal_id.clone()),
             },
-            Some(agent_ref.to_string()),
+            None,
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
@@ -945,7 +948,11 @@ mod tests {
         let workspace = &app.state.workspaces[0];
         assert_eq!(workspace.tabs.len(), 2);
         let proxy_tab = &workspace.tabs[workspace.active_tab_index()];
-        assert_eq!(proxy_tab.custom_name.as_deref(), Some("buildbox::w1:p3"));
+        assert!(
+            proxy_tab.custom_name.is_none(),
+            "the requested agent_ref is client-supplied identity; tab chrome \
+             must fall back to the pane label until the server context arrives"
+        );
         let (pane_id, terminal_id) = app
             .remote_focus_operations
             .proxy_location(&started.operation_id)
