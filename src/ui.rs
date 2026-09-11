@@ -1196,57 +1196,56 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_action_buttons(app, frame);
     }
-    let preview_is_in_dock =
-        !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Editor);
-    if app.dock_editor_preview.is_some() && !preview_is_in_dock {
-        dock::editor::render_editor_preview(app, frame, terminal_area);
-    } else if let Some(detail) = app.symphony_detail.as_ref() {
-        render_symphony(
+    match app.terminal_area_surface() {
+        crate::app::state::TerminalAreaSurface::EditorPreview => {
+            dock::editor::render_editor_preview(app, frame, terminal_area);
+        }
+        crate::app::state::TerminalAreaSurface::Symphony(detail) => render_symphony(
             &app.palette,
             &detail.snapshot,
             detail.selected,
             terminal_area,
             detail.observed_at,
             frame,
-        );
-    } else if let Some(detail) = app.loop_run_history_detail.as_ref() {
-        render_loop_run_history(
-            &app.palette,
-            &detail.history,
-            &detail.loop_id,
-            terminal_area,
-            detail.observed_at,
-            frame,
-        );
-    } else if app.usage_view.is_some() {
-        render_usage(app, terminal_area, frame);
-    } else if app.work_view.is_some() {
-        render_work_view(app, terminal_area, frame);
-    } else if app.dock_collapsed && app.dock_object_preview.is_some() {
-        dock::render_object_preview(app, frame, terminal_area);
-    } else if app.home.is_some() {
-        let queue = app.blocked_agents();
-        let counts = app.home_counts(&queue);
-        home::render_home(app, terminal_runtimes, &queue, counts, terminal_area, frame);
-    } else if let Some(inbox) = app.inbox.as_ref() {
-        let queue = app.blocked_agents();
-        inbox::render_inbox(
-            app,
-            terminal_runtimes,
-            inbox.current(&queue),
-            queue.len(),
-            inbox.deferred_count(&queue),
-            terminal_area,
-            frame,
-        );
-    } else if app
-        .active
-        .and_then(|ws_idx| app.workspaces.get(ws_idx))
-        .is_some()
-    {
-        render_tab_surface(app, terminal_runtimes, app.view.tab_surface(), frame);
-    } else {
-        render_empty(app, frame, terminal_area);
+        ),
+        crate::app::state::TerminalAreaSurface::LoopRunHistory(detail) => {
+            render_loop_run_history(
+                &app.palette,
+                &detail.history,
+                &detail.loop_id,
+                terminal_area,
+                detail.observed_at,
+                frame,
+            );
+        }
+        crate::app::state::TerminalAreaSurface::Usage => render_usage(app, terminal_area, frame),
+        crate::app::state::TerminalAreaSurface::Work => {
+            render_work_view(app, terminal_area, frame);
+        }
+        crate::app::state::TerminalAreaSurface::DockObjectPreview => {
+            dock::render_object_preview(app, frame, terminal_area);
+        }
+        crate::app::state::TerminalAreaSurface::Home => {
+            let queue = app.blocked_agents();
+            let counts = app.home_counts(&queue);
+            home::render_home(app, terminal_runtimes, &queue, counts, terminal_area, frame);
+        }
+        crate::app::state::TerminalAreaSurface::Inbox(inbox) => {
+            let queue = app.blocked_agents();
+            inbox::render_inbox(
+                app,
+                terminal_runtimes,
+                inbox.current(&queue),
+                queue.len(),
+                inbox.deferred_count(&queue),
+                terminal_area,
+                frame,
+            );
+        }
+        crate::app::state::TerminalAreaSurface::Tab => {
+            render_tab_surface(app, terminal_runtimes, app.view.tab_surface(), frame);
+        }
+        crate::app::state::TerminalAreaSurface::Empty => render_empty(app, frame, terminal_area),
     }
 
     if app.view.info_panel_rect.width > 0 {

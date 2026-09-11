@@ -2911,6 +2911,10 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
+pub(crate) struct RemoteAgentPressState {
+    pub agent_ref: crate::api::schema::AgentRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
@@ -3348,6 +3352,20 @@ pub(crate) struct PaneSettlementChange {
     pub(crate) settled_at: Option<u64>,
 }
 
+/// Renderer selected for the full terminal area before overlays are applied.
+pub(crate) enum TerminalAreaSurface<'a> {
+    EditorPreview,
+    Symphony(&'a SymphonyDetail),
+    LoopRunHistory(&'a LoopRunHistoryDetail),
+    Usage,
+    Work,
+    DockObjectPreview,
+    Home,
+    Inbox(&'a crate::app::inbox::InboxState),
+    Tab,
+    Empty,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3545,6 +3563,9 @@ pub struct AppState {
     /// `collapsed_space_keys`, which folds one space inside the tree; this folds
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
+    /// Remote host groups start folded. This records the inverse only after an
+    /// operator expands one, so new hosts stay folded without refresh-time work.
+    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     pub(crate) sidebar_group_mode: SidebarGroupMode,
     /// Whether the keyboard belongs to the sidebar.
     ///
@@ -3621,6 +3642,8 @@ pub struct AppState {
     pub(crate) workspace_presses:
         std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
+    pub(crate) remote_agent_presses:
+        std::collections::HashMap<crate::app::InputSourceId, RemoteAgentPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -3856,6 +3879,14 @@ pub struct AppState {
     pub nudge_resumed_agents: bool,
     /// Prompt submitted by the resume nudge (`session.resume_nudge_message`).
     pub resume_nudge_message: String,
+    /// Nudge stalled agent panes (`session.auto_nudge_stalled_agents`).
+    pub auto_nudge_stalled_agents: bool,
+    /// Initial quiet period before a stalled pane is nudged.
+    pub nudge_after: std::time::Duration,
+    /// Maximum nudges sent during one stale-status episode.
+    pub max_nudges: u32,
+    /// Prompt submitted to a stalled pane (`session.stall_nudge_message`).
+    pub stall_nudge_message: String,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -5677,10 +5708,54 @@ impl AppState {
         section == SettingsSection::Integrations && self.integration_updates_available()
     }
 
+    pub(crate) fn terminal_area_surface(&self) -> TerminalAreaSurface<'_> {
+        let preview_is_in_dock = !self.dock_collapsed && self.dock_tab == Some(DockSurface::Editor);
+        if self.dock_editor_preview.is_some() && !preview_is_in_dock {
+            TerminalAreaSurface::EditorPreview
+        } else if let Some(detail) = self.symphony_detail.as_ref() {
+            TerminalAreaSurface::Symphony(detail)
+        } else if let Some(detail) = self.loop_run_history_detail.as_ref() {
+            TerminalAreaSurface::LoopRunHistory(detail)
+        } else if self.usage_view.is_some() {
+            TerminalAreaSurface::Usage
+        } else if self.work_view.is_some() {
+            TerminalAreaSurface::Work
+        } else if self.dock_collapsed && self.dock_object_preview.is_some() {
+            TerminalAreaSurface::DockObjectPreview
+        } else if self.home.is_some() {
+            TerminalAreaSurface::Home
+        } else if let Some(inbox) = self.inbox.as_ref() {
+            TerminalAreaSurface::Inbox(inbox)
+        } else if self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .is_some()
+        {
+            TerminalAreaSurface::Tab
+        } else {
+            TerminalAreaSurface::Empty
+        }
+    }
+
+    /// True when the terminal-area renderer does not display the active tab.
+    pub(crate) fn tab_surface_replaced(&self) -> bool {
+        !matches!(self.terminal_area_surface(), TerminalAreaSurface::Tab)
+    }
+
     pub(crate) fn app_surface_pane_ids(&self) -> std::collections::HashSet<PaneId> {
+        self.app_surface_pane_ids_with_tab_visibility(!self.tab_surface_replaced())
+    }
+
+    pub(crate) fn app_surface_pane_ids_with_tab_visibility(
+        &self,
+        tab_visible: bool,
+    ) -> std::collections::HashSet<PaneId> {
         let mut pane_ids = std::collections::HashSet::new();
         if let Some(popup) = &self.popup_pane {
             pane_ids.insert(popup.pane_id);
+        }
+        if !tab_visible {
+            return pane_ids;
         }
         let Some(tab) = self
             .active
@@ -5936,6 +6011,7 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
             sidebar_group_menu_open: false,
@@ -6058,6 +6134,7 @@ impl AppState {
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
+            remote_agent_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -6200,6 +6277,11 @@ impl AppState {
             settle_stops_agent: true,
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),
+            auto_nudge_stalled_agents: false,
+            nudge_after: std::time::Duration::from_secs(20 * 60),
+            max_nudges: 3,
+            stall_nudge_message:
+                "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.".to_string(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
@@ -6377,6 +6459,10 @@ impl AppState {
             assert!(
                 self.tab_presses.is_empty(),
                 "empty app state must not keep tab press state"
+            );
+            assert!(
+                self.remote_agent_presses.is_empty(),
+                "empty app state must not keep remote agent press state"
             );
             assert!(
                 self.context_menu.is_none(),
@@ -6631,6 +6717,102 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    type SurfaceSetup = (&'static str, fn(&mut AppState));
+
+    fn show_editor_preview(state: &mut AppState) {
+        state.dock_editor_preview = Some(DockEditorPreview {
+            path: "/tmp/preview.rs".into(),
+            content: "preview".into(),
+            notice: None,
+        });
+    }
+
+    fn show_symphony(state: &mut AppState) {
+        state.toggle_symphony();
+    }
+
+    fn show_loop_history(state: &mut AppState) {
+        state.toggle_loop_run_history();
+    }
+
+    fn show_usage(state: &mut AppState) {
+        state.toggle_usage_view();
+    }
+
+    fn show_work(state: &mut AppState) {
+        state.work_view = Some(WorkViewState::new(false, None));
+    }
+
+    fn show_dock_object_preview(state: &mut AppState) {
+        state.dock_collapsed = true;
+        state.dock_object_preview = Some(DockObjectRef {
+            surface: DockSurface::Linear,
+            key: "SCA-1".into(),
+        });
+    }
+
+    fn show_home(state: &mut AppState) {
+        state.home = Some(crate::app::home::HomeState::default());
+    }
+
+    fn show_inbox(state: &mut AppState) {
+        state.inbox = Some(crate::app::inbox::InboxState::default());
+    }
+
+    fn replacing_surface_setups() -> [SurfaceSetup; 8] {
+        [
+            ("editor preview", show_editor_preview),
+            ("symphony", show_symphony),
+            ("loop history", show_loop_history),
+            ("usage", show_usage),
+            ("work", show_work),
+            ("dock object preview", show_dock_object_preview),
+            ("home", show_home),
+            ("inbox", show_inbox),
+        ]
+    }
+
+    #[test]
+    fn tab_surface_replacement_matches_every_terminal_area_renderer_branch() {
+        let empty = AppState::test_new();
+        assert!(matches!(
+            empty.terminal_area_surface(),
+            TerminalAreaSurface::Empty
+        ));
+        assert!(empty.tab_surface_replaced());
+
+        let mut normal = AppState::test_new();
+        normal.workspaces = vec![crate::workspace::Workspace::test_new("tab")];
+        normal.active = Some(0);
+        assert!(matches!(
+            normal.terminal_area_surface(),
+            TerminalAreaSurface::Tab
+        ));
+        assert!(!normal.tab_surface_replaced());
+
+        for (name, setup) in replacing_surface_setups() {
+            let mut state = AppState::test_new();
+            setup(&mut state);
+            assert!(state.tab_surface_replaced(), "{name}");
+            assert!(
+                !matches!(state.terminal_area_surface(), TerminalAreaSurface::Tab),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_state_projects_stalled_agent_nudge_defaults() {
+        let state = AppState::test_new();
+        assert!(!state.auto_nudge_stalled_agents);
+        assert_eq!(state.nudge_after, std::time::Duration::from_secs(20 * 60));
+        assert_eq!(state.max_nudges, 3);
+        assert_eq!(
+            state.stall_nudge_message,
+            "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+        );
+    }
 
     fn linear_ownership_ticket(
         identifier: &str,

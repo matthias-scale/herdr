@@ -4403,7 +4403,7 @@ impl App {
                 });
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                self.state.note_human_text(pane_id, text);
+                self.note_human_text(pane_id, text);
             }
         }
     }
@@ -4455,7 +4455,7 @@ impl App {
             };
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                self.state.note_human_text(pane_id, &text);
+                self.note_human_text(pane_id, &text);
             }
         }
     }
@@ -4507,7 +4507,7 @@ impl App {
             };
             if let (true, Some(pane_id)) = (sent && has_text, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                self.state.note_human_text(pane_id, &draft);
+                self.note_human_text(pane_id, &draft);
             }
         }
     }

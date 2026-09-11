@@ -992,7 +992,7 @@ impl App {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
             }
             BlockedPaneTarget::Remote(agent_ref) => {
-                select_remote_agent_row(&mut self.state, agent_ref);
+                self.state.select_remote_agent_row(agent_ref);
             }
         }
     }
@@ -1385,6 +1385,7 @@ impl App {
             return false;
         }
 
+        self.note_human_key(pane_id, &key);
         self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
         self.state.mode = Mode::Terminal;
         true
@@ -2190,25 +2191,6 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
     })
 }
 
-fn select_remote_agent_row(state: &mut AppState, agent_ref: crate::api::schema::AgentRef) {
-    state.sidebar_selected_remote_agent = Some(agent_ref.clone());
-    if let Some(target_row) = crate::ui::sidebar_rows(state).iter().position(|row| {
-        matches!(
-            row,
-            crate::ui::SidebarRow::RemoteAgent { entry, .. }
-                if entry.agent_ref == agent_ref
-        )
-    }) {
-        state.workspace_scroll = crate::ui::sidebar_row_scroll_for_target(
-            state,
-            state.view.sidebar_rect,
-            state.workspace_scroll,
-            target_row,
-        );
-    }
-    state.mark_sidebar_projection_changed();
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavigateAction {
     NewWorkspace,
@@ -2861,7 +2843,7 @@ pub(super) fn execute_navigate_action_in_context(
                         state.focus_pane_in_workspace(ws_idx, pane_id);
                     }
                     BlockedPaneTarget::Remote(agent_ref) => {
-                        select_remote_agent_row(state, agent_ref);
+                        state.select_remote_agent_row(agent_ref);
                     }
                 }
             }
@@ -3804,8 +3786,18 @@ mod tests {
         let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
             .expect("valid remote agent reference");
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
-            crate::ui::RemoteAgentPanelEntry::new(agent_ref, remote),
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
         )];
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 10));
+        let collapse_key = crate::ui::sidebar::remote_host_collapse_key("ub2");
+        let expansion_key = format!(
+            "{}:{collapse_key}",
+            app.state.sidebar_group_mode.collapse_namespace()
+        );
+        assert!(!app
+            .state
+            .expanded_remote_host_groups
+            .contains(&expansion_key));
 
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 
@@ -3820,6 +3812,15 @@ mod tests {
                 .as_ref()
                 .map(ToString::to_string),
             Some("ub2::pane/with/slash".into())
+        );
+        assert!(app
+            .state
+            .expanded_remote_host_groups
+            .contains(&expansion_key));
+        assert!(
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .iter()
+                .any(|area| area.agent_ref == agent_ref)
         );
 
         assert!(!app
@@ -4089,6 +4090,26 @@ mod tests {
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+    }
+
+    /// AC6: a successfully forwarded prefix pass-through key records the human draft.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prefix_pass_through_records_a_human_draft() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        app.state.prefix_code = KeyCode::Char('x');
+        app.state.prefix_mods = KeyModifiers::empty();
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ));
+
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(app.state.pending_human_drafts[&pane_id], "x");
     }
 
     #[test]

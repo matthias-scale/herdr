@@ -65,6 +65,10 @@ pub(crate) struct ClientConnection {
     pub(crate) work_view: Option<crate::app::state::WorkViewState>,
     /// Client-local historical provider usage controls and scan snapshot.
     pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
+    /// Last tiled-pane geometry rendered for this client. Capacity is reused across frames.
+    pub(crate) retained_pane_infos: Vec<crate::layout::PaneInfo>,
+    /// Whether pane PTY output owns this client's cursor on its last full frame.
+    pub(crate) retained_pane_cursor: bool,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Passive eligibility for audited local Kitty regular-file graphics.
@@ -145,6 +149,8 @@ impl ClientConnection {
             symphony_detail: None,
             work_view: None,
             usage_view: None,
+            retained_pane_infos: Vec::new(),
+            retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             direct_graphics: false,
             pixel_mouse: false,
@@ -186,6 +192,24 @@ impl ClientConnection {
 
     pub(crate) fn is_full_app_client(&self) -> bool {
         matches!(self.mode, ClientConnectionMode::App) && !self.pending_terminal_attach
+    }
+
+    pub(crate) fn tab_surface_replaced(&self, app_state: &crate::app::state::AppState) -> bool {
+        let dock = &self.dock_presentation;
+        let preview_is_in_dock =
+            !dock.collapsed && dock.tab == Some(crate::app::DockSurface::Editor);
+        (dock.editor_preview.is_some() && !preview_is_in_dock)
+            || self.symphony_detail.is_some()
+            || self.loop_run_history_detail.is_some()
+            || self.usage_view.is_some()
+            || self.work_view.is_some()
+            || (dock.collapsed && dock.object_preview.is_some())
+            || app_state.home.is_some()
+            || app_state.inbox.is_some()
+            || app_state
+                .active
+                .and_then(|ws_idx| app_state.workspaces.get(ws_idx))
+                .is_none()
     }
 
     pub(crate) fn request_semantic_redraw_after_input(&mut self) {
