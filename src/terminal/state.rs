@@ -770,7 +770,7 @@ impl TerminalState {
 
     pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<bool, String> {
         let mut context = self.work_context.snapshot_tiers().git_observation;
-        context.pr_urls = vec![url];
+        context.set_inferred_pr_url(url)?;
         self.replace_git_work_context(context)
     }
 
@@ -3569,6 +3569,54 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    fn terminal_with_restored_git_pr(url: &str) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    git_observation: crate::work_context::PaneWorkContext {
+                        pr_urls: vec![url.into()],
+                        repo: Some("o/r".into()),
+                        role: Some(crate::work_context::PaneWorkRole::Ship),
+                        active_owner: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .expect("restore git tier");
+        terminal
+    }
+
+    #[test]
+    fn inferred_different_pr_clears_git_role_and_owner() {
+        let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+
+        assert!(terminal
+            .set_inferred_pr_url("https://github.com/o/r/pull/2".into())
+            .expect("infer different PR"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.pr_urls, ["https://github.com/o/r/pull/2"]);
+        assert_eq!(git.repo.as_deref(), Some("o/r"));
+        assert_eq!(git.role, None);
+        assert!(!git.active_owner);
+    }
+
+    #[test]
+    fn inferring_same_pr_keeps_git_role_and_owner() {
+        let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+
+        assert!(!terminal
+            .set_inferred_pr_url("https://github.com/o/r/pull/1".into())
+            .expect("re-infer same PR"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.role, Some(crate::work_context::PaneWorkRole::Ship));
+        assert!(git.active_owner);
     }
 
     fn closing_tokens(items: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {

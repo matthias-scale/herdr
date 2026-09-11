@@ -221,6 +221,16 @@ impl PaneWorkContext {
         keep_latest_work_item(&mut self.pr_urls);
     }
 
+    pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<(), String> {
+        let pr_urls = normalize_pr_urls([url])?;
+        if self.pr_urls != pr_urls {
+            self.role = None;
+            self.active_owner = false;
+        }
+        self.pr_urls = pr_urls;
+        Ok(())
+    }
+
     fn keep_restored_primary_work_items(&mut self, tier: &'static str) {
         keep_restored_primary_work_item(&mut self.ticket_ids, "ticket_ids", tier);
         keep_restored_primary_work_item(&mut self.pr_urls, "pr_urls", tier);
@@ -298,8 +308,8 @@ impl PaneWorkContext {
 /// Persisted per-tier work context, preserving source provenance across restarts.
 ///
 /// `restored_fallback` carries values whose source tier is unknown (legacy flat
-/// snapshots); live hook/git observations supersede it while `manual` stays
-/// authoritative.
+/// snapshots). It remains below every provenance-aware tier in the effective
+/// view without being mutated by their writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaneWorkContextTiers {
@@ -407,7 +417,7 @@ pub struct PaneWorkContextState {
     hook_turn: PaneWorkContext,
     git_observation: PaneWorkContext,
     /// Legacy restored values with unknown source provenance. Below every live
-    /// tier in precedence; superseded by later hook/git observations.
+    /// tier in precedence and retained independently from later observations.
     restored_fallback: PaneWorkContext,
     effective: PaneWorkContext,
 }
@@ -415,8 +425,8 @@ pub struct PaneWorkContextState {
 impl PaneWorkContextState {
     /// Restore persisted context. When per-tier provenance was persisted it is
     /// reinstalled tier-by-tier; otherwise the legacy flat value becomes a
-    /// restored fallback that later live observations supersede — it is never
-    /// promoted to a manual pin.
+    /// restored fallback below later live observations. It is never promoted
+    /// to a manual pin.
     pub fn from_restored(context: PaneWorkContext) -> Result<Self, String> {
         let mut state = Self {
             restored_fallback: context.normalized_restored("restored_fallback")?,
@@ -476,15 +486,22 @@ impl PaneWorkContextState {
             return Err("missing work-context field to set or clear".into());
         }
         patch.validate_collisions()?;
-        let pr_binding_replaced =
-            patch.pr_urls.is_some() || patch.clear_fields.contains(&PaneWorkContextField::PrUrls);
+        let pr_urls_supplied = patch.pr_urls.is_some();
+        let repo_supplied = patch.repo.is_some();
+        let repo_cleared = patch.clear_fields.contains(&PaneWorkContextField::Repo);
+        let existing_repo_is_pr_derived = self.manual.repo.is_some()
+            && self
+                .manual
+                .primary_pr()
+                .and_then(repo_slug_from_pr_url)
+                .as_ref()
+                == self.manual.repo.as_ref();
         // A pull request implies its repository only when this patch actually
         // binds one, and never when the same patch clears the repository. A
         // patch that merely touches an unrelated field must not re-derive it,
         // or an explicit `--clear repo` would silently come back and an
         // unrelated `--title` edit could relocate the pane.
-        let imply_repo_from_pull_request =
-            patch.pr_urls.is_some() && !patch.clear_fields.contains(&PaneWorkContextField::Repo);
+        let imply_repo_from_pull_request = pr_urls_supplied && !repo_cleared;
         let patched_role = patch.role;
         let patched_active_owner = patch.active_owner;
 
@@ -522,9 +539,15 @@ impl PaneWorkContextState {
                 PaneWorkContextField::ActiveOwner => candidate.active_owner = false,
             }
         }
-        if pr_binding_replaced || candidate.pr_urls.is_empty() {
+        candidate.set_latest_work_items();
+        candidate.pr_urls = normalize_pr_urls(candidate.pr_urls)?;
+        let pr_binding_changed = candidate.pr_urls != self.manual.pr_urls;
+        if pr_binding_changed {
             candidate.role = None;
             candidate.active_owner = false;
+            if existing_repo_is_pr_derived && !repo_supplied {
+                candidate.repo = None;
+            }
         }
         if let Some(role) = patched_role {
             candidate.role = Some(role);
@@ -575,10 +598,7 @@ impl PaneWorkContextState {
     #[allow(dead_code)]
     pub fn replace_hook_turn(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
-        // Any live observation supersedes the unknown-provenance legacy value.
-        let fallback_changed = self.clear_restored_fallback();
-        let superseded_changed = supersede_inferred_work_items(&context, &mut self.git_observation);
-        if context == self.hook_turn && !fallback_changed && !superseded_changed {
+        if context == self.hook_turn {
             return Ok(false);
         }
         self.hook_turn = context;
@@ -597,7 +617,6 @@ impl PaneWorkContextState {
             return Ok(false);
         }
         self.hook_turn.session_name = session_name;
-        self.clear_restored_fallback();
         self.recompute();
         Ok(true)
     }
@@ -615,22 +634,12 @@ impl PaneWorkContextState {
 
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
-        // Any live observation supersedes the unknown-provenance legacy value.
-        let fallback_changed = self.clear_restored_fallback();
-        if context == self.git_observation && !fallback_changed {
+        if context == self.git_observation {
             return Ok(false);
         }
         self.git_observation = context;
         self.recompute();
         Ok(true)
-    }
-
-    fn clear_restored_fallback(&mut self) -> bool {
-        if self.restored_fallback == PaneWorkContext::default() {
-            return false;
-        }
-        self.restored_fallback = PaneWorkContext::default();
-        true
     }
 
     fn recompute(&mut self) {
@@ -740,21 +749,6 @@ fn keep_restored_primary_work_item<T>(
         original_count,
         "truncated restored work context to its previously primary assignment"
     );
-}
-
-fn supersede_inferred_work_items(newer: &PaneWorkContext, older: &mut PaneWorkContext) -> bool {
-    let mut changed = false;
-    if !newer.ticket_ids.is_empty() {
-        changed |= !older.ticket_ids.is_empty();
-        older.ticket_ids.clear();
-    }
-    if !newer.pr_urls.is_empty() {
-        changed |= !older.pr_urls.is_empty() || older.role.is_some() || older.active_owner;
-        older.pr_urls.clear();
-        older.role = None;
-        older.active_owner = false;
-    }
-    changed
 }
 
 fn first_present<const N: usize>(values: [Option<&String>; N]) -> Option<String> {
@@ -1947,13 +1941,61 @@ mod tests {
             })
             .unwrap();
 
-        // The hook does not merely sort ahead of the observation, it replaces
-        // it: the pane said which pull request it is on, so the branch guess
-        // has nothing left to contribute.
+        // The hook wins in the effective view without deleting the observation.
         assert_eq!(
             state.effective().pr_urls,
             vec!["https://github.com/o/r/pull/2"]
         );
+    }
+
+    #[test]
+    fn clearing_hook_turn_reveals_untouched_git_work_item() {
+        let git = PaneWorkContext {
+            ticket_ids: vec!["SCA-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
+            ..PaneWorkContext::default()
+        };
+        let mut state = PaneWorkContextState::default();
+        state.replace_git_observation(git.clone()).unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-2".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert!(state.clear_hook_turn());
+        assert_eq!(state.snapshot_tiers().git_observation, git);
+        assert_eq!(state.effective().ticket_ids, ["SCA-1"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/1"]);
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+    }
+
+    #[test]
+    fn empty_hook_turn_replacement_reveals_untouched_git_work_item() {
+        let git = PaneWorkContext {
+            ticket_ids: vec!["SCA-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            ..PaneWorkContext::default()
+        };
+        let mut state = PaneWorkContextState::default();
+        state.replace_git_observation(git.clone()).unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-2".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert!(state.replace_hook_turn(PaneWorkContext::default()).unwrap());
+        assert_eq!(state.snapshot_tiers().git_observation, git);
+        assert_eq!(state.effective().ticket_ids, ["SCA-1"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/1"]);
     }
 
     #[test]
@@ -2519,9 +2561,9 @@ mod tests {
     }
 
     #[test]
-    fn ac1_legacy_flat_restore_is_fallback_not_manual_pin() {
+    fn ac1_legacy_flat_restore_remains_below_live_tiers() {
         // A legacy flat snapshot has unknown provenance: it must load intact
-        // but be superseded by later live hook/git observations.
+        // and remain below later live hook/git observations.
         let mut restored = PaneWorkContextState::from_restored(PaneWorkContext {
             repo: None,
             ticket_ids: vec!["MAT-1".into()],
@@ -2545,9 +2587,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
-        assert!(restored.effective().ticket_ids.is_empty());
-        assert!(restored.effective().pr_urls.is_empty());
-        assert!(restored.effective().work_title.is_none());
+        assert_eq!(restored.effective().ticket_ids, ["MAT-1"]);
+        assert_eq!(
+            restored.effective().pr_urls,
+            ["https://github.com/o/r/pull/2"]
+        );
+        assert_eq!(
+            restored.effective().work_title.as_deref(),
+            Some("Old title")
+        );
 
         restored
             .replace_hook_turn(PaneWorkContext {
@@ -2557,7 +2605,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective().ticket_ids, vec!["SCA-9"]);
-        assert!(restored.effective().pr_urls.is_empty());
+        assert_eq!(
+            restored.effective().pr_urls,
+            ["https://github.com/o/r/pull/2"]
+        );
         assert_eq!(
             restored.effective().work_title.as_deref(),
             Some("New title")
@@ -2678,6 +2729,51 @@ mod tests {
             state.effective().primary_pr(),
             Some("https://github.com/o/r/pull/42")
         );
+    }
+
+    #[test]
+    fn manual_patch_for_same_pr_keeps_role_and_active_owner() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert!(!state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap());
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+    }
+
+    #[test]
+    fn changing_manual_pr_rebinds_derived_repo_and_clears_role_and_owner() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/old/repo/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert!(state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/new/repo/pull/7".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap());
+        assert_eq!(state.effective().repo.as_deref(), Some("new/repo"));
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
     }
 
     #[test]

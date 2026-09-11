@@ -1590,6 +1590,15 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 effective.effective().pr_urls,
                 ["https://github.com/hook/repo/pull/1"]
             );
+            let git = effective.snapshot_tiers().git_observation;
+            assert_eq!(git.ticket_ids, [format!("SCA-{}", generation + 1)]);
+            assert_eq!(
+                git.pr_urls,
+                [format!(
+                    "https://github.com/git/repo/pull/{}",
+                    generation + 1
+                )]
+            );
         }
     }
 

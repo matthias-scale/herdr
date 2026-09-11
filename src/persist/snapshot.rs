@@ -1088,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn ac3_legacy_flat_work_context_restores_as_replaceable_fallback() {
+    fn ac3_legacy_flat_work_context_restores_as_lower_precedence_fallback() {
         // A pre-tier snapshot carries only the flat field; it must load intact
         // and never behave like a manual pin after restore.
         let raw = r#"{
@@ -1137,10 +1137,13 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(restored.effective_work_context().ticket_ids.is_empty());
+        assert_eq!(restored.effective_work_context().ticket_ids, ["MAT-1"]);
         assert!(restored.effective_work_context().pr_urls.is_empty());
         assert!(restored.effective_work_context().preview_urls.is_empty());
-        assert!(restored.effective_work_context().work_title.is_none());
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("Old title")
+        );
         restored
             .work_context
             .replace_hook_turn(crate::work_context::PaneWorkContext {
