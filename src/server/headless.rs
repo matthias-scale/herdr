@@ -8995,6 +8995,63 @@ next_tab = ""
         );
     }
 
+    #[tokio::test]
+    async fn detached_working_report_without_a_foreground_scan_is_not_nudged() {
+        let mut server = test_headless_server();
+        server.app.state.auto_nudge_stalled_agents = true;
+        let workspace = crate::workspace::Workspace::test_new("headless-working-unscanned");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+
+        server.app.handle_internal_event_with_prefix_sync(
+            crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                session_ref: None,
+            },
+        );
+        let reported_at = server.app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("working report timestamp");
+        server.app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(reported_at);
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + server.app.state.agent_stale_after,
+            false,
+        );
+
+        assert_eq!(server.app.last_foreground_process_refresh_generation, 0);
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(!server.app.stall_nudge_episodes.contains_key(&terminal_id));
+        assert!(rx.try_recv().is_err());
+    }
+
     /// AC6: terminal-attach draft bytes suppress a stalled-agent auto-nudge.
     #[tokio::test]
     async fn headless_attach_human_bytes_suppress_a_stalled_agent_auto_nudge() {

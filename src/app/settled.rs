@@ -1143,6 +1143,7 @@ mod tests {
             Some(1_000),
             quiet_since,
         );
+        terminal.set_foreground_process(None, false, quiet_since);
         terminal
             .mark_agent_status_stale_at(quiet_since + stale_after, stale_after)
             .expect("working report should become stale");

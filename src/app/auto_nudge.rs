@@ -979,6 +979,11 @@ mod tests {
             .expect("root terminal")
             .status_reported_at()
             .expect("runtime status report timestamp");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_foreground_process(None, false, report_at);
         assert!(!app.state.terminals[&terminal_id].supervisor_stale);
 
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(1)));
@@ -1201,5 +1206,38 @@ mod tests {
             app.state.nudge_after,
             Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)
         );
+    }
+
+    #[tokio::test]
+    async fn shorter_reload_budget_does_not_stale_a_working_report_with_unknown_foreground() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        let mut config = crate::config::Config::default();
+        config.session.auto_nudge_stalled_agents = true;
+        config.session.agent_stale_after_minutes = 15;
+        app.apply_live_config(&config, &[], &[], false);
+        app.handle_internal_event_with_prefix_sync(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+        });
+        let reported_at = app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("working report timestamp");
+
+        config.session.agent_stale_after_minutes = 5;
+        app.apply_live_config(&config, &[], &[], false);
+        app.handle_scheduled_tasks(reported_at + app.state.agent_stale_after, false);
+
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
+        assert_eq!(drain(&mut rx), "");
     }
 }

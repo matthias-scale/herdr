@@ -5577,6 +5577,7 @@ mod tests {
                 started,
             )
             .expect("working report accepted");
+        terminal.set_foreground_process(None, false, started);
 
         let updates = app
             .state
