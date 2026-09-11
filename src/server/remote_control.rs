@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_agent_is_allowed_when_other_facts_match() {
+    fn matching_context_is_allowed_when_all_control_facts_match() {
         let expected = context();
         let writes = std::cell::Cell::new(0_u8);
         let result = validate_and_write(

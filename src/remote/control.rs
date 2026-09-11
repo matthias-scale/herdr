@@ -45,22 +45,7 @@ impl SshRunner for OpenSshRunner {
                 "SSH target must not begin with '-'",
             ));
         }
-        let mut command = std::process::Command::new("ssh");
-        command
-            .arg("-T")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("RequestTTY=no")
-            .arg("-o")
-            .arg("ConnectTimeout=5")
-            .arg("--")
-            .arg(target)
-            .arg("herdr")
-            .arg("remote-control-bridge")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        let mut command = ssh_command(target);
         let mut child = command.spawn()?;
         let Some(stdin) = child.stdin.take() else {
             return Err(io::Error::other("ssh stdin was not available"));
@@ -76,6 +61,27 @@ impl SshRunner for OpenSshRunner {
             stderr,
         }))
     }
+}
+
+#[cfg(unix)]
+fn ssh_command(target: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("ssh");
+    command
+        .arg("-T")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("RequestTTY=no")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg("--")
+        .arg(target)
+        .arg("herdr")
+        .arg("remote-control-bridge")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
 }
 
 #[cfg(unix)]
@@ -681,6 +687,106 @@ mod tests {
             result,
             Err(error) if error.kind() == io::ErrorKind::InvalidInput
         ));
+    }
+
+    #[test]
+    // AC7: the control SSH command is non-interactive and separates the target from the bridge command.
+    fn control_ssh_argv_has_batch_mode_and_command_separator() {
+        let command = ssh_command("buildbox");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
+        let separator = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("SSH target separator");
+        assert_eq!(
+            args.get(separator + 1).map(String::as_str),
+            Some("buildbox")
+        );
+        assert_eq!(
+            &args[separator + 2..],
+            ["herdr".to_owned(), "remote-control-bridge".to_owned()]
+        );
+    }
+
+    #[test]
+    // AC7: remote focus only resolves the admitted hosts returned by select_hosts.
+    fn remote_focus_transport_resolves_hosts_through_select_hosts() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![
+                crate::config::FleetHostConfig {
+                    name: "laptop".into(),
+                    local: true,
+                    ..Default::default()
+                },
+                crate::config::FleetHostConfig {
+                    name: "buildbox".into(),
+                    target: "operator@buildbox".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let transport = SshRemoteFocusTransport::new(&fleet);
+        assert_eq!(
+            transport.targets.get("buildbox").map(String::as_str),
+            Some("operator@buildbox")
+        );
+        assert!(!transport.targets.contains_key("laptop"));
+
+        let invalid = crate::config::FleetConfig {
+            hosts: vec![
+                crate::config::FleetHostConfig {
+                    name: "duplicate".into(),
+                    target: "one".into(),
+                    ..Default::default()
+                },
+                crate::config::FleetHostConfig {
+                    name: "duplicate".into(),
+                    target: "two".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(SshRemoteFocusTransport::new(&invalid).targets.is_empty());
+    }
+
+    #[test]
+    // AC6: a typed server ControlError becomes the same typed client failure as other transport errors.
+    fn typed_control_error_is_classified_by_the_client() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let welcome = framed(&ServerMessage::Welcome {
+            version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        });
+        let control_error = framed(&ServerMessage::ControlError {
+            code: "refused_for_safety".into(),
+            message: "controlled PTY write gate refused the batch".into(),
+        });
+        let mut input = welcome;
+        input.extend(control_error);
+        let mut transport = transport_with(input, Arc::clone(&output), None);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start(
+                "operation",
+                &AgentRef {
+                    host: "buildbox".into(),
+                    agent: "claude".into(),
+                },
+                "proxy",
+                event_tx,
+            )
+            .expect("thread starts");
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "refused_for_safety");
+        assert_eq!(error.message, "controlled PTY write gate refused the batch");
     }
 
     #[test]

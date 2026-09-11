@@ -9049,6 +9049,40 @@ last_pane = "prefix+tab"
         assert!(rx.try_recv().is_err());
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC1: home paste routing stays out of a remotely leased pane and leaves that lease intact.
+    async fn home_paste_does_not_write_through_remote_lease() {
+        let (mut app, terminal_id, mut input_rx) = test_app_with_focused_runtime();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("focused runtime")
+            .acquire_remote_owner(41));
+        let controlled_owners = std::collections::HashMap::from([(terminal_id, 41)]);
+        app.state.home = Some(home::HomeState::default());
+
+        app.route_client_events_from_with_human_input_hook(
+            9,
+            vec![crate::raw_input::RawInputEvent::Paste("home prompt".into())],
+            true,
+            &mut |_| {},
+            Some(&controlled_owners),
+        );
+
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some("home prompt")
+        );
+        assert!(input_rx.try_recv().is_err());
+        assert!(!app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("focused runtime")
+            .acquire_remote_owner(99));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn route_client_paste_is_swallowed_by_dock_object_preview() {
         let mut app = test_app();

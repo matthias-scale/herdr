@@ -2141,7 +2141,16 @@ impl HeadlessServer {
     /// Revalidate the authoritative remote context and write one input batch
     /// directly to the PTY master during this server event-loop turn.
     #[cfg(unix)]
-    fn forward_control_bytes(&mut self, client_id: u64, data: Vec<u8>) -> bool {
+    fn controlled_write_target(
+        &self,
+        client_id: u64,
+    ) -> Result<
+        Option<(
+            crate::server::remote_control::RemoteControlLease,
+            crate::terminal::TerminalId,
+        )>,
+        crate::api::schema::ErrorBody,
+    > {
         let Some(lease) = self
             .clients
             .get(&client_id)
@@ -2153,39 +2162,51 @@ impl HeadlessServer {
                 _ => None,
             })
         else {
-            return false;
+            return Ok(None);
         };
-        if let Err(error) = crate::server::remote_control::validate_input_owner(
+        crate::server::remote_control::validate_input_owner(
             self.terminal_attach_owners
                 .get(&lease.context.terminal_id)
                 .copied(),
             client_id,
-        ) {
-            self.reject_remote_control(client_id, error);
-            return false;
+        )?;
+        let real_terminal_id = self
+            .terminal_id_by_string(&lease.context.terminal_id)
+            .ok_or_else(|| crate::api::schema::ErrorBody {
+                code: "connection_lost".to_owned(),
+                message: "controlled terminal no longer exists; delivery is unknown".to_owned(),
+            })?;
+        if self.app.terminal_runtimes.get(&real_terminal_id).is_none() {
+            return Err(crate::api::schema::ErrorBody {
+                code: "connection_lost".to_owned(),
+                message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+            });
         }
-        let provider: &dyn crate::server::remote_control::RemoteControlContextProvider = &self.app;
-        let Some(real_terminal_id) = self.terminal_id_by_string(&lease.context.terminal_id) else {
-            self.reject_remote_control(
-                client_id,
-                crate::api::schema::ErrorBody {
-                    code: "connection_lost".to_owned(),
-                    message: "controlled terminal no longer exists; delivery is unknown".to_owned(),
-                },
-            );
-            return false;
+        Ok(Some((lease, real_terminal_id)))
+    }
+
+    #[cfg(unix)]
+    fn forward_control_bytes(&mut self, client_id: u64, data: Vec<u8>) -> bool {
+        let target = match self.controlled_write_target(client_id) {
+            Ok(Some(target)) => target,
+            Ok(None) => return false,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
         };
+        let (lease, real_terminal_id) = target;
         let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
-            self.reject_remote_control(
+            return self.reject_remote_control(
                 client_id,
                 crate::api::schema::ErrorBody {
                     code: "connection_lost".to_owned(),
                     message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
                 },
             );
-            return false;
         };
         runtime.scroll_reset();
+        let provider: &dyn crate::server::remote_control::RemoteControlContextProvider = &self.app;
         let current = match provider.fresh_remote_control_context(&lease.agent_ref) {
             Ok(context) => context,
             Err(error) => {
@@ -2193,6 +2214,24 @@ impl HeadlessServer {
                 return false;
             }
         };
+        self.forward_control_bytes_with_current_context(
+            client_id,
+            data,
+            lease,
+            real_terminal_id,
+            current,
+        )
+    }
+
+    #[cfg(unix)]
+    fn forward_control_bytes_with_current_context(
+        &mut self,
+        client_id: u64,
+        data: Vec<u8>,
+        lease: crate::server::remote_control::RemoteControlLease,
+        real_terminal_id: crate::terminal::TerminalId,
+        current: api::schema::RemoteControlContext,
+    ) -> bool {
         if let Err(error) = crate::server::remote_control::validate_context(
             &self.app.state.agent_host_name,
             &lease.context.user,
@@ -2202,12 +2241,33 @@ impl HeadlessServer {
             self.reject_remote_control(client_id, error);
             return false;
         }
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "connection_lost".to_owned(),
+                    message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+                },
+            );
+        };
         let has_bytes = !data.is_empty();
-        match runtime.try_send_controlled_bytes(client_id, &data) {
+        let result = runtime.try_send_controlled_bytes(client_id, &data);
+        self.finish_controlled_write(client_id, &real_terminal_id, has_bytes, result)
+    }
+
+    #[cfg(unix)]
+    fn finish_controlled_write(
+        &mut self,
+        client_id: u64,
+        real_terminal_id: &crate::terminal::TerminalId,
+        has_bytes: bool,
+        result: crate::pty::actor::ControlledWriteResult,
+    ) -> bool {
+        match result {
             crate::pty::actor::ControlledWriteResult::Written => {
                 if has_bytes {
                     self.app.retire_blocked_hook_authority_for_terminal(
-                        &real_terminal_id,
+                        real_terminal_id,
                         std::time::Instant::now(),
                     );
                 }
@@ -2236,6 +2296,48 @@ impl HeadlessServer {
                 false
             }
         }
+    }
+
+    #[cfg(all(test, unix))]
+    fn forward_control_bytes_with_provider_for_test(
+        &mut self,
+        client_id: u64,
+        data: Vec<u8>,
+        provider: &dyn crate::server::remote_control::RemoteControlContextProvider,
+    ) -> bool {
+        let target = match self.controlled_write_target(client_id) {
+            Ok(Some(target)) => target,
+            Ok(None) => return false,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        let (lease, real_terminal_id) = target;
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "connection_lost".to_owned(),
+                    message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+                },
+            );
+        };
+        runtime.scroll_reset();
+        let current = match provider.fresh_remote_control_context(&lease.agent_ref) {
+            Ok(context) => context,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        self.forward_control_bytes_with_current_context(
+            client_id,
+            data,
+            lease,
+            real_terminal_id,
+            current,
+        )
     }
 
     #[cfg(not(unix))]
@@ -8856,6 +8958,287 @@ next_tab = ""
             revision: 1,
             context_epoch: 1,
         }
+    }
+
+    #[cfg(unix)]
+    struct MutableSequencedContextProvider {
+        contexts: std::sync::Mutex<std::collections::VecDeque<api::schema::RemoteControlContext>>,
+    }
+
+    #[cfg(unix)]
+    impl crate::server::remote_control::RemoteControlContextProvider
+        for MutableSequencedContextProvider
+    {
+        fn fresh_remote_control_context(
+            &self,
+            _agent_ref: &api::schema::AgentRef,
+        ) -> Result<api::schema::RemoteControlContext, api::schema::ErrorBody> {
+            self.contexts
+                .lock()
+                .expect("context provider lock")
+                .pop_front()
+                .ok_or_else(|| api::schema::ErrorBody {
+                    code: "test_context_exhausted".into(),
+                    message: "test context provider exhausted".into(),
+                })
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_controlled_test_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Bytes>,
+    ) {
+        let workspace = crate::workspace::Workspace::test_new("controlled-test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.agent_host_name = "buildbox".into();
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        let terminal_id_string = terminal_id.to_string();
+        let workspace_id = server.app.state.workspaces[0].id.clone();
+        let pane_id_string = format!(
+            "{workspace_id}:p{}",
+            server.app.state.workspaces[0]
+                .public_pane_number(pane_id)
+                .expect("public pane number")
+        );
+        let context =
+            test_remote_control_context(&terminal_id_string, &workspace_id, &pane_id_string);
+        let lease = crate::server::remote_control::RemoteControlLease::new(
+            api::schema::AgentRef::new("buildbox", &pane_id_string).expect("agent ref"),
+            context,
+        );
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), client_id);
+        client.writer = Some(writer);
+        client.mode = ClientConnectionMode::TerminalAttach {
+            terminal_id: terminal_id_string.clone(),
+            control: Some(Box::new(lease)),
+        };
+        server.clients.insert(client_id, client);
+        server
+            .terminal_attach_owners
+            .insert(terminal_id_string.clone(), client_id);
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("controlled runtime")
+            .acquire_remote_owner(client_id));
+        (terminal_id_string, control_rx, input_rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC2: a context change between control batches prevents the second PTY write.
+    async fn forward_control_bytes_refreshes_context_for_each_batch() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, mut input_rx) =
+            install_controlled_test_client(&mut server, 7);
+        let expected = match &server.clients[&7].mode {
+            ClientConnectionMode::TerminalAttach {
+                control: Some(lease),
+                ..
+            } => lease.context.clone(),
+            _ => panic!("controlled test client has no lease"),
+        };
+        let mut changed = expected.clone();
+        changed.revision += 1;
+        let provider = MutableSequencedContextProvider {
+            contexts: std::sync::Mutex::new(
+                [expected.clone(), changed]
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<_>>(),
+            ),
+        };
+
+        assert!(server.forward_control_bytes_with_provider_for_test(
+            7,
+            b"first".to_vec(),
+            &provider,
+        ));
+        assert_eq!(
+            input_rx.try_recv().expect("first batch written"),
+            Bytes::from("first")
+        );
+        assert!(!server.forward_control_bytes_with_provider_for_test(
+            7,
+            b"second".to_vec(),
+            &provider,
+        ));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "second batch must not be written"
+        );
+        assert!(!server.clients.contains_key(&7));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, .. } if code == "refused_for_safety"
+        ));
+        assert!(provider
+            .contexts
+            .lock()
+            .expect("context provider lock")
+            .is_empty());
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: a partial controlled PTY write ends the lease without retrying the remainder.
+    async fn partial_controlled_write_ends_server_lease() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, _input_rx) = install_controlled_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal");
+
+        assert!(!server.finish_controlled_write(
+            7,
+            &real_terminal_id,
+            true,
+            crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written: 17 },
+        ));
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.terminal_attach_owners.contains_key(&terminal_id));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "connection_lost" && message.contains("17 bytes")
+        ));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: an EAGAIN result is delivery-unknown and ends the lease automatically.
+    async fn eagain_controlled_write_ends_server_lease() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, _input_rx) = install_controlled_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal");
+
+        assert!(!server.finish_controlled_write(
+            7,
+            &real_terminal_id,
+            true,
+            crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written: 0 },
+        ));
+        assert!(!server.clients.contains_key(&7));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "connection_lost" && message.contains("0 bytes")
+        ));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: the server emits a typed ControlError instead of an untyped shutdown.
+    async fn server_emits_typed_control_error_for_remote_rejection() {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), 7);
+        client.writer = Some(writer);
+        server.clients.insert(7, client);
+
+        assert!(!server.reject_remote_control(
+            7,
+            api::schema::ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "test refusal".into(),
+            },
+        ));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "refused_for_safety" && message == "test refusal"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC1: a clipboard-image paste uses the human-input lease termination path before pane write.
+    async fn clipboard_image_paste_ends_human_control_before_forwarding() {
+        let mut server = test_headless_server();
+        let (terminal_id, _control_rx, mut input_rx) =
+            install_controlled_test_client(&mut server, 7);
+        let mut app_client = test_app_client(Some(true), 1);
+        app_client.pending_terminal_attach = false;
+        server.clients.insert(1, app_client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .try_send_paste("blocked-before-human-input".into())
+            .is_err());
+        assert!(
+            server.handle_server_event(ServerEvent::ClientClipboardImage {
+                client_id: 1,
+                extension: "png".into(),
+                data: b"not-a-real-image".to_vec(),
+            })
+        );
+        assert!(!server.clients.contains_key(&7));
+        let forwarded = input_rx.try_recv().expect("clipboard image path forwarded");
+        let forwarded = String::from_utf8_lossy(&forwarded);
+        assert!(forwarded.contains("herdr-clipboard-images"), "{forwarded}");
     }
 
     #[cfg(unix)]

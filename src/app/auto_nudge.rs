@@ -938,6 +938,27 @@ mod tests {
         assert_eq!(drain(&mut rx), "\r");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    // AC1: auto-nudge cannot write to a pane while a remote lease owns its PTY.
+    async fn remote_lease_refuses_auto_nudge_writes() {
+        let now = Instant::now();
+        let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        let runtime = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("stalled runtime");
+        assert!(runtime.acquire_remote_owner(7));
+
+        assert!(!app.tick_auto_nudges(now));
+        assert_eq!(drain(&mut rx), "");
+        assert!(!app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("stalled runtime")
+            .acquire_remote_owner(99));
+    }
+
     #[tokio::test]
     async fn foreign_pane_input_cancels_the_delayed_stall_nudge_submission() {
         let now = Instant::now();

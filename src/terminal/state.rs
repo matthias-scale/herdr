@@ -4538,7 +4538,8 @@ mod tests {
     }
 
     #[test]
-    fn managed_agent_readiness_tracks_detection_state() {
+    // AC8: constructed Blocked and Active managed-agent states are both control-admissible.
+    fn managed_agent_control_admits_constructed_blocked_and_active_states() {
         let mut terminal = test_terminal();
         let now = Instant::now();
         terminal.begin_managed_agent(
