@@ -12,6 +12,10 @@ use crate::api::schema::{AgentRef, RemoteControlContext};
 pub(crate) struct RemoteControlLease {
     pub(crate) agent_ref: AgentRef,
     pub(crate) context: RemoteControlContext,
+    /// Last context sent to the attached proxy. This is presentation state;
+    /// `context` remains the lease's safety baseline for every write.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) advertised_context: RemoteControlContext,
 }
 
 impl PartialEq for RemoteControlLease {
@@ -27,7 +31,11 @@ impl RemoteControlLease {
     // still construct a lease to exercise shared protocol state.
     #[cfg(test)]
     pub(crate) fn new(agent_ref: AgentRef, context: RemoteControlContext) -> Self {
-        Self { agent_ref, context }
+        Self {
+            agent_ref,
+            advertised_context: context.clone(),
+            context,
+        }
     }
 }
 

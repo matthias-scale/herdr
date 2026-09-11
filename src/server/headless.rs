@@ -2385,6 +2385,61 @@ impl HeadlessServer {
         }
     }
 
+    /// Keep attached proxy identity lines synchronized with the server-owned
+    /// context. The lease's original context remains the safety baseline for
+    /// writes; a changed target is still rejected before input is delivered.
+    #[cfg(unix)]
+    fn refresh_remote_control_contexts(&mut self) {
+        let attached = self
+            .clients
+            .iter()
+            .filter_map(|(&client_id, client)| {
+                let ClientConnectionMode::TerminalAttach {
+                    control: Some(control),
+                    ..
+                } = &client.mode
+                else {
+                    return None;
+                };
+                Some((
+                    client_id,
+                    control.agent_ref.clone(),
+                    control.advertised_context.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        for (client_id, agent_ref, advertised) in attached {
+            let current = match self.app.remote_control_context(&agent_ref) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.reject_remote_control(client_id, error);
+                    continue;
+                }
+            };
+            if current == advertised {
+                continue;
+            }
+            if !self.send_to_client(
+                client_id,
+                ServerMessage::ControlContext {
+                    context: Box::new(current.clone()),
+                },
+            ) {
+                continue;
+            }
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                if let ClientConnectionMode::TerminalAttach {
+                    control: Some(control),
+                    ..
+                } = &mut client.mode
+                {
+                    control.advertised_context = current;
+                }
+            }
+        }
+    }
+
     #[cfg(all(test, unix))]
     fn forward_control_bytes_with_provider_for_test(
         &mut self,
@@ -2736,6 +2791,7 @@ impl HeadlessServer {
         }
         let lease = crate::server::remote_control::RemoteControlLease {
             agent_ref,
+            advertised_context: current.clone(),
             context: current.clone(),
         };
         let lease_for_attach = lease.clone();
@@ -6287,6 +6343,8 @@ impl HeadlessServer {
         }
         changed |= self.app.handle_loop_receipt_fallback(now);
         changed |= self.app.tick_notepad(now);
+        #[cfg(unix)]
+        self.refresh_remote_control_contexts();
         if has_app_client {
             let host_focused = self.app_clients_host_focused();
             changed |= self.app.tick_pomodoro(now, host_focused);

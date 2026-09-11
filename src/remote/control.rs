@@ -668,6 +668,18 @@ fn run_control_session(
                     break;
                 }
             }
+            ServerMessage::ControlContext { context } => {
+                if active
+                    && event_tx
+                        .blocking_send(crate::events::AppEvent::RemoteFocusTransition {
+                            operation_id: operation_id.clone(),
+                            transition: Box::new(RemoteFocusTransition::ContextUpdated(context)),
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+            }
             ServerMessage::Terminal(frame) => {
                 // Frames are an ordered diff stream: block on a full event
                 // channel rather than drop one and corrupt later diffs.

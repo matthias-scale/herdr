@@ -61,6 +61,10 @@ pub(crate) enum RemoteFocusTransition {
     // path reaches Active yet.
     #[cfg_attr(not(unix), allow(dead_code))]
     Active(Box<RemoteControlContext>),
+    /// The server's authoritative identity or process context changed while
+    /// the control lease remained active.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    ContextUpdated(Box<RemoteControlContext>),
     Failed(ErrorBody),
     Closed,
 }
@@ -249,8 +253,16 @@ impl RemoteFocusOperations {
 
         match transition {
             RemoteFocusTransition::Active(context) => {
-                if operation.state == RemoteFocusState::Connecting {
+                if matches!(
+                    operation.state,
+                    RemoteFocusState::Connecting | RemoteFocusState::Active
+                ) {
                     operation.state = RemoteFocusState::Active;
+                    operation.context = Some(*context);
+                }
+            }
+            RemoteFocusTransition::ContextUpdated(context) => {
+                if operation.state == RemoteFocusState::Active {
                     operation.context = Some(*context);
                 }
             }
@@ -674,7 +686,6 @@ impl crate::app::App {
         let cwd = self.state.workspaces[ws_idx].identity_cwd.clone();
         let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), cwd);
         terminal.remote_proxy = true;
-        terminal.manual_label = Some(agent_ref.to_string());
         self.state.terminals.insert(terminal_id.clone(), terminal);
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         let workspace = &mut self.state.workspaces[ws_idx];
@@ -714,7 +725,8 @@ impl crate::app::App {
         transition: RemoteFocusTransition,
     ) {
         let activation = match &transition {
-            RemoteFocusTransition::Active(context) => Some((**context).clone()),
+            RemoteFocusTransition::Active(context)
+            | RemoteFocusTransition::ContextUpdated(context) => Some((**context).clone()),
             _ => None,
         };
         self.remote_focus_operations
@@ -946,6 +958,10 @@ mod tests {
             .get(&terminal_id)
             .expect("proxy terminal state");
         assert!(terminal.remote_proxy);
+        assert!(
+            terminal.manual_label.is_none(),
+            "the connecting proxy must not present client-supplied identity"
+        );
         assert_eq!(
             started.proxy_pane_id,
             app.public_pane_id(0, pane_id).expect("public pane id")
@@ -1152,6 +1168,48 @@ mod tests {
             .expect("outbound channel")
             .try_recv()
             .is_err());
+    }
+
+    #[test]
+    fn authoritative_context_updates_replace_the_proxy_identity_line() {
+        let (mut app, _recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let terminal_id = proxy_terminal_id(&app, &started.operation_id);
+        let initial = context();
+
+        app.apply_remote_focus_transition(
+            &started.operation_id,
+            RemoteFocusTransition::Active(Box::new(initial.clone())),
+        );
+        app.apply_remote_focus_frame(&started.operation_id, &full_frame(b"ready"));
+
+        let mut updated = initial;
+        updated.cwd = "/work/other".into();
+        updated.foreground_cwd = "/work/other".into();
+        updated.foreground_process.cwd = "/work/other".into();
+        updated.foreground_process.name = "other-agent".into();
+        app.apply_remote_focus_transition(
+            &started.operation_id,
+            RemoteFocusTransition::Active(Box::new(updated.clone())),
+        );
+
+        let terminal = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("proxy terminal");
+        assert_eq!(
+            terminal.manual_label.as_deref(),
+            Some("buildbox::w1:p3 · operator · /work/other · /dev/pts/4 · other-agent")
+        );
+        assert_eq!(
+            app.remote_focus_status(&started.operation_id)
+                .expect("operation status")
+                .context,
+            Some(updated)
+        );
     }
 
     #[test]
