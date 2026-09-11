@@ -312,15 +312,13 @@ pub struct SessionConfig {
     /// Settle a pane that has been inactive for `settle_after_days`.
     /// Default: true.
     pub auto_settle_inactive: bool,
-    /// Settle a pane whose agent has read Done and stayed quiet for
-    /// `settle_done_after_minutes`, instead of leaving it running until
-    /// `reap_done_after_minutes` closes it. Only applies to panes that can be
-    /// resumed into their native agent session; a pane with no resume plan is
-    /// left to reaping, because settling it would strand it in the Settled
-    /// section with nothing to resume. Default: true.
+    /// Settle an inactive agent pane after it stays idle with no closing gates,
+    /// usage limit, active sub-agents, or held shell for
+    /// `settle_done_after_minutes`. Applies whether the pane was seen and when
+    /// stale supervision resolves to an idle screen. Default: true.
     pub auto_settle_done: bool,
-    /// How long a Done pane has to stay quiet before `auto_settle_done`
-    /// settles it. Default: 30.
+    /// How long an eligible agent pane has to stay quiet before
+    /// `auto_settle_done` settles it. Default: 30.
     pub settle_done_after_minutes: u64,
     /// Stop resumable agent processes when their pane settles.
     /// Default: true.

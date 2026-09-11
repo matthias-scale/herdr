@@ -74,10 +74,7 @@ fn primary_pr_settled_label(
     (!title.is_empty()).then(|| format!("#{number} {title}"))
 }
 
-/// Whether the pane can be brought back after its agent is stopped. Only a
-/// resumable pane may be settled by the Done trigger: settling one that cannot
-/// resume would file it under Settled with a dead Resume action and hide it
-/// from reaping, which is the path that would otherwise close it.
+/// Whether the pane can be brought back after its agent is stopped.
 pub(crate) fn pane_has_resume_plan(terminal: &crate::terminal::TerminalState) -> bool {
     terminal
         .persisted_agent_session
@@ -173,6 +170,7 @@ impl AppState {
         };
         pane.activity.note(now);
         let changed = pane.settled_at.take().is_some();
+        self.mark_session_dirty();
         if changed {
             let workspace_id = self.workspaces[ws_idx].id.clone();
             self.pending_pane_settlement_changes
@@ -202,6 +200,9 @@ impl AppState {
             .activity
             .observe_detection_snapshot(revision, agent, snapshot, now);
         let changed = activity && pane.settled_at.take().is_some();
+        if activity {
+            self.mark_session_dirty();
+        }
         if changed {
             let workspace_id = self.workspaces[ws_idx].id.clone();
             self.pending_pane_settlement_changes
@@ -236,6 +237,12 @@ impl AppState {
                     };
                     let state = terminal.sidebar_projection(pane.seen).0;
                     let open_blockers = !terminal.closing_gates.is_empty();
+                    let quiet = crate::terminal::state::session_is_quiet(
+                        state,
+                        open_blockers || terminal.usage_limited,
+                        terminal.effective_active_subagents(),
+                        terminal.holds_shell,
+                    );
                     if crate::terminal::counts_as_blocked(
                         state,
                         open_blockers,
@@ -264,19 +271,14 @@ impl AppState {
                     let finished_ripe = now.saturating_duration_since(finished_since)
                         >= self.settle_finished_after
                         && quiet_for >= self.settle_finished_after;
-                    // A Done agent is finished work the sidebar already hides,
-                    // and leaving it running only spends context until reaping
-                    // closes it outright. Settling it instead stops the process
-                    // and keeps one Resume click, so the Done trigger applies
-                    // only where that click can actually work.
-                    let done_ripe = self.auto_settle_done
-                        && pane_has_resume_plan(terminal)
+                    // A quiet agent has no work running and no human decision
+                    // pending. Use the pane activity clock rather than the
+                    // transient unread-Done clock, which focus clears.
+                    let quiet_ripe = self.auto_settle_done
                         && !self.is_active_pane(ws_idx, tab_idx, *pane_id)
                         && !tab.pinned
-                        && crate::app::pane_lifecycle::pane_is_done(pane, terminal)
-                        && pane.done_since.is_some_and(|done_since| {
-                            now.saturating_duration_since(done_since) >= self.settle_done_after
-                        });
+                        && quiet
+                        && quiet_for >= self.settle_done_after;
                     let holding = new_work_trigger && !finished_ripe;
                     let armed = holding.then_some(finished_since);
                     if pane.finished_since != armed {
@@ -287,7 +289,7 @@ impl AppState {
                     if !holding {
                         observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
                     }
-                    if inactive || done_ripe || (new_work_trigger && finished_ripe) {
+                    if inactive || quiet_ripe || (new_work_trigger && finished_ripe) {
                         let Ok(agent_ref) = crate::api::schema::AgentRef::new(
                             self.agent_host_name.clone(),
                             pane_id.raw().to_string(),
@@ -569,6 +571,60 @@ mod tests {
         (state, pane_id)
     }
 
+    fn settled_state_with_agent_state(
+        agent_state: AgentState,
+        quiet_since: Instant,
+    ) -> (AppState, PaneId) {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let _ = state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), agent_state);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(quiet_since);
+        assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+        (state, pane_id)
+    }
+
+    fn transition_agent_state(
+        state: &mut AppState,
+        pane_id: PaneId,
+        agent_state: AgentState,
+        now: Instant,
+    ) {
+        state
+            .update_terminal_state_at(pane_id, now, |terminal| {
+                Some(terminal.set_detected_state_with_screen_signals_at(
+                    Some(crate::detect::Agent::Codex),
+                    agent_state,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    now,
+                ))
+            })
+            .expect("agent state transition");
+    }
+
+    fn assert_quiet_clock_restarted(state: &AppState, pane_id: PaneId, transition_at: Instant) {
+        assert_eq!(
+            state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(transition_at + Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+
     fn settle_ready_remote_collision(
         now: Instant,
     ) -> (AppState, PaneId, crate::work_index::Snapshot) {
@@ -789,10 +845,19 @@ mod tests {
 
         state.auto_settle_inactive = false;
         state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("root terminal")
-            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Idle);
+            .update_terminal_state_at(pane_id, after_old_deadline, |terminal| {
+                Some(terminal.set_detected_state_with_screen_signals_at(
+                    Some(crate::detect::Agent::Codex),
+                    AgentState::Idle,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    after_old_deadline,
+                ))
+            })
+            .expect("unblocking state transition");
         assert_eq!(
             state.refresh_settled_panes_at(
                 Some(&snapshot(merged_item.clone())),
@@ -910,6 +975,42 @@ mod tests {
     }
 
     #[test]
+    fn settled_pane_stays_settled_when_idle_becomes_unknown_and_restarts_quiet_clock() {
+        let now = Instant::now();
+        let transition_at = now + Duration::from_secs(60);
+        let (mut state, pane_id) = settled_state_with_agent_state(AgentState::Idle, now);
+
+        transition_agent_state(&mut state, pane_id, AgentState::Unknown, transition_at);
+
+        assert!(state.pane_is_settled(0, pane_id));
+        assert_quiet_clock_restarted(&state, pane_id, transition_at);
+    }
+
+    #[test]
+    fn settled_pane_stays_settled_when_unknown_becomes_idle_and_restarts_quiet_clock() {
+        let now = Instant::now();
+        let transition_at = now + Duration::from_secs(60);
+        let (mut state, pane_id) = settled_state_with_agent_state(AgentState::Unknown, now);
+
+        transition_agent_state(&mut state, pane_id, AgentState::Idle, transition_at);
+
+        assert!(state.pane_is_settled(0, pane_id));
+        assert_quiet_clock_restarted(&state, pane_id, transition_at);
+    }
+
+    #[test]
+    fn settled_pane_unsettles_when_agent_enters_working() {
+        let now = Instant::now();
+        let transition_at = now + Duration::from_secs(60);
+        let (mut state, pane_id) = settled_state_with_agent_state(AgentState::Idle, now);
+
+        transition_agent_state(&mut state, pane_id, AgentState::Working, transition_at);
+
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert_quiet_clock_restarted(&state, pane_id, transition_at);
+    }
+
+    #[test]
     fn revoked_finished_reading_requires_a_fresh_grace_window() {
         let url = "https://github.com/owner/repo/pull/7";
         let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
@@ -1002,10 +1103,47 @@ mod tests {
             .expect("root pane");
         pane.seen = false;
         pane.done_since = Some(done_since);
+        pane.activity.set_last_at(done_since);
         state.settle_done_after = Duration::from_secs(30 * 60);
         // Isolate the Done trigger from the other two.
         state.auto_settle_inactive = false;
         state.auto_settle_finished = false;
+        (state, pane_id)
+    }
+
+    fn stale_state(screen_state: AgentState, now: Instant) -> (AppState, PaneId) {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1_000),
+            now,
+        );
+        terminal
+            .mark_agent_status_stale_at(now + crate::terminal::state::AGENT_STALE_SILENCE)
+            .expect("working report should become stale");
+        assert!(terminal.supervisor_stale);
+        assert!(terminal.set_process_state(false, Some((screen_state, false))));
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now);
+        state.auto_settle_inactive = false;
+        state.auto_settle_finished = false;
+        state.settle_done_after = Duration::from_secs(30 * 60);
         (state, pane_id)
     }
 
@@ -1022,13 +1160,97 @@ mod tests {
     }
 
     #[test]
-    fn done_pane_without_a_resume_plan_is_left_to_reaping() {
+    fn quiet_seen_pane_settles_after_focus_moves_elsewhere() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let now = Instant::now();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Idle);
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("seen-session")
+                    .expect("valid session id"),
+            });
+        state.auto_settle_inactive = false;
+        state.auto_settle_finished = false;
+        state.settle_done_after = Duration::from_secs(30 * 60);
+        state.note_pane_activity_at(pane_id, now);
+
+        state.active = Some(0);
+        state.focus_pane_in_workspace(0, pane_id);
+        assert!(state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        let other = Workspace::test_new("other");
+        let other_pane = other.tabs[0].root_pane;
+        state.workspaces.push(other);
+        state.ensure_test_terminals();
+        state.focus_pane_in_workspace(1, other_pane);
+
+        assert_eq!(
+            state.refresh_settled_panes_at(None, now + state.settle_done_after, 1_725_000_036),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn stale_pane_settles_only_when_its_screen_resolves_idle() {
+        let now = Instant::now();
+        let settle_at = now + Duration::from_secs(30 * 60);
+        let (mut idle, idle_pane) = stale_state(AgentState::Idle, now);
+        assert_eq!(
+            idle.refresh_settled_panes_at(None, settle_at, 1_725_000_037),
+            1
+        );
+        assert!(idle.pane_is_settled(0, idle_pane));
+
+        for screen_state in [AgentState::Working, AgentState::Blocked] {
+            let (mut state, pane_id) = stale_state(screen_state, now);
+            assert_eq!(
+                state.refresh_settled_panes_at(None, settle_at, 1_725_000_038),
+                0,
+                "stale {screen_state:?} pane settled"
+            );
+            assert!(!state.pane_is_settled(0, pane_id));
+        }
+    }
+
+    #[test]
+    fn quiet_settle_deadline_covers_seen_and_stale_idle_panes() {
+        let now = Instant::now();
+        let expected = now + Duration::from_secs(30 * 60);
+        let (mut seen, seen_pane) = done_state(true, now);
+        let pane = seen.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&seen_pane)
+            .expect("seen pane");
+        pane.seen = true;
+        pane.activity.set_last_at(now);
+        assert_eq!(seen.next_done_settle_deadline(now), Some(expected));
+
+        let (stale, _) = stale_state(AgentState::Idle, now);
+        assert_eq!(stale.next_done_settle_deadline(now), Some(expected));
+    }
+
+    #[test]
+    fn quiet_pane_without_a_resume_plan_settles_and_remains_reapable() {
         let now = Instant::now();
         let (mut state, pane_id) = done_state(false, now - Duration::from_secs(5 * 60 * 60));
-        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_032), 0);
-        assert!(
-            !state.pane_is_settled(0, pane_id),
-            "settling a pane that cannot resume would hide it from reaping with a dead Resume"
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_032), 1);
+        assert!(state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            state.next_done_reap_deadline(now),
+            Some(now),
+            "settling an unresumable pane must preserve its reap clock"
         );
         assert!(state.next_done_settle_deadline(now).is_none());
     }
@@ -1052,6 +1274,57 @@ mod tests {
         state.workspaces[0].tabs[0].pinned = true;
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_034), 0);
         assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn quiet_settle_preserves_blocked_and_closing_gate_exclusions() {
+        let now = Instant::now();
+        let quiet_since = now - Duration::from_secs(31 * 60);
+        let (mut eligible, eligible_pane) = done_state(true, quiet_since);
+        eligible.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&eligible_pane)
+            .expect("eligible pane")
+            .seen = true;
+        assert_eq!(
+            eligible.refresh_settled_panes_at(None, now, 1_725_000_038),
+            1,
+            "the control pane must be eligible before exclusions are applied"
+        );
+
+        let (mut blocked, blocked_pane) = done_state(true, quiet_since);
+        let blocked_terminal_id = blocked.workspaces[0].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        blocked
+            .terminals
+            .get_mut(&blocked_terminal_id)
+            .expect("blocked terminal")
+            .state = AgentState::Blocked;
+        assert_eq!(
+            blocked.refresh_settled_panes_at(None, now, 1_725_000_039),
+            0
+        );
+
+        let (mut gated, gated_pane) = done_state(true, quiet_since);
+        let gated_terminal_id = gated.workspaces[0].tabs[0].panes[&gated_pane]
+            .attached_terminal_id
+            .clone();
+        gated
+            .terminals
+            .get_mut(&gated_terminal_id)
+            .expect("gated terminal")
+            .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Gate".into(),
+            text: "Choose the release path".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert_eq!(gated.refresh_settled_panes_at(None, now, 1_725_000_040), 0);
     }
 
     #[test]
@@ -1271,6 +1544,17 @@ mod tests {
 
         assert!(state.note_pane_activity_at(pane_id, Instant::now()));
         assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn meaningful_activity_marks_the_session_for_persistence() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        state.session_dirty = false;
+        state.session_dirty_revision = 0;
+
+        assert!(!state.note_pane_activity_at(pane_id, Instant::now()));
+        assert!(state.session_dirty);
+        assert_eq!(state.session_dirty_revision, 1);
     }
 
     #[test]

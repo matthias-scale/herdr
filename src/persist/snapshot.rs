@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::layout::Direction;
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,9 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    /// Unix timestamp of the pane's last meaningful activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,12 +344,25 @@ pub fn capture(
     collapsed_space_keys: std::collections::HashSet<String>,
     prio_panel_collapsed: bool,
 ) -> SessionSnapshot {
+    let captured_at = Instant::now();
+    let captured_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         generation: None,
         workspaces: workspaces
             .iter()
-            .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
+            .map(|workspace| {
+                capture_workspace(
+                    workspace,
+                    terminals,
+                    terminal_runtimes,
+                    captured_at,
+                    captured_at_unix,
+                )
+            })
             .collect(),
         active,
         selected,
@@ -363,6 +380,8 @@ fn capture_workspace(
         crate::terminal::TerminalState,
     >,
     terminal_runtimes: &TerminalRuntimeRegistry,
+    captured_at: Instant,
+    captured_at_unix: u64,
 ) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         id: Some(ws.id.clone()),
@@ -384,7 +403,15 @@ fn capture_workspace(
         tabs: ws
             .tabs
             .iter()
-            .map(|tab| capture_tab(tab, terminals, terminal_runtimes))
+            .map(|tab| {
+                capture_tab(
+                    tab,
+                    terminals,
+                    terminal_runtimes,
+                    captured_at,
+                    captured_at_unix,
+                )
+            })
             .collect(),
         active_tab: ws.active_tab,
     }
@@ -397,6 +424,8 @@ fn capture_tab(
         crate::terminal::TerminalState,
     >,
     terminal_runtimes: &TerminalRuntimeRegistry,
+    captured_at: Instant,
+    captured_at_unix: u64,
 ) -> TabSnapshot {
     let mut panes = HashMap::new();
     for id in tab.panes.keys() {
@@ -457,6 +486,10 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                last_activity_at: pane.map(|pane| {
+                    pane.activity
+                        .unix_timestamp_at(captured_at, captured_at_unix)
+                }),
                 settled_at: pane.and_then(|pane| pane.settled_at),
                 settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
                 settled_auto_label: terminal
@@ -1152,7 +1185,16 @@ mod tests {
         terminal.settled_auto_label = Some("#7 Persist settlement".into());
         let terminals = std::collections::HashMap::from([(terminal_id, terminal)]);
 
-        let captured = capture_workspace(&ws, &terminals, &Default::default());
+        let captured = capture_workspace(
+            &ws,
+            &terminals,
+            &Default::default(),
+            Instant::now(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
         let encoded = serde_json::to_string(&captured).expect("encode");
         let decoded: WorkspaceSnapshot = serde_json::from_str(&encoded).expect("decode");
 
@@ -1195,6 +1237,7 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
+                last_activity_at: None,
                 settled_at: Some(1_725_000_000),
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
                 settled_auto_label: Some("#7 Fix restore".into()),
@@ -1211,6 +1254,7 @@ mod tests {
             1,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
+                last_activity_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1912,6 +1956,7 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+                last_activity_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1930,6 +1975,7 @@ mod tests {
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
+                last_activity_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,

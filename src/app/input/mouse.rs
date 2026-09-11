@@ -41,6 +41,7 @@ pub(super) enum MouseAction {
     SettledMenu {
         index: usize,
     },
+    FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
     SidebarNewMenu {
         action: crate::app::state::SidebarNewMenuAction,
     },
@@ -1598,6 +1599,11 @@ impl AppState {
 
                     if let Some(target) = self.sidebar_settled_target_at(mouse.row) {
                         self.sidebar_selected_work_group = None;
+                        if !self.settled_target_has_resume_plan(&target) {
+                            self.sidebar_selected_settled = None;
+                            self.mode = Mode::Terminal;
+                            return Some(MouseAction::FocusLiveSettledPane(target));
+                        }
                         self.sidebar_selected_settled = Some(target);
                         self.mode = Mode::Navigate;
                         return None;

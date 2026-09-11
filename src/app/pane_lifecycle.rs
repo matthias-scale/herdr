@@ -67,18 +67,18 @@ impl AppState {
             return None;
         }
         self.done_panes()
-            .filter(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
-                pane_is_done(pane, terminal)
-                    && !self.is_active_pane(*ws_idx, *tab_idx, *pane_id)
-                    && !self.workspaces[*ws_idx].tabs[*tab_idx].pinned
+            .filter_map(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
+                (!self.is_active_pane(ws_idx, tab_idx, pane_id)
+                    && !self.workspaces[ws_idx].tabs[tab_idx].pinned)
+                    .then(|| pane_reap_since(pane, terminal))
+                    .flatten()
             })
-            .filter_map(|(_, _, _, pane, _)| pane.done_since)
-            .filter_map(|done_since| strict_deadline(done_since, self.reap_done_after))
+            .filter_map(|reap_since| strict_deadline(reap_since, self.reap_done_after))
             .map(|deadline| deadline.max(now))
             .min()
     }
 
-    /// When the next Done pane becomes eligible for the settle trigger. The
+    /// When the next quiet pane becomes eligible for the settle trigger. The
     /// settlement pass itself runs on every tick, so without this the wake that
     /// carries it would depend on unrelated timers.
     pub(crate) fn next_done_settle_deadline(&self, now: Instant) -> Option<Instant> {
@@ -87,13 +87,12 @@ impl AppState {
         }
         self.done_panes()
             .filter(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
-                pane_is_done(pane, terminal)
-                    && crate::app::settled::pane_has_resume_plan(terminal)
+                pane.settled_at.is_none()
+                    && pane_is_quiet(pane, terminal)
                     && !self.is_active_pane(*ws_idx, *tab_idx, *pane_id)
                     && !self.workspaces[*ws_idx].tabs[*tab_idx].pinned
             })
-            .filter_map(|(_, _, _, pane, _)| pane.done_since)
-            .filter_map(|done_since| done_since.checked_add(self.settle_done_after))
+            .filter_map(|(_, _, _, pane, _)| pane.activity.deadline_after(self.settle_done_after))
             .map(|deadline| deadline.max(now))
             .min()
     }
@@ -104,9 +103,8 @@ impl AppState {
         }
         self.done_panes()
             .filter_map(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
-                let done_since = pane.done_since?;
-                (pane_is_done(pane, terminal)
-                    && now.saturating_duration_since(done_since) > self.reap_done_after
+                let reap_since = pane_reap_since(pane, terminal)?;
+                (now.saturating_duration_since(reap_since) > self.reap_done_after
                     && !self.is_active_pane(ws_idx, tab_idx, pane_id)
                     && !self.workspaces[ws_idx].tabs[tab_idx].pinned)
                     .then_some(pane_id)
@@ -124,9 +122,8 @@ impl AppState {
         let tab = workspace.tabs.get(tab_idx)?;
         let pane = tab.panes.get(&pane_id)?;
         let terminal = self.terminals.get(&pane.attached_terminal_id)?;
-        let done_since = pane.done_since?;
-        if !pane_is_done(pane, terminal)
-            || now.saturating_duration_since(done_since) <= self.reap_done_after
+        let done_since = pane_reap_since(pane, terminal)?;
+        if now.saturating_duration_since(done_since) <= self.reap_done_after
             || self.is_active_pane(ws_idx, tab_idx, pane_id)
             || tab.pinned
         {
@@ -242,9 +239,35 @@ pub(crate) fn pane_is_done(
     crate::terminal::state::session_is_quiet(
         state,
         !terminal.closing_gates.is_empty() || terminal.usage_limited,
-        terminal.active_subagents,
+        terminal.effective_active_subagents(),
         terminal.holds_shell,
     )
+}
+
+pub(crate) fn pane_is_quiet(
+    pane: &crate::pane::PaneState,
+    terminal: &crate::terminal::TerminalState,
+) -> bool {
+    let state = terminal.sidebar_projection(pane.seen).0;
+    crate::terminal::state::session_is_quiet(
+        state,
+        !terminal.closing_gates.is_empty() || terminal.usage_limited,
+        terminal.effective_active_subagents(),
+        terminal.holds_shell,
+    )
+}
+
+fn pane_reap_since(
+    pane: &crate::pane::PaneState,
+    terminal: &crate::terminal::TerminalState,
+) -> Option<Instant> {
+    if pane_is_done(pane, terminal) {
+        return pane.done_since;
+    }
+    (pane.settled_at.is_some()
+        && !crate::app::settled::pane_has_resume_plan(terminal)
+        && pane_is_quiet(pane, terminal))
+    .then(|| pane.activity.last_at())
 }
 
 fn strict_deadline(done_since: Instant, threshold: Duration) -> Option<Instant> {
@@ -396,11 +419,36 @@ mod tests {
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("settled-session")
+                    .expect("valid session id"),
+            });
         let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
         pane.settled_at = Some(1_725_000_021);
 
         assert!(!pane_is_done(pane, &app.terminals[&terminal_id]));
         assert!(app.due_done_pane_ids(Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn settled_unresumable_quiet_pane_stays_on_the_reap_clock() {
+        let now = Instant::now();
+        let quiet_since = now - Duration::from_secs(5 * 60 * 60);
+        let (mut app, pane_id) = lifecycle_state(AgentState::Idle, true, quiet_since);
+        let pane = app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane");
+        pane.done_since = None;
+        pane.settled_at = Some(1_725_000_022);
+        pane.activity.set_last_at(quiet_since);
+
+        assert_eq!(app.due_done_pane_ids(now), vec![pane_id]);
     }
 
     #[test]

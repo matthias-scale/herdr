@@ -1578,13 +1578,16 @@ impl TerminalState {
     /// written without a TTL, and transcript rows simply stop arriving when the
     /// parent stalls. So a parent that said "3 agents running" keeps reading busy
     /// forever unless the watchdog ages the claim out.
+    pub(crate) fn effective_active_subagents(&self) -> Option<u32> {
+        self.active_subagents.or_else(|| {
+            self.metadata_tokens
+                .get("closing_agents")
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+    }
+
     pub(crate) fn declares_running_subagents(&self) -> bool {
-        self.active_subagents
-            .or_else(|| {
-                self.metadata_tokens
-                    .get("closing_agents")
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
+        self.effective_active_subagents()
             .is_some_and(|count| count > 0)
     }
 

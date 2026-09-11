@@ -3878,14 +3878,16 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
-        let entered_active_agent_state = change.previous_state != change.state
-            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let agent_state_changed = change.previous_state != change.state;
         let foreground_agent_changed = change.previous_known_agent != change.known_agent;
-        let activity = entered_active_agent_state || foreground_agent_changed;
-        if activity {
+        let should_note_activity = agent_state_changed || foreground_agent_changed;
+        let entered_active_agent_state = agent_state_changed
+            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let should_unsettle = entered_active_agent_state || foreground_agent_changed;
+        if should_note_activity {
             pane.activity.note(now);
         }
-        let unsettled = activity && pane.settled_at.take().is_some();
+        let unsettled = should_unsettle && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,
@@ -3909,6 +3911,10 @@ impl AppState {
         } else {
             None
         };
+
+        if should_note_activity {
+            self.mark_session_dirty();
+        }
 
         if unsettled {
             let workspace_id = self.workspaces[ws_idx].id.clone();

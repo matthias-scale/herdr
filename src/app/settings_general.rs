@@ -84,8 +84,8 @@ impl GeneralRow {
             Self::AutoSettleFinished => "Auto-settle finished threads",
             Self::AutoSettleInactive => "Auto-settle inactive threads",
             Self::SettleAfterDays => "Days of inactivity before auto-settle",
-            Self::AutoSettleDone => "Auto-settle done threads",
-            Self::SettleDoneAfterMinutes => "Minutes done before auto-settle",
+            Self::AutoSettleDone => "Auto-settle quiet threads",
+            Self::SettleDoneAfterMinutes => "Quiet minutes before auto-settle",
             Self::NudgeResumedAgents => "Continue resumed agents",
             Self::AutoNudgeStalledAgents => "Nudge stalled agents",
             Self::HideWhitespace => "Hide whitespace changes in diff",
@@ -106,9 +106,7 @@ impl GeneralRow {
     pub(crate) fn hint(self) -> Option<&'static str> {
         match self {
             Self::ProjectGrouping => Some("combine matching repos across hosts"),
-            Self::AutoSettleDone => {
-                Some("stop a finished agent and file it under Settled, ready to resume")
-            }
+            Self::AutoSettleDone => Some("file idle agents with no pending work under Settled"),
             Self::NudgeResumedAgents => {
                 Some("after a restart, tell an idle resumed agent to carry on")
             }

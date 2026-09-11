@@ -68,6 +68,28 @@ impl PaneActivity {
         now.saturating_duration_since(self.last_at)
     }
 
+    pub(crate) fn deadline_after(&self, quiet_for: Duration) -> Option<Instant> {
+        self.last_at.checked_add(quiet_for)
+    }
+
+    pub(crate) fn last_at(&self) -> Instant {
+        self.last_at
+    }
+
+    pub(crate) fn unix_timestamp_at(&self, now: Instant, now_unix: u64) -> u64 {
+        now_unix.saturating_sub(self.inactive_for(now).as_secs())
+    }
+
+    pub(crate) fn restore_unix_timestamp_at(
+        &mut self,
+        last_at_unix: u64,
+        now: Instant,
+        now_unix: u64,
+    ) {
+        let elapsed = Duration::from_secs(now_unix.saturating_sub(last_at_unix));
+        self.last_at = now.checked_sub(elapsed).unwrap_or(now);
+    }
+
     #[cfg(test)]
     pub(crate) fn set_last_at(&mut self, at: Instant) {
         self.last_at = at;

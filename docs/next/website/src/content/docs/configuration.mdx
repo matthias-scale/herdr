@@ -128,9 +128,11 @@ Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose stat
 
 Herdr moves panes into the collapsible Settled section when their primary pull request closes or merges, a linked ticket reaches Done, or they have no activity for `settle_after_days`. New pane input, output, or agent-state activity returns a settled pane to the active sidebar without stopping its terminal.
 
-A pane also settles when its agent reads Done and stays quiet for `settle_done_after_minutes`, so a finished thread stops spending context instead of running until reaping closes it. This trigger only applies to panes Herdr can resume into their native agent session; a pane with no resume plan keeps its old path into Recently done and reaping.
+A pane also settles after its agent stays quiet for `settle_done_after_minutes`. Quiet means the resolved agent state is idle with no closing gate, usage limit, active sub-agent, or held shell. The trigger applies whether or not the pane has been seen and when stale supervision resolves to an idle screen. Stale screens that resolve to working or blocked do not settle.
 
-The three triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, `auto_settle_inactive = false` to stop settling panes that only went quiet, and `auto_settle_done = false` to stop settling finished agents. All three are on by default and are toggles in **Settings → General**.
+When a settled pane has a native resume plan, Herdr can stop its process and offer Resume. Without one, Herdr keeps the runtime live and clicking its Settled row focuses that pane directly. These live settled panes remain eligible for automatic reaping on `reap_done_after_minutes`; resumable settled panes remain exempt.
+
+The three triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, `auto_settle_inactive = false` to stop the multi-day inactivity trigger, and `auto_settle_done = false` to stop settling quiet agents on the shorter minute clock. All three are on by default and are toggles in **Settings → General**.
 
 Settled panes are also listed in **Settings → Archive**, where `enter` restores one to the active sidebar and `d` closes it. When `ui.confirm_close` is on, `d` asks once before it closes anything.
 

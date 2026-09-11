@@ -8,6 +8,7 @@ use super::ScrollbarClickTarget;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SettledMenuAction {
     Resume(crate::app::state::PaneFocusTarget),
+    FocusLive(crate::app::state::PaneFocusTarget),
     NewThread {
         directory: std::path::PathBuf,
         workspace: crate::app::home::HomeWorkspace,
@@ -22,6 +23,18 @@ pub(crate) enum SidebarWorkGroupKeyAction {
 }
 
 impl AppState {
+    pub(crate) fn settled_target_has_resume_plan(
+        &self,
+        target: &crate::app::state::PaneFocusTarget,
+    ) -> bool {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == target.workspace_id)
+            .and_then(|workspace| workspace.pane_state(target.pane_id))
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(crate::app::settled::pane_has_resume_plan)
+    }
+
     pub(crate) fn open_sidebar_new_menu(&mut self) {
         self.sidebar_group_menu_open = false;
         self.sidebar_filter_menu_open = false;
@@ -340,7 +353,10 @@ impl AppState {
         let pane = self.workspaces[ws_idx].pane_state(target.pane_id)?;
         let terminal = self.terminals.get(&pane.attached_terminal_id)?;
         match index {
-            0 => Some(SettledMenuAction::Resume(target)),
+            0 if self.settled_target_has_resume_plan(&target) => {
+                Some(SettledMenuAction::Resume(target))
+            }
+            0 => Some(SettledMenuAction::FocusLive(target)),
             1 => Some(SettledMenuAction::NewThread {
                 directory: terminal.cwd.clone(),
                 workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
@@ -1364,6 +1380,10 @@ impl super::super::App {
         };
         match key.code {
             KeyCode::Enter => {
+                if !self.state.settled_target_has_resume_plan(&target) {
+                    self.focus_live_settled_pane(target);
+                    return true;
+                }
                 self.state.sidebar_settled_menu_target = Some(target);
                 self.state.sidebar_settled_menu_selected = 0;
                 self.state.sidebar_settled_menu_delete_armed = false;
@@ -1385,18 +1405,8 @@ impl super::super::App {
             return;
         };
         match action {
-            SettledMenuAction::Resume(target) => {
-                let Some(ws_idx) = self
-                    .state
-                    .workspaces
-                    .iter()
-                    .position(|workspace| workspace.id == target.workspace_id)
-                else {
-                    return;
-                };
-                self.state
-                    .note_pane_activity_at(target.pane_id, std::time::Instant::now());
-                self.focus_pane_internal_via_api(ws_idx, target.pane_id);
+            SettledMenuAction::Resume(target) | SettledMenuAction::FocusLive(target) => {
+                self.focus_live_settled_pane(target)
             }
             SettledMenuAction::NewThread {
                 directory,
@@ -1417,6 +1427,21 @@ impl super::super::App {
                 self.close_focused_pane_via_api_requires_confirmation();
             }
         }
+        self.flush_pane_settlement_events();
+    }
+
+    pub(crate) fn focus_live_settled_pane(&mut self, target: crate::app::state::PaneFocusTarget) {
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)
+        else {
+            return;
+        };
+        self.state
+            .note_pane_activity_at(target.pane_id, std::time::Instant::now());
+        self.focus_pane_internal_via_api(ws_idx, target.pane_id);
         self.flush_pane_settlement_events();
     }
 }
@@ -1481,6 +1506,20 @@ mod tests {
                             ..Default::default()
                         },
                     );
+                if settled {
+                    app.state
+                        .terminals
+                        .get_mut(&terminal_id)
+                        .expect("fixture terminal")
+                        .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                            source: "herdr:codex".into(),
+                            agent: "codex".into(),
+                            session_ref: crate::agent_resume::AgentSessionRef::id(format!(
+                                "settled-{ws_idx}-{tab_idx}"
+                            ))
+                            .expect("valid session id"),
+                        });
+                }
             }
         }
         app.state.active = Some(0);
@@ -1595,6 +1634,19 @@ mod tests {
             .get_mut(&pane_id)
             .expect("root pane")
             .settled_at = Some(1_725_000_000);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("settled-menu")
+                    .expect("valid session id"),
+            });
         crate::app::state::PaneFocusTarget {
             workspace_id: app.state.workspaces[0].id.clone(),
             pane_id,
@@ -1938,6 +1990,38 @@ mod tests {
             app.state.workspaces[0].focused_pane_id(),
             Some(target.pane_id)
         );
+    }
+
+    #[test]
+    fn clicking_unresumable_settled_row_focuses_its_live_pane() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("settled-live"),
+            Workspace::test_new("currently-focused"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.ws_idx == 0 && card.pane_id == pane_id)
+            .expect("settled row")
+            .rect;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 1,
+            row.y,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+        assert!(!app.state.pane_is_settled(0, pane_id));
+        assert!(app.state.sidebar_settled_menu_target.is_none());
     }
 
     #[test]
