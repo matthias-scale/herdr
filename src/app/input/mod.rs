@@ -4989,6 +4989,9 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
+                    MouseAction::FocusLiveSettledPane(target) => {
+                        self.focus_live_settled_pane(target)
+                    }
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
                             self.begin_tui_workspace_create("tui.mouse.workspace.create");

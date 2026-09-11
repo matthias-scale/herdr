@@ -3394,10 +3394,7 @@ impl AppState {
                 holds_shell,
                 stale_resolution,
             } => {
-                self.update_terminal_state(pane_id, |terminal| {
-                    terminal.set_process_state(holds_shell, stale_resolution);
-                    None
-                });
+                self.apply_pane_process_state(pane_id, holds_shell, stale_resolution);
                 Vec::new()
             }
             AppEvent::HookStateReported {
@@ -3598,6 +3595,61 @@ impl AppState {
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
         self.update_terminal_state_at(pane_id, Instant::now(), update)
+    }
+
+    fn apply_pane_process_state(
+        &mut self,
+        pane_id: PaneId,
+        holds_shell: bool,
+        stale_resolution: Option<(AgentState, bool)>,
+    ) {
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.pane_state(pane_id).is_some())
+        else {
+            return;
+        };
+        let Some(pane) = self.workspaces[ws_idx].pane_state(pane_id) else {
+            return;
+        };
+        let terminal_id = pane.attached_terminal_id.clone();
+        let seen = pane.seen;
+        let Some((previous_state, state, changed)) =
+            self.terminals.get_mut(&terminal_id).map(|terminal| {
+                let previous_state = terminal.sidebar_projection(seen).0;
+                let changed = terminal.set_process_state(holds_shell, stale_resolution);
+                (previous_state, terminal.sidebar_projection(seen).0, changed)
+            })
+        else {
+            return;
+        };
+        if !changed {
+            return;
+        }
+        self.mark_sidebar_projection_changed();
+
+        let projected_state_changed = previous_state != state;
+        if !projected_state_changed {
+            return;
+        }
+        let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) else {
+            return;
+        };
+        let entered_active_state =
+            projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
+        let unsettled = entered_active_state && pane.settled_at.take().is_some();
+
+        if unsettled {
+            let workspace_id = self.workspaces[ws_idx].id.clone();
+            self.pending_pane_settlement_changes
+                .push(crate::app::state::PaneSettlementChange {
+                    workspace_id,
+                    pane_id,
+                    settled_at: None,
+                });
+            self.mark_session_dirty();
+        }
     }
 
     pub(crate) fn update_terminal_state_at<F>(
@@ -3878,14 +3930,16 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
-        let entered_active_agent_state = change.previous_state != change.state
-            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let agent_state_changed = change.previous_state != change.state;
         let foreground_agent_changed = change.previous_known_agent != change.known_agent;
-        let activity = entered_active_agent_state || foreground_agent_changed;
-        if activity {
+        let should_note_activity = agent_state_changed || foreground_agent_changed;
+        let entered_active_agent_state = agent_state_changed
+            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let should_unsettle = entered_active_agent_state || foreground_agent_changed;
+        if should_note_activity {
             pane.activity.note(now);
         }
-        let unsettled = activity && pane.settled_at.take().is_some();
+        let unsettled = should_unsettle && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,
@@ -3909,6 +3963,10 @@ impl AppState {
         } else {
             None
         };
+
+        if should_note_activity {
+            self.mark_session_dirty();
+        }
 
         if unsettled {
             let workspace_id = self.workspaces[ws_idx].id.clone();
