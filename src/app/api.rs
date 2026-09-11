@@ -126,6 +126,13 @@ impl App {
                 self.state.provider_usage = *snapshot;
                 changed && self.state.status_bar_enabled
             }
+            AppEvent::RemoteFocusTransition {
+                operation_id,
+                transition,
+            } => {
+                self.apply_remote_focus_transition(&operation_id, *transition);
+                false
+            }
             AppEvent::ConnectivityProbed { reachable } => {
                 self.connectivity_probe_in_flight = false;
                 self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
@@ -311,6 +318,14 @@ impl App {
             )),
             _ => None,
         };
+        if let AppEvent::RemoteFocusTransition {
+            operation_id,
+            transition,
+        } = ev
+        {
+            self.apply_remote_focus_transition(&operation_id, *transition);
+            return None;
+        }
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
         }
@@ -1603,7 +1618,12 @@ impl App {
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
-            Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
+            Method::AgentFocus(params) => {
+                return self.handle_agent_focus_params(request.id, params)
+            }
+            Method::AgentFocusStatus(params) => {
+                return self.handle_agent_focus_status(request.id, params)
+            }
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
@@ -2671,6 +2691,178 @@ mod tests {
 
         assert_eq!(response["result"]["type"], "pane_process_info");
         assert_eq!(response["result"]["process_info"]["pane_id"], target);
+        assert!(response["result"]["process_info"]["tty"].is_null());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pane_process_info_keeps_recorded_tty_after_shell_exit() {
+        use std::path::Path;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("process-info-exit")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &["/bin/sh".into(), "-c".into(), "sleep 0.2".into()],
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("spawn test pane");
+        let shell_pid = runtime.child_pid().expect("test shell pid");
+        let recorded_tty = runtime
+            .tty_name()
+            .map(Path::to_path_buf)
+            .expect("recorded pane tty");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let shell_stdin = loop {
+            if let Ok(path) = std::fs::read_link(format!("/proc/{shell_pid}/fd/0")) {
+                break path;
+            }
+            assert!(Instant::now() < deadline, "test shell did not expose stdin");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            shell_stdin, recorded_tty,
+            "recorded pane tty must match the live shell device"
+        );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Path::new(&format!("/proc/{shell_pid}")).exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !Path::new(&format!("/proc/{shell_pid}")).exists(),
+            "test shell did not exit"
+        );
+
+        let target = app.public_pane_id(0, pane_id).expect("public pane id");
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "process_info_after_exit".into(),
+                method: crate::api::schema::Method::PaneProcessInfo(
+                    crate::api::schema::PaneProcessInfoParams {
+                        pane_id: Some(target),
+                    },
+                ),
+            });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "pane_process_info");
+        assert_eq!(
+            response["result"]["process_info"]["tty"],
+            recorded_tty.display().to_string()
+        );
+
+        test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pane_process_info_reports_new_tty_after_runtime_respawn() {
+        use std::path::Path;
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new(
+            "process-info-respawn",
+        )];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .respawn_shell_on_exit = true;
+        let old_runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("spawn original pane");
+        let old_tty = old_runtime
+            .tty_name()
+            .map(Path::to_path_buf)
+            .expect("original pane tty");
+        app.terminal_runtimes
+            .insert(terminal_id.clone(), old_runtime);
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id });
+
+        let runtime = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("respawned runtime");
+        let shell_pid = runtime.child_pid().expect("respawned shell pid");
+        let new_tty = runtime
+            .tty_name()
+            .map(Path::to_path_buf)
+            .expect("respawned pane tty");
+        assert_ne!(new_tty, old_tty, "respawn must allocate a fresh PTY");
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{shell_pid}/fd/0")).expect("respawned shell stdin"),
+            new_tty
+        );
+
+        let target = app.public_pane_id(0, pane_id).expect("public pane id");
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "process_info_after_respawn".into(),
+                method: crate::api::schema::Method::PaneProcessInfo(
+                    crate::api::schema::PaneProcessInfoParams {
+                        pane_id: Some(target),
+                    },
+                ),
+            });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "pane_process_info");
+        assert_eq!(
+            response["result"]["process_info"]["tty"],
+            new_tty.display().to_string()
+        );
+
+        test_support::shutdown_test_runtimes(&mut app);
     }
 
     #[test]

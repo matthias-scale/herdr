@@ -281,6 +281,7 @@ mod tests {
             target: name.to_string(),
             local: false,
             session: None,
+            socket: None,
             state,
             version: Some("0.8.2".to_string()),
             protocol: Some(crate::protocol::PROTOCOL_VERSION),

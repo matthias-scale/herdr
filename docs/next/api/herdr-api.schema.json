@@ -1703,6 +1703,73 @@
     },
     "request": {
       "$defs": {
+        "AgentFocusParams": {
+          "description": "The additive request shape for `agent.focus`. Exactly one of `target` and\n`agent_ref` must be present.",
+          "oneOf": [
+            {
+              "not": {
+                "required": [
+                  "agent_ref"
+                ]
+              },
+              "properties": {
+                "target": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target"
+              ]
+            },
+            {
+              "not": {
+                "required": [
+                  "target"
+                ]
+              },
+              "properties": {
+                "agent_ref": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "agent_ref"
+              ]
+            }
+          ],
+          "properties": {
+            "agent_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "AgentFocusStatusParams": {
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1777,6 +1844,10 @@
             "source"
           ],
           "type": "object"
+        },
+        "AgentRef": {
+          "description": "Cross-host identity for a pane-backed agent or windowless run.",
+          "type": "string"
         },
         "AgentRenameParams": {
           "properties": {
@@ -6259,7 +6330,23 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/AgentTarget"
+              "$ref": "#/schemas/request/$defs/AgentFocusParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.focus.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentFocusStatusParams"
             }
           },
           "required": [
@@ -7791,6 +7878,21 @@
             "failed"
           ],
           "type": "string"
+        },
+        "ErrorBody": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -10636,6 +10738,122 @@
           ],
           "type": "string"
         },
+        "RemoteControlContext": {
+          "properties": {
+            "context_epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "foreground_cwd": {
+              "type": "string"
+            },
+            "foreground_process": {
+              "$ref": "#/schemas/success_response/$defs/RemoteForegroundProcess"
+            },
+            "host": {
+              "type": "string"
+            },
+            "human_draft": {
+              "type": "boolean"
+            },
+            "interactive_ready": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state_change_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "tty": {
+              "type": "string"
+            },
+            "user": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "user",
+            "workspace_id",
+            "tab_id",
+            "pane_id",
+            "terminal_id",
+            "cwd",
+            "foreground_cwd",
+            "tty",
+            "foreground_process",
+            "interactive_ready",
+            "human_draft",
+            "state_change_seq",
+            "revision",
+            "context_epoch"
+          ],
+          "type": "object"
+        },
+        "RemoteFocusState": {
+          "enum": [
+            "connecting",
+            "active",
+            "failed",
+            "closed"
+          ],
+          "type": "string"
+        },
+        "RemoteForegroundProcess": {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "process_group_id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pid",
+            "process_group_id",
+            "name",
+            "argv",
+            "cwd"
+          ],
+          "type": "object"
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -11086,6 +11304,126 @@
               "required": [
                 "type",
                 "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent_ref": {
+                  "$ref": "#/schemas/success_response/$defs/AgentRef"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "proxy_pane_id": {
+                  "type": "string"
+                },
+                "state": {
+                  "$ref": "#/schemas/success_response/$defs/RemoteFocusState"
+                },
+                "type": {
+                  "const": "agent_focus_started",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "operation_id",
+                "agent_ref",
+                "state",
+                "proxy_pane_id"
+              ],
+              "type": "object"
+            },
+            {
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "active"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "context": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "required": [
+                      "context"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "failed"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "error": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "required": [
+                      "error"
+                    ]
+                  }
+                }
+              ],
+              "properties": {
+                "agent_ref": {
+                  "$ref": "#/schemas/success_response/$defs/AgentRef"
+                },
+                "context": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/RemoteControlContext"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "error": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/ErrorBody"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "proxy_pane_id": {
+                  "type": "string"
+                },
+                "state": {
+                  "$ref": "#/schemas/success_response/$defs/RemoteFocusState"
+                },
+                "type": {
+                  "const": "agent_focus_status",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "operation_id",
+                "agent_ref",
+                "state",
+                "proxy_pane_id"
               ],
               "type": "object"
             },

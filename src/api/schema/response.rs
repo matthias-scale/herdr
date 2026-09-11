@@ -130,6 +130,23 @@ pub enum ResponseResult {
     AgentList {
         agents: Vec<AgentInfo>,
     },
+    AgentFocusStarted {
+        operation_id: String,
+        agent_ref: super::AgentRef,
+        state: super::RemoteFocusState,
+        proxy_pane_id: String,
+    },
+    #[schemars(transform = require_remote_focus_status_details)]
+    AgentFocusStatus {
+        operation_id: String,
+        agent_ref: super::AgentRef,
+        state: super::RemoteFocusState,
+        proxy_pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<super::RemoteControlContext>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ErrorBody>,
+    },
     AgentView {
         active: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +317,28 @@ pub enum ResponseResult {
         theme_name: String,
     },
     Ok {},
+}
+
+fn require_remote_focus_status_details(schema: &mut schemars::Schema) {
+    let _ = schema.insert(
+        "allOf".into(),
+        serde_json::json!([
+            {
+                "if": {"properties": {"state": {"const": "active"}}},
+                "then": {
+                    "properties": {"context": {"not": {"type": "null"}}},
+                    "required": ["context"]
+                }
+            },
+            {
+                "if": {"properties": {"state": {"const": "failed"}}},
+                "then": {
+                    "properties": {"error": {"not": {"type": "null"}}},
+                    "required": ["error"]
+                }
+            }
+        ]),
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

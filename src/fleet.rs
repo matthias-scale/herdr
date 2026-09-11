@@ -227,6 +227,11 @@ pub(crate) struct HostSnapshot {
     pub(crate) target: String,
     pub(crate) local: bool,
     pub(crate) session: Option<String>,
+    /// How to reach the host's server once ssh lands. It is connection detail
+    /// rather than a runtime fact, so it stays out of the published snapshot
+    /// while the local commands that dial the host can still read it.
+    #[serde(skip)]
+    pub(crate) socket: Option<String>,
     pub(crate) state: HostState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) version: Option<String>,
@@ -288,6 +293,7 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
                         target: host.target.clone(),
                         local: host.local,
                         session: host.session.clone(),
+                        socket: host.socket.clone(),
                         state: HostState::Unreachable,
                         version: None,
                         protocol: None,
@@ -316,6 +322,40 @@ pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, Strin
         argv.extend(["--session".to_string(), session.clone()]);
     }
     Ok(argv)
+}
+
+/// Build the argv that attaches one remote agent's terminal into a local pane.
+///
+/// `herdr --remote <target>` starts a *second* herdr TUI inside the pane and
+/// offers to sync binaries with the remote host, which would stop a server that
+/// is running live agents. Attaching a single agent instead streams that one
+/// remote terminal and touches nothing else on the host.
+pub(crate) fn agent_attach_argv(host: &HostSnapshot, agent: &str) -> Result<Vec<String>, String> {
+    if host.local {
+        return Err(format!("{} is the local host", host.name));
+    }
+    if host.target.trim().is_empty() {
+        return Err(format!("{} has no SSH target", host.name));
+    }
+    if agent.trim().is_empty() {
+        return Err(format!("{} has no agent target", host.name));
+    }
+    Ok(vec![
+        "ssh".to_string(),
+        "-t".to_string(),
+        host.target.clone(),
+        remote_attach_command(host.socket.as_deref(), host.session.as_deref(), agent),
+    ])
+}
+
+fn remote_attach_command(socket: Option<&str>, session: Option<&str>, agent: &str) -> String {
+    let socket = socket
+        .map(|path| format!("HERDR_SOCKET_PATH={} ", shell_quote(path)))
+        .unwrap_or_default();
+    let session = session
+        .map(|name| format!("HERDR_SESSION={} ", shell_quote(name)))
+        .unwrap_or_default();
+    format!("{socket}{session}herdr agent attach {}", shell_quote(agent))
 }
 
 pub(crate) fn start_poller(
@@ -455,6 +495,7 @@ fn snapshot_from_evidence(
             target: evidence.host.target,
             local: evidence.host.local,
             session: evidence.host.session,
+            socket: evidence.host.socket,
             state,
             version: evidence.runtime.version,
             protocol: evidence.runtime.protocol,
@@ -1947,12 +1988,65 @@ mod tests {
     }
 
     #[test]
+    fn agent_attach_argv_streams_one_remote_agent_instead_of_a_nested_herdr() {
+        let host = HostSnapshot {
+            name: "workbox".to_string(),
+            target: "you@workbox".to_string(),
+            local: false,
+            session: Some("agents".to_string()),
+            socket: Some("/home/you/.config/herdr/herdr.sock".to_string()),
+            state: HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            entries: Vec::new(),
+        };
+
+        assert_eq!(
+            agent_attach_argv(&host, "w1:p2").expect("attach argv"),
+            [
+                "ssh",
+                "-t",
+                "you@workbox",
+                "HERDR_SOCKET_PATH='/home/you/.config/herdr/herdr.sock' HERDR_SESSION='agents' herdr agent attach 'w1:p2'"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_attach_command_quotes_a_target_that_carries_a_quote() {
+        assert_eq!(
+            remote_attach_command(None, None, "pane'; rm -rf /"),
+            "herdr agent attach 'pane'\\''; rm -rf /'"
+        );
+    }
+
+    #[test]
+    fn agent_attach_argv_rejects_an_empty_agent() {
+        let host = HostSnapshot {
+            name: "workbox".to_string(),
+            target: "you@workbox".to_string(),
+            local: false,
+            session: None,
+            socket: None,
+            state: HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            entries: Vec::new(),
+        };
+
+        assert!(agent_attach_argv(&host, "  ").is_err());
+    }
+
+    #[test]
     fn host_attach_argv_includes_configured_session() {
         let host = HostSnapshot {
             name: "workbox".to_string(),
             target: "you@workbox".to_string(),
             local: false,
             session: Some("agents".to_string()),
+            socket: None,
             state: HostState::Reachable,
             version: None,
             protocol: None,

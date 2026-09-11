@@ -1,12 +1,14 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
+use std::path::PathBuf;
 
 use crate::pty::fd;
 
 pub(crate) struct SpawnedPty {
     pub master_fd: OwnedFd,
     pub child: Box<dyn Child + Send + Sync>,
+    pub tty_name: Option<PathBuf>,
 }
 
 pub(crate) fn spawn_with_portable_pty(
@@ -23,6 +25,7 @@ pub(crate) fn spawn_with_portable_pty(
             pixel_height: 0,
         })
         .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let tty_name = pair.master.tty_name();
     let master_fd = pair
         .master
         .as_raw_fd()
@@ -38,6 +41,7 @@ pub(crate) fn spawn_with_portable_pty(
     Ok(SpawnedPty {
         master_fd: actor_fd,
         child,
+        tty_name,
     })
 }
 

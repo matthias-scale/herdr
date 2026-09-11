@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentFocusParams, AgentFocusStatusParams, AgentPromptParams, AgentRenameParams,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -39,6 +39,72 @@ impl App {
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    pub(super) fn handle_agent_focus_params(
+        &mut self,
+        id: String,
+        params: AgentFocusParams,
+    ) -> String {
+        match (params.target, params.agent_ref) {
+            (Some(target), None) => self.handle_agent_focus(id, AgentTarget { target }),
+            (None, Some(agent_ref)) if agent_ref.host == self.state.agent_host_name => self
+                .handle_agent_focus(
+                    id,
+                    AgentTarget {
+                        target: agent_ref.agent,
+                    },
+                ),
+            (None, Some(agent_ref)) => {
+                if !self.configured_remote_focus_hosts.contains(&agent_ref.host) {
+                    return encode_error(
+                        id,
+                        "unknown_host",
+                        format!("unknown remote focus host: {}", agent_ref.host),
+                    );
+                }
+                let started = match self.start_remote_focus_operation(agent_ref) {
+                    Ok(started) => started,
+                    Err(error) => return encode_error_body(id, error),
+                };
+                encode_success(
+                    id,
+                    ResponseResult::AgentFocusStarted {
+                        operation_id: started.operation_id,
+                        agent_ref: started.agent_ref,
+                        state: crate::api::schema::RemoteFocusState::Connecting,
+                        proxy_pane_id: started.proxy_pane_id,
+                    },
+                )
+            }
+            (Some(_), Some(_)) | (None, None) => encode_error(
+                id,
+                "invalid_request",
+                "agent.focus requires exactly one of target or agent_ref",
+            ),
+        }
+    }
+
+    pub(super) fn handle_agent_focus_status(
+        &mut self,
+        id: String,
+        params: AgentFocusStatusParams,
+    ) -> String {
+        let status = match self.remote_focus_status(&params.operation_id) {
+            Ok(status) => status,
+            Err(error) => return encode_error_body(id, error),
+        };
+        encode_success(
+            id,
+            ResponseResult::AgentFocusStatus {
+                operation_id: status.operation_id,
+                agent_ref: status.agent_ref,
+                state: status.state,
+                proxy_pane_id: status.proxy_pane_id,
+                context: status.context,
+                error: status.error,
+            },
+        )
     }
 
     pub(super) fn handle_agent_rename(&mut self, id: String, params: AgentRenameParams) -> String {
@@ -316,7 +382,10 @@ mod tests {
     use super::*;
     use crate::{
         api::schema::{
-            AgentStatus, PaneMoveDestination, PaneMoveParams, SplitDirection, SuccessResponse,
+            AgentFocusParams, AgentFocusStatusParams, AgentRef, AgentStatus, ErrorBody,
+            ErrorResponse, Method, PaneMoveDestination, PaneMoveParams, RemoteControlContext,
+            RemoteFocusState, RemoteForegroundProcess, Request, ResponseResult, SplitDirection,
+            SuccessResponse,
         },
         app::Mode,
         config::Config,
@@ -339,6 +408,67 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app
+    }
+
+    #[derive(Debug)]
+    struct FakeRemoteFocusTransport;
+
+    impl crate::app::remote_focus::RemoteFocusTransport for FakeRemoteFocusTransport {
+        fn start(
+            &mut self,
+            operation_id: &str,
+            agent_ref: &AgentRef,
+            _proxy_pane_id: &str,
+            event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        ) -> Result<(), ErrorBody> {
+            let transition = if agent_ref.agent.ends_with("p3") {
+                crate::app::remote_focus::RemoteFocusTransition::Active(Box::new(remote_context()))
+            } else {
+                crate::app::remote_focus::RemoteFocusTransition::Failed(ErrorBody {
+                    code: "connection_lost".into(),
+                    message: "fake transport ended".into(),
+                })
+            };
+            event_tx
+                .try_send(crate::events::AppEvent::RemoteFocusTransition {
+                    operation_id: operation_id.to_string(),
+                    transition: Box::new(transition),
+                })
+                .map_err(|_| ErrorBody {
+                    code: "connection_lost".into(),
+                    message: "fake event queue closed".into(),
+                })
+        }
+    }
+
+    fn configure_remote_host(app: &mut App, name: &str) {
+        app.configured_remote_focus_hosts.insert(name.into());
+    }
+
+    fn remote_context() -> RemoteControlContext {
+        RemoteControlContext {
+            host: "buildbox".into(),
+            user: "operator".into(),
+            workspace_id: "w1".into(),
+            tab_id: "t2".into(),
+            pane_id: "w1:p3".into(),
+            terminal_id: "terminal-id".into(),
+            cwd: "/work/repo".into(),
+            foreground_cwd: "/work/repo".into(),
+            tty: "/dev/pts/4".into(),
+            foreground_process: RemoteForegroundProcess {
+                pid: 1234,
+                process_group_id: 1234,
+                name: "agent".into(),
+                argv: vec!["agent".into(), "run".into()],
+                cwd: "/work/repo".into(),
+            },
+            interactive_ready: true,
+            human_draft: false,
+            state_change_seq: 9,
+            revision: 41,
+            context_epoch: 12,
+        }
     }
 
     fn mark_agent(app: &mut App, ws_idx: usize, pane_id: crate::layout::PaneId) {
@@ -1353,6 +1483,251 @@ mod tests {
             panic!("expected agent info response");
         };
         assert_eq!(agent.agent_status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn self_host_agent_ref_matches_local_focus_from_fresh_state() {
+        fn fresh_app() -> (App, String, crate::layout::PaneId) {
+            let mut app = app_with_agent();
+            app.state.agent_host_name = "laptop".into();
+            let root_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let pane_id =
+                app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+            app.state.ensure_test_terminals();
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("test terminal")
+                .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .expect("test pane")
+                .seen = false;
+            app.state.workspaces[0].tabs[0]
+                .layout
+                .focus_pane(root_pane_id);
+            app.state.active = None;
+            app.state.mode = Mode::Navigate;
+            assert_eq!(
+                app.state.workspaces[0].focused_pane_id(),
+                Some(root_pane_id)
+            );
+            let target = app.public_pane_id(0, pane_id).expect("public pane id");
+            (app, target, pane_id)
+        }
+
+        fn response_without_instance_ids(response: &str) -> serde_json::Value {
+            let mut response: serde_json::Value =
+                serde_json::from_str(response).expect("focus response");
+            let agent = response
+                .pointer_mut("/result/agent")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("agent info result");
+            for field in [
+                "agent_ref",
+                "terminal_id",
+                "workspace_id",
+                "tab_id",
+                "pane_id",
+            ] {
+                let _ = agent.remove(field);
+            }
+            response
+        }
+
+        let (mut target_app, target, target_pane_id) = fresh_app();
+        let target_response = target_app.handle_api_request(Request {
+            id: "same-id".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: Some(target),
+                agent_ref: None,
+            }),
+        });
+        let (mut agent_ref_app, target, agent_ref_pane_id) = fresh_app();
+        let agent_ref_response = agent_ref_app.handle_api_request(Request {
+            id: "same-id".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("laptop", target).expect("valid agent reference")),
+            }),
+        });
+
+        assert_eq!(
+            response_without_instance_ids(&agent_ref_response),
+            response_without_instance_ids(&target_response)
+        );
+        for (app, pane_id) in [
+            (&target_app, target_pane_id),
+            (&agent_ref_app, agent_ref_pane_id),
+        ] {
+            assert_eq!(app.state.active, Some(0));
+            assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+            assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+            assert_eq!(app.state.mode, Mode::Terminal);
+            assert_eq!(app.remote_focus_operations.len(), 0);
+        }
+        let parsed: SuccessResponse = serde_json::from_str(&agent_ref_response).expect("response");
+        assert!(matches!(parsed.result, ResponseResult::AgentInfo { .. }));
+    }
+
+    #[test]
+    fn agent_focus_rejects_missing_and_conflicting_target_forms() {
+        for params in [
+            AgentFocusParams {
+                target: None,
+                agent_ref: None,
+            },
+            AgentFocusParams {
+                target: Some("w1:p1".into()),
+                agent_ref: Some(AgentRef::new("laptop", "w1:p1").expect("valid agent reference")),
+            },
+        ] {
+            let mut app = app_with_agent();
+            let response = app.handle_api_request(Request {
+                id: "invalid-focus".into(),
+                method: Method::AgentFocus(params),
+            });
+            let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+            assert_eq!(error.error.code, "invalid_request");
+            assert!(error.error.message.contains("exactly one"));
+        }
+    }
+
+    #[test]
+    fn remote_focus_rejects_unknown_hosts() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        let response = app.handle_api_request(Request {
+            id: "unknown-host".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("missing", "w1:p3").expect("valid agent reference")),
+            }),
+        });
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "unknown_host");
+        assert_eq!(app.remote_focus_operations.len(), 0);
+    }
+
+    #[test]
+    fn remote_focus_default_stub_reports_failure_without_activation() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        configure_remote_host(&mut app, "buildbox");
+        let request = |method| Request {
+            id: "remote-focus".into(),
+            method,
+        };
+        let started = app.handle_api_request(request(Method::AgentFocus(AgentFocusParams {
+            target: None,
+            agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
+        })));
+        let started: serde_json::Value = serde_json::from_str(&started).expect("started response");
+        assert_eq!(started["result"]["type"], "agent_focus_started");
+        assert_eq!(started["result"]["state"], "connecting");
+        let operation_id = started["result"]["operation_id"]
+            .as_str()
+            .expect("operation id")
+            .to_string();
+        assert!(started["result"]["proxy_pane_id"].as_str().is_some());
+
+        let status =
+            app.handle_api_request(request(Method::AgentFocusStatus(AgentFocusStatusParams {
+                operation_id,
+            })));
+        let status: serde_json::Value = serde_json::from_str(&status).expect("status response");
+        assert_eq!(status["result"]["state"], "failed");
+        assert_eq!(status["result"]["error"]["code"], "host_unreachable");
+        assert!(status["result"]["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not implemented")));
+        assert!(status["result"].get("context").is_none());
+    }
+
+    #[test]
+    fn remote_focus_status_rejects_unknown_operation_ids() {
+        let mut app = app_with_agent();
+        let response = app.handle_api_request(Request {
+            id: "unknown-operation".into(),
+            method: Method::AgentFocusStatus(AgentFocusStatusParams {
+                operation_id: "missing-operation".into(),
+            }),
+        });
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "unknown_operation");
+    }
+
+    #[test]
+    fn injected_transport_can_drive_remote_focus_active_closed_and_failed() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        configure_remote_host(&mut app, "buildbox");
+        app.remote_focus_transport = Box::new(FakeRemoteFocusTransport);
+
+        let started = app.handle_api_request(Request {
+            id: "fake-active".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
+            }),
+        });
+        let started: serde_json::Value = serde_json::from_str(&started).expect("started response");
+        let operation_id = started["result"]["operation_id"]
+            .as_str()
+            .expect("operation id")
+            .to_string();
+        let status = app.handle_api_request(Request {
+            id: "fake-active-status".into(),
+            method: Method::AgentFocusStatus(AgentFocusStatusParams {
+                operation_id: operation_id.clone(),
+            }),
+        });
+        let status: serde_json::Value = serde_json::from_str(&status).expect("active status");
+        assert_eq!(status["result"]["state"], "active");
+        assert!(status["result"].get("context").is_some());
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            crate::app::remote_focus::RemoteFocusTransition::Closed,
+        );
+        let status = app
+            .remote_focus_status(&operation_id)
+            .expect("closed status");
+        assert_eq!(status.state, RemoteFocusState::Closed);
+        assert!(status.context.is_none());
+
+        let failed = app.handle_api_request(Request {
+            id: "fake-failed".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("buildbox", "w1:p4").expect("valid agent reference")),
+            }),
+        });
+        let failed: serde_json::Value = serde_json::from_str(&failed).expect("started response");
+        let failed_id = failed["result"]["operation_id"]
+            .as_str()
+            .expect("operation id")
+            .to_string();
+        let _ = app.handle_api_request(Request {
+            id: "fake-failed-status".into(),
+            method: Method::AgentFocusStatus(AgentFocusStatusParams {
+                operation_id: failed_id.clone(),
+            }),
+        });
+        app.apply_remote_focus_transition(
+            &failed_id,
+            crate::app::remote_focus::RemoteFocusTransition::Active(Box::new(remote_context())),
+        );
+        let status = app.remote_focus_status(&failed_id).expect("failed status");
+        assert_eq!(status.state, RemoteFocusState::Failed);
+        assert_eq!(
+            status.error.as_ref().map(|error| error.code.as_str()),
+            Some("connection_lost")
+        );
     }
 
     #[test]

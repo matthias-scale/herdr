@@ -300,6 +300,15 @@ impl App {
     }
 
     pub(crate) fn open_fleet_host(&mut self, name: &str) {
+        self.open_fleet_host_focused(name, None);
+    }
+
+    /// Attach to a fleet host, or to one agent on it.
+    ///
+    /// With an agent the pane streams that agent's remote terminal directly.
+    /// Without one it opens the whole remote session, which is what the Hosts
+    /// surface asks for.
+    pub(crate) fn open_fleet_host_focused(&mut self, name: &str, focus_agent: Option<&str>) {
         let Some(host) = self
             .state
             .fleet_snapshot
@@ -319,17 +328,63 @@ impl App {
             );
             return;
         }
-        let argv = match crate::fleet::host_attach_argv(&host) {
+        let argv = match focus_agent {
+            Some(agent) => crate::fleet::agent_attach_argv(&host, agent),
+            None => crate::fleet::host_attach_argv(&host),
+        };
+        let argv = match argv {
             Ok(argv) => argv,
             Err(error) => {
                 self.show_fleet_launch_error(error);
                 return;
             }
         };
+        // An attach target is one thing. Clicking its row again must return to the
+        // pane already attached to it rather than dial a second ssh connection
+        // and leave the operator with two views of the same agent.
+        if self.focus_attached_fleet_host_pane(&argv) {
+            return;
+        }
         if let Err(error) = self.create_fleet_host_tab(&argv) {
             tracing::warn!(host = %host.name, %error, "could not open fleet host");
             self.show_fleet_launch_error(error.to_string());
         }
+    }
+
+    /// Focus the pane already running `argv`, if one is open. The launch argv
+    /// is the host's identity here: it carries the target and session the
+    /// attach was built from, so two hosts can never collide on it.
+    fn focus_attached_fleet_host_pane(&mut self, argv: &[String]) -> bool {
+        let target = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, workspace)| {
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(tab_idx, tab)| {
+                        tab.panes
+                            .iter()
+                            .find(|(_, pane)| {
+                                self.state
+                                    .terminals
+                                    .get(&pane.attached_terminal_id)
+                                    .and_then(|terminal| terminal.launch_argv.as_deref())
+                                    == Some(argv)
+                            })
+                            .map(|(pane_id, _)| (ws_idx, tab_idx, *pane_id))
+                    })
+            });
+        let Some((ws_idx, tab_idx, pane_id)) = target else {
+            return false;
+        };
+        self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        self.state.mode = Mode::Terminal;
+        true
     }
 
     fn create_fleet_host_tab(&mut self, argv: &[String]) -> std::io::Result<()> {
@@ -906,6 +961,7 @@ mod tests {
             target: "ub2".to_string(),
             local: false,
             session: None,
+            socket: None,
             state: crate::fleet::HostState::Unreachable,
             version: None,
             protocol: None,
