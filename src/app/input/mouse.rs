@@ -7,7 +7,8 @@ use crate::{
     app::state::{
         AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
         HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
-        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
+        RemoteAgentPressState, RightClickPassthroughGesture, TabPressState, ViewLayout,
+        WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -174,6 +175,15 @@ impl AppState {
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
         self.forwarded_pane_input = None;
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            self.remote_agent_presses.remove(&source_id);
+        }
         // Same rule as the keyboard: a due break reminder owns the screen.
         if self.pomodoro.prompt.is_some() {
             return None;
@@ -1529,18 +1539,12 @@ impl AppState {
                         self.toggle_sidebar_group(&key);
                         return None;
                     }
-                    // A fleet row opens on one click, the way a local row does.
-                    // Attaching is idempotent -- an already attached host is
-                    // focused rather than dialled again -- so nothing is lost by
-                    // dropping the select-then-open step this used to need.
                     if let Some(agent_ref) = crate::ui::remote_agent_row_at(self, mouse.row) {
                         self.sidebar_selected_work_group = None;
-                        self.sidebar_selected_remote_agent = Some(agent_ref.clone());
-                        self.mark_sidebar_projection_changed();
-                        return Some(MouseAction::OpenFleetHost {
-                            name: agent_ref.host.clone(),
-                            focus_agent: Some(agent_ref.agent.clone()),
-                        });
+                        self.select_remote_agent_row(agent_ref.clone());
+                        self.remote_agent_presses
+                            .insert(source_id, RemoteAgentPressState { agent_ref });
+                        return None;
                     }
                     if let Some(key) =
                         crate::ui::sidebar_unassigned_spawn_at(self, mouse.column, mouse.row)
@@ -1657,6 +1661,10 @@ impl AppState {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.selection.is_some() {
                     self.update_selection_drag(terminal_runtimes, mouse.column, mouse.row);
+                    return None;
+                }
+
+                if self.remote_agent_presses.remove(&source_id).is_some() {
                     return None;
                 }
 
@@ -1845,8 +1853,19 @@ impl AppState {
 
                 let workspace_press = self.workspace_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
+                let remote_agent_press = self.remote_agent_presses.remove(&source_id);
+                let remote_agent_action = remote_agent_press.and_then(|press| {
+                    (in_sidebar
+                        && crate::ui::remote_agent_row_at(self, mouse.row).as_ref()
+                            == Some(&press.agent_ref))
+                    .then_some(MouseAction::OpenFleetHost {
+                        name: press.agent_ref.host,
+                        focus_agent: Some(press.agent_ref.agent),
+                    })
+                });
                 if foreign_chrome_drag {
-                    return self.chrome_press_action(workspace_press, tab_press);
+                    return remote_agent_action
+                        .or_else(|| self.chrome_press_action(workspace_press, tab_press));
                 }
 
                 match self.drag.take() {
@@ -1902,7 +1921,10 @@ impl AppState {
                         }
                     }
                     Some(_) => {}
-                    None => return self.chrome_press_action(workspace_press, tab_press),
+                    None => {
+                        return remote_agent_action
+                            .or_else(|| self.chrome_press_action(workspace_press, tab_press));
+                    }
                 }
             }
 
@@ -2303,6 +2325,18 @@ impl AppState {
             }) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
+            }
+            Some(crate::ui::MobileSwitcherTarget::NestedHeader(key)) => {
+                self.toggle_sidebar_group(&key);
+            }
+            Some(crate::ui::MobileSwitcherTarget::RemoteAgent(agent_ref)) => {
+                self.sidebar_selected_work_group = None;
+                self.select_remote_agent_row(agent_ref.clone());
+                self.close_workspace_picker();
+                return MobileMouseResult::Action(MouseAction::OpenFleetHost {
+                    name: agent_ref.host,
+                    focus_agent: Some(agent_ref.agent),
+                });
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
                 let actions = global_menu_actions(self);
@@ -2927,7 +2961,9 @@ impl AppState {
     }
 
     fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
-        self.tab_presses.contains_key(&source_id) || self.workspace_presses.contains_key(&source_id)
+        self.tab_presses.contains_key(&source_id)
+            || self.workspace_presses.contains_key(&source_id)
+            || self.remote_agent_presses.contains_key(&source_id)
     }
 
     fn chrome_drag_owned_by_other(&self, source_id: crate::app::InputSourceId) -> bool {
@@ -2988,6 +3024,7 @@ impl AppState {
     fn clear_chrome_press(&mut self, source_id: crate::app::InputSourceId) {
         self.tab_presses.remove(&source_id);
         self.workspace_presses.remove(&source_id);
+        self.remote_agent_presses.remove(&source_id);
     }
 
     fn mouse_pane_focus_action(&self, pane_id: crate::layout::PaneId) -> Option<MouseAction> {
@@ -3639,7 +3676,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_fleet_row_attaches_to_its_host_on_the_first_click() {
+    fn releasing_a_fleet_row_attaches_to_its_host_once() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
@@ -3653,6 +3690,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state
+            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub2"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -3665,6 +3704,12 @@ mod tests {
             row.rect.x + 2,
             row.rect.y,
         ));
+        assert!(app.state.toast.is_none(), "press alone must not attach");
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            row.rect.x + 2,
+            row.rect.y,
+        ));
 
         assert_eq!(
             app.state.sidebar_selected_remote_agent.as_ref(),
@@ -3673,7 +3718,7 @@ mod tests {
         );
         // No fleet inventory is polled in this fixture, so the attach stops at
         // its own guard -- which is exactly the proof the click reached it.
-        let toast = app.state.toast.clone().expect("one click attaches");
+        let toast = app.state.toast.clone().expect("completed click attaches");
         assert_eq!(toast.title, "host launch failed");
         assert!(
             toast.context.contains("fleet inventory"),
@@ -3683,7 +3728,112 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_fleet_row_carries_the_agent_the_remote_should_focus() {
+    fn clicking_a_remote_host_header_expands_it_on_the_first_click() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
+        )];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        assert!(
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .is_empty()
+        );
+        let collapse_key = crate::ui::sidebar::remote_host_collapse_key("ub2");
+        let header_row = (app.state.view.sidebar_rect.y..app.state.view.sidebar_rect.bottom())
+            .find(|row| {
+                crate::ui::sidebar_nested_header_at(&app.state, *row).as_deref()
+                    == Some(collapse_key.as_str())
+            })
+            .expect("remote host header row");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            app.state.view.sidebar_rect.x + 2,
+            header_row,
+        ));
+
+        assert_eq!(
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .len(),
+            1,
+            "one header click reveals the host's rows"
+        );
+    }
+
+    #[test]
+    fn mobile_switcher_toggles_remote_host_and_opens_remote_agent() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
+        )];
+        app.state.mode = Mode::Navigate;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let target_col = viewport.x + 2;
+        let header_row = (viewport.y..viewport.bottom())
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, target_col, *row),
+                    Some(crate::ui::MobileSwitcherTarget::NestedHeader(ref key))
+                        if key == "host:ub2"
+                )
+            })
+            .expect("remote host header");
+
+        let header_result = app.state.handle_mobile_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target_col,
+            header_row,
+        ));
+        assert!(matches!(header_result, MobileMouseResult::Consumed));
+
+        let remote_row = (viewport.y..viewport.bottom())
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, target_col, *row),
+                    Some(crate::ui::MobileSwitcherTarget::RemoteAgent(ref target))
+                        if target == &agent_ref
+                )
+            })
+            .expect("expanded remote agent row");
+        let result = app.state.handle_mobile_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target_col,
+            remote_row,
+        ));
+        let MobileMouseResult::Action(MouseAction::OpenFleetHost { name, focus_agent }) = result
+        else {
+            panic!("remote row tap must open its fleet host");
+        };
+        assert_eq!(name, "ub2");
+        assert_eq!(focus_agent.as_deref(), Some("pane/1"));
+        assert_eq!(
+            app.state.sidebar_selected_remote_agent.as_ref(),
+            Some(&agent_ref)
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn completed_fleet_row_click_carries_the_agent_the_remote_should_focus_once() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
@@ -3697,6 +3847,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
+        app.state
+            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -3704,11 +3856,21 @@ mod tests {
                 .next()
                 .expect("the fleet row owns a hit area");
 
-        let action = app.state.handle_mouse(
+        let press = app.state.handle_mouse(
             &mut app.terminal_runtimes,
             crate::app::LOCAL_INPUT_SOURCE,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
+                row.rect.x + 2,
+                row.rect.y,
+            ),
+        );
+        assert!(press.is_none(), "press alone must not attach");
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
                 row.rect.x + 2,
                 row.rect.y,
             ),
@@ -3721,6 +3883,219 @@ mod tests {
         };
         assert_eq!(name, "ub1");
         assert_eq!(focus_agent.as_deref(), Some("w3K:p11"));
+        assert!(
+            app.state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    crate::app::LOCAL_INPUT_SOURCE,
+                    mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        row.rect.x + 2,
+                        row.rect.y,
+                    ),
+                )
+                .is_none(),
+            "one press can produce only one open action"
+        );
+    }
+
+    #[test]
+    fn dragging_from_a_fleet_row_cancels_open() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub1", "w3K:p11")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
+        )];
+        app.state
+            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let row =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .next()
+                .expect("the fleet row owns a hit area");
+        let event =
+            |kind, row_offset| mouse(kind, row.rect.x + 2, row.rect.y.saturating_add(row_offset));
+
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                event(MouseEventKind::Down(MouseButton::Left), 0),
+            )
+            .is_none());
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                event(MouseEventKind::Drag(MouseButton::Left), 1),
+            )
+            .is_none());
+        assert!(
+            app.state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    crate::app::LOCAL_INPUT_SOURCE,
+                    event(MouseEventKind::Up(MouseButton::Left), 1),
+                )
+                .is_none(),
+            "a drag must cancel the pending fleet open"
+        );
+    }
+
+    #[test]
+    fn scrolling_at_sidebar_limit_cancels_only_that_sources_fleet_row_press() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub1", "w3K:p11")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
+        )];
+        app.state
+            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let row =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .next()
+                .expect("the fleet row owns a hit area");
+        let local_source = crate::app::LOCAL_INPUT_SOURCE;
+        let other_source = local_source + 1;
+        let event = |kind| mouse(kind, row.rect.x + 2, row.rect.y);
+
+        for source_id in [local_source, other_source] {
+            assert!(app
+                .state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    source_id,
+                    event(MouseEventKind::Down(MouseButton::Left)),
+                )
+                .is_none());
+        }
+        assert_eq!(app.state.workspace_scroll, 0, "sidebar starts at its limit");
+
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                local_source,
+                event(MouseEventKind::ScrollDown),
+            )
+            .is_none());
+        assert_eq!(app.state.workspace_scroll, 0, "wheel remains clamped");
+        assert!(!app.state.remote_agent_presses.contains_key(&local_source));
+        assert!(app.state.remote_agent_presses.contains_key(&other_source));
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                local_source,
+                event(MouseEventKind::Up(MouseButton::Left)),
+            )
+            .is_none());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn releasing_on_a_different_fleet_row_cancels_open() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        app.state.remote_agent_panel_entries = ["w3K:p11", "w3K:p12"]
+            .into_iter()
+            .map(|agent| {
+                let agent_ref = crate::api::schema::AgentRef::new("ub1", agent)
+                    .expect("valid remote agent reference");
+                std::sync::Arc::new(crate::ui::RemoteAgentPanelEntry::new(
+                    agent_ref,
+                    entry.clone(),
+                ))
+            })
+            .collect();
+        app.state
+            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let rows =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect);
+        assert_eq!(rows.len(), 2);
+        let outside_sidebar_col = app.state.view.sidebar_rect.right();
+
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    rows[0].rect.x + 2,
+                    rows[0].rect.y,
+                ),
+            )
+            .is_none());
+        assert!(
+            app.state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    crate::app::LOCAL_INPUT_SOURCE,
+                    mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        rows[1].rect.x + 2,
+                        rows[1].rect.y,
+                    ),
+                )
+                .is_none(),
+            "release on row B must not open row A"
+        );
+
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    rows[0].rect.x + 2,
+                    rows[0].rect.y,
+                ),
+            )
+            .is_none());
+        assert!(
+            app.state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    crate::app::LOCAL_INPUT_SOURCE,
+                    mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        outside_sidebar_col,
+                        rows[0].rect.y,
+                    ),
+                )
+                .is_none(),
+            "release outside the sidebar must not open a row at the same y"
+        );
     }
 
     #[test]

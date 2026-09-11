@@ -23,6 +23,7 @@ impl App {
                         FleetAgentInfo {
                             agent_ref: entry.agent_ref.clone(),
                             name: entry.name.clone().unwrap_or_else(|| entry.handle.clone()),
+                            title: entry.title.clone(),
                             agent: entry.agent.clone(),
                             state: entry.state.clone(),
                             source: entry.source.table_label().to_string(),
@@ -152,19 +153,22 @@ mod tests {
             configured_hosts: vec!["ub1".to_string(), "ub2".to_string()],
             hosts: ["ub1", "ub2"]
                 .into_iter()
-                .map(|host| crate::fleet::HostSnapshot {
-                    name: host.to_string(),
-                    target: host.to_string(),
-                    local: false,
-                    session: Some("agents".to_string()),
-                    socket: None,
-                    state: HostState::Reachable,
-                    version: Some("0.8.2".to_string()),
-                    protocol: Some(crate::protocol::PROTOCOL_VERSION),
-                    error: None,
-                    entries: vec![crate::fleet::FleetRow::test_agent_row_with_id(
-                        host, "reviewer", "w1:p1",
-                    )],
+                .map(|host| {
+                    let mut entry =
+                        crate::fleet::FleetRow::test_agent_row_with_id(host, "reviewer", "w1:p1");
+                    entry.title = Some(format!("{host} review title"));
+                    crate::fleet::HostSnapshot {
+                        name: host.to_string(),
+                        target: host.to_string(),
+                        local: false,
+                        session: Some("agents".to_string()),
+                        socket: None,
+                        state: HostState::Reachable,
+                        version: Some("0.8.2".to_string()),
+                        protocol: Some(crate::protocol::PROTOCOL_VERSION),
+                        error: None,
+                        entries: vec![entry],
+                    }
                 })
                 .collect(),
         };
@@ -175,6 +179,10 @@ mod tests {
         assert_eq!(snapshot["refreshed_at_unix_ms"], 42);
         assert_eq!(snapshot["hosts"][0]["agent_count"], 1);
         assert_eq!(snapshot["hosts"][0]["agents"][0]["agent_ref"], "ub1::w1:p1");
+        assert_eq!(
+            snapshot["hosts"][0]["agents"][0]["title"],
+            "ub1 review title"
+        );
         assert_eq!(snapshot["hosts"][1]["agents"][0]["agent_ref"], "ub2::w1:p1");
         assert_ne!(
             snapshot["hosts"][0]["agents"][0]["agent_ref"],

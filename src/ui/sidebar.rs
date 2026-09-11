@@ -1366,11 +1366,12 @@ pub(crate) fn remote_agent_panel_entries(
                         seen,
                         state == AgentState::Unknown,
                         row.agent.clone(),
-                        row.name
+                        row.title
                             .clone()
+                            .or_else(|| row.name.clone())
                             .unwrap_or_else(|| row.agent_ref.agent.clone()),
-                        row.name.is_some(),
-                        None,
+                        row.title.is_some(),
+                        row.title.clone(),
                         None,
                         None,
                         false,
@@ -1395,14 +1396,12 @@ pub(crate) fn remote_agent_panel_entries(
                         info.agent_status != crate::api::schema::AgentStatus::Done,
                         info.agent_status == crate::api::schema::AgentStatus::Stale,
                         info.display_agent.clone().or_else(|| info.agent.clone()),
-                        info.name
+                        row.title
                             .clone()
-                            .or_else(|| info.terminal_title_stripped.clone())
-                            .or_else(|| info.terminal_title.clone())
-                            .or_else(|| info.title.clone())
+                            .or_else(|| row.name.clone())
                             .unwrap_or_else(|| row.agent_ref.agent.clone()),
-                        info.name.is_some(),
-                        info.name.clone(),
+                        row.title.is_some(),
+                        row.title.clone(),
                         info.terminal_title.clone(),
                         info.terminal_title_stripped.clone(),
                         !info.gates.is_empty(),
@@ -1443,7 +1442,7 @@ pub(crate) fn remote_agent_panel_entries(
                         tab_has_custom_name,
                         tab_label_leads_with_agent: false,
                         pane_label,
-                        pane_label_is_agent_identity: false,
+                        pane_label_is_agent_identity: true,
                         terminal_title,
                         terminal_title_stripped,
                         agent_label,
@@ -1902,10 +1901,12 @@ fn section_header_color(title: &str, p: &Palette) -> ratatui::style::Color {
 /// every time an agent blocks or unblocks, and a collapse the user asked for
 /// must survive that churn.
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
-    app.collapsed_sidebar_groups.contains(&format!(
-        "{}:{title}",
-        app.sidebar_group_mode.collapse_namespace()
-    ))
+    let key = format!("{}:{title}", app.sidebar_group_mode.collapse_namespace());
+    if title.starts_with("host:") {
+        !app.expanded_remote_host_groups.contains(&key)
+    } else {
+        app.collapsed_sidebar_groups.contains(&key)
+    }
 }
 
 pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
@@ -8229,9 +8230,23 @@ pub(crate) mod tests {
             .collect()
     }
 
+    fn expand_remote_host(app: &mut AppState, host: &str) {
+        app.toggle_sidebar_group(&remote_host_collapse_key(host));
+    }
+
     #[test]
-    fn remote_rows_group_under_one_collapsible_header_per_host() {
+    fn remote_host_groups_start_collapsed_and_keep_an_explicit_expansion() {
         let mut app = app_with_two_remote_hosts();
+
+        assert_eq!(
+            remote_row_shape(&app),
+            [
+                "host remote-b (2) collapsed=true",
+                "host remote-a (1) collapsed=true",
+            ]
+        );
+
+        expand_remote_host(&mut app, "remote-b");
 
         assert_eq!(
             remote_row_shape(&app),
@@ -8239,31 +8254,95 @@ pub(crate) mod tests {
                 "host remote-b (2) collapsed=false",
                 "agent remote-b::pane/1 depth=1",
                 "agent remote-b::pane/2 depth=1",
-                "host remote-a (1) collapsed=false",
-                "agent remote-a::pane/4 depth=1",
-            ]
+                "host remote-a (1) collapsed=true",
+            ],
+            "one explicit expansion reveals only that host"
         );
 
-        app.collapsed_sidebar_groups.insert(format!(
-            "{}:{}",
-            app.sidebar_group_mode.collapse_namespace(),
-            remote_host_collapse_key("remote-b")
-        ));
+        app.remote_agent_panel_entries = app_with_two_remote_hosts().remote_agent_panel_entries;
+        assert!(remote_row_shape(&app)
+            .iter()
+            .any(|row| row == "agent remote-b::pane/1 depth=1"));
 
+        expand_remote_host(&mut app, "remote-b");
         assert_eq!(
             remote_row_shape(&app),
             [
                 "host remote-b (2) collapsed=true",
-                "host remote-a (1) collapsed=false",
-                "agent remote-a::pane/4 depth=1",
+                "host remote-a (1) collapsed=true",
             ],
-            "a collapsed host keeps its header and its count, and gives back its rows"
+            "a second toggle restores the default collapsed state"
         );
+    }
+
+    #[test]
+    fn remote_rows_render_the_host_title_and_fall_back_to_the_handle() {
+        let mut titled = remote_agent_info(
+            "w23:p1D",
+            "cl-ceea66cc",
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+        );
+        titled.terminal_title_stripped = Some("Scalable V2 cost levers handoff".into());
+        titled.work_context.work_title = Some("lower-priority work title".into());
+        let untitled = remote_agent_info(
+            "w23:p1E",
+            "cl-deadbeef",
+            crate::api::schema::AgentStatus::Idle,
+            false,
+            false,
+        );
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "ub1",
+                false,
+                vec![
+                    crate::fleet::FleetRow::test_agent_info_row("ub1", titled),
+                    crate::fleet::FleetRow::test_agent_info_row("ub1", untitled),
+                ],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let entries = remote_agent_panel_entries(&snapshot);
+        let app = AppState::test_new();
+        assert_eq!(
+            snapshot.hosts[0].entries[0].title.as_deref(),
+            Some("Scalable V2 cost levers handoff")
+        );
+        assert_eq!(
+            entries[0].entry.pane_label.as_deref(),
+            Some("Scalable V2 cost levers handoff")
+        );
+        assert_eq!(entries[0].render_title, "Scalable V2 cost levers handoff");
+        assert_eq!(entries[1].render_title, "cl-deadbeef");
+
+        for (entry, expected) in entries
+            .iter()
+            .zip(["Scalable V2 cost levers handoff", "cl-deadbeef"])
+        {
+            let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_remote_compact_agent_row(
+                        &app,
+                        frame,
+                        entry,
+                        Rect::new(0, 0, 80, 1),
+                        1,
+                        None,
+                    )
+                })
+                .unwrap();
+            let rendered = row_text(terminal.backend().buffer(), 0, 80);
+            assert!(rendered.contains(expected), "{rendered:?}");
+        }
     }
 
     #[test]
     fn grouped_remote_rows_hug_each_other_like_local_rows() {
         let mut app = app_with_two_remote_hosts();
+        expand_remote_host(&mut app, "remote-b");
         // The configured agent gap is what made the fleet list twice as tall as
         // the local one; inside a host group the rows must ignore it.
         app.sidebar_agents.row_gap = 1;
@@ -8406,6 +8485,8 @@ pub(crate) mod tests {
 
         let mut app = app_with_agents(&["local"]);
         app.remote_agent_panel_entries = entries.clone();
+        expand_remote_host(&mut app, "remote-b");
+        expand_remote_host(&mut app, "remote-a");
         let rows = sidebar_rows(&app);
         assert!(!rows.iter().any(|row| {
             matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
@@ -8513,6 +8594,7 @@ pub(crate) mod tests {
         };
         let mut app = app_with_agents(&["local"]);
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        expand_remote_host(&mut app, "WorkBox");
         app.sidebar_work_filter.query = "WORKBOX reviewagent".into();
 
         let rows = sidebar_rows(&app);
@@ -9441,6 +9523,9 @@ pub(crate) mod tests {
                 ..crate::fleet::Snapshot::default()
             };
             app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+            for host in hosts {
+                expand_remote_host(&mut app, host);
+            }
 
             let width = 18;
             let area = Rect::new(0, 0, width, 8);
