@@ -86,6 +86,13 @@ pub(crate) enum ControlledWriteResult {
     Refused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteOwnerAcquireResult {
+    Acquired,
+    AlreadyControlled,
+    RefusedForSafety,
+}
+
 enum PtyIoControlCommand {
     BeginHandoff(std_mpsc::Sender<std::io::Result<()>>),
     DuplicateForHandoff(std_mpsc::Sender<std::io::Result<RawFd>>),
@@ -102,6 +109,10 @@ pub(crate) struct PtyIoActorHandle {
     wake: fd::WakeWriter,
     controlled_write_fd: Option<RawFd>,
     user_writes: Arc<Mutex<UserWriteGate>>,
+    // Lock order is user_writes -> pty_write. Terminal-response writes take
+    // only pty_write and never user_writes, so no path can form a cycle. The
+    // PTY write lock is held only across the individual write(2) syscall.
+    pty_write: Arc<Mutex<()>>,
     user_writes_poisoned: Arc<AtomicBool>,
     on_user_writes_poisoned: Option<Arc<dyn Fn() + Send + Sync>>,
     controls: Arc<Mutex<SharedPtyControls>>,
@@ -112,6 +123,7 @@ pub(crate) struct PtyIoActorHandle {
 struct UserWriteGate {
     accepting: bool,
     remote_owner: Option<u64>,
+    pending_local_writes: usize,
 }
 
 impl PtyIoActorHandle {
@@ -156,16 +168,15 @@ impl PtyIoActorHandle {
             Err(_) => return Err(mpsc::error::SendError(bytes)),
         };
 
-        let allowed = {
-            let Some(user_writes) = self.lock_user_writes() else {
-                return Err(mpsc::error::SendError(bytes));
-            };
-            user_writes.accepting && user_writes.remote_owner.is_none()
+        let Some(mut user_writes) = self.lock_user_writes() else {
+            return Err(mpsc::error::SendError(bytes));
         };
-        if !allowed {
+        if !user_writes.accepting || user_writes.remote_owner.is_some() {
             return Err(mpsc::error::SendError(bytes));
         }
         permit.send(PtyIoDataCommand::WriteUserInput { bytes });
+        user_writes.pending_local_writes += 1;
+        drop(user_writes);
         self.wake_actor();
         Ok(())
     }
@@ -174,7 +185,7 @@ impl PtyIoActorHandle {
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        let Some(user_writes) = self.lock_user_writes() else {
+        let Some(mut user_writes) = self.lock_user_writes() else {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         };
         if !user_writes.accepting {
@@ -183,12 +194,13 @@ impl PtyIoActorHandle {
         if user_writes.remote_owner.is_some() {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
-        drop(user_writes);
         match self
             .data_tx
             .try_send(PtyIoDataCommand::WriteUserInput { bytes })
         {
             Ok(()) => {
+                user_writes.pending_local_writes += 1;
+                drop(user_writes);
                 self.wake_actor();
                 Ok(())
             }
@@ -201,17 +213,26 @@ impl PtyIoActorHandle {
         }
     }
 
-    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+    pub(crate) fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
         let Some(mut user_writes) = self.lock_user_writes() else {
-            return false;
+            return RemoteOwnerAcquireResult::RefusedForSafety;
         };
         match user_writes.remote_owner {
+            Some(existing) if existing == owner_id => RemoteOwnerAcquireResult::Acquired,
+            Some(_) => RemoteOwnerAcquireResult::AlreadyControlled,
+            None if user_writes.pending_local_writes != 0 => {
+                RemoteOwnerAcquireResult::RefusedForSafety
+            }
             None => {
                 user_writes.remote_owner = Some(owner_id);
-                true
+                RemoteOwnerAcquireResult::Acquired
             }
-            Some(existing) => existing == owner_id,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.try_acquire_remote_owner(owner_id) == RemoteOwnerAcquireResult::Acquired
     }
 
     pub(crate) fn release_remote_owner(&self, owner_id: u64) {
@@ -220,6 +241,8 @@ impl PtyIoActorHandle {
         };
         if user_writes.remote_owner == Some(owner_id) {
             user_writes.remote_owner = None;
+            drop(user_writes);
+            self.wake_actor();
         }
     }
 
@@ -246,8 +269,13 @@ impl PtyIoActorHandle {
         // between the server's fresh probe and write(2); no userspace mutex can
         // close that window because it does not serialize with kernel tty state.
         // The window is bounded to this single check-to-write syscall sequence.
+        let pty_write = self
+            .pty_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result =
             unsafe { libc::write(controlled_write_fd, bytes.as_ptr().cast(), bytes.len()) };
+        drop(pty_write);
         drop(user_writes);
         if result >= 0 {
             let written = result as usize;
@@ -472,8 +500,10 @@ impl PtyIoActor {
         let user_writes = Arc::new(Mutex::new(UserWriteGate {
             accepting: !config.initially_quiesced,
             remote_owner: None,
+            pending_local_writes: 0,
         }));
         let user_writes_poisoned = Arc::new(AtomicBool::new(false));
+        let pty_write = Arc::new(Mutex::new(()));
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let response_order = Arc::new(Mutex::new(()));
         let handle = PtyIoActorHandle {
@@ -482,6 +512,7 @@ impl PtyIoActor {
             wake: wake_pipe.writer,
             controlled_write_fd: Some(controlled_write_fd),
             user_writes: Arc::clone(&user_writes),
+            pty_write: Arc::clone(&pty_write),
             user_writes_poisoned: Arc::clone(&user_writes_poisoned),
             on_user_writes_poisoned: config.on_user_writes_poisoned.clone(),
             controls: Arc::clone(&controls),
@@ -502,6 +533,7 @@ impl PtyIoActor {
             current_write_offset: 0,
             wake_read_fd: wake_pipe.read_fd,
             user_writes: Arc::clone(&user_writes),
+            pty_write,
             user_writes_poisoned,
             on_user_writes_poisoned: config.on_user_writes_poisoned,
             controls,
@@ -537,6 +569,7 @@ struct PtyIoActorRunner {
     current_write_offset: usize,
     wake_read_fd: OwnedFd,
     user_writes: Arc<Mutex<UserWriteGate>>,
+    pty_write: Arc<Mutex<()>>,
     user_writes_poisoned: Arc<AtomicBool>,
     on_user_writes_poisoned: Option<Arc<dyn Fn() + Send + Sync>>,
     controls: Arc<Mutex<SharedPtyControls>>,
@@ -556,6 +589,17 @@ impl PtyIoActorRunner {
             if let Some(callback) = &self.on_user_writes_poisoned {
                 callback();
             }
+        }
+    }
+
+    fn mark_local_write_drained(&self, user_writes: &mut UserWriteGate) {
+        if user_writes.pending_local_writes == 0 {
+            warn!(
+                pane = self.pane_id,
+                "PTY actor completed a local write without a pending-write reservation"
+            );
+        } else {
+            user_writes.pending_local_writes -= 1;
         }
     }
 
@@ -865,7 +909,7 @@ impl PtyIoActorRunner {
         while let Some((bytes, user_input)) = self.pending_writes.front() {
             let bytes = bytes.clone();
             let user_input = *user_input;
-            let user_writes = if user_input {
+            let mut user_writes = if user_input {
                 match self.user_writes.lock() {
                     Ok(user_writes) => Some(user_writes),
                     Err(_) => {
@@ -883,14 +927,19 @@ impl PtyIoActorRunner {
                     .as_ref()
                     .is_some_and(|user_writes| user_writes.remote_owner.is_some())
             {
-                drop(user_writes);
-                self.pending_writes.pop_front();
-                self.current_write_offset = 0;
-                continue;
+                warn!(
+                    pane = self.pane_id,
+                    "refusing to drop pending local PTY input while remote ownership is held"
+                );
+                return;
             }
             let chunk = &bytes[self.current_write_offset..];
+            let pty_write = self
+                .pty_write
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let write_result = self.file.write(chunk);
-            drop(user_writes);
+            drop(pty_write);
             match write_result {
                 Ok(0) => {
                     warn!(pane = self.pane_id, "PTY actor write returned zero bytes");
@@ -901,6 +950,9 @@ impl PtyIoActorRunner {
                     if self.current_write_offset >= bytes.len() {
                         self.pending_writes.pop_front();
                         self.current_write_offset = 0;
+                        if let Some(user_writes) = user_writes.as_mut() {
+                            self.mark_local_write_drained(user_writes);
+                        }
                     }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
@@ -1055,7 +1107,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
@@ -1338,6 +1392,65 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn controlled_and_terminal_response_writes_are_contiguous_on_real_pty() {
+        let (handle, read_rx, child, _foreground_group) = actor_handle_for_real_pty(true);
+        assert!(handle.acquire_remote_owner(7));
+
+        let controlled = b"controlled-payload".to_vec();
+        let response = Bytes::from_static(b"terminal-response");
+        let total_len = controlled.len() + response.len();
+        let write_guard = handle
+            .pty_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let write_handle = handle.clone();
+        let controlled_for_thread = controlled.clone();
+        let controlled_write = std::thread::spawn(move || {
+            started_tx.send(()).expect("controlled writer started");
+            write_handle.try_write_controlled_user_input(7, &controlled_for_thread)
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("controlled writer entered the concurrent write");
+
+        handle.write_terminal_response(|| Some(response.clone()));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !controlled_write.is_finished(),
+            "controlled write bypassed the PTY lock"
+        );
+        assert!(
+            read_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a PTY write escaped while the shared lock was held"
+        );
+        drop(write_guard);
+
+        assert_eq!(
+            controlled_write.join().expect("controlled writer joins"),
+            ControlledWriteResult::Written
+        );
+        let mut observed = Vec::with_capacity(total_len);
+        while observed.len() < total_len {
+            observed.extend_from_slice(
+                &read_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("cat echoes both PTY writes"),
+            );
+        }
+        observed.truncate(total_len);
+        let controlled_then_response = [controlled.as_slice(), response.as_ref()].concat();
+        let response_then_controlled = [response.as_ref(), controlled.as_slice()].concat();
+        assert!(
+            observed == controlled_then_response || observed == response_then_controlled,
+            "concurrent PTY writes must each remain contiguous"
+        );
+        handle.shutdown();
+        reap_test_pty(child);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn foreground_agent_change_with_same_process_group_writes_zero_bytes() {
         assert_context_change_writes_zero_bytes(|context| {
             context.foreground_process.name = "other-agent".into()
@@ -1397,10 +1510,11 @@ mod tests {
             }
         }
         assert!(reached_eagain, "real PTY input buffer did not reach EAGAIN");
-        assert_eq!(
-            handle.try_write_controlled_user_input(7, b"controlled-after-eagain"),
-            ControlledWriteResult::DeliveryUnknown { written: 0 }
-        );
+        // The server ends the lease on DeliveryUnknown; EAGAIN is not a
+        // persistent promise across independent syscalls, so do not retry it
+        // here.
+        handle.release_remote_owner(7);
+        assert!(handle.acquire_remote_owner(8));
         handle.shutdown();
         reap_test_pty(child);
     }
@@ -1495,6 +1609,86 @@ mod tests {
         peer.read_exact(&mut received)
             .expect("post-release write reaches the actor fd");
         assert_eq!(&received, b"after-release");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn remote_owner_refuses_while_local_input_is_queued_then_acquires_after_drain() {
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+        let write_guard = handle
+            .pty_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        handle
+            .try_write_user_input(Bytes::from_static(b"queued-local"))
+            .expect("local input is accepted before remote acquisition");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+        drop(write_guard);
+
+        let mut delivered = [0u8; 12];
+        peer.read_exact(&mut delivered)
+            .expect("queued local input reaches the PTY in full");
+        assert_eq!(&delivered, b"queued-local");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::Acquired
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn remote_owner_refuses_while_partial_local_input_remains_then_acquires_after_drain() {
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+        let payload = vec![b'l'; 4 * 1024 * 1024];
+        handle
+            .try_write_user_input(Bytes::from(payload.clone()))
+            .expect("large local input is accepted");
+
+        peer.set_nonblocking(true)
+            .expect("peer becomes nonblocking for partial observation");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut prefix = Vec::new();
+        while prefix.is_empty() {
+            let mut chunk = vec![0u8; 64 * 1024];
+            match peer.read(&mut chunk) {
+                Ok(0) => panic!("PTY socket closed before local input was delivered"),
+                Ok(written) => prefix.extend_from_slice(&chunk[..written]),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "actor did not start writing the partial local buffer"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(err) => panic!("failed to observe partial local input: {err}"),
+            }
+        }
+        assert!(
+            prefix.len() < payload.len(),
+            "the test must observe a partially written local buffer"
+        );
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+
+        peer.set_nonblocking(false)
+            .expect("peer returns to blocking mode");
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let mut remainder = vec![0u8; payload.len() - prefix.len()];
+        peer.read_exact(&mut remainder)
+            .expect("partial local input remainder reaches the PTY");
+        prefix.extend_from_slice(&remainder);
+        assert_eq!(prefix, payload);
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::Acquired
+        );
         handle.shutdown();
     }
 
@@ -1750,7 +1944,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             on_user_writes_poisoned: None,
             controls: Arc::clone(&controls),
@@ -1816,7 +2012,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
@@ -1839,7 +2037,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             on_user_writes_poisoned: None,
             controls,
@@ -1883,10 +2083,11 @@ mod tests {
     }
 
     #[test]
-    fn resize_writes_terminal_responses_after_applying_resize() {
+    fn resize_writes_terminal_responses_while_remote_lease_is_held() {
         let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
         let response = Bytes::from_static(b"\x1B[48;40;100;720;900t");
 
+        assert!(handle.acquire_remote_owner(7));
         handle.resize(40, 100, 9, 18, vec![response.clone()]);
 
         let mut buf = vec![0; response.len()];
@@ -1914,7 +2115,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             on_user_writes_poisoned: None,
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
@@ -1966,7 +2169,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             on_user_writes_poisoned: None,
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
@@ -2027,7 +2232,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 0,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             on_user_writes_poisoned: None,
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
@@ -2078,7 +2285,9 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
+                pending_local_writes: 1,
             })),
+            pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),

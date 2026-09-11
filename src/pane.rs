@@ -22,7 +22,7 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(unix)]
-use crate::pty::actor::ControlledWriteResult;
+use crate::pty::actor::{ControlledWriteResult, RemoteOwnerAcquireResult};
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
 
@@ -1316,9 +1316,9 @@ impl PaneRuntimeIo {
     }
 
     #[cfg(unix)]
-    fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+    fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.acquire_remote_owner(owner_id),
+            PaneRuntimeIo::Actor(actor) => actor.try_acquire_remote_owner(owner_id),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { remote_owner, .. } => {
                 let mut owner = remote_owner
@@ -1327,12 +1327,18 @@ impl PaneRuntimeIo {
                 match *owner {
                     None => {
                         *owner = Some(owner_id);
-                        true
+                        RemoteOwnerAcquireResult::Acquired
                     }
-                    Some(existing) => existing == owner_id,
+                    Some(existing) if existing == owner_id => RemoteOwnerAcquireResult::Acquired,
+                    Some(_) => RemoteOwnerAcquireResult::AlreadyControlled,
                 }
             }
         }
+    }
+
+    #[cfg(all(unix, test))]
+    fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.try_acquire_remote_owner(owner_id) == RemoteOwnerAcquireResult::Acquired
     }
 
     #[cfg(unix)]
@@ -3433,6 +3439,11 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
+    pub(crate) fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
+        self.io.try_acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(all(unix, test))]
     pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
         self.io.acquire_remote_owner(owner_id)
     }

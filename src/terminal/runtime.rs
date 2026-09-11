@@ -494,6 +494,14 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
+    pub(crate) fn try_acquire_remote_owner(
+        &self,
+        owner_id: u64,
+    ) -> crate::pty::actor::RemoteOwnerAcquireResult {
+        self.0.try_acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(all(unix, test))]
     pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
         self.0.acquire_remote_owner(owner_id)
     }

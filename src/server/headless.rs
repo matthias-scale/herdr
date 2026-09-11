@@ -2514,15 +2514,26 @@ impl HeadlessServer {
                 },
             );
         };
-        let acquired_runtime_owner = runtime.acquire_remote_owner(client_id);
-        if !acquired_runtime_owner {
-            return self.reject_remote_control(
-                client_id,
-                crate::api::schema::ErrorBody {
-                    code: "already_controlled".to_owned(),
-                    message: "controlled terminal runtime already has a writer".to_owned(),
-                },
-            );
+        match runtime.try_acquire_remote_owner(client_id) {
+            crate::pty::actor::RemoteOwnerAcquireResult::Acquired => {}
+            crate::pty::actor::RemoteOwnerAcquireResult::AlreadyControlled => {
+                return self.reject_remote_control(
+                    client_id,
+                    crate::api::schema::ErrorBody {
+                        code: "already_controlled".to_owned(),
+                        message: "controlled terminal runtime already has a writer".to_owned(),
+                    },
+                );
+            }
+            crate::pty::actor::RemoteOwnerAcquireResult::RefusedForSafety => {
+                return self.reject_remote_control(
+                    client_id,
+                    crate::api::schema::ErrorBody {
+                        code: "refused_for_safety".to_owned(),
+                        message: "local terminal input is still in flight".to_owned(),
+                    },
+                );
+            }
         }
         let lease = crate::server::remote_control::RemoteControlLease {
             agent_ref,
