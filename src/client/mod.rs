@@ -2120,14 +2120,9 @@ async fn run_client_loop(
                 if let Some((frame, encoded)) =
                     encode_last_frame_repaint(&state.blit_encoder, state.draw_host_cursor)
                 {
-                    let graphics = if state.kitty_graphics_enabled {
-                        frame.graphics.as_slice()
-                    } else {
-                        &[]
-                    };
+                    // The committed frame may contain stale graphics from an earlier transaction.
                     let mut stdout = io::stdout();
-                    let _ =
-                        write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
+                    let _ = stdout.write_all(&encoded.bytes);
                     let _ = stdout.flush();
                     state.blit_encoder.commit(frame, encoded);
                 }
