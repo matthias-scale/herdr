@@ -1918,6 +1918,7 @@ impl PaneRuntime {
             agent_activity: None,
             agent_state: None,
             stall_nudge: None,
+            human_draft: None,
             pane_seen: None,
             pane_done_for_ms: None,
         }
@@ -2139,6 +2140,7 @@ impl PaneRuntime {
             agent_activity: _,
             agent_state: _,
             stall_nudge: _,
+            human_draft: _,
             pane_seen: _,
             pane_done_for_ms: _,
         } = state;

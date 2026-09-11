@@ -46,6 +46,8 @@ pub(crate) struct HandoffRuntimeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_nudge: Option<StallNudgeHandoffState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_draft: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_seen: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_done_for_ms: Option<u64>,
@@ -65,4 +67,27 @@ pub(crate) struct ImportedHandoffRuntime {
     pub master_fd: std::os::fd::RawFd,
     #[cfg(unix)]
     pub state: HandoffRuntimeState,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::HandoffRuntimeState;
+
+    /// AC6: handoff payloads written before human-draft transfer still deserialize.
+    #[test]
+    fn handoff_runtime_without_human_draft_still_deserializes() {
+        let payload = serde_json::json!({
+            "pane_id": 7,
+            "child_pid": 11,
+            "rows": 24,
+            "cols": 80,
+            "cell_width_px": 8,
+            "cell_height_px": 16
+        });
+
+        let state: HandoffRuntimeState =
+            serde_json::from_value(payload).expect("older handoff runtime should deserialize");
+
+        assert!(state.human_draft.is_none());
+    }
 }

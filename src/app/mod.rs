@@ -1537,6 +1537,17 @@ impl App {
                     .map(|state| (*pane_id, state))
             })
             .collect();
+        let imported_human_drafts = imports
+            .iter()
+            .filter_map(|(pane_id, import)| {
+                import
+                    .state
+                    .human_draft
+                    .clone()
+                    .filter(|draft| !draft.is_empty())
+                    .map(|draft| (*pane_id, draft))
+            })
+            .collect();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1568,6 +1579,7 @@ impl App {
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.restore_stall_nudge_episodes(imported_stall_nudges, &pane_id_aliases, now);
+        app.restore_handoff_human_drafts(imported_human_drafts, &pane_id_aliases);
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.active = snapshot
             .active

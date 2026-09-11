@@ -68,6 +68,8 @@ impl App {
             return false;
         }
         runtime.send_bytes_after(Bytes::from(enter), SUBMIT_DELAY);
+        self.state
+            .note_pane_activity_at(pane_id, std::time::Instant::now());
         true
     }
 

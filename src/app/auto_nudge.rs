@@ -218,6 +218,18 @@ impl App {
     }
 
     #[cfg(unix)]
+    pub(crate) fn human_draft_handoff_state(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<String> {
+        self.state
+            .pending_human_drafts
+            .get(&pane_id)
+            .filter(|draft| !draft.is_empty())
+            .cloned()
+    }
+
+    #[cfg(unix)]
     pub(crate) fn restore_stall_nudge_episodes(
         &mut self,
         imported: std::collections::HashMap<u32, crate::handoff_runtime::StallNudgeHandoffState>,
@@ -263,6 +275,26 @@ impl App {
                     schedule_failed,
                 },
             );
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_handoff_human_drafts(
+        &mut self,
+        imported: std::collections::HashMap<u32, String>,
+        pane_id_aliases: &std::collections::HashMap<u32, crate::layout::PaneId>,
+    ) {
+        for (old_pane_id, draft) in imported {
+            if draft.is_empty() {
+                continue;
+            }
+            let pane_id = pane_id_aliases
+                .get(&old_pane_id)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(old_pane_id));
+            if self.find_pane(pane_id).is_some() {
+                self.state.pending_human_drafts.insert(pane_id, draft);
+            }
         }
     }
 
@@ -1030,6 +1062,29 @@ mod tests {
         assert_eq!(drain(&mut rx), "");
     }
 
+    /// AC6: pane-send activity keeps a due nudge out of the human turn's submit delay.
+    #[tokio::test]
+    async fn pane_send_activity_suppresses_a_due_stall_nudge() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.stall_nudge_episodes.insert(
+            terminal_id.clone(),
+            StallNudgeEpisode {
+                pane_id,
+                nudges_sent: 0,
+                next_nudge_at: Some(now),
+                declaration_kind: "agent_status",
+                last_drop_reason: None,
+                schedule_failed: false,
+            },
+        );
+
+        assert!(app.send_text_to_agent_pane(0, pane_id, "human turn"));
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(!app.tick_auto_nudges(now));
+        assert_eq!(drain(&mut rx), "human turn");
+    }
+
     /// Pins that a draft changed at fire time suppresses Enter without cancellation.
     #[tokio::test]
     async fn a_draft_change_at_fire_time_cancels_the_delayed_stall_nudge_submission() {
@@ -1075,6 +1130,36 @@ mod tests {
         );
 
         assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 2);
+        assert!(!app.tick_auto_nudges(now));
+        assert_eq!(drain(&mut rx), "");
+    }
+
+    /// AC6: handoff restores an exported human draft under the aliased pane and blocks nudging it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_restores_human_draft_and_blocks_auto_nudge() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.state
+            .pending_human_drafts
+            .insert(pane_id, "half typed".into());
+        let exported = app.human_draft_handoff_state(pane_id).expect("human draft");
+        let old_pane_id = pane_id.raw().saturating_add(1_000);
+        app.state.pending_human_drafts.clear();
+
+        app.restore_handoff_human_drafts(
+            std::collections::HashMap::from([(old_pane_id, exported)]),
+            &std::collections::HashMap::from([(old_pane_id, pane_id)]),
+        );
+
+        assert_eq!(
+            app.state
+                .pending_human_drafts
+                .get(&pane_id)
+                .map(String::as_str),
+            Some("half typed")
+        );
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
         assert!(!app.tick_auto_nudges(now));
         assert_eq!(drain(&mut rx), "");
     }

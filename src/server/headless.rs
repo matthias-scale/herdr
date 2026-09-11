@@ -1520,6 +1520,9 @@ impl HeadlessServer {
             handoff_runtime.stall_nudge = self
                 .app
                 .stall_nudge_handoff_state(terminal_id, handoff_captured_at);
+            handoff_runtime.human_draft = self
+                .app
+                .human_draft_handoff_state(crate::layout::PaneId::from_raw(pane_id));
             handoff_runtime.pane_seen = Some(pane_seen);
             handoff_runtime.pane_done_for_ms = pane_done_since.map(|done_since| {
                 handoff_captured_at
