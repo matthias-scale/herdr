@@ -4718,7 +4718,9 @@ impl HeadlessServer {
     fn sync_immediate_pty_sources(&self) {
         let (has_app_target, direct_terminal_targets) = self.pty_render_targets();
         let mut pane_ids = if has_app_target {
-            self.app.state.app_surface_pane_ids()
+            self.app
+                .state
+                .app_surface_pane_ids_with_tab_visibility(self.any_app_client_displays_tab())
         } else {
             HashSet::new()
         };
@@ -4761,6 +4763,14 @@ impl HeadlessServer {
             }
         }
         (has_app_target, direct_terminal_targets)
+    }
+
+    fn any_app_client_displays_tab(&self) -> bool {
+        self.clients.values().any(|client| {
+            client.writer.is_some()
+                && client.is_full_app_client()
+                && !client.tab_surface_replaced(&self.app.state)
+        })
     }
 
     fn pty_source_visible_to_render_targets(
@@ -4820,7 +4830,7 @@ impl HeadlessServer {
         {
             return true;
         }
-        if self.app.state.tab_surface_replaced() {
+        if !self.any_app_client_displays_tab() {
             return false;
         }
         let Some(workspace) = self
@@ -4864,15 +4874,31 @@ impl HeadlessServer {
         }
 
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
-        let [(client_id, (cols, rows), cell_size, _is_foreground, mode)] =
-            render_targets.as_slice()
-        else {
-            retained_fallback!("multiple_or_no_target");
-        };
-        if !matches!(mode, ClientConnectionMode::App) {
-            retained_fallback!("not_app_client");
+        let mut retained_target = None;
+        let mut app_target_count = 0;
+        for (client_id, size, cell_size, _is_foreground, mode) in &render_targets {
+            if !matches!(mode, ClientConnectionMode::App) {
+                retained_fallback!("not_app_client");
+            }
+            app_target_count += 1;
+            let Some(client) = self.clients.get(client_id) else {
+                retained_fallback!("client_missing");
+            };
+            if client.tab_surface_replaced(&self.app.state) {
+                continue;
+            }
+            if retained_target.is_some() {
+                retained_fallback!("multiple_tab_targets");
+            }
+            retained_target = Some((*client_id, *size, *cell_size));
         }
-        let Some(client) = self.clients.get(client_id) else {
+        let Some((client_id, (cols, rows), cell_size)) = retained_target else {
+            if app_target_count > 0 {
+                retained_success!("tab_surface_replaced");
+            }
+            retained_fallback!("no_target");
+        };
+        let Some(client) = self.clients.get(&client_id) else {
             retained_fallback!("client_missing");
         };
         if client.deferred_render() != DeferredRender::None {
@@ -4890,8 +4916,11 @@ impl HeadlessServer {
                 &self.app.state,
                 &self.app.pane_graphics,
                 &self.app.terminal_runtimes,
-                self.app.state.view.tab_surface(),
-                *cell_size,
+                crate::ui::TabSurfaceView {
+                    pane_infos: &client.retained_pane_infos,
+                    split_borders: &[],
+                },
+                cell_size,
             )
         {
             retained_fallback!("visible_kitty_graphics");
@@ -4899,7 +4928,7 @@ impl HeadlessServer {
         let Some(mut frame) = client.render_state.last_frame().cloned() else {
             retained_fallback!("no_last_frame");
         };
-        if frame.width != *cols || frame.height != *rows {
+        if frame.width != cols || frame.height != rows {
             retained_fallback!("frame_size_mismatch");
         }
         frame.graphics.clear();
@@ -4907,13 +4936,14 @@ impl HeadlessServer {
         let Some(ws_idx) = self.app.state.active else {
             retained_fallback!("no_active_workspace");
         };
-        let pane_infos = self.app.state.view.pane_infos.clone();
+        let pane_infos = client.retained_pane_infos.clone();
+        let retained_pane_cursor = client.retained_pane_cursor;
         if pane_infos.is_empty() {
             retained_fallback!("no_pane_info");
         }
 
         let mut touched = false;
-        for info in pane_infos {
+        for info in &pane_infos {
             if !rect_fits_frame(info.inner_rect, &frame) {
                 retained_fallback!("pane_rect_outside_frame");
             }
@@ -4946,10 +4976,16 @@ impl HeadlessServer {
         }
 
         let previous_cursor = frame.cursor.clone();
-        frame.cursor = crate::server::render_stream::focused_terminal_cursor(
-            &self.app.state,
-            &self.app.terminal_runtimes,
-        );
+        if retained_pane_cursor {
+            frame.cursor = crate::ui::tab_surface_cursor(
+                &self.app.state,
+                &self.app.terminal_runtimes,
+                crate::ui::TabSurfaceView {
+                    pane_infos: &pane_infos,
+                    split_borders: &[],
+                },
+            );
+        }
         let cursor_changed = frame.cursor != previous_cursor;
 
         if !touched && !cursor_changed {
@@ -4957,7 +4993,7 @@ impl HeadlessServer {
         }
 
         let mut broken_clients = Vec::new();
-        let sent = self.send_retained_frame_to_client(*client_id, frame, &mut broken_clients);
+        let sent = self.send_retained_frame_to_client(client_id, frame, &mut broken_clients);
         for broken_client in broken_clients {
             self.remove_client_and_resize_if_needed(broken_client);
         }
@@ -5200,6 +5236,8 @@ impl HeadlessServer {
                         cursor,
                         &hyperlinks,
                     );
+                    let retained_pane_cursor =
+                        !crate::server::render_stream::dock_editor_is_focused(&self.app.state);
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
                     self.app
                         .state
@@ -5214,6 +5252,10 @@ impl HeadlessServer {
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
                     if let Some(client) = self.clients.get_mut(&client_id) {
+                        client
+                            .retained_pane_infos
+                            .clone_from(&self.app.state.view.pane_infos);
+                        client.retained_pane_cursor = retained_pane_cursor;
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
@@ -7288,72 +7330,218 @@ esac
         (server, client_rx, pane_id)
     }
 
-    fn show_retained_editor_preview(state: &mut crate::app::state::AppState) {
-        state.dock_editor_preview = Some(crate::app::state::DockEditorPreview {
-            path: "/tmp/preview.rs".into(),
-            content: "preview".into(),
-            notice: None,
-        });
+    fn client_key(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        code: crate::protocol::ClientKeyCode,
+        modifiers: KeyModifiers,
+    ) {
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code,
+                modifiers: modifiers.bits(),
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }],
+        }));
     }
 
-    fn show_retained_symphony(state: &mut crate::app::state::AppState) {
-        state.toggle_symphony();
+    fn client_prefix_action(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        code: crate::protocol::ClientKeyCode,
+        modifiers: KeyModifiers,
+    ) {
+        client_key(
+            server,
+            client_id,
+            crate::protocol::ClientKeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        );
+        client_key(server, client_id, code, modifiers);
     }
 
-    fn show_retained_loop_history(state: &mut crate::app::state::AppState) {
-        state.toggle_loop_run_history();
+    fn open_client_editor_preview(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        client_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let root = PathBuf::from("/nonexistent/herdr-retained-preview");
+        server.app.state.dock_files_root = Some(root.clone());
+        server.app.state.dock_file_cache.insert(
+            root.clone(),
+            crate::files::FileTreeSnapshot {
+                root,
+                files: vec![crate::files::FileRecord {
+                    path: PathBuf::from("preview.rs"),
+                    status: None,
+                    kind: crate::files::FileTreeRowKind::File,
+                }],
+                fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
+            },
+        );
+        let dock = &mut server
+            .clients
+            .get_mut(&client_id)
+            .expect("client")
+            .dock_presentation;
+        dock.collapsed = false;
+        dock.tab = Some(crate::app::DockSurface::Files);
+        dock.open_surfaces = vec![crate::app::DockSurface::Files];
+        dock.tab_bindings = vec![None];
+        dock.active_tab_index = Some(0);
+        dock.files_focused = true;
+
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("files surface frame");
+        let hit = server
+            .app
+            .state
+            .view
+            .dock_file_row_hit_areas
+            .first()
+            .expect("preview file row")
+            .rect;
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Down(
+                    crate::protocol::ClientMouseButton::Left,
+                ),
+                column: hit.x,
+                row: hit.y,
+                modifiers: 0,
+            }],
+        }));
     }
 
-    fn show_retained_usage(state: &mut crate::app::state::AppState) {
-        state.toggle_usage_view();
+    fn open_client_symphony(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        _client_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        client_prefix_action(
+            server,
+            client_id,
+            crate::protocol::ClientKeyCode::Char('s'),
+            KeyModifiers::SHIFT,
+        );
     }
 
-    fn show_retained_work(state: &mut crate::app::state::AppState) {
-        state.work_view = Some(crate::app::state::WorkViewState::new(false, None));
+    fn open_client_loop_history(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        _client_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        client_prefix_action(
+            server,
+            client_id,
+            crate::protocol::ClientKeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        );
     }
 
-    fn show_retained_dock_object_preview(state: &mut crate::app::state::AppState) {
-        state.dock_collapsed = true;
-        state.dock_object_preview = Some(crate::app::state::DockObjectRef {
+    fn open_client_usage(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        _client_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        client_prefix_action(
+            server,
+            client_id,
+            crate::protocol::ClientKeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        );
+    }
+
+    fn open_client_work(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        _client_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        client_prefix_action(
+            server,
+            client_id,
+            crate::protocol::ClientKeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+        );
+    }
+
+    fn open_client_dock_object_preview(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        _client_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let dock = &mut server
+            .clients
+            .get_mut(&client_id)
+            .expect("client")
+            .dock_presentation;
+        dock.collapsed = true;
+        dock.object_preview = Some(crate::app::state::DockObjectRef {
             surface: crate::app::DockSurface::Linear,
             key: "SCA-1".into(),
         });
     }
 
-    fn show_retained_home(state: &mut crate::app::state::AppState) {
-        state.home = Some(crate::app::home::HomeState::default());
-    }
-
-    fn show_retained_inbox(state: &mut crate::app::state::AppState) {
-        state.inbox = Some(crate::app::inbox::InboxState::default());
-    }
-
     #[tokio::test]
-    async fn replacing_terminal_area_surfaces_hide_tiled_panes_from_retained_rendering() {
-        type SurfaceSetup = (&'static str, fn(&mut crate::app::state::AppState));
-        let setups: [SurfaceSetup; 8] = [
-            ("editor preview", show_retained_editor_preview),
-            ("symphony", show_retained_symphony),
-            ("loop history", show_retained_loop_history),
-            ("usage", show_retained_usage),
-            ("work", show_retained_work),
-            ("dock object preview", show_retained_dock_object_preview),
-            ("home", show_retained_home),
-            ("inbox", show_retained_inbox),
+    async fn attach_local_surfaces_reject_tiled_pane_retained_updates() {
+        type SurfaceSetup = (
+            &'static str,
+            fn(&mut HeadlessServer, u64, &std::sync::mpsc::Receiver<Vec<u8>>),
+        );
+        let setups: [SurfaceSetup; 6] = [
+            ("editor preview", open_client_editor_preview),
+            ("symphony", open_client_symphony),
+            ("loop history", open_client_loop_history),
+            ("usage", open_client_usage),
+            ("work", open_client_work),
+            ("dock object preview", open_client_dock_object_preview),
         ];
 
         for (name, setup) in setups {
-            let (mut server, _client_rx, pane_id) = retained_test_server(b"tiled pane");
-            setup(&mut server.app.state);
-
-            assert!(server.app.state.tab_surface_replaced(), "{name}");
+            let (mut server, client_rx, pane_id) = retained_test_server(b"tiled pane");
+            server.render_and_stream();
+            let _ = client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial tab frame");
+            setup(&mut server, 1, &client_rx);
             assert!(
-                !server.app.state.app_surface_pane_ids().contains(&pane_id),
+                server.clients[&1].tab_surface_replaced(&server.app.state),
                 "{name}"
             );
-            assert!(!server.app_surface_contains_pane(pane_id), "{name}");
-            assert!(!server.retained_pty_update_allowed_by_app_state(), "{name}");
-            assert!(!server.render_retained_pty_update_and_stream(), "{name}");
+            server.render_and_stream();
+            let surface_frame = read_server_frame(
+                client_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("replacement surface frame"),
+            );
+            let runtime = server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+                .expect("runtime");
+            runtime.test_process_pty_bytes(b"\rZ");
+
+            assert!(server.render_retained_pty_update_and_stream(), "{name}");
+            assert_frame_data_eq(
+                server.clients[&1]
+                    .render_state
+                    .last_frame()
+                    .expect("replacement frame retained"),
+                &surface_frame,
+            );
+            assert!(
+                client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "{name} received a tiled-pane patch"
+            );
         }
     }
 
@@ -12219,6 +12407,71 @@ next_tab = ""
         );
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
         assert_eq!((patched.width, patched.height), (80, 24));
+    }
+
+    #[tokio::test]
+    async fn tab_client_keeps_retained_pty_updates_beside_attach_local_usage_client() {
+        let (mut server, usage_rx, pane_id) = retained_test_server(b"aaaa");
+        let (tab_tx, _tab_control_rx, tab_rx) = test_client_writer();
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(tab_tx),
+            ),
+        );
+        server.render_and_stream();
+        let _ = usage_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial first-client frame");
+        let tab_frame = read_server_frame(
+            tab_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial tab-client frame"),
+        );
+
+        open_client_usage(&mut server, 1, &usage_rx);
+        server.render_and_stream();
+        let usage_frame = read_server_frame(
+            usage_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("usage frame"),
+        );
+        assert!(tab_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(server.clients[&1].usage_view.is_some());
+        assert!(server.clients[&2].usage_view.is_none());
+        assert!(server.any_app_client_displays_tab());
+        server.sync_immediate_pty_sources();
+        assert!(server.app.render_dirty.request_pty(pane_id));
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        assert!(server.render_retained_pty_update_and_stream());
+        assert_eq!(
+            server.clients[&1]
+                .render_state
+                .last_frame()
+                .expect("usage frame retained"),
+            &usage_frame
+        );
+        assert!(usage_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        let patched_tab = read_server_frame(
+            tab_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("retained tab frame"),
+        );
+        assert_ne!(patched_tab, tab_frame);
+        assert!(patched_tab.cells.iter().any(|cell| cell.symbol == "Z"));
     }
 
     #[tokio::test]

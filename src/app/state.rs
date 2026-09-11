@@ -5726,11 +5726,18 @@ impl AppState {
     }
 
     pub(crate) fn app_surface_pane_ids(&self) -> std::collections::HashSet<PaneId> {
+        self.app_surface_pane_ids_with_tab_visibility(!self.tab_surface_replaced())
+    }
+
+    pub(crate) fn app_surface_pane_ids_with_tab_visibility(
+        &self,
+        tab_visible: bool,
+    ) -> std::collections::HashSet<PaneId> {
         let mut pane_ids = std::collections::HashSet::new();
         if let Some(popup) = &self.popup_pane {
             pane_ids.insert(popup.pane_id);
         }
-        if self.tab_surface_replaced() {
+        if !tab_visible {
             return pane_ids;
         }
         let Some(tab) = self
