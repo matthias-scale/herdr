@@ -258,6 +258,10 @@ impl TerminalRuntime {
         self.0.set_remote_proxy_input_enabled(enabled)
     }
 
+    pub(crate) fn remote_proxy_input_enabled(&self) -> Option<bool> {
+        self.0.remote_proxy_input_enabled()
+    }
+
     /// Feeds one complete remote terminal frame into the local screen. Runs
     /// on the app event loop, never in a render or layout path.
     pub(crate) fn process_remote_frame(&self, bytes: &[u8]) -> bool {

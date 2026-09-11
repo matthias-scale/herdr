@@ -2772,6 +2772,22 @@ impl App {
         }
     }
 
+    pub(crate) fn focused_remote_proxy_input_gate_closed(&self) -> bool {
+        if !matches!(
+            self.terminal_input_context(),
+            Some(TerminalInputContext::Pane)
+        ) {
+            return false;
+        }
+        let Some(ws_idx) = self.state.active else {
+            return false;
+        };
+        self.state
+            .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            .and_then(|runtime| runtime.remote_proxy_input_enabled())
+            .is_some_and(|enabled| !enabled)
+    }
+
     fn execute_repeat_plan_headless(
         &mut self,
         source_id: InputSourceId,
@@ -2983,6 +2999,8 @@ impl App {
                                 continue;
                             }
                             let initial_context = self.terminal_input_context();
+                            let proxy_input_gate_closed =
+                                self.focused_remote_proxy_input_gate_closed();
                             let target = if initial_context.is_some() {
                                 self.handle_terminal_key_headless_from_with_hook(
                                     source_id,
@@ -2995,12 +3013,13 @@ impl App {
                                 None
                             };
                             let resulting_context = self.terminal_input_context();
-                            let plan = self.input_leases.complete_press(
+                            let plan = self.input_leases.complete_press_with_reprocess(
                                 lease_key,
                                 &key,
                                 initial_context.as_ref(),
                                 resulting_context.as_ref(),
                                 target,
+                                !proxy_input_gate_closed,
                             );
                             self.execute_repeat_plan_headless(
                                 source_id,

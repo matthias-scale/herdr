@@ -1615,6 +1615,13 @@ impl PaneRuntimeIo {
         }
     }
 
+    fn remote_proxy_input_enabled(&self) -> Option<bool> {
+        let PaneRuntimeIo::RemoteProxy { input_enabled, .. } = self else {
+            return None;
+        };
+        Some(input_enabled.load(Ordering::Acquire))
+    }
+
     fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_terminal_response(response),
@@ -2131,6 +2138,10 @@ impl PaneRuntime {
         };
         input_enabled.store(enabled, Ordering::Release);
         true
+    }
+
+    pub(crate) fn remote_proxy_input_enabled(&self) -> Option<bool> {
+        self.io.remote_proxy_input_enabled()
     }
 
     /// Feeds one complete remote terminal frame into the local screen.

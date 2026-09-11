@@ -214,14 +214,16 @@ impl App {
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
                         let initial_context = self.terminal_input_context();
+                        let proxy_input_gate_closed = self.focused_remote_proxy_input_gate_closed();
                         let target = self.handle_key(key.clone()).await;
                         let resulting_context = self.terminal_input_context();
-                        let plan = self.input_leases.complete_press(
+                        let plan = self.input_leases.complete_press_with_reprocess(
                             lease_key,
                             &key,
                             initial_context.as_ref(),
                             resulting_context.as_ref(),
                             target,
+                            !proxy_input_gate_closed,
                         );
                         self.execute_repeat_plan(lease_key, key, plan).await;
                         true

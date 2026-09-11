@@ -1103,6 +1103,58 @@ mod tests {
     }
 
     #[test]
+    fn refused_proxy_press_drops_a_later_held_key_repeat() {
+        let (mut app, recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let terminal_id = proxy_terminal_id(&app, &started.operation_id);
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::empty(),
+        )
+        .with_windows_record(crate::input::WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 65,
+            virtual_scan_code: 30,
+            unicode: b'a' as u16,
+            control_key_state: 0,
+        });
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(key.clone())],
+            false,
+        );
+        app.apply_remote_focus_transition(
+            &started.operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+        app.apply_remote_focus_frame(&started.operation_id, &full_frame(b"ready"));
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("proxy runtime")
+            .is_remote_proxy());
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(
+                key.with_kind(crossterm::event::KeyEventKind::Repeat),
+            )],
+            false,
+        );
+
+        assert!(recording
+            .lock()
+            .expect("lock")
+            .outbound
+            .as_mut()
+            .expect("outbound channel")
+            .try_recv()
+            .is_err());
+    }
+
+    #[test]
     fn failure_closes_the_proxy_pane_and_releases_the_lease() {
         let (mut app, recording) = proxy_app();
         let started = app
