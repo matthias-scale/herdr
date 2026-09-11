@@ -4820,6 +4820,9 @@ impl HeadlessServer {
         {
             return true;
         }
+        if self.app.state.tab_surface_replaced() {
+            return false;
+        }
         let Some(workspace) = self
             .app
             .state
@@ -4966,6 +4969,7 @@ impl HeadlessServer {
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
         self.app.state.mode == app::Mode::Terminal
+            && !self.app.state.tab_surface_replaced()
             && self.app.state.popup_pane.is_none()
             && self.app.state.selection.is_none()
             && self.app.state.copy_mode.is_none()
@@ -7282,6 +7286,75 @@ esac
         server.resize_shared_runtime_to_effective_size();
 
         (server, client_rx, pane_id)
+    }
+
+    fn show_retained_editor_preview(state: &mut crate::app::state::AppState) {
+        state.dock_editor_preview = Some(crate::app::state::DockEditorPreview {
+            path: "/tmp/preview.rs".into(),
+            content: "preview".into(),
+            notice: None,
+        });
+    }
+
+    fn show_retained_symphony(state: &mut crate::app::state::AppState) {
+        state.toggle_symphony();
+    }
+
+    fn show_retained_loop_history(state: &mut crate::app::state::AppState) {
+        state.toggle_loop_run_history();
+    }
+
+    fn show_retained_usage(state: &mut crate::app::state::AppState) {
+        state.toggle_usage_view();
+    }
+
+    fn show_retained_work(state: &mut crate::app::state::AppState) {
+        state.work_view = Some(crate::app::state::WorkViewState::new(false, None));
+    }
+
+    fn show_retained_dock_object_preview(state: &mut crate::app::state::AppState) {
+        state.dock_collapsed = true;
+        state.dock_object_preview = Some(crate::app::state::DockObjectRef {
+            surface: crate::app::DockSurface::Linear,
+            key: "SCA-1".into(),
+        });
+    }
+
+    fn show_retained_home(state: &mut crate::app::state::AppState) {
+        state.home = Some(crate::app::home::HomeState::default());
+    }
+
+    fn show_retained_inbox(state: &mut crate::app::state::AppState) {
+        state.inbox = Some(crate::app::inbox::InboxState::default());
+    }
+
+    #[tokio::test]
+    async fn replacing_terminal_area_surfaces_hide_tiled_panes_from_retained_rendering() {
+        type SurfaceSetup = (&'static str, fn(&mut crate::app::state::AppState));
+        let setups: [SurfaceSetup; 8] = [
+            ("editor preview", show_retained_editor_preview),
+            ("symphony", show_retained_symphony),
+            ("loop history", show_retained_loop_history),
+            ("usage", show_retained_usage),
+            ("work", show_retained_work),
+            ("dock object preview", show_retained_dock_object_preview),
+            ("home", show_retained_home),
+            ("inbox", show_retained_inbox),
+        ];
+
+        for (name, setup) in setups {
+            let (mut server, _client_rx, pane_id) = retained_test_server(b"tiled pane");
+            setup(&mut server.app.state);
+
+            assert!(server.app.state.tab_surface_replaced(), "{name}");
+            assert!(
+                !server.app.state.app_surface_pane_ids().contains(&pane_id),
+                "{name}"
+            );
+            assert!(!server.app_surface_contains_pane(pane_id), "{name}");
+            assert!(!server.retained_pty_update_allowed_by_app_state(), "{name}");
+            assert!(!server.render_retained_pty_update_and_stream(), "{name}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12119,6 +12192,10 @@ next_tab = ""
     #[tokio::test]
     async fn retained_pty_update_streams_dirty_row_from_last_frame() {
         let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        assert!(!server.app.state.tab_surface_replaced());
+        assert!(server.app.state.app_surface_pane_ids().contains(&pane_id));
+        assert!(server.app_surface_contains_pane(pane_id));
+        assert!(server.retained_pty_update_allowed_by_app_state());
         server.render_and_stream();
         let first = read_server_frame(
             client_rx
@@ -12142,6 +12219,66 @@ next_tab = ""
         );
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
         assert_eq!((patched.width, patched.height), (80, 24));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_cannot_alternate_home_composer_cells() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"underlying pane");
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial pane frame");
+        server.app.state.home = Some(crate::app::home::HomeState::default());
+        server.render_and_stream();
+        let home_frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial home frame"),
+        );
+        assert!(!server.app.state.app_surface_pane_ids().contains(&pane_id));
+        assert!(!server.app_surface_contains_pane(pane_id));
+        let pane = server.app.state.view.pane_infos[0].clone();
+        let top_right = (pane.inner_rect.right() - 2, pane.inner_rect.y);
+        let bottom_left = (pane.inner_rect.x, pane.inner_rect.bottom() - 2);
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        let (rows, cols) = runtime.current_size();
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[1;{}HX\x1b[{};1HY",
+                cols.saturating_sub(1),
+                rows.saturating_sub(1)
+            )
+            .as_bytes(),
+        );
+
+        let retained = server.render_retained_pty_update_and_stream();
+        let retained_frame = server
+            .clients
+            .get(&1)
+            .and_then(|client| client.render_state.last_frame())
+            .expect("client frame after retained attempt");
+        let cell_index = |frame: &FrameData, (x, y): (u16, u16)| {
+            usize::from(y) * usize::from(frame.width) + usize::from(x)
+        };
+
+        assert_eq!(
+            retained_frame.cells[cell_index(retained_frame, top_right)],
+            home_frame.cells[cell_index(&home_frame, top_right)]
+        );
+        assert_eq!(
+            retained_frame.cells[cell_index(retained_frame, bottom_left)],
+            home_frame.cells[cell_index(&home_frame, bottom_left)]
+        );
+        assert_eq!(retained_frame, &home_frame);
+        assert!(!retained, "home must reject tiled-pane retained patches");
+        assert!(
+            client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "unchanged home cells must not be streamed"
+        );
     }
 
     #[tokio::test]

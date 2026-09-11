@@ -3348,6 +3348,20 @@ pub(crate) struct PaneSettlementChange {
     pub(crate) settled_at: Option<u64>,
 }
 
+/// Renderer selected for the full terminal area before overlays are applied.
+pub(crate) enum TerminalAreaSurface<'a> {
+    EditorPreview,
+    Symphony(&'a SymphonyDetail),
+    LoopRunHistory(&'a LoopRunHistoryDetail),
+    Usage,
+    Work,
+    DockObjectPreview,
+    Home,
+    Inbox(&'a crate::app::inbox::InboxState),
+    Tab,
+    Empty,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5677,10 +5691,47 @@ impl AppState {
         section == SettingsSection::Integrations && self.integration_updates_available()
     }
 
+    pub(crate) fn terminal_area_surface(&self) -> TerminalAreaSurface<'_> {
+        let preview_is_in_dock = !self.dock_collapsed && self.dock_tab == Some(DockSurface::Editor);
+        if self.dock_editor_preview.is_some() && !preview_is_in_dock {
+            TerminalAreaSurface::EditorPreview
+        } else if let Some(detail) = self.symphony_detail.as_ref() {
+            TerminalAreaSurface::Symphony(detail)
+        } else if let Some(detail) = self.loop_run_history_detail.as_ref() {
+            TerminalAreaSurface::LoopRunHistory(detail)
+        } else if self.usage_view.is_some() {
+            TerminalAreaSurface::Usage
+        } else if self.work_view.is_some() {
+            TerminalAreaSurface::Work
+        } else if self.dock_collapsed && self.dock_object_preview.is_some() {
+            TerminalAreaSurface::DockObjectPreview
+        } else if self.home.is_some() {
+            TerminalAreaSurface::Home
+        } else if let Some(inbox) = self.inbox.as_ref() {
+            TerminalAreaSurface::Inbox(inbox)
+        } else if self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .is_some()
+        {
+            TerminalAreaSurface::Tab
+        } else {
+            TerminalAreaSurface::Empty
+        }
+    }
+
+    /// True when the terminal-area renderer does not display the active tab.
+    pub(crate) fn tab_surface_replaced(&self) -> bool {
+        !matches!(self.terminal_area_surface(), TerminalAreaSurface::Tab)
+    }
+
     pub(crate) fn app_surface_pane_ids(&self) -> std::collections::HashSet<PaneId> {
         let mut pane_ids = std::collections::HashSet::new();
         if let Some(popup) = &self.popup_pane {
             pane_ids.insert(popup.pane_id);
+        }
+        if self.tab_surface_replaced() {
+            return pane_ids;
         }
         let Some(tab) = self
             .active
@@ -6631,6 +6682,90 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    type SurfaceSetup = (&'static str, fn(&mut AppState));
+
+    fn show_editor_preview(state: &mut AppState) {
+        state.dock_editor_preview = Some(DockEditorPreview {
+            path: "/tmp/preview.rs".into(),
+            content: "preview".into(),
+            notice: None,
+        });
+    }
+
+    fn show_symphony(state: &mut AppState) {
+        state.toggle_symphony();
+    }
+
+    fn show_loop_history(state: &mut AppState) {
+        state.toggle_loop_run_history();
+    }
+
+    fn show_usage(state: &mut AppState) {
+        state.toggle_usage_view();
+    }
+
+    fn show_work(state: &mut AppState) {
+        state.work_view = Some(WorkViewState::new(false, None));
+    }
+
+    fn show_dock_object_preview(state: &mut AppState) {
+        state.dock_collapsed = true;
+        state.dock_object_preview = Some(DockObjectRef {
+            surface: DockSurface::Linear,
+            key: "SCA-1".into(),
+        });
+    }
+
+    fn show_home(state: &mut AppState) {
+        state.home = Some(crate::app::home::HomeState::default());
+    }
+
+    fn show_inbox(state: &mut AppState) {
+        state.inbox = Some(crate::app::inbox::InboxState::default());
+    }
+
+    fn replacing_surface_setups() -> [SurfaceSetup; 8] {
+        [
+            ("editor preview", show_editor_preview),
+            ("symphony", show_symphony),
+            ("loop history", show_loop_history),
+            ("usage", show_usage),
+            ("work", show_work),
+            ("dock object preview", show_dock_object_preview),
+            ("home", show_home),
+            ("inbox", show_inbox),
+        ]
+    }
+
+    #[test]
+    fn tab_surface_replacement_matches_every_terminal_area_renderer_branch() {
+        let empty = AppState::test_new();
+        assert!(matches!(
+            empty.terminal_area_surface(),
+            TerminalAreaSurface::Empty
+        ));
+        assert!(empty.tab_surface_replaced());
+
+        let mut normal = AppState::test_new();
+        normal.workspaces = vec![crate::workspace::Workspace::test_new("tab")];
+        normal.active = Some(0);
+        assert!(matches!(
+            normal.terminal_area_surface(),
+            TerminalAreaSurface::Tab
+        ));
+        assert!(!normal.tab_surface_replaced());
+
+        for (name, setup) in replacing_surface_setups() {
+            let mut state = AppState::test_new();
+            setup(&mut state);
+            assert!(state.tab_surface_replaced(), "{name}");
+            assert!(
+                !matches!(state.terminal_area_surface(), TerminalAreaSurface::Tab),
+                "{name}"
+            );
+        }
+    }
 
     fn linear_ownership_ticket(
         identifier: &str,
