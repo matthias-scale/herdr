@@ -2662,6 +2662,28 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn closing_block_adapter_payload(items: serde_json::Value) -> serde_json::Value {
+        let asset_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/integration/assets/closing-block");
+        let input = serde_json::to_string(&items).expect("serialize adapter input");
+        let output = std::process::Command::new("python3")
+            .current_dir(asset_dir)
+            .args([
+                "-c",
+                "import json, sys; import herdr_status; items = json.loads(sys.argv[1]); outcome = herdr_status.report(agent='claude', blocking=0, agents=0, items=items, pane_id='', sock_path=''); print(json.dumps(outcome['payload']))",
+                &input,
+            ])
+            .output()
+            .expect("run closing-block adapter");
+        assert!(
+            output.status.success(),
+            "adapter failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse closing-block adapter payload")
+    }
+
     fn metadata_error_code(response: &str) -> String {
         let response: ErrorResponse = serde_json::from_str(response).unwrap();
         response.error.code
@@ -4949,6 +4971,103 @@ mod tests {
         assert_eq!(pane.items[0].label, "Answer");
         assert_eq!(pane.decisions[0].recommendation, "proceed");
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Blocked);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adapter_answer_payload_blocks_every_idle_pane_consumer_and_clears_next_turn() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let mut payload = closing_block_adapter_payload(serde_json::json!([{
+            "n": 1,
+            "label": "Answer",
+            "text": "Choose the release lane"
+        }]));
+        payload["pane_id"] = serde_json::json!(pane_id);
+        payload["source"] = serde_json::json!("herdr:claude-closing-block");
+        payload["seq"] = serde_json::json!(1);
+        let params: PaneReportAgentParams =
+            serde_json::from_value(payload).expect("adapter payload matches pane report schema");
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "answer-action-point".into(),
+            method: crate::api::schema::Method::PaneReportAgent(params),
+        });
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&internal_pane_id)
+            .expect("reported pane")
+            .seen = false;
+
+        let pane = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .expect("reported pane");
+        let terminal = &app.state.terminals[&terminal_id];
+        let projected = terminal.sidebar_projection(pane.seen).0;
+        assert_eq!(projected, AgentState::Blocked);
+        assert_eq!(terminal.closing_items[0].text, "Choose the release lane");
+        let pane_info = app
+            .pane_info(0, internal_pane_id)
+            .expect("reported pane info");
+        assert_eq!(pane_info.items[0].text, "Choose the release lane");
+        assert!(crate::terminal::counts_as_blocked(
+            projected,
+            !terminal.closing_gates.is_empty(),
+            terminal.usage_limited
+        ));
+        assert!(!crate::app::pane_lifecycle::pane_is_done(pane, terminal));
+
+        app.state.auto_settle_inactive = true;
+        app.state.settle_after = std::time::Duration::ZERO;
+        let now = std::time::Instant::now();
+        assert_eq!(app.state.refresh_settled_panes_at(None, now, 1), 0);
+        assert!(!app.state.pane_is_settled(0, internal_pane_id));
+
+        app.state.auto_nudge_stalled_agents = true;
+        app.state.nudge_after = std::time::Duration::ZERO;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .supervisor_stale = true;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 8,
+            );
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        assert!(!app.tick_auto_nudges(now));
+        assert!(
+            rx.try_recv().is_err(),
+            "blocked pane received an auto-nudge"
+        );
+
+        let mut clear = closing_block_adapter_payload(serde_json::json!([]));
+        clear["pane_id"] = serde_json::json!(pane_id);
+        clear["source"] = serde_json::json!("herdr:claude-closing-block");
+        clear["seq"] = serde_json::json!(2);
+        let params: PaneReportAgentParams =
+            serde_json::from_value(clear).expect("clear payload matches pane report schema");
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "clear-action-point".into(),
+            method: crate::api::schema::Method::PaneReportAgent(params),
+        });
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.closing_gates.is_empty());
+        assert!(terminal.closing_items.is_empty());
     }
 
     #[test]
