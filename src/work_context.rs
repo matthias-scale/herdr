@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use regex::{Regex, RegexBuilder};
@@ -183,15 +183,16 @@ fn missive_link_label(url: &str) -> String {
 
 impl PaneWorkContext {
     pub(crate) fn normalized(self) -> Result<Self, String> {
-        self.normalized_for_write(None)
+        self.normalized_for_write()
     }
 
-    fn normalized_restored(self, tier: &'static str) -> Result<Self, String> {
-        self.normalized_for_write(Some(tier))
+    fn normalized_restored(mut self, tier: &'static str) -> Result<Self, String> {
+        self.keep_restored_primary_work_items(tier);
+        self.normalized_for_write()
     }
 
-    fn normalized_for_write(mut self, restored_tier: Option<&'static str>) -> Result<Self, String> {
-        self.set_latest_work_items(restored_tier);
+    fn normalized_for_write(mut self) -> Result<Self, String> {
+        self.set_latest_work_items();
         let normalized = Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
@@ -215,9 +216,14 @@ impl PaneWorkContext {
 
     /// Enforce the per-agent assignment cardinality while preserving the array
     /// wire shape. Array order is assignment order, so the last value wins.
-    pub(crate) fn set_latest_work_items(&mut self, restored_tier: Option<&'static str>) {
-        keep_latest_work_item(&mut self.ticket_ids, "ticket_ids", restored_tier);
-        keep_latest_work_item(&mut self.pr_urls, "pr_urls", restored_tier);
+    pub(crate) fn set_latest_work_items(&mut self) {
+        keep_latest_work_item(&mut self.ticket_ids);
+        keep_latest_work_item(&mut self.pr_urls);
+    }
+
+    fn keep_restored_primary_work_items(&mut self, tier: &'static str) {
+        keep_restored_primary_work_item(&mut self.ticket_ids, "ticket_ids", tier);
+        keep_restored_primary_work_item(&mut self.pr_urls, "pr_urls", tier);
     }
 
     /// Fill an absent repository from an explicitly bound pull request.
@@ -539,7 +545,7 @@ impl PaneWorkContextState {
     }
 
     pub(crate) fn replace_manual_normalized(&mut self, mut context: PaneWorkContext) -> bool {
-        context.set_latest_work_items(None);
+        context.set_latest_work_items();
         if context == self.manual {
             return false;
         }
@@ -611,8 +617,7 @@ impl PaneWorkContextState {
         let context = context.normalized()?;
         // Any live observation supersedes the unknown-provenance legacy value.
         let fallback_changed = self.clear_restored_fallback();
-        let superseded_changed = supersede_inferred_work_items(&context, &mut self.hook_turn);
-        if context == self.git_observation && !fallback_changed && !superseded_changed {
+        if context == self.git_observation && !fallback_changed {
             return Ok(false);
         }
         self.git_observation = context;
@@ -706,30 +711,35 @@ impl PaneWorkContextState {
             role,
             active_owner,
         };
-        self.effective.set_latest_work_items(None);
+        self.effective.set_latest_work_items();
     }
 }
 
-fn keep_latest_work_item<T>(
+fn keep_latest_work_item<T>(values: &mut Vec<T>) {
+    if values.len() <= 1 {
+        return;
+    }
+    let latest = values.pop();
+    values.clear();
+    values.extend(latest);
+}
+
+fn keep_restored_primary_work_item<T>(
     values: &mut Vec<T>,
     field: &'static str,
-    restored_tier: Option<&'static str>,
+    tier: &'static str,
 ) {
     if values.len() <= 1 {
         return;
     }
     let original_count = values.len();
-    let latest = values.pop();
-    values.clear();
-    values.extend(latest);
-    if let Some(tier) = restored_tier {
-        tracing::warn!(
-            tier,
-            field,
-            original_count,
-            "truncated restored work context to its latest assignment"
-        );
-    }
+    values.truncate(1);
+    tracing::warn!(
+        tier,
+        field,
+        original_count,
+        "truncated restored work context to its previously primary assignment"
+    );
 }
 
 fn supersede_inferred_work_items(newer: &PaneWorkContext, older: &mut PaneWorkContext) -> bool {
@@ -803,19 +813,16 @@ fn is_ascii_token_char(byte: u8) -> bool {
 
 pub fn extract_ticket_ids(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
-    let mut seen = HashSet::new();
-    let mut tickets = Vec::new();
+    let mut last_occurrences = HashMap::new();
     for matched in ticket_regex().find_iter(text) {
         let left_ok = matched.start() == 0 || !is_ascii_token_char(bytes[matched.start() - 1]);
         let right_ok = matched.end() == bytes.len() || !is_ascii_token_char(bytes[matched.end()]);
         if left_ok && right_ok {
             let ticket = matched.as_str().to_ascii_uppercase();
-            if seen.insert(ticket.clone()) {
-                tickets.push(ticket);
-            }
+            last_occurrences.insert(ticket, matched.start());
         }
     }
-    tickets
+    values_by_last_occurrence(last_occurrences)
 }
 
 /// Longest candidate a host-only preview URL may be; the preview normalizer rejects anything with a
@@ -843,8 +850,7 @@ fn bounded_candidate(remaining: &str, max_bytes: usize) -> Option<&str> {
 pub fn extract_pr_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://github.com/";
 
-    let mut seen = HashSet::new();
-    let mut urls = Vec::new();
+    let mut last_occurrences = HashMap::new();
     for (start, _) in text.match_indices(PREFIX) {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
@@ -855,11 +861,15 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
         let Ok(url) = normalize_pr_url(candidate) else {
             continue;
         };
-        if seen.insert(url.clone()) {
-            urls.push(url);
-        }
+        last_occurrences.insert(url, start);
     }
-    urls
+    values_by_last_occurrence(last_occurrences)
+}
+
+fn values_by_last_occurrence(last_occurrences: HashMap<String, usize>) -> Vec<String> {
+    let mut values: Vec<_> = last_occurrences.into_iter().collect();
+    values.sort_unstable_by_key(|(_, position)| *position);
+    values.into_iter().map(|(value, _)| value).collect()
 }
 
 /// Split an observed preview URL into its bare root and the full URL as written.
@@ -1325,10 +1335,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ac2_ticket_normalization_uses_ascii_token_boundaries_and_first_seen_order() {
+    fn work_item_extraction_orders_unique_values_by_their_last_occurrence() {
         assert_eq!(
-            extract_ticket_ids("sca-12, MAT-7; SCA-12"),
-            vec!["SCA-12", "MAT-7"]
+            extract_ticket_ids("SCA-1 SCA-2 SCA-1"),
+            vec!["SCA-2", "SCA-1"]
+        );
+        assert_eq!(
+            extract_pr_urls(concat!(
+                "https://github.com/o/r/pull/1 ",
+                "https://github.com/o/r/pull/2 ",
+                "https://github.com/o/r/pull/1"
+            )),
+            vec![
+                "https://github.com/o/r/pull/2",
+                "https://github.com/o/r/pull/1"
+            ]
         );
         assert!(extract_ticket_ids("FORMAT-12 XMAT-3 MAT-4X _SCA-5").is_empty());
     }
@@ -1848,7 +1869,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_inference_replaces_older_inference_but_not_an_explicit_assignment() {
+    fn source_tier_precedence_is_manual_then_hook_then_git() {
         let mut state = PaneWorkContextState::default();
         state
             .replace_hook_turn(PaneWorkContext {
@@ -1864,8 +1885,8 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(state.effective().ticket_ids, ["SCA-2"]);
-        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/2"]);
+        assert_eq!(state.effective().ticket_ids, ["SCA-1"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/1"]);
 
         state
             .apply_manual_patch(PaneWorkContextPatch {
@@ -2389,13 +2410,16 @@ mod tests {
     }
 
     #[test]
-    fn restore_truncates_each_persisted_tier_before_recomputing() {
+    fn restore_keeps_each_tiers_previously_primary_work_item_and_ownership() {
         let context = |first: u64| PaneWorkContext {
             ticket_ids: vec![format!("SCA-{first}"), format!("SCA-{}", first + 1)],
             pr_urls: vec![
-                format!("https://github.com/o/r/pull/{first}"),
-                format!("https://github.com/o/r/pull/{}", first + 1),
+                format!("https://github.com/owned/repo/pull/{first}"),
+                format!("https://github.com/other/repo/pull/{}", first + 1),
             ],
+            repo: Some("owned/repo".into()),
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
             ..Default::default()
         };
         let state = PaneWorkContextState::from_restored_with_tiers(
@@ -2411,27 +2435,41 @@ mod tests {
 
         let tiers = state.snapshot_tiers();
         for (tier, ticket, pr) in [
-            (&tiers.manual, "SCA-11", "https://github.com/o/r/pull/11"),
-            (&tiers.hook_turn, "SCA-21", "https://github.com/o/r/pull/21"),
+            (
+                &tiers.manual,
+                "SCA-10",
+                "https://github.com/owned/repo/pull/10",
+            ),
+            (
+                &tiers.hook_turn,
+                "SCA-20",
+                "https://github.com/owned/repo/pull/20",
+            ),
             (
                 &tiers.git_observation,
-                "SCA-31",
-                "https://github.com/o/r/pull/31",
+                "SCA-30",
+                "https://github.com/owned/repo/pull/30",
             ),
             (
                 &tiers.restored_fallback,
-                "SCA-41",
-                "https://github.com/o/r/pull/41",
+                "SCA-40",
+                "https://github.com/owned/repo/pull/40",
             ),
         ] {
             assert_eq!(tier.ticket_ids, [ticket]);
             assert_eq!(tier.pr_urls, [pr]);
+            assert_eq!(tier.repo.as_deref(), Some("owned/repo"));
+            assert_eq!(tier.role, Some(PaneWorkRole::Ship));
+            assert!(tier.active_owner);
         }
-        assert_eq!(state.effective().ticket_ids, ["SCA-11"]);
+        assert_eq!(state.effective().ticket_ids, ["SCA-10"]);
         assert_eq!(
             state.effective().pr_urls,
-            ["https://github.com/o/r/pull/11"]
+            ["https://github.com/owned/repo/pull/10"]
         );
+        assert_eq!(state.effective().repo.as_deref(), Some("owned/repo"));
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
     }
 
     #[test]

@@ -794,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_multi_item_snapshot_restores_only_its_latest_assignments() {
+    fn legacy_multi_item_snapshot_restores_only_its_previously_primary_assignments() {
         let raw = r#"{
             "version": 3,
             "workspaces": [{
@@ -831,10 +831,10 @@ mod tests {
             )
             .expect("legacy work context should restore");
 
-        assert_eq!(restored.effective_work_context().ticket_ids, ["SCA-2"]);
+        assert_eq!(restored.effective_work_context().ticket_ids, ["SCA-1"]);
         assert_eq!(
             restored.effective_work_context().pr_urls,
-            ["https://github.com/o/r/pull/2"]
+            ["https://github.com/o/r/pull/1"]
         );
     }
 
