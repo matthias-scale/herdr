@@ -1740,6 +1740,46 @@ impl crate::app::state::AppState {
             .push_str(text);
     }
 
+    pub(crate) fn note_human_bytes(&mut self, pane_id: crate::layout::PaneId, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\u{1b}' {
+                if characters
+                    .peek()
+                    .is_some_and(|next| matches!(next, '[' | 'O'))
+                {
+                    characters.next();
+                    for sequence_character in characters.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&sequence_character) {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            match character {
+                '\r' | '\n' => {
+                    self.pending_human_drafts.remove(&pane_id);
+                }
+                '\u{7f}' | '\u{8}' => {
+                    if let Some(draft) = self.pending_human_drafts.get_mut(&pane_id) {
+                        draft.pop();
+                        if draft.is_empty() {
+                            self.pending_human_drafts.remove(&pane_id);
+                        }
+                    }
+                }
+                '\0'..='\u{1f}' => {}
+                _ => self
+                    .pending_human_drafts
+                    .entry(pane_id)
+                    .or_default()
+                    .push(character),
+            }
+        }
+    }
+
     pub(crate) fn toggle_home(&mut self) {
         if self.home.is_some() {
             self.clear_home();
@@ -2777,6 +2817,27 @@ mod tests {
     use super::*;
     use crate::layout::PaneId;
     use crate::terminal::TerminalId;
+
+    /// AC6: raw human bytes update drafts while editing and terminal escapes stay invisible.
+    #[test]
+    fn human_bytes_track_draft_edits_and_skip_terminal_sequences() {
+        let mut state = crate::app::state::AppState::test_new();
+        let pane_id = PaneId::alloc();
+
+        state.note_human_bytes(pane_id, b"ab\x7f");
+        assert_eq!(state.pending_human_drafts[&pane_id], "a");
+        state.note_human_bytes(pane_id, b"\r");
+        assert!(!state.pending_human_drafts.contains_key(&pane_id));
+
+        state.note_human_bytes(pane_id, b"\x1b[A");
+        assert!(!state.pending_human_drafts.contains_key(&pane_id));
+        state.note_human_bytes(pane_id, b"\x1b[200~hi\x1b[201~");
+        assert_eq!(state.pending_human_drafts[&pane_id], "hi");
+
+        state.pending_human_drafts.remove(&pane_id);
+        state.note_human_bytes(pane_id, b"x\ry");
+        assert_eq!(state.pending_human_drafts[&pane_id], "y");
+    }
 
     #[test]
     fn opening_the_new_thread_composer_takes_the_keyboard_off_the_sidebar() {

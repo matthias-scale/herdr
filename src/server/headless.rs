@@ -1517,6 +1517,12 @@ impl HeadlessServer {
                 .and_then(|terminal| terminal.agent_activity_handoff_state(handoff_captured_at));
             handoff_runtime.agent_state = terminal
                 .and_then(|terminal| terminal.terminal_agent_handoff_state(handoff_captured_at));
+            handoff_runtime.stall_nudge = self
+                .app
+                .stall_nudge_handoff_state(terminal_id, handoff_captured_at);
+            handoff_runtime.human_draft = self
+                .app
+                .human_draft_handoff_state(crate::layout::PaneId::from_raw(pane_id));
             handoff_runtime.pane_seen = Some(pane_seen);
             handoff_runtime.pane_done_for_ms = pane_done_since.map(|done_since| {
                 handoff_captured_at
@@ -2089,6 +2095,7 @@ impl HeadlessServer {
     ) -> Option<Result<(), String>> {
         self.app.begin_contract_false_positive_input_burst();
         let terminal_id = self.terminal_id_by_string(terminal_id)?;
+        let data = Bytes::from(data);
         let has_bytes = !data.is_empty();
         let result = {
             let runtime = self.app.terminal_runtimes.get(&terminal_id)?;
@@ -2096,10 +2103,13 @@ impl HeadlessServer {
                 runtime.scroll_reset();
             }
             runtime
-                .try_send_bytes(Bytes::from(data))
+                .try_send_bytes(data.clone())
                 .map_err(|err| err.to_string())
         };
         if result.is_ok() && has_bytes {
+            if let Some(pane_id) = self.app.state.pane_id_for_terminal(&terminal_id) {
+                self.app.note_human_bytes(pane_id, &data);
+            }
             self.app.retire_blocked_hook_authority_for_terminal(
                 &terminal_id,
                 std::time::Instant::now(),
@@ -5664,6 +5674,7 @@ impl HeadlessServer {
         // ticks has to be ticked here too or it only runs for TUI-owned
         // runtimes. Resumes above, and the nudge that follows them.
         changed |= self.app.tick_resume_nudges(now);
+        changed |= self.app.tick_auto_nudges(now);
         changed
     }
 
@@ -8645,6 +8656,122 @@ next_tab = ""
         assert!(
             sent.contains("continue"),
             "expected the nudge to reach the pane, got {sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_fires_a_stalled_agent_auto_nudge() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        server.app.state.auto_nudge_stalled_agents = true;
+        let mut workspace = crate::workspace::Workspace::test_new("headless-auto-nudge");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        workspace.tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - server.app.state.nudge_after);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.supervisor_stale = true;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert!(server.app.stall_nudge_episodes.contains_key(&terminal_id));
+        let mut sent = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            sent.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            sent.contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."),
+            "expected the auto-nudge to reach the pane, got {sent:?}"
+        );
+    }
+
+    /// AC6: terminal-attach draft bytes suppress a stalled-agent auto-nudge.
+    #[tokio::test]
+    async fn headless_attach_human_bytes_suppress_a_stalled_agent_auto_nudge() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        server.app.state.auto_nudge_stalled_agents = true;
+        let workspace = crate::workspace::Workspace::test_new("headless-attach-draft");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.supervisor_stale = true;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+
+        let result = server
+            .forward_terminal_attach_bytes(&terminal_id.to_string(), b"draft".to_vec(), false)
+            .expect("terminal target");
+        assert!(result.is_ok());
+        assert_eq!(rx.try_recv().expect("attached bytes"), Bytes::from("draft"));
+        let nudge_after = server.app.state.nudge_after;
+        server.app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - nudge_after);
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .supervisor_stale = true;
+
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "auto-nudge wrote into a human draft"
         );
     }
 
