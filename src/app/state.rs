@@ -2911,6 +2911,10 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
+pub(crate) struct RemoteAgentPressState {
+    pub agent_ref: crate::api::schema::AgentRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
@@ -3545,6 +3549,9 @@ pub struct AppState {
     /// `collapsed_space_keys`, which folds one space inside the tree; this folds
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
+    /// Remote host groups start folded. This records the inverse only after an
+    /// operator expands one, so new hosts stay folded without refresh-time work.
+    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     pub(crate) sidebar_group_mode: SidebarGroupMode,
     /// Whether the keyboard belongs to the sidebar.
     ///
@@ -3621,6 +3628,8 @@ pub struct AppState {
     pub(crate) workspace_presses:
         std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
+    pub(crate) remote_agent_presses:
+        std::collections::HashMap<crate::app::InputSourceId, RemoteAgentPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -5944,6 +5953,7 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
             sidebar_group_menu_open: false,
@@ -6066,6 +6076,7 @@ impl AppState {
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
+            remote_agent_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -6390,6 +6401,10 @@ impl AppState {
             assert!(
                 self.tab_presses.is_empty(),
                 "empty app state must not keep tab press state"
+            );
+            assert!(
+                self.remote_agent_presses.is_empty(),
+                "empty app state must not keep remote agent press state"
             );
             assert!(
                 self.context_menu.is_none(),

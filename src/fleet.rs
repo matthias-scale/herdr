@@ -1016,6 +1016,8 @@ pub(crate) struct FleetRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
@@ -1156,6 +1158,7 @@ impl FleetRow {
         let model = agent.tokens.get("model").cloned();
         let effort = agent.tokens.get("effort").cloned();
         let work = agent_work(&agent);
+        let title = agent_title(&agent);
         let native_session = agent
             .agent_session
             .as_ref()
@@ -1167,6 +1170,7 @@ impl FleetRow {
             handle,
             agent: agent.agent,
             name: Some(id),
+            title,
             model,
             effort,
             work,
@@ -1226,6 +1230,7 @@ impl FleetRow {
             handle,
             agent: Some(run.agent),
             name: Some(run.run_id),
+            title: None,
             model: Some(run.model),
             effort: Some(run.effort),
             work: Some(if run.branch.is_empty() {
@@ -1289,6 +1294,7 @@ impl FleetRow {
             handle,
             agent: None,
             name: None,
+            title: None,
             model: None,
             effort: None,
             work: None,
@@ -1351,6 +1357,37 @@ fn agent_work(agent: &AgentInfo) -> Option<String> {
             })
         })
         .or_else(|| agent.work_context.work_title.clone())
+}
+
+/// Resolve the title once when fleet evidence arrives. Older hosts do not send
+/// `display_title`, so their fallback cannot recover manual pane labels or know
+/// the remote user's home directory. It deliberately treats HOME as unknown.
+fn agent_title(agent: &AgentInfo) -> Option<String> {
+    if agent.display_title.is_some() {
+        return agent.display_title.clone();
+    }
+    let title = agent.work_context.session_name.clone().or_else(|| {
+        crate::workspace::agent_title_from_terminal_or_work(crate::workspace::AgentTitleContext {
+            terminal_title: agent.terminal_title_stripped.as_deref(),
+            work_title: agent.work_context.work_title.as_deref(),
+            cwd: agent.cwd.as_deref().map(Path::new),
+            home: None,
+            agent_name: agent.name.as_deref(),
+            agent_label: agent.agent.as_deref(),
+            display_agent: agent.display_agent.as_deref(),
+            detected_agent: agent
+                .agent
+                .as_deref()
+                .and_then(crate::detect::parse_agent_label),
+        })
+    });
+    let projection = crate::workspace::TabDisplayProjection::Derived {
+        agent: None,
+        ticket: agent.work_context.primary_ticket().map(str::to_string),
+        binding: None,
+        title,
+    };
+    crate::workspace::session_title(Some(&projection), None)
 }
 
 fn gate_recommendation(text: &str) -> Option<String> {
@@ -2151,6 +2188,152 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].as_ref().unwrap().run_id, "ra-260826-test-a1b2c3d");
         assert_eq!(runtime, HostRuntime::default());
+    }
+
+    #[test]
+    fn remote_agent_list_applies_local_title_rules_and_legacy_fallbacks() {
+        let parse_row = |agent: serde_json::Value| {
+            let response = serde_json::json!({
+                "id": "x",
+                "result": {"type": "agent_list", "agents": [agent]}
+            });
+            let output = [
+                serde_json::to_vec(&response).expect("agent response JSON"),
+                REMOTE_RUNS_MARKER.to_vec(),
+            ]
+            .concat();
+            let (agents, runs, _) = parse_remote_output(&output);
+            assert!(runs.is_empty());
+            FleetRow::from_agent(
+                "ub1",
+                false,
+                agents
+                    .expect("valid remote agent list")
+                    .into_iter()
+                    .next()
+                    .expect("one remote agent"),
+                0,
+            )
+            .expect("valid fleet row")
+        };
+        let base = serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {"work_title": "Cost levers from work context"},
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "revision": 1
+        });
+        let mut with_terminal_title = base.clone();
+        with_terminal_title["terminal_title_stripped"] =
+            serde_json::json!("Scalable V2 cost levers handoff");
+
+        assert_eq!(
+            parse_row(with_terminal_title).title.as_deref(),
+            Some("Scalable V2 cost levers handoff")
+        );
+        let mut with_composed_title = base.clone();
+        with_composed_title["terminal_title_stripped"] = serde_json::json!("codex — Fix billing");
+        assert_eq!(
+            parse_row(with_composed_title).title.as_deref(),
+            Some("Fix billing"),
+            "the fleet projection strips the same leading agent identity as a local tab"
+        );
+        let mut with_cwd_title = base.clone();
+        with_cwd_title["cwd"] = serde_json::json!("/work/herdr");
+        with_cwd_title["terminal_title_stripped"] = serde_json::json!("codex — herdr");
+        assert_eq!(
+            parse_row(with_cwd_title).title.as_deref(),
+            Some("Cost levers from work context"),
+            "an agent-and-cwd title yields to the declared work title"
+        );
+        assert_eq!(
+            parse_row(base.clone()).title.as_deref(),
+            Some("Cost levers from work context"),
+            "older agent-list JSON without a terminal title still parses"
+        );
+        let mut without_title = base;
+        without_title["work_context"] = serde_json::json!({});
+        without_title["terminal_title_stripped"] = serde_json::json!("Codex");
+        let fallback = parse_row(without_title);
+        assert_eq!(fallback.title, None);
+        assert_eq!(fallback.name.as_deref(), Some("cl-ceea66cc"));
+    }
+
+    #[test]
+    fn remote_agent_title_prefers_host_display_title_verbatim() {
+        let agent: AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {
+                "ticket_ids": ["SCA-1"],
+                "work_title": "collector fallback"
+            },
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "title": "runtime title",
+            "display_title": "SCA-9: exact host title",
+            "terminal_title_stripped": "terminal fallback",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("valid agent info");
+
+        let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
+        assert_eq!(row.title.as_deref(), Some("SCA-9: exact host title"));
+    }
+
+    #[test]
+    fn legacy_remote_tilde_title_does_not_use_collector_home() {
+        let agent: AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {"work_title": "collector fallback"},
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "terminal_title_stripped": "~/projects/herdr",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "cwd": "/srv/remote-user/projects/herdr",
+            "revision": 1
+        }))
+        .expect("valid legacy agent info");
+
+        let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
+        assert_eq!(row.title.as_deref(), Some("~/projects/herdr"));
+    }
+
+    #[test]
+    fn legacy_remote_tilde_title_ignores_matching_collector_home() {
+        let collector_home = std::env::var_os("HOME").expect("test collector HOME");
+        let remote_cwd = PathBuf::from(collector_home).join("fleet-title-project");
+        let agent: AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {"work_title": "collector fallback"},
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "terminal_title_stripped": "~/fleet-title-project",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "cwd": remote_cwd,
+            "revision": 1
+        }))
+        .expect("valid legacy agent info");
+
+        let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
+        assert_eq!(row.title.as_deref(), Some("~/fleet-title-project"));
     }
 
     #[test]
