@@ -1197,9 +1197,12 @@ mod tests {
         updated.foreground_cwd = "/work/other".into();
         updated.foreground_process.cwd = "/work/other".into();
         updated.foreground_process.name = "other-agent".into();
+        // The wire transport delivers post-activation context through
+        // ServerMessage::ControlContext as ContextUpdated, never as a second
+        // Active; the test has to exercise that variant.
         app.apply_remote_focus_transition(
             &started.operation_id,
-            RemoteFocusTransition::Active(Box::new(updated.clone())),
+            RemoteFocusTransition::ContextUpdated(Box::new(updated.clone())),
         );
 
         let terminal = app
