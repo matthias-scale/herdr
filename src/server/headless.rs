@@ -1506,6 +1506,13 @@ impl HeadlessServer {
         let mut handoff_entries = Vec::new();
         let handoff_captured_at = Instant::now();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
+            if runtime.is_remote_proxy() {
+                // A proxy pane has no local PTY to hand over. Its wire
+                // transport dies with this server, the remote lease ends with
+                // it, and the pane is excluded from the session snapshot the
+                // new server restores.
+                continue;
+            }
             let Some((pane_id, pane_seen, pane_done_since)) =
                 pane_by_terminal.get(terminal_id).copied()
             else {
@@ -9148,7 +9155,48 @@ next_tab = ""
     }
 
     #[cfg(unix)]
-    impl crate::remote::ControlStream for LocalSocketControlStream {}
+    impl crate::remote::ControlStream for LocalSocketControlStream {
+        fn split(
+            self: Box<Self>,
+        ) -> (
+            Box<dyn crate::remote::ControlReadHalf>,
+            Box<dyn std::io::Write + Send>,
+        ) {
+            use interprocess::local_socket::traits::Stream as _;
+            let (reader, writer) = self.0.split();
+            (
+                Box::new(LocalSocketControlReader(reader)),
+                Box::new(LocalSocketControlWriter(writer)),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    struct LocalSocketControlReader(interprocess::local_socket::RecvHalf);
+
+    #[cfg(unix)]
+    impl std::io::Read for LocalSocketControlReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
+    impl crate::remote::ControlReadHalf for LocalSocketControlReader {}
+
+    #[cfg(unix)]
+    struct LocalSocketControlWriter(interprocess::local_socket::SendHalf);
+
+    #[cfg(unix)]
+    impl std::io::Write for LocalSocketControlWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            std::io::Write::write(&mut self.0, buffer)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            std::io::Write::flush(&mut self.0)
+        }
+    }
 
     #[cfg(unix)]
     struct LocalSocketControlRunner {
@@ -9170,6 +9218,17 @@ next_tab = ""
         api::schema::AgentRef,
         api::schema::RemoteControlContext,
     ) {
+        guarded_control_handshake_test_server_with_command("exec sleep 30")
+    }
+
+    #[cfg(unix)]
+    fn guarded_control_handshake_test_server_with_command(
+        command: &str,
+    ) -> (
+        HeadlessServer,
+        api::schema::AgentRef,
+        api::schema::RemoteControlContext,
+    ) {
         let mut server = test_headless_server();
         let workspace = crate::workspace::Workspace::test_new("guarded-control-handshake");
         let pane_id = workspace.tabs[0].root_pane;
@@ -9182,11 +9241,7 @@ next_tab = ""
             24,
             80,
             std::env::temp_dir(),
-            &[
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "exec sleep 30".to_owned(),
-            ],
+            &["/bin/sh".to_owned(), "-c".to_owned(), command.to_owned()],
             &crate::pane::PaneLaunchEnv::from_extra(vec![(
                 "HERDR_AGENT".to_owned(),
                 "claude".to_owned(),
@@ -9289,6 +9344,12 @@ next_tab = ""
                 socket_path: server.client_socket_path.clone(),
             }),
         );
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(8);
+        let channels = crate::pane::RemoteProxyChannels {
+            outbound_rx,
+            detach_tx: outbound_tx,
+            resize_slot: Arc::new(std::sync::Mutex::new((24, 80, 0, 0))),
+        };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
         transport
             .start_with_expected_context_and_version_for_test(
@@ -9296,6 +9357,7 @@ next_tab = ""
                 agent_ref,
                 expected_context,
                 version,
+                channels,
                 event_tx,
             )
             .expect("control client thread starts");
@@ -9421,6 +9483,188 @@ next_tab = ""
         }
         assert!(server.clients.is_empty());
         shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // The whole proxy loop over the real wire: one local proxy pane shows the
+    // remote terminal, input stays gated until ControlReady and the first
+    // complete frame, typed input reaches the remote PTY, the answer comes
+    // back as frames, and closing the pane releases the remote lease.
+    async fn real_control_session_streams_to_proxy_pane_and_back() {
+        let (mut remote, agent_ref, _context) = guarded_control_handshake_test_server_with_command(
+            "while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done",
+        );
+        let remote_terminal_id = remote.app.state.workspaces[0]
+            .terminal_id(remote.app.state.workspaces[0].tabs[0].root_pane)
+            .expect("remote terminal")
+            .clone();
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut client = crate::app::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        client.state.workspaces = vec![crate::workspace::Workspace::test_new("client")];
+        client.state.ensure_test_terminals();
+        client.state.active = Some(0);
+        client.state.selected = 0;
+        client.state.mode = crate::app::Mode::Terminal;
+        client.state.agent_host_name = "client".to_owned();
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "local-test-control-socket".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        client.remote_focus_transport =
+            Box::new(crate::remote::SshRemoteFocusTransport::with_runner(
+                &fleet,
+                Arc::new(LocalSocketControlRunner {
+                    socket_path: remote.client_socket_path.clone(),
+                }),
+            ));
+        let started = client
+            .start_remote_focus_operation(agent_ref.clone())
+            .expect("remote focus operation starts");
+        let operation_id = started.operation_id.clone();
+
+        fn drive(remote: &mut HeadlessServer, client: &mut crate::app::App) {
+            remote
+                .accept_client_connections()
+                .expect("accept control connection");
+            while let Ok(event) = remote.server_event_rx.try_recv() {
+                remote.handle_server_event(event);
+            }
+            remote.render_and_stream();
+            while let Ok(event) = client.event_rx.try_recv() {
+                client.handle_internal_event_with_render_impact(event);
+            }
+        }
+
+        fn drive_until(
+            remote: &mut HeadlessServer,
+            client: &mut crate::app::App,
+            what: &str,
+            condition: impl Fn(&mut HeadlessServer, &mut crate::app::App) -> bool,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !condition(remote, client) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                drive(remote, client);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        // ControlReady activates the operation and stamps the identity line.
+        drive_until(
+            &mut remote,
+            &mut client,
+            "control ready",
+            |_remote, client| {
+                client
+                    .remote_focus_status(&operation_id)
+                    .is_ok_and(|status| status.state == api::schema::RemoteFocusState::Active)
+            },
+        );
+        let (_proxy_pane, proxy_terminal_id) = client
+            .remote_focus_operations
+            .proxy_location(&operation_id)
+            .expect("proxy pane bound");
+        {
+            let terminal = client
+                .state
+                .terminals
+                .get(&proxy_terminal_id)
+                .expect("proxy terminal");
+            let label = terminal.manual_label.as_deref().expect("identity line");
+            assert!(label.starts_with("buildbox::"), "identity line: {label}");
+            assert!(label.contains("/dev/pts/"), "identity line: {label}");
+        }
+        // No complete frame yet: input stays refused and is not buffered.
+        assert!(
+            client
+                .terminal_runtimes
+                .get(&proxy_terminal_id)
+                .expect("proxy runtime")
+                .try_send_bytes(Bytes::from_static(b"too early\n"))
+                .is_err(),
+            "input before the first complete frame is refused"
+        );
+
+        // The first complete remote frame opens the gate.
+        drive_until(
+            &mut remote,
+            &mut client,
+            "first complete frame",
+            |_remote, client| {
+                client
+                    .remote_focus_operations
+                    .input_gate_open(&operation_id)
+            },
+        );
+
+        // Typed input crosses the wire, is written to the remote PTY by the
+        // guarded batch path, and the remote output returns as frames.
+        client
+            .terminal_runtimes
+            .get(&proxy_terminal_id)
+            .expect("proxy runtime")
+            .try_send_bytes(Bytes::from_static(b"hello remote\n"))
+            .expect("input enabled after ControlReady and first frame");
+        drive_until(
+            &mut remote,
+            &mut client,
+            "remote echo",
+            |_remote, client| {
+                client
+                    .terminal_runtimes
+                    .get(&proxy_terminal_id)
+                    .is_some_and(|runtime| runtime.visible_text().contains("echo:hello remote"))
+            },
+        );
+
+        // Closing the proxy pane releases the remote lease and the operation
+        // ends Closed, not Failed.
+        let (proxy_pane_id, _) = client
+            .remote_focus_operations
+            .proxy_location(&operation_id)
+            .expect("proxy pane bound");
+        let should_close = client.state.workspaces[0].remove_pane(proxy_pane_id);
+        assert!(!should_close);
+        client
+            .state
+            .remove_unattached_terminal_ids([proxy_terminal_id.clone()]);
+        client.shutdown_detached_terminal_runtimes();
+        assert_eq!(
+            client
+                .remote_focus_status(&operation_id)
+                .expect("status")
+                .state,
+            api::schema::RemoteFocusState::Closed
+        );
+        drive_until(
+            &mut remote,
+            &mut client,
+            "lease release",
+            |remote, _client| remote.clients.is_empty(),
+        );
+        assert!(
+            remote
+                .app
+                .terminal_runtimes
+                .get(&remote_terminal_id)
+                .expect("remote runtime")
+                .acquire_remote_owner(99),
+            "the remote terminal accepts a new owner after the lease released"
+        );
+
+        shutdown_test_runtimes(&mut remote);
     }
 
     #[cfg(unix)]

@@ -1276,8 +1276,53 @@ pub struct PaneRuntime {
     detect_handle: Option<tokio::task::AbortHandle>,
 }
 
+/// Outbound messages from a remote focus proxy pane to its wire transport.
+///
+/// `SyncResize` carries no dimensions: the transport reads the latest values
+/// from the shared resize slot, so a resize that finds the channel full still
+/// reaches the wire through the already queued marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyOutbound {
+    Input(Bytes),
+    SyncResize,
+    // Sent by the Unix wire transport's detach path; on Windows nothing
+    // queues a detach yet.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Detach,
+}
+
+/// Channel ends a remote proxy runtime hands to the focus transport.
+// The Unix wire transport session loop reads these; on Windows the struct is
+// created and dropped without a consumer.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct RemoteProxyChannels {
+    pub outbound_rx: mpsc::Receiver<ProxyOutbound>,
+    /// Sender clone so the transport can queue a detach even after the pane
+    /// (and its own sender) is gone.
+    pub detach_tx: mpsc::Sender<ProxyOutbound>,
+    pub resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+}
+
+/// Keystroke bursts (including pastes) queue briefly; a stuck transport drops
+/// new input instead of growing memory without bound.
+const REMOTE_PROXY_OUTBOUND_CAPACITY: usize = 64;
+
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
+    /// A local pane whose screen is fed by a remote focus wire stream. There
+    /// is no PTY: user input, resizes, and detach flow to the transport.
+    RemoteProxy {
+        outbound: mpsc::Sender<ProxyOutbound>,
+        /// Input gate. Keystrokes are refused (never buffered) until the first
+        /// complete frame and `ControlReady` have both arrived.
+        input_enabled: Arc<AtomicBool>,
+        resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+        /// Terminal responses to queries in the frame stream are discarded:
+        /// the remote server already answered them for its own terminal.
+        response_sink: mpsc::Sender<Bytes>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    },
     #[cfg(test)]
     TestChannel {
         sender: mpsc::Sender<Bytes>,
@@ -1290,6 +1335,7 @@ impl PaneRuntimeIo {
     fn shutdown(&self) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
+            PaneRuntimeIo::RemoteProxy { .. } => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1299,6 +1345,9 @@ impl PaneRuntimeIo {
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                Err(std::io::Error::other("remote proxy pane has no PTY"))
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {
                 Err(std::io::Error::other("test runtime has no PTY master fd"))
@@ -1310,6 +1359,7 @@ impl PaneRuntimeIo {
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
+            PaneRuntimeIo::RemoteProxy { .. } => None,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
         }
@@ -1319,6 +1369,12 @@ impl PaneRuntimeIo {
     fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_acquire_remote_owner(owner_id),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                // The pane's surface is owned by its remote focus lease; a
+                // second local controller is rejected, never taken over.
+                let _ = owner_id;
+                RemoteOwnerAcquireResult::AlreadyControlled
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { remote_owner, .. } => {
                 let mut owner = remote_owner
@@ -1345,6 +1401,9 @@ impl PaneRuntimeIo {
     fn release_remote_owner(&self, owner_id: u64) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_remote_owner(owner_id),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                let _ = owner_id;
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { remote_owner, .. } => {
                 let mut owner = remote_owner
@@ -1361,6 +1420,10 @@ impl PaneRuntimeIo {
     fn try_send_controlled_bytes(&self, owner_id: u64, bytes: &[u8]) -> ControlledWriteResult {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_write_controlled_user_input(owner_id, bytes),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                let _ = (owner_id, bytes);
+                ControlledWriteResult::Refused
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel {
                 sender,
@@ -1385,6 +1448,10 @@ impl PaneRuntimeIo {
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                let _ = timeout;
+                Ok(())
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1400,6 +1467,7 @@ impl PaneRuntimeIo {
                     actor.rollback_handoff()
                 }
             }
+            PaneRuntimeIo::RemoteProxy { .. } => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1409,6 +1477,7 @@ impl PaneRuntimeIo {
     fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
+            PaneRuntimeIo::RemoteProxy { .. } => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1432,6 +1501,18 @@ impl PaneRuntimeIo {
                     terminal_responses,
                 );
             }
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                resize_slot,
+                ..
+            } => {
+                if let Ok(mut slot) = resize_slot.lock() {
+                    *slot = (rows, cols, cell_width_px, cell_height_px);
+                }
+                // Latest-wins: when the channel is full, an earlier marker
+                // still delivers the slot value just written.
+                let _ = outbound.try_send(ProxyOutbound::SyncResize);
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { resize_tx, .. } => {
                 let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
@@ -1451,6 +1532,7 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
+            PaneRuntimeIo::RemoteProxy { .. } => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1459,6 +1541,21 @@ impl PaneRuntimeIo {
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                input_enabled,
+                ..
+            } => {
+                if !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                outbound.send(ProxyOutbound::Input(bytes)).await.map_err(
+                    |mpsc::error::SendError(message)| match message {
+                        ProxyOutbound::Input(bytes) => mpsc::error::SendError(bytes),
+                        _ => unreachable!("only input is sent as bytes"),
+                    },
+                )
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel {
                 sender,
@@ -1480,6 +1577,26 @@ impl PaneRuntimeIo {
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                input_enabled,
+                ..
+            } => {
+                if !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                outbound
+                    .try_send(ProxyOutbound::Input(bytes))
+                    .map_err(|error| match error {
+                        mpsc::error::TrySendError::Full(ProxyOutbound::Input(bytes)) => {
+                            mpsc::error::TrySendError::Full(bytes)
+                        }
+                        mpsc::error::TrySendError::Closed(ProxyOutbound::Input(bytes)) => {
+                            mpsc::error::TrySendError::Closed(bytes)
+                        }
+                        _ => unreachable!("only input is sent as bytes"),
+                    })
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel {
                 sender,
@@ -1501,6 +1618,11 @@ impl PaneRuntimeIo {
     fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_terminal_response(response),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                // Responses to queries inside a remote frame stream are
+                // dropped: the remote server answered them already.
+                let _ = response;
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => {
                 if let Some(bytes) = response() {
@@ -1519,6 +1641,21 @@ impl PaneRuntimeIo {
                     if let Err(err) = actor.write_user_input(bytes).await {
                         warn!(error = %err, "failed to send delayed PTY input");
                     }
+                });
+            }
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                input_enabled,
+                ..
+            } => {
+                let outbound = outbound.clone();
+                let input_enabled = Arc::clone(input_enabled);
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if !input_enabled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let _ = outbound.send(ProxyOutbound::Input(bytes)).await;
                 });
             }
             #[cfg(test)]
@@ -1921,6 +2058,106 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
+    /// A pane runtime with no PTY whose screen is fed by remote focus wire
+    /// frames. The returned channels belong to the focus transport: it
+    /// receives user input, resize markers, and detach, and it reads the
+    /// latest dimensions from the resize slot.
+    pub(crate) fn spawn_remote_proxy(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<(Self, RemoteProxyChannels)> {
+        let (outbound_tx, outbound_rx) = mpsc::channel(REMOTE_PROXY_OUTBOUND_CAPACITY);
+        let detach_tx = outbound_tx.clone();
+        let resize_slot = Arc::new(Mutex::new((rows, cols, 0, 0)));
+        let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let ghostty = GhosttyPaneTerminal::new(terminal, response_tx)?;
+        let (response_sink, _sink_rx) = mpsc::channel(1);
+        Ok((
+            Self {
+                pane_id,
+                terminal: Arc::new(PaneTerminal::new(ghostty)),
+                io: PaneRuntimeIo::RemoteProxy {
+                    outbound: outbound_tx,
+                    input_enabled: Arc::new(AtomicBool::new(false)),
+                    resize_slot: Arc::clone(&resize_slot),
+                    response_sink,
+                    render_notify,
+                    render_dirty,
+                },
+                current_size: Cell::new((rows, cols, 0, 0)),
+                #[cfg(test)]
+                resize_count: Cell::new(0),
+                child_pid: Arc::new(AtomicU32::new(0)),
+                tty_name: None,
+                reported_cwd: Arc::new(Mutex::new(None)),
+                child_wait_completed: None,
+                kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+                content_seq: Arc::new(AtomicU64::new(0)),
+                detection_content_seq: Arc::new(AtomicU64::new(0)),
+                full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
+                full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
+                detect_reset_notify: Arc::new(Notify::new()),
+                detect_screen_rescan_notify: Arc::new(Notify::new()),
+                pending_release: Arc::new(Mutex::new(None)),
+                suspended: false,
+                suppress_pane_died: Arc::new(AtomicBool::new(true)),
+                preserve_processes_on_drop: true,
+                detect_handle: None,
+            },
+            RemoteProxyChannels {
+                outbound_rx,
+                detach_tx,
+                resize_slot,
+            },
+        ))
+    }
+
+    pub(crate) fn is_remote_proxy(&self) -> bool {
+        matches!(self.io, PaneRuntimeIo::RemoteProxy { .. })
+    }
+
+    /// Opens or closes the input gate. Keystrokes are refused while the gate
+    /// is closed; they are never buffered for later delivery.
+    pub(crate) fn set_remote_proxy_input_enabled(&self, enabled: bool) -> bool {
+        let PaneRuntimeIo::RemoteProxy { input_enabled, .. } = &self.io else {
+            return false;
+        };
+        input_enabled.store(enabled, Ordering::Release);
+        true
+    }
+
+    /// Feeds one complete remote terminal frame into the local screen.
+    /// Frames are ANSI blits of the remote terminal; the parser applies them
+    /// like ordinary PTY output. This runs on the app event loop, never in a
+    /// render or layout path.
+    pub(crate) fn process_remote_frame(&self, bytes: &[u8]) -> bool {
+        let PaneRuntimeIo::RemoteProxy {
+            response_sink,
+            render_notify,
+            render_dirty,
+            ..
+        } = &self.io
+        else {
+            return false;
+        };
+        self.content_seq.fetch_add(1, Ordering::AcqRel);
+        let result = self
+            .terminal
+            .process_pty_bytes(self.pane_id, 0, bytes, response_sink);
+        self.content_seq.fetch_add(1, Ordering::Release);
+        if result.request_render && render_dirty.request_pty(self.pane_id) {
+            render_notify.notify_one();
+        }
+        result.request_render
+    }
+
     pub fn suspend_processes(&mut self) {
         if self.suspended {
             return;
@@ -3610,10 +3847,15 @@ impl PaneRuntime {
     pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
-            let leader_cwd = self
-                .io
-                .foreground_process_group_id()
-                .and_then(usable_process_cwd);
+            // Runtimes without a child process (remote proxies) have no
+            // process tree to scan; the reported cwd fallback still applies.
+            let leader_cwd = if self.child_pid.load(Ordering::Acquire) == 0 {
+                None
+            } else {
+                self.io
+                    .foreground_process_group_id()
+                    .and_then(usable_process_cwd)
+            };
             leader_cwd.or_else(|| self.cwd())
         }
 
@@ -3628,6 +3870,9 @@ impl PaneRuntime {
         #[cfg(unix)]
         {
             let pid = self.child_pid.load(Ordering::Acquire);
+            if pid == 0 {
+                return None;
+            }
             let shell_cwd = absolute_process_cwd(pid);
             let foreground_pgid = self
                 .io

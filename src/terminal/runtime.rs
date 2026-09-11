@@ -227,6 +227,43 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// A pane runtime with no PTY whose screen is fed by remote focus wire
+    /// frames. Construction performs no process or I/O setup.
+    pub(crate) fn spawn_remote_proxy(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<(Self, crate::pane::RemoteProxyChannels)> {
+        crate::pane::PaneRuntime::spawn_remote_proxy(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            render_notify,
+            render_dirty,
+        )
+        .map(|(runtime, channels)| (Self(runtime), channels))
+    }
+
+    pub(crate) fn is_remote_proxy(&self) -> bool {
+        self.0.is_remote_proxy()
+    }
+
+    /// Opens or closes the remote proxy input gate. Returns false when this
+    /// runtime is not a remote proxy.
+    pub(crate) fn set_remote_proxy_input_enabled(&self, enabled: bool) -> bool {
+        self.0.set_remote_proxy_input_enabled(enabled)
+    }
+
+    /// Feeds one complete remote terminal frame into the local screen. Runs
+    /// on the app event loop, never in a render or layout path.
+    pub(crate) fn process_remote_frame(&self, bytes: &[u8]) -> bool {
+        self.0.process_remote_frame(bytes)
+    }
+
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.0.apply_host_terminal_theme(theme);
     }

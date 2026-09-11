@@ -55,6 +55,9 @@ impl App {
             terminal_id: terminal_id.clone(),
         };
         self.release_input_target_headless(&target);
+        // A proxy pane's shutdown releases its remote focus lease exactly
+        // once, on whichever close path removed the pane.
+        self.detach_remote_proxy_for_terminal(&terminal_id);
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
             runtime.shutdown();
         }

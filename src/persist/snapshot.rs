@@ -411,6 +411,15 @@ fn capture_workspace(
         tabs: ws
             .tabs
             .iter()
+            // Remote focus proxy panes are ephemeral wire surfaces: a restore
+            // must never respawn them as local shells.
+            .filter(|tab| {
+                !tab.panes.values().any(|pane| {
+                    terminals
+                        .get(&pane.attached_terminal_id)
+                        .is_some_and(|terminal| terminal.remote_proxy)
+                })
+            })
             .map(|tab| {
                 capture_tab(
                     tab,
@@ -576,9 +585,12 @@ fn capture_pane_history(
     pane_id: Option<String>,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<PaneHistorySnapshot> {
-    let ansi = terminal_runtimes
-        .get(&pane?.attached_terminal_id)?
-        .snapshot_history()?;
+    let runtime = terminal_runtimes.get(&pane?.attached_terminal_id)?;
+    if runtime.is_remote_proxy() {
+        // Proxy screens belong to the remote terminal, not to local history.
+        return None;
+    }
+    let ansi = runtime.snapshot_history()?;
     let lines = ansi.lines().count();
     Some(PaneHistorySnapshot {
         pane_id,
@@ -713,6 +725,60 @@ mod tests {
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> SessionHistorySnapshot {
         capture_history(&state.workspaces, terminal_runtimes)
+    }
+
+    #[test]
+    fn remote_proxy_tabs_are_excluded_from_capture_and_history() {
+        let mut state = state_with_workspaces(&["local"]);
+        let terminal_runtimes = {
+            let mut registry = TerminalRuntimeRegistry::new();
+            let pane_id = crate::layout::PaneId::alloc();
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            let (runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+                pane_id,
+                24,
+                80,
+                0,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            )
+            .expect("proxy runtime");
+            let mut terminal =
+                crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+            terminal.remote_proxy = true;
+            state.terminals.insert(terminal_id.clone(), terminal);
+            registry.insert(terminal_id.clone(), runtime);
+            let events = state.workspaces[0].tabs[0].events.clone();
+            state.workspaces[0].create_tab_from_existing_pane(
+                crate::workspace::MovedPane {
+                    pane_id,
+                    pane_state: crate::pane::PaneState::new(terminal_id),
+                },
+                Some("buildbox::w1:p3".to_string()),
+                events,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            );
+            registry
+        };
+        assert_eq!(state.workspaces[0].tabs.len(), 2);
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(
+            snapshot.workspaces[0].tabs.len(),
+            1,
+            "a proxy tab never persists as a restorable shell"
+        );
+        let history = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
+        assert!(
+            history
+                .workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .all(|tab| tab.panes.is_empty()),
+            "a proxy screen never enters local pane history"
+        );
     }
 
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {

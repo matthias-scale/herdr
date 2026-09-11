@@ -1,7 +1,7 @@
 //! Non-interactive OpenSSH control transport for remote focus.
 //
 // This transport is intentionally retained as compiled/tested code while the
-// production default remains the step-4 proxy-pane stub.
+// production default remains the proxy-pane stub.
 #![allow(dead_code)]
 
 #[cfg(unix)]
@@ -9,22 +9,40 @@ use std::io;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 
 use crate::api::schema::{AgentRef, ErrorBody};
 #[cfg(unix)]
 use crate::app::remote_focus::RemoteFocusTransition;
+#[cfg(unix)]
+use crate::pane::ProxyOutbound;
+// The transport trait signature names this on every platform; only the Unix
+// session loop uses it beyond the signature.
+use crate::pane::RemoteProxyChannels;
 #[cfg(unix)]
 use crate::protocol::{
     self, ClientKeybindings, ClientLaunchMode, ClientMessage, RenderEncoding, ServerMessage,
     MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
+/// The read half of a split control stream. Owns connection diagnostics:
+/// after a read failure the SSH stderr explains the loss better than the I/O
+/// error does.
 #[cfg(unix)]
-pub(crate) trait ControlStream: Read + Write + Send {
+pub(crate) trait ControlReadHalf: Read + Send {
     fn close_diagnostic(&mut self) -> Option<String> {
         None
     }
+}
+
+#[cfg(unix)]
+pub(crate) trait ControlStream: Read + Write + Send {
+    /// Splits the stream after the handshake so the session can read frames
+    /// and write input concurrently. The writer half closes the remote
+    /// bridge's stdin when dropped.
+    fn split(self: Box<Self>) -> (Box<dyn ControlReadHalf>, Box<dyn Write + Send>);
 }
 
 #[cfg(unix)]
@@ -112,6 +130,35 @@ impl Write for ProcessControlStream {
 
 #[cfg(unix)]
 impl ControlStream for ProcessControlStream {
+    fn split(self: Box<Self>) -> (Box<dyn ControlReadHalf>, Box<dyn Write + Send>) {
+        let this = *self;
+        (
+            Box::new(ProcessControlReader {
+                child: this.child,
+                stdout: this.stdout,
+                stderr: this.stderr,
+            }),
+            Box::new(this.stdin),
+        )
+    }
+}
+
+#[cfg(unix)]
+struct ProcessControlReader {
+    child: std::process::Child,
+    stdout: std::process::ChildStdout,
+    stderr: Option<std::process::ChildStderr>,
+}
+
+#[cfg(unix)]
+impl Read for ProcessControlReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.stdout.read(buffer)
+    }
+}
+
+#[cfg(unix)]
+impl ControlReadHalf for ProcessControlReader {
     fn close_diagnostic(&mut self) -> Option<String> {
         let mut output = Vec::new();
         if let Some(stderr) = &mut self.stderr {
@@ -123,16 +170,27 @@ impl ControlStream for ProcessControlStream {
 }
 
 #[cfg(unix)]
-impl Drop for ProcessControlStream {
+impl Drop for ProcessControlReader {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
+/// One live control session. `detached` distinguishes an intentional local
+/// detach (quiet close) from a connection loss (ambiguous delivery).
+#[cfg(unix)]
+#[derive(Clone)]
+struct SessionHandle {
+    outbound_tx: tokio::sync::mpsc::Sender<ProxyOutbound>,
+    detached: Arc<AtomicBool>,
+}
+
 pub(crate) struct SshRemoteFocusTransport {
     #[cfg(unix)]
     runner: Arc<dyn SshRunner>,
+    #[cfg(unix)]
+    sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
     targets: std::collections::HashMap<String, String>,
 }
 
@@ -147,6 +205,8 @@ impl SshRemoteFocusTransport {
         Self {
             #[cfg(unix)]
             runner: Arc::new(OpenSshRunner),
+            #[cfg(unix)]
+            sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             targets,
         }
     }
@@ -162,6 +222,7 @@ impl SshRemoteFocusTransport {
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     fn start_with_options(
         &mut self,
         operation_id: &str,
@@ -169,6 +230,7 @@ impl SshRemoteFocusTransport {
         version: u32,
         build_version: String,
         expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+        channels: RemoteProxyChannels,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Result<(), ErrorBody> {
         let Some(target) = self.targets.get(&agent_ref.host).cloned() else {
@@ -180,6 +242,18 @@ impl SshRemoteFocusTransport {
         let operation_id = operation_id.to_owned();
         let agent_ref = agent_ref.clone();
         let runner = Arc::clone(&self.runner);
+        let detached = Arc::new(AtomicBool::new(false));
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                operation_id.clone(),
+                SessionHandle {
+                    outbound_tx: channels.detach_tx.clone(),
+                    detached: Arc::clone(&detached),
+                },
+            );
+        let sessions = Arc::clone(&self.sessions);
         std::thread::Builder::new()
             .name(format!("herdr-remote-focus-{operation_id}"))
             .spawn(move || {
@@ -191,6 +265,9 @@ impl SshRemoteFocusTransport {
                     version,
                     build_version,
                     expected_context,
+                    channels,
+                    sessions,
+                    detached,
                     event_tx,
                 )
             })
@@ -208,6 +285,7 @@ impl SshRemoteFocusTransport {
         agent_ref: &AgentRef,
         expected_context: Option<crate::api::schema::RemoteControlContext>,
         version: u32,
+        channels: RemoteProxyChannels,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Result<(), ErrorBody> {
         self.start_with_options(
@@ -216,6 +294,7 @@ impl SshRemoteFocusTransport {
             version,
             crate::build_info::version().to_owned(),
             expected_context.map(Box::new),
+            channels,
             event_tx,
         )
     }
@@ -252,11 +331,12 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         operation_id: &str,
         agent_ref: &AgentRef,
         _proxy_pane_id: &str,
+        channels: RemoteProxyChannels,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Result<(), ErrorBody> {
         #[cfg(not(unix))]
         {
-            let _ = (operation_id, agent_ref, event_tx);
+            let _ = (operation_id, agent_ref, channels, event_tx);
             Err(ErrorBody {
                 code: "agent_not_attachable".to_owned(),
                 message: "remote focus requires a Unix client and Unix server".to_owned(),
@@ -270,8 +350,37 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
                 PROTOCOL_VERSION,
                 crate::build_info::version().to_owned(),
                 None,
+                channels,
                 event_tx,
             )
+        }
+    }
+
+    fn detach(&mut self, operation_id: &str) {
+        #[cfg(unix)]
+        {
+            let handle = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(operation_id)
+                .cloned();
+            let Some(handle) = handle else {
+                return;
+            };
+            handle.detached.store(true, Ordering::Release);
+            if handle.outbound_tx.try_send(ProxyOutbound::Detach).is_err() {
+                // A full or closing channel must not block the app loop; the
+                // writer drains quickly, so a helper thread delivers it.
+                let outbound_tx = handle.outbound_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = outbound_tx.blocking_send(ProxyOutbound::Detach);
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = operation_id;
         }
     }
 }
@@ -285,7 +394,68 @@ fn read_initial_welcome(
         .or_else(|error| protocol::decode_legacy_server_welcome(&payload).ok_or(error))
 }
 
+/// Ends the session: marks it detached so a late local detach is a no-op and
+/// unregisters it. The writer exits on its own: a queued detach, a write
+/// failure, or the channel closing once the app and this handle drop their
+/// senders. Nothing more is written here — after a connection loss no bytes
+/// may reach the wire.
 #[cfg(unix)]
+fn finish_control_session(
+    sessions: &Mutex<std::collections::HashMap<String, SessionHandle>>,
+    operation_id: &str,
+    detached: &AtomicBool,
+) {
+    detached.store(true, Ordering::Release);
+    sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(operation_id);
+}
+
+/// Forwards proxy outbound messages to the wire. Input preserves order
+/// relative to resizes; a resize marker reads the latest dimensions from the
+/// shared slot. Ends on detach, on a closed channel (best-effort detach so
+/// the remote lease is still released), or on a write failure (the reader
+/// reports the loss).
+#[cfg(unix)]
+fn run_control_writer(
+    mut writer: Box<dyn Write + Send>,
+    mut outbound_rx: tokio::sync::mpsc::Receiver<ProxyOutbound>,
+    resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+    detached: Arc<AtomicBool>,
+) {
+    while let Some(message) = outbound_rx.blocking_recv() {
+        let is_detach = matches!(message, ProxyOutbound::Detach);
+        let wire = match message {
+            ProxyOutbound::Input(bytes) => ClientMessage::Input {
+                data: bytes.to_vec(),
+            },
+            ProxyOutbound::SyncResize => {
+                let (rows, cols, cell_width_px, cell_height_px) =
+                    resize_slot.lock().map(|slot| *slot).unwrap_or((0, 0, 0, 0));
+                ClientMessage::Resize {
+                    cols,
+                    rows,
+                    cell_width_px,
+                    cell_height_px,
+                }
+            }
+            ProxyOutbound::Detach => ClientMessage::Detach,
+        };
+        if protocol::write_message(&mut writer, &wire).is_err() {
+            return;
+        }
+        if is_detach {
+            return;
+        }
+    }
+    if !detached.load(Ordering::Acquire) {
+        let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn run_control_session(
     runner: Arc<dyn SshRunner>,
     target: String,
@@ -294,8 +464,16 @@ fn run_control_session(
     version: u32,
     build_version: String,
     expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+    channels: RemoteProxyChannels,
+    sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
+    detached: Arc<AtomicBool>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) {
+    let RemoteProxyChannels {
+        outbound_rx,
+        resize_slot,
+        ..
+    } = channels;
     let mut stream = match runner.connect(&target) {
         Ok(stream) => stream,
         Err(error) => {
@@ -305,16 +483,21 @@ fn run_control_session(
                 "host_unreachable"
             };
             SshRemoteFocusTransport::fail(&event_tx, &operation_id, code, error.to_string());
+            finish_control_session(&sessions, &operation_id, &detached);
             return;
         }
     };
+    let (hello_rows, hello_cols, hello_cell_width_px, hello_cell_height_px) = resize_slot
+        .lock()
+        .map(|slot| *slot)
+        .unwrap_or((40, 120, 0, 0));
     let hello = ClientMessage::Hello {
         version,
         build_version,
-        cols: 120,
-        rows: 40,
-        cell_width_px: 0,
-        cell_height_px: 0,
+        cols: hello_cols.max(2),
+        rows: hello_rows.max(1),
+        cell_width_px: hello_cell_width_px,
+        cell_height_px: hello_cell_height_px,
         requested_encoding: RenderEncoding::TerminalAnsi,
         keybindings: ClientKeybindings::Server,
         launch_mode: ClientLaunchMode::TerminalAttach,
@@ -326,6 +509,7 @@ fn run_control_session(
             "host_unreachable",
             format!("remote control handshake write failed: {error}"),
         );
+        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     let welcome: ServerMessage = match read_initial_welcome(&mut *stream) {
@@ -337,6 +521,7 @@ fn run_control_session(
                 "host_unreachable",
                 format!("remote control handshake read failed: {error}"),
             );
+            finish_control_session(&sessions, &operation_id, &detached);
             return;
         }
     };
@@ -353,6 +538,7 @@ fn run_control_session(
             "version_skew",
             "remote control did not receive a Welcome message",
         );
+        finish_control_session(&sessions, &operation_id, &detached);
         return;
     };
     if error.is_some()
@@ -379,6 +565,7 @@ fn run_control_session(
                     .map_or(String::new(), |error| format!(" ({error})")),
             ),
         );
+        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     if let Err(error) = protocol::write_message(
@@ -396,14 +583,39 @@ fn run_control_session(
             "host_unreachable",
             format!("remote control request write failed: {error}"),
         );
+        finish_control_session(&sessions, &operation_id, &detached);
+        return;
+    }
+    let (mut reader, writer) = stream.split();
+    let writer_detached = Arc::clone(&detached);
+    let writer_resize_slot = Arc::clone(&resize_slot);
+    let writer_thread = std::thread::Builder::new()
+        .name(format!("herdr-remote-focus-writer-{operation_id}"))
+        .spawn(move || {
+            run_control_writer(writer, outbound_rx, writer_resize_slot, writer_detached)
+        });
+    if let Err(error) = writer_thread {
+        SshRemoteFocusTransport::fail(
+            &event_tx,
+            &operation_id,
+            "host_unreachable",
+            format!("failed to start remote focus writer: {error}"),
+        );
+        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     let mut active = false;
     loop {
-        let message: ServerMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
+        if detached.load(Ordering::Acquire) {
+            break;
+        }
+        let message: ServerMessage = match protocol::read_message(&mut reader, MAX_FRAME_SIZE) {
             Ok(message) => message,
             Err(error) => {
-                let diagnostic = stream.close_diagnostic();
+                if detached.load(Ordering::Acquire) {
+                    break;
+                }
+                let diagnostic = reader.close_diagnostic();
                 let detail = diagnostic
                     .filter(|message| !message.trim().is_empty())
                     .unwrap_or_else(|| error.to_string());
@@ -423,40 +635,63 @@ fn run_control_session(
                         format!("remote control request read failed: {detail}")
                     },
                 );
-                return;
+                break;
             }
         };
         match message {
             ServerMessage::ControlReady { context } => {
                 active = true;
-                let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteFocusTransition {
-                    operation_id: operation_id.clone(),
-                    transition: Box::new(RemoteFocusTransition::Active(context)),
-                });
+                if event_tx
+                    .blocking_send(crate::events::AppEvent::RemoteFocusTransition {
+                        operation_id: operation_id.clone(),
+                        transition: Box::new(RemoteFocusTransition::Active(context)),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            ServerMessage::Terminal(frame) => {
+                // Frames are an ordered diff stream: block on a full event
+                // channel rather than drop one and corrupt later diffs.
+                if event_tx
+                    .blocking_send(crate::events::AppEvent::RemoteFocusFrame {
+                        operation_id: operation_id.clone(),
+                        frame: Box::new(frame),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
             ServerMessage::ControlError { code, message } => {
-                SshRemoteFocusTransport::fail(&event_tx, &operation_id, &code, message);
-                return;
+                if !detached.load(Ordering::Acquire) {
+                    SshRemoteFocusTransport::fail(&event_tx, &operation_id, &code, message);
+                }
+                break;
             }
             ServerMessage::ServerShutdown { reason } => {
-                SshRemoteFocusTransport::fail(
-                    &event_tx,
-                    &operation_id,
-                    if active {
-                        "connection_lost"
-                    } else {
-                        "host_unreachable"
-                    },
-                    reason.unwrap_or_else(|| {
-                        "remote control server closed the connection".to_owned()
-                    }),
-                );
-                return;
+                if !detached.load(Ordering::Acquire) {
+                    SshRemoteFocusTransport::fail(
+                        &event_tx,
+                        &operation_id,
+                        if active {
+                            "connection_lost"
+                        } else {
+                            "host_unreachable"
+                        },
+                        reason.unwrap_or_else(|| {
+                            "remote control server closed the connection".to_owned()
+                        }),
+                    );
+                }
+                break;
             }
-            ServerMessage::Terminal(_) | ServerMessage::Graphics { .. } => {}
+            ServerMessage::Graphics { .. } => {}
             _ => {}
         }
     }
+    finish_control_session(&sessions, &operation_id, &detached);
 }
 
 #[cfg(all(test, unix))]
@@ -470,20 +705,14 @@ mod tests {
         input: Cursor<Vec<u8>>,
         output: Arc<Mutex<Vec<u8>>>,
         fail_at: Option<u64>,
+        read_gate: Option<Arc<AtomicBool>>,
     }
 
     impl Read for FakeStream {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if self
-                .fail_at
-                .is_some_and(|offset| self.input.position() >= offset)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionReset,
-                    "mid-stream failure",
-                ));
-            }
-            self.input.read(buffer)
+            // The handshake reads through the whole stream before the split;
+            // the gate only holds the post-split reader.
+            read_fake_input(&mut self.input, self.fail_at, None, buffer)
         }
     }
 
@@ -501,7 +730,81 @@ mod tests {
         }
     }
 
-    impl ControlStream for FakeStream {}
+    impl ControlStream for FakeStream {
+        fn split(self: Box<Self>) -> (Box<dyn ControlReadHalf>, Box<dyn Write + Send>) {
+            let this = *self;
+            (
+                Box::new(FakeReader {
+                    input: this.input,
+                    fail_at: this.fail_at,
+                    read_gate: this.read_gate,
+                }),
+                Box::new(FakeWriter {
+                    output: this.output,
+                }),
+            )
+        }
+    }
+
+    fn read_fake_input(
+        input: &mut Cursor<Vec<u8>>,
+        fail_at: Option<u64>,
+        read_gate: Option<&AtomicBool>,
+        buffer: &mut [u8],
+    ) -> io::Result<usize> {
+        // A closed gate holds the reader only once the scripted bytes are
+        // consumed, so a test can order a detach before the stream ends
+        // without blocking scripted messages.
+        while read_gate.is_some_and(|gate| !gate.load(Ordering::Acquire))
+            && input.position() >= input.get_ref().len() as u64
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if fail_at.is_some_and(|offset| input.position() >= offset) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "mid-stream failure",
+            ));
+        }
+        input.read(buffer)
+    }
+
+    struct FakeReader {
+        input: Cursor<Vec<u8>>,
+        fail_at: Option<u64>,
+        read_gate: Option<Arc<AtomicBool>>,
+    }
+
+    impl Read for FakeReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            read_fake_input(
+                &mut self.input,
+                self.fail_at,
+                self.read_gate.as_deref(),
+                buffer,
+            )
+        }
+    }
+
+    impl ControlReadHalf for FakeReader {}
+
+    struct FakeWriter {
+        output: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for FakeWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.output
+                .lock()
+                .expect("fake output lock")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct FakeRunner {
         stream: Mutex<Option<FakeStream>>,
@@ -531,10 +834,34 @@ mod tests {
         output
     }
 
+    fn test_channels() -> (
+        RemoteProxyChannels,
+        tokio::sync::mpsc::Sender<ProxyOutbound>,
+    ) {
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(8);
+        (
+            RemoteProxyChannels {
+                outbound_rx,
+                detach_tx: outbound_tx.clone(),
+                resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
+            },
+            outbound_tx,
+        )
+    }
+
     fn transport_with(
         input: Vec<u8>,
         output: Arc<Mutex<Vec<u8>>>,
         fail_at: Option<u64>,
+    ) -> SshRemoteFocusTransport {
+        transport_with_read_gate(input, output, fail_at, None)
+    }
+
+    fn transport_with_read_gate(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        fail_at: Option<u64>,
+        read_gate: Option<Arc<AtomicBool>>,
     ) -> SshRemoteFocusTransport {
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
@@ -551,6 +878,7 @@ mod tests {
                     input: Cursor::new(input),
                     output,
                     fail_at,
+                    read_gate,
                 })),
                 connect_error: None,
             }),
@@ -573,6 +901,13 @@ mod tests {
                 connect_error: Some(error.to_owned()),
             }),
         )
+    }
+
+    fn agent_ref() -> AgentRef {
+        AgentRef {
+            host: "buildbox".into(),
+            agent: "claude".into(),
+        }
     }
 
     fn receive_failure(
@@ -615,6 +950,26 @@ mod tests {
         }
     }
 
+    fn welcome_bytes() -> Vec<u8> {
+        framed(&ServerMessage::Welcome {
+            version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        })
+    }
+
+    fn wire_messages(written: &[u8]) -> Vec<ClientMessage> {
+        let mut messages = Vec::new();
+        let mut input = written;
+        while !input.is_empty() {
+            let message: ClientMessage =
+                protocol::read_message(&mut input, MAX_FRAME_SIZE).expect("wire message parses");
+            messages.push(message);
+        }
+        messages
+    }
+
     #[test]
     fn version_skew_is_reported_before_control_terminal_is_written() {
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -625,17 +980,10 @@ mod tests {
             error: None,
         });
         let mut transport = transport_with(input, Arc::clone(&output), None);
+        let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
-            .start(
-                "operation",
-                &AgentRef {
-                    host: "buildbox".into(),
-                    agent: "claude".into(),
-                },
-                "proxy",
-                event_tx,
-            )
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
         assert_eq!(receive_failure(&mut event_rx).code, "version_skew");
         let written = output.lock().expect("fake output lock");
@@ -656,17 +1004,10 @@ mod tests {
                 error: None,
             });
             let mut transport = transport_with(input, Arc::clone(&output), None);
+            let (channels, _outbound_tx) = test_channels();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
             transport
-                .start(
-                    "operation",
-                    &AgentRef {
-                        host: "buildbox".into(),
-                        agent: "claude".into(),
-                    },
-                    "proxy",
-                    event_tx,
-                )
+                .start("operation", &agent_ref(), "proxy", channels, event_tx)
                 .expect("thread starts");
             assert_eq!(receive_failure(&mut event_rx).code, "version_skew");
             let written = output.lock().expect("fake output lock");
@@ -698,17 +1039,10 @@ mod tests {
             error: None,
         });
         let mut transport = transport_with(input, Arc::clone(&output), None);
+        let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
-            .start(
-                "operation",
-                &AgentRef {
-                    host: "buildbox".to_owned(),
-                    agent: "claude".to_owned(),
-                },
-                "proxy",
-                event_tx,
-            )
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
         assert_eq!(receive_failure(&mut event_rx).code, "version_skew");
     }
@@ -716,17 +1050,10 @@ mod tests {
     #[test]
     fn ssh_auth_failure_is_not_forwarded_to_the_remote_agent() {
         let mut transport = transport_with_connect_error("Permission denied (publickey)");
+        let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
-            .start(
-                "operation",
-                &AgentRef {
-                    host: "buildbox".into(),
-                    agent: "claude".into(),
-                },
-                "proxy",
-                event_tx,
-            )
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
         assert_eq!(receive_failure(&mut event_rx).code, "auth_failed");
     }
@@ -823,17 +1150,10 @@ mod tests {
         let mut input = welcome;
         input.extend(control_error);
         let mut transport = transport_with(input, Arc::clone(&output), None);
+        let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
-            .start(
-                "operation",
-                &AgentRef {
-                    host: "buildbox".into(),
-                    agent: "claude".into(),
-                },
-                "proxy",
-                event_tx,
-            )
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
         let error = receive_failure(&mut event_rx);
         assert_eq!(error.code, "refused_for_safety");
@@ -856,17 +1176,10 @@ mod tests {
         let mut input = welcome;
         input.extend(ready);
         let mut transport = transport_with(input, Arc::clone(&output), Some(fail_at));
+        let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
-            .start(
-                "operation",
-                &AgentRef {
-                    host: "buildbox".into(),
-                    agent: "claude".into(),
-                },
-                "proxy",
-                event_tx,
-            )
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
         let first = event_rx.blocking_recv().expect("active event");
         assert!(matches!(
@@ -889,5 +1202,179 @@ mod tests {
         let _: ClientMessage = protocol::read_message(&mut frames, MAX_FRAME_SIZE)
             .expect("control request was written");
         assert!(frames.is_empty(), "loss must not cause a replay");
+    }
+
+    #[test]
+    // The proxy pane's screen is the remote terminal: every complete Terminal
+    // frame becomes one ordered frame event for the app.
+    fn terminal_frames_are_forwarded_as_ordered_frame_events() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let frame = crate::protocol::TerminalFrame {
+            seq: 1,
+            width: 80,
+            height: 24,
+            full: true,
+            bytes: b"\x1b[1;1Hremote screen".to_vec(),
+        };
+        input.extend(framed(&ServerMessage::Terminal(frame.clone())));
+        let mut transport = transport_with(input, Arc::clone(&output), None);
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let first = event_rx.blocking_recv().expect("active event");
+        assert!(matches!(
+            first,
+            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        let second = event_rx.blocking_recv().expect("frame event");
+        let crate::events::AppEvent::RemoteFocusFrame {
+            operation_id,
+            frame: received,
+        } = second
+        else {
+            panic!("expected remote focus frame, got {second:?}");
+        };
+        assert_eq!(operation_id, "operation");
+        assert_eq!(*received, frame);
+    }
+
+    #[test]
+    // Input, the latest resize, and detach reach the wire in order after the
+    // control request.
+    fn input_resize_and_detach_are_written_in_order() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        // Hold the reader at the stream's end so the outbound messages land
+        // before the EOF the remote close would produce.
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport = transport_with_read_gate(
+            input,
+            Arc::clone(&output),
+            None,
+            Some(Arc::clone(&read_gate)),
+        );
+        let (channels, outbound_tx) = test_channels();
+        let resize_slot = Arc::clone(&channels.resize_slot);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let first = event_rx.blocking_recv().expect("active event");
+        assert!(matches!(
+            first,
+            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"answer")))
+            .expect("input queued");
+        *resize_slot.lock().expect("resize slot lock") = (30, 100, 9, 18);
+        outbound_tx
+            .blocking_send(ProxyOutbound::SyncResize)
+            .expect("resize queued");
+        transport.detach("operation");
+        read_gate.store(true, Ordering::Release);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            {
+                let written = output.lock().expect("fake output lock");
+                let messages = wire_messages(&written);
+                if messages.len() >= 5 {
+                    assert!(matches!(messages[0], ClientMessage::Hello { .. }));
+                    assert!(matches!(messages[1], ClientMessage::ControlTerminal { .. }));
+                    assert!(
+                        matches!(&messages[2], ClientMessage::Input { data } if data == b"answer")
+                    );
+                    assert!(matches!(
+                        messages[3],
+                        ClientMessage::Resize {
+                            cols: 100,
+                            rows: 30,
+                            cell_width_px: 9,
+                            cell_height_px: 18,
+                        }
+                    ));
+                    assert!(matches!(messages[4], ClientMessage::Detach));
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "input, resize, and detach did not reach the wire: {:?}",
+                output.lock().expect("fake output lock").len()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    // An intentional detach closes quietly: the stream ending afterwards is
+    // not a connection loss and no failure reaches the app.
+    fn detach_after_activation_is_quiet() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        // Hold the reader before the stream's end so the detach lands first,
+        // then release it into the EOF the remote close would produce.
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport = transport_with_read_gate(
+            input,
+            Arc::clone(&output),
+            None,
+            Some(Arc::clone(&read_gate)),
+        );
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let first = event_rx.blocking_recv().expect("active event");
+        assert!(matches!(
+            first,
+            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        transport.detach("operation");
+        read_gate.store(true, Ordering::Release);
+
+        // The reader now sees the EOF the remote close produced; an
+        // intentional detach must not surface as a failure. The session's
+        // event sender drops when it ends, closing the channel quietly.
+        let unexpected = event_rx.blocking_recv();
+        assert!(
+            unexpected.is_none(),
+            "detach must not produce failure events: {unexpected:?}"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            {
+                let written = output.lock().expect("fake output lock");
+                let messages = wire_messages(&written);
+                if messages
+                    .last()
+                    .is_some_and(|message| matches!(message, ClientMessage::Detach))
+                {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detach did not reach the wire"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 }
