@@ -313,7 +313,13 @@ impl PaneWorkContext {
         previous: &Self,
         preserve_repo: bool,
     ) -> bool {
-        if self.pr_urls == previous.pr_urls {
+        if self.pr_urls.len() == previous.pr_urls.len()
+            && self
+                .pr_urls
+                .iter()
+                .zip(&previous.pr_urls)
+                .all(|(current, previous)| current.eq_ignore_ascii_case(previous))
+        {
             return false;
         }
         self.role = None;
@@ -672,10 +678,15 @@ impl PaneWorkContextState {
             .unwrap_or_default();
         let role = pr_tier.and_then(|tier| contexts[tier].role);
         let active_owner = pr_tier.is_some_and(|tier| contexts[tier].active_owner);
+        let effective_pr_repo = pr_urls.first().and_then(|url| repo_slug_from_pr_url(url));
         let repo = contexts.iter().enumerate().find_map(|(tier, context)| {
             context.repo.as_ref().and_then(|repo| {
-                (Some(tier) == pr_tier || !context.repo_is_derived_from_primary_pr())
-                    .then(|| repo.clone())
+                (Some(tier) == pr_tier
+                    || !context.repo_is_derived_from_primary_pr()
+                    || effective_pr_repo
+                        .as_ref()
+                        .is_some_and(|pr_repo| repo_slugs_match(repo, pr_repo)))
+                .then(|| repo.clone())
             })
         });
         self.effective = PaneWorkContext {
@@ -717,7 +728,8 @@ impl PaneWorkContextState {
             ]),
             // Explicit repository declarations retain normal tier precedence.
             // A repository matching a tier's PR is PR-derived and participates
-            // only when that tier also supplies the effective PR.
+            // only when that tier supplies the effective PR or both PRs name
+            // the same repository.
             repo,
             work_title: first_present([
                 self.manual.work_title.as_ref(),
@@ -1969,6 +1981,28 @@ mod tests {
     }
 
     #[test]
+    fn hook_pr_binding_uses_matching_git_derived_repo() {
+        const HOOK_PR: &str = "https://github.com/o/r/pull/2";
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                repo: Some("o/r".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                pr_urls: vec![HOOK_PR.into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().pr_urls, [HOOK_PR]);
+        assert_eq!(state.effective().repo.as_deref(), Some("o/r"));
+    }
+
+    #[test]
     fn git_pr_binding_does_not_borrow_restored_role_owner_or_repo() {
         const RESTORED_PR: &str = "https://github.com/restored/repo/pull/1";
         const GIT_PR: &str = "https://github.com/git/repo/pull/2";
@@ -2801,6 +2835,36 @@ mod tests {
     }
 
     #[test]
+    fn case_variant_inferred_pr_keeps_restored_git_role_and_owner() {
+        let restored = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                git_observation: PaneWorkContext {
+                    pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                    repo: Some("Owner/Repo".into()),
+                    role: Some(PaneWorkRole::Ship),
+                    active_owner: true,
+                    ..PaneWorkContext::default()
+                },
+                ..PaneWorkContextTiers::default()
+            }),
+        )
+        .expect("restore tiered work context");
+        let mut git_observation = restored.snapshot_tiers().git_observation;
+
+        git_observation
+            .set_inferred_pr_url("https://github.com/owner/repo/pull/1".into())
+            .expect("set inferred pull request");
+
+        assert_eq!(git_observation.role, Some(PaneWorkRole::Ship));
+        assert!(git_observation.active_owner);
+        assert_eq!(
+            git_observation.primary_pr(),
+            Some("https://github.com/owner/repo/pull/1")
+        );
+    }
+
+    #[test]
     fn changing_manual_pr_preserves_repo_and_clears_role_and_owner() {
         let mut state = PaneWorkContextState::default();
         state
@@ -2863,17 +2927,17 @@ mod tests {
     }
 
     #[test]
-    fn higher_tier_pr_does_not_borrow_case_variant_derived_repo() {
+    fn hook_pr_does_not_borrow_git_derived_repo_from_another_repository() {
         let state = PaneWorkContextState::from_restored_with_tiers(
             PaneWorkContext::default(),
             Some(PaneWorkContextTiers {
-                manual: PaneWorkContext {
-                    pr_urls: vec!["https://github.com/other/repo/pull/2".into()],
+                hook_turn: PaneWorkContext {
+                    pr_urls: vec!["https://github.com/x/y/pull/2".into()],
                     ..Default::default()
                 },
                 git_observation: PaneWorkContext {
-                    repo: Some("owner/repo".into()),
-                    pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                    repo: Some("o/r".into()),
+                    pr_urls: vec!["https://github.com/o/r/pull/1".into()],
                     ..Default::default()
                 },
                 ..Default::default()
