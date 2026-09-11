@@ -301,13 +301,19 @@ impl RemoteFocusOperations {
 
     /// Records that one complete frame reached the proxy screen. Returns true
     /// when input may now be enabled: the operation is active (ControlReady
-    /// arrived) and this was a complete frame.
-    pub(crate) fn mark_frame_processed(&mut self, operation_id: &str) -> bool {
+    /// arrived) and a complete frame was processed.
+    pub(crate) fn mark_frame_processed(
+        &mut self,
+        operation_id: &str,
+        frame_complete: bool,
+    ) -> bool {
         let Some(operation) = self.operations.get_mut(operation_id) else {
             return false;
         };
-        operation.first_frame_processed = true;
-        operation.state == RemoteFocusState::Active
+        if frame_complete {
+            operation.first_frame_processed = true;
+        }
+        operation.state == RemoteFocusState::Active && operation.first_frame_processed
     }
 
     /// Whether the operation is active and at least one complete frame has
@@ -767,7 +773,7 @@ impl crate::app::App {
         let painted = runtime.process_remote_frame(&frame.bytes);
         if self
             .remote_focus_operations
-            .mark_frame_processed(operation_id)
+            .mark_frame_processed(operation_id, frame.full)
         {
             runtime.set_remote_proxy_input_enabled(true);
         }
@@ -1067,6 +1073,33 @@ mod tests {
             .expect("proxy runtime")
             .try_send_bytes(bytes::Bytes::from_static(b"answer"))
             .expect("the first complete frame after ControlReady opens the gate");
+    }
+
+    #[test]
+    fn partial_first_frame_does_not_open_the_input_gate() {
+        let (mut app, _recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let terminal_id = proxy_terminal_id(&app, &started.operation_id);
+
+        let mut partial = full_frame(b"partial frame");
+        partial.full = false;
+        assert!(app.apply_remote_focus_frame(&started.operation_id, &partial));
+        app.apply_remote_focus_transition(
+            &started.operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+
+        assert!(!app
+            .remote_focus_operations
+            .input_gate_open(&started.operation_id));
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("proxy runtime")
+            .try_send_bytes(bytes::Bytes::from_static(b"too early"))
+            .is_err());
     }
 
     #[test]
