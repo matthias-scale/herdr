@@ -23,8 +23,6 @@ use crate::pomodoro::PomodoroPhase;
 
 /// Width of `⏱ 25:00` plus a leading space.
 const INDICATOR_WIDTH: u16 = 9;
-/// Width of `⏱ 0:00 held` plus a leading space.
-const HELD_INDICATOR_WIDTH: u16 = 14;
 /// Columns the footer icon strip already owns.
 const FOOTER_ICON_COLUMNS: u16 = 13;
 const PROMPT_WIDTH: u16 = 62;
@@ -87,18 +85,13 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         return Rect::default();
     }
     let content_width = sidebar.width.saturating_sub(1);
-    let indicator_width = if app.pomodoro.held() {
-        HELD_INDICATOR_WIDTH
-    } else {
-        INDICATOR_WIDTH
-    };
-    if content_width < FOOTER_ICON_COLUMNS + indicator_width {
+    if content_width < FOOTER_ICON_COLUMNS + INDICATOR_WIDTH {
         return Rect::default();
     }
     Rect::new(
-        sidebar.x + content_width - indicator_width,
+        sidebar.x + content_width - INDICATOR_WIDTH,
         sidebar.bottom().saturating_sub(1),
-        indicator_width,
+        INDICATOR_WIDTH,
         1,
     )
 }
@@ -132,8 +125,11 @@ pub(crate) fn render_indicator(
     } else {
         Style::default().fg(phase_color(app, app.pomodoro.phase))
     };
-    let held_label = if held { " held" } else { "" };
-    let label = format!("{glyph} {}{held_label}", app.pomodoro.label_at(now));
+    let label = if held {
+        format!("{glyph} held")
+    } else {
+        format!("{glyph} {}", app.pomodoro.label_at(now))
+    };
     let line = Line::from(vec![Span::styled(label, style)]);
     frame.render_widget(Paragraph::new(line).right_aligned(), area);
 }
@@ -317,20 +313,24 @@ mod tests {
         app.pomodoro.reset(now);
         app.pomodoro
             .tick_with_host_focus(now + std::time::Duration::from_secs(25 * 60), false);
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 1))
+        let sidebar = Rect::new(0, 0, 26, 1);
+        let slot = pomodoro_hit_area(&app, sidebar);
+        assert_ne!(slot, Rect::default());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(26, 1))
             .expect("test terminal");
         terminal
-            .draw(|frame| render_indicator(&app, frame, Rect::new(0, 0, 20, 1), now))
+            .draw(|frame| render_indicator(&app, frame, slot, now))
             .expect("draw indicator");
         let buffer = terminal.backend().buffer();
-        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
-        let held_cell = buffer
-            .content()
-            .iter()
+        let text: String = (slot.x..slot.right())
+            .map(|x| buffer[(x, slot.y)].symbol())
+            .collect();
+        let held_cell = (slot.x..slot.right())
+            .map(|x| &buffer[(x, slot.y)])
             .find(|cell| cell.symbol() == "h")
             .expect("held label");
 
-        assert!(text.contains("0:00 held"), "{text:?}");
+        assert!(text.contains("⏱ held"), "{text:?}");
         assert_eq!(held_cell.style().fg, Some(app.palette.yellow));
         assert_ne!(app.palette.yellow, phase_color(&app, app.pomodoro.phase));
     }

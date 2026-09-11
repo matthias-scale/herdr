@@ -10877,7 +10877,8 @@ next_tab = ""
         );
 
         assert!(server.app_clients_host_focused());
-        server.remove_client(2);
+        server.clients.get_mut(&2).expect("client").writer = None;
+        assert!(server.clients.contains_key(&2));
         assert!(!server.app_clients_host_focused());
     }
 
