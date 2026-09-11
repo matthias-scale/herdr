@@ -238,6 +238,9 @@ impl crate::app::App {
     /// while every keystroke went to the pane behind it.
     pub(crate) fn intercept_notepad_key(&mut self, key: &crate::input::TerminalKey) -> bool {
         let now = std::time::Instant::now();
+        if self.state.pomodoro.dismiss_send_off_at(now) {
+            return true;
+        }
         if self.state.pomodoro.prompt.is_some() {
             self.state
                 .handle_pomodoro_prompt_key(key.as_key_event(), now);

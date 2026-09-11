@@ -1064,6 +1064,13 @@ impl App {
             include_client_refresh
                 .then(|| self.sidebar_animation_deadline())
                 .flatten(),
+            include_client_refresh
+                .then(|| {
+                    crate::ui::pomodoro::animation_visible(&self.state, self.state.screen_rect())
+                        .then(|| self.state.pomodoro.animation_deadline())
+                        .flatten()
+                })
+                .flatten(),
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh
                     && self.status_metric_refresh_enabled
