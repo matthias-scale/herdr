@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
+use crate::terminal::state::{attention_tier, AttentionTier};
 use crate::terminal::{TerminalId, TerminalState};
 
 use super::{Tab, Workspace};
@@ -21,6 +22,7 @@ pub struct PaneDetail {
     pub agent_context: Option<Agent>,
     pub has_agent: bool,
     pub state: AgentState,
+    pub attention_tier: AttentionTier,
     /// The last closing-block report still names at least one gate. Outlives
     /// the blocked lifecycle state: output retirement may flip the pane back
     /// to working while the human decision is still open.
@@ -120,6 +122,12 @@ impl Tab {
                     agent_context: terminal.agent_lifecycle_context(),
                     has_agent: terminal.agent_lifecycle_context().is_some(),
                     state,
+                    attention_tier: attention_tier(
+                        state,
+                        !terminal.closing_gates.is_empty(),
+                        !terminal.closing_items.is_empty(),
+                        terminal.usage_limited,
+                    ),
                     open_blockers: !terminal.closing_gates.is_empty(),
                     gate_count: terminal.closing_gates.len(),
                     closing_idle: terminal.closing_idle,
@@ -163,6 +171,27 @@ impl Workspace {
             .map(|tab| tab.aggregate_state(terminals))
             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
             .unwrap_or((AgentState::Unknown, true))
+    }
+
+    pub(crate) fn aggregate_attention_tier(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> AttentionTier {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .filter(|pane| pane.settled_at.is_none())
+            .filter_map(|pane| terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| {
+                attention_tier(
+                    terminal.state,
+                    !terminal.closing_gates.is_empty(),
+                    !terminal.closing_items.is_empty(),
+                    terminal.usage_limited,
+                )
+            })
+            .max()
+            .unwrap_or_default()
     }
 
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {

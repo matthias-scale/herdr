@@ -9,7 +9,7 @@ pub(crate) use history_read::{merge_scrolled_up, snapshot_text, ScreenSnapshot, 
 pub use id::TerminalId;
 pub use runtime::TerminalRuntime;
 pub(crate) use runtime_registry::TerminalRuntimeRegistry;
-pub(crate) use state::counts_as_blocked;
+pub(crate) use state::{counts_as_blocked, needs_human_attention};
 #[cfg(unix)]
 pub(crate) use state::{AgentActivityHandoffState, TerminalAgentHandoffState};
 pub use state::{

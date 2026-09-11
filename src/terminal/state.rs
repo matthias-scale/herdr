@@ -72,7 +72,40 @@ fn parse_binary_token(value: &str) -> Option<bool> {
     }
 }
 
-/// One blocking rule for the sidebar worklist and inbox.
+/// Severity of a pane's outstanding demand on the human.
+///
+/// This is shared runtime meaning. The TUI decides how each tier looks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AttentionTier {
+    #[default]
+    None,
+    Attention,
+    Blocked,
+}
+
+/// Derive human-attention severity from the lifecycle and closing-block facts.
+///
+/// Gates and usage limits are blockers. Answer and Verify items are the lower
+/// attention tier once the agent has stopped. A plain blocked lifecycle still
+/// means blocked when no structured closing-block detail accompanied it.
+pub(crate) fn attention_tier(
+    state: AgentState,
+    has_closing_gates: bool,
+    has_closing_items: bool,
+    usage_limited: bool,
+) -> AttentionTier {
+    if usage_limited || has_closing_gates {
+        AttentionTier::Blocked
+    } else if has_closing_items && state != AgentState::Working {
+        AttentionTier::Attention
+    } else if state == AgentState::Blocked {
+        AttentionTier::Blocked
+    } else {
+        AttentionTier::None
+    }
+}
+
+/// One red-blocker rule for the sidebar worklist and inbox.
 ///
 /// A latched human gate does not block while the agent is still working. The
 /// action already in flight may resolve or refine that gate. Once work stops,
@@ -80,10 +113,29 @@ fn parse_binary_token(value: &str) -> Option<bool> {
 /// the pane cannot proceed until its reset window.
 pub(crate) fn counts_as_blocked(
     state: AgentState,
-    open_blockers: bool,
+    has_closing_gates: bool,
+    has_closing_items: bool,
     usage_limited: bool,
 ) -> bool {
-    state == AgentState::Blocked || usage_limited || (open_blockers && state != AgentState::Working)
+    attention_tier(state, has_closing_gates, has_closing_items, usage_limited)
+        == AttentionTier::Blocked
+        && (state != AgentState::Working || usage_limited)
+}
+
+/// Whether prefix navigation should stop on this pane.
+pub(crate) fn needs_human_attention(
+    state: AgentState,
+    has_closing_gates: bool,
+    has_closing_items: bool,
+    usage_limited: bool,
+) -> bool {
+    match attention_tier(state, has_closing_gates, has_closing_items, usage_limited) {
+        AttentionTier::None => false,
+        AttentionTier::Attention => true,
+        AttentionTier::Blocked => {
+            counts_as_blocked(state, has_closing_gates, has_closing_items, usage_limited)
+        }
+    }
 }
 
 #[path = "metadata.rs"]
@@ -3591,6 +3643,26 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 mod tests {
     use super::*;
     use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
+
+    #[test]
+    fn closing_block_attention_tier_distinguishes_gates_from_other_items() {
+        assert_eq!(
+            attention_tier(AgentState::Blocked, true, false, false),
+            AttentionTier::Blocked
+        );
+        assert_eq!(
+            attention_tier(AgentState::Blocked, false, true, false),
+            AttentionTier::Attention
+        );
+        assert_eq!(
+            attention_tier(AgentState::Blocked, true, true, false),
+            AttentionTier::Blocked
+        );
+        assert_eq!(
+            attention_tier(AgentState::Working, false, true, false),
+            AttentionTier::None
+        );
+    }
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())

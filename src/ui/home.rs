@@ -26,31 +26,55 @@ fn waited_label(agent: &BlockedAgent) -> String {
     }
 }
 
-/// `● 4 blocked` on the left, the fleet's size on the right.
+/// Red blockers and lower-tier attention waits on the left, fleet size right.
 ///
-/// Blocked leads and is the only figure with a marker: it is the one number that
-/// means somebody is waiting. The rest is context for reading it.
+/// Blocked leads with the strongest marker. Lower-tier attention follows in
+/// amber so the two kinds remain distinct at a glance.
 fn header_line(app: &AppState, counts: HomeCounts, width: u16) -> Line<'static> {
-    let left = format!(" ● {} blocked", counts.blocked);
+    let blocked = format!(" ● {} blocked", counts.blocked);
+    let attention = format!(" · {} attention", counts.attention);
     let right = format!("{} agents · {} spaces ", counts.agents, counts.spaces,);
-    let gap = (width as usize).saturating_sub(left.chars().count() + right.chars().count());
-    Line::from(vec![
-        Span::styled(
-            left,
+    let show_attention =
+        display_width(&blocked) + display_width(&attention) + display_width(&right)
+            <= width as usize;
+    let attention_width = if show_attention {
+        display_width(&attention)
+    } else {
+        0
+    };
+    let gap = (width as usize)
+        .saturating_sub(display_width(&blocked) + attention_width + display_width(&right));
+    let mut spans = vec![Span::styled(
+        blocked,
+        Style::default()
+            // The palette reserves `red` for needs-attention/blocked, and
+            // the sidebar already says blocked in it. Accent is the generic
+            // highlight colour and read as "selected", not "waiting".
+            .fg(if counts.blocked > 0 {
+                app.palette.red
+            } else {
+                app.palette.overlay0
+            })
+            .add_modifier(Modifier::BOLD),
+    )];
+    if show_attention {
+        spans.push(Span::styled(
+            attention,
             Style::default()
-                // The palette reserves `red` for needs-attention/blocked, and
-                // the sidebar already says blocked in it. Accent is the generic
-                // highlight colour and read as "selected", not "waiting".
-                .fg(if counts.blocked > 0 {
-                    app.palette.red
+                .fg(if counts.attention > 0 {
+                    app.palette.peach
                 } else {
                     app.palette.overlay0
                 })
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(right, Style::default().fg(app.palette.overlay0)),
-    ])
+        ));
+    }
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(
+        right,
+        Style::default().fg(app.palette.overlay0),
+    ));
+    Line::from(spans)
 }
 
 /// `▸  workspace       what it is asking            18m`
@@ -66,13 +90,18 @@ fn agent_line(app: &AppState, agent: &BlockedAgent, selected: bool, width: u16) 
     let ask = truncate(&agent.agent_label, ask_width);
     // Bold-vs-dim alone was not readable as a cursor. A filled row is, and it
     // is the same surface the sidebar uses for its selection.
+    let attention_color = match agent.attention_tier {
+        crate::terminal::state::AttentionTier::Blocked => app.palette.red,
+        crate::terminal::state::AttentionTier::Attention => app.palette.peach,
+        crate::terminal::state::AttentionTier::None => app.palette.subtext0,
+    };
     let style = if selected {
         Style::default()
             .fg(app.palette.text)
             .bg(app.palette.surface0)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(app.palette.subtext0)
+        Style::default().fg(attention_color)
     };
     let age_style = if selected {
         Style::default()
@@ -1004,15 +1033,16 @@ fn lens_snapshot(
             reason: Some("pane is no longer available".into()),
         });
     };
-    if !crate::terminal::counts_as_blocked(
+    if !crate::terminal::needs_human_attention(
         terminal.state,
         !terminal.closing_gates.is_empty(),
+        !terminal.closing_items.is_empty(),
         terminal.usage_limited,
     ) {
         return Some(LensSnapshot {
             title,
             output: String::new(),
-            reason: Some("pane is no longer blocked".into()),
+            reason: Some("pane is no longer waiting on you".into()),
         });
     }
     let Some(runtime) =
@@ -1692,6 +1722,7 @@ mod tests {
             agent_label: format!("agent{index}"),
             blocked_since: None,
             seq: None,
+            attention_tier: crate::terminal::state::AttentionTier::Blocked,
         }
     }
 
@@ -1705,6 +1736,7 @@ mod tests {
                     queue,
                     HomeCounts {
                         blocked: queue.len(),
+                        attention: 0,
                         agents: queue.len(),
                         spaces: 1,
                     },
@@ -1785,6 +1817,29 @@ mod tests {
         // With nothing waiting the count goes quiet rather than staying loud.
         let buffer = draw_home(&app, &[], area);
         assert_eq!(buffer[(1, 0)].style().fg, Some(app.palette.overlay0));
+    }
+
+    #[test]
+    fn narrow_header_drops_attention_before_the_existing_fleet_summary() {
+        let app = AppState::test_new();
+        let counts = HomeCounts {
+            blocked: 1,
+            attention: 2,
+            agents: 3,
+            spaces: 4,
+        };
+        let text = |width| {
+            header_line(&app, counts, width)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        let narrow = text(40);
+        assert!(!narrow.contains("attention"));
+        assert!(narrow.ends_with("3 agents · 4 spaces "));
+        assert!(text(80).contains("2 attention"));
     }
 
     #[test]
@@ -2498,7 +2553,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn the_lens_renders_the_tail_returned_by_pane_read() {
         let app = app_with_lens_screen(b"old line\r\nretry cap\r\nwhich do you want?\r\n");
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         let area = Rect::new(0, 0, 90, 12);
         let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let expected = lens_snapshot(&app, &runtimes, &queue, 2)
@@ -2518,7 +2573,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn the_lens_renders_a_clickable_new_task_action() {
         let app = app_with_lens_screen(b"which do you want?\r\n");
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         let area = Rect::new(0, 0, 90, 12);
         let buffer = draw_home(&app, &queue, area);
         let rendered = buffer
@@ -2574,7 +2629,7 @@ mod tests {
         );
 
         let empty = app_with_lens_screen(b"");
-        let empty_queue = empty.blocked_agents();
+        let empty_queue = empty.home_attention_agents();
         assert_eq!(
             lens_snapshot(&empty, &runtimes, &empty_queue, 2)
                 .expect("lens")
@@ -2584,7 +2639,7 @@ mod tests {
         );
 
         let mut no_longer_blocked = app_with_lens_screen(b"");
-        let stale_queue = no_longer_blocked.blocked_agents();
+        let stale_queue = no_longer_blocked.home_attention_agents();
         no_longer_blocked
             .terminals
             .get_mut(&stale_queue[0].terminal_id)
@@ -2595,7 +2650,7 @@ mod tests {
                 .expect("lens")
                 .reason
                 .as_deref(),
-            Some("pane is no longer blocked")
+            Some("pane is no longer waiting on you")
         );
     }
 

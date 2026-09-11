@@ -242,14 +242,15 @@ impl AppState {
                         }
                         continue;
                     }
-                    if crate::terminal::counts_as_blocked(
+                    if crate::terminal::needs_human_attention(
                         state,
                         open_blockers,
+                        !terminal.closing_items.is_empty(),
                         terminal.usage_limited,
                     ) {
                         // Settling suspends the agent and would bury an
-                        // unanswered question. A blocking pane is never a
-                        // settle candidate, no matter how old the work reads.
+                        // unanswered question. A pane waiting on the human is
+                        // never a settle candidate, no matter its severity.
                         if quiet_observation_changed {
                             arm_writes.push((ws_idx, *pane_id, pane.finished_since, quiet));
                         }

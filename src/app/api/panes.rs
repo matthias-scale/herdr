@@ -5224,7 +5224,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn adapter_answer_payload_blocks_every_idle_pane_consumer_and_clears_next_turn() {
+    async fn adapter_answer_payload_needs_attention_and_clears_next_turn() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -5271,11 +5271,21 @@ mod tests {
             .pane_info(0, internal_pane_id)
             .expect("reported pane info");
         assert_eq!(pane_info.items[0].text, "Choose the release lane");
-        assert!(crate::terminal::counts_as_blocked(
+        assert!(!crate::terminal::counts_as_blocked(
             projected,
             !terminal.closing_gates.is_empty(),
+            !terminal.closing_items.is_empty(),
             terminal.usage_limited
         ));
+        assert_eq!(
+            crate::terminal::state::attention_tier(
+                projected,
+                !terminal.closing_gates.is_empty(),
+                !terminal.closing_items.is_empty(),
+                terminal.usage_limited,
+            ),
+            crate::terminal::state::AttentionTier::Attention
+        );
         assert!(!crate::app::pane_lifecycle::pane_is_done(pane, terminal));
 
         app.state.auto_settle_inactive = true;

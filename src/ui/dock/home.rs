@@ -638,8 +638,8 @@ fn ticket_subtab_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<L
     )
 }
 
-/// One poll: the gate's own question, its options and its default, plus the
-/// pane that raised it. The question and options run through the markdown
+/// One poll shows the closing item's question, options, default and source
+/// pane. The question and options run through the markdown
 /// renderer, so an `(a-rec)` block keeps its emphasis.
 fn poll_detail_lines(
     app: &AppState,
@@ -647,11 +647,16 @@ fn poll_detail_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let item = &row.item;
+    let attention_color = match row.attention_tier {
+        crate::terminal::state::AttentionTier::Blocked => app.palette.red,
+        crate::terminal::state::AttentionTier::Attention => app.palette.peach,
+        crate::terminal::state::AttentionTier::None => app.palette.overlay0,
+    };
     let mut lines = vec![
         Line::from(Span::styled(
             format!("{}  {}", item.n, item.label),
             Style::default()
-                .fg(app.palette.accent)
+                .fg(attention_color)
                 .add_modifier(Modifier::BOLD),
         )),
         field_line(
@@ -1176,12 +1181,17 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             render_hidden_tab_counts(app, frame, &window);
             for (index, tab_area) in window.tabs {
                 let row = &projection.poll_rows[index];
+                let attention_color = match row.attention_tier {
+                    crate::terminal::state::AttentionTier::Blocked => app.palette.red,
+                    crate::terminal::state::AttentionTier::Attention => app.palette.peach,
+                    crate::terminal::state::AttentionTier::None => app.palette.overlay0,
+                };
                 let style = if selected_poll == Some(index) {
                     Style::default()
-                        .fg(app.palette.accent)
+                        .fg(attention_color)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(app.palette.overlay0)
+                    Style::default().fg(attention_color)
                 };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(poll_tab_label(row), style))),

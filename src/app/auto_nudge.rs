@@ -35,7 +35,7 @@ struct AutoNudgeFacts {
     quiet_for: Duration,
     nudge_after: Duration,
     blocked: bool,
-    has_closing_gates: bool,
+    has_closing_block_items: bool,
     human_draft: bool,
     resume_pending: bool,
     launch_pending: bool,
@@ -75,8 +75,8 @@ fn auto_nudge_decision(facts: &AutoNudgeFacts) -> AutoNudgeDecision {
     if facts.blocked {
         return AutoNudgeDecision::Drop("the agent is blocked");
     }
-    if facts.has_closing_gates {
-        return AutoNudgeDecision::Drop("the pane declares a closing gate");
+    if facts.has_closing_block_items {
+        return AutoNudgeDecision::Drop("the pane declares a closing item");
     }
     if facts.human_draft {
         return AutoNudgeDecision::Drop("the pane holds a draft the human typed");
@@ -511,7 +511,8 @@ impl App {
                         quiet_for,
                         nudge_after: self.state.nudge_after,
                         blocked: terminal.state == crate::detect::AgentState::Blocked,
-                        has_closing_gates: !terminal.closing_gates.is_empty(),
+                        has_closing_block_items: !terminal.closing_gates.is_empty()
+                            || !terminal.closing_items.is_empty(),
                         human_draft: self
                             .state
                             .pending_human_drafts
@@ -683,7 +684,7 @@ mod tests {
             quiet_for: Duration::from_secs(20 * 60),
             nudge_after: Duration::from_secs(20 * 60),
             blocked: false,
-            has_closing_gates: false,
+            has_closing_block_items: false,
             human_draft: false,
             resume_pending: false,
             launch_pending: false,
@@ -727,7 +728,7 @@ mod tests {
                 ..ready_facts(now)
             },
             AutoNudgeFacts {
-                has_closing_gates: true,
+                has_closing_block_items: true,
                 ..ready_facts(now)
             },
             AutoNudgeFacts {

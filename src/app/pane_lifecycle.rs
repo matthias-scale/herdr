@@ -232,14 +232,16 @@ pub(crate) fn pane_is_done(
     if seen || terminal.supervisor_stale {
         return false;
     }
-    // Idle is not enough to close a pane. A latched gate, a live sub-agent or a
+    // Idle is not enough to close a pane. A latched closing item, a live sub-agent or a
     // shell still running below the agent all mean the pane has something left
-    // in it, and an unanswered gate is precisely what keeps a pane idle and
+    // in it, and an unanswered item is precisely what keeps a pane idle and
     // unread for hours. Share the sidebar's definition so the pane the sidebar
     // paints as blocking can never be reaped underneath it.
     crate::terminal::state::session_is_quiet(
         state,
-        !terminal.closing_gates.is_empty() || terminal.usage_limited,
+        !terminal.closing_gates.is_empty()
+            || !terminal.closing_items.is_empty()
+            || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
     )
@@ -255,7 +257,9 @@ pub(crate) fn pane_is_quiet(
     let state = terminal.sidebar_projection(pane.seen).0;
     crate::terminal::state::session_is_quiet(
         state,
-        !terminal.closing_gates.is_empty() || terminal.usage_limited,
+        !terminal.closing_gates.is_empty()
+            || !terminal.closing_items.is_empty()
+            || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
     )
@@ -418,13 +422,41 @@ mod tests {
             default_at: None,
         }];
         assert!(
-            crate::terminal::state::counts_as_blocked(AgentState::Idle, true, false),
+            crate::terminal::state::counts_as_blocked(AgentState::Idle, true, false, false),
             "an idle pane with an open gate is blocking in the sidebar"
         );
         let due = app.due_done_pane_ids(Instant::now());
         assert!(
             due.is_empty(),
             "a pane waiting on a human gate must not be reaped: {due:?}"
+        );
+    }
+
+    #[test]
+    fn never_reaps_a_pane_holding_an_unanswered_closing_item() {
+        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose the release path".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let pane = &app.workspaces[0].tabs[0].panes[&pane_id];
+        assert!(!pane_is_done(pane, terminal));
+        assert!(!pane_is_quiet(pane, terminal));
+        let due = app.due_done_pane_ids(Instant::now());
+        assert!(
+            due.is_empty(),
+            "a pane waiting on a human answer must not be reaped: {due:?}"
         );
     }
 

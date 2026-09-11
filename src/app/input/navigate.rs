@@ -2086,8 +2086,8 @@ pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
 ///
 /// The cycle walks the worklist the operator reads. Panes hidden by the current
 /// projection are appended afterward so none become unreachable.
-/// `counts_as_blocked` is the same rule the Blocked section and the inbox use,
-/// so a pane is a stop only while it waits on a human: a latched gate on a pane
+/// The shared attention tier is the rule the worklist uses, so a pane is a stop
+/// for both red blockers and yellow questions. A latched gate on a pane
 /// whose agent has resumed working is not a stop, and neither is a settled pane.
 /// Comparing a tab's aggregate state against `Blocked` instead missed usage
 /// limits and unanswered gates, ignored the stale-supervisor projection the
@@ -2107,29 +2107,22 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let mut panes = crate::ui::all_agent_panel_entries(state)
         .into_iter()
         .map(|entry| {
-            let blocked = crate::terminal::counts_as_blocked(
-                entry.state,
-                entry.open_blockers,
-                entry.usage_limited,
-            ) && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
+            let needs_attention = crate::ui::sidebar::entry_needs_human_attention(&entry)
+                && !state.pane_is_settled(entry.ws_idx, entry.pane_id);
             (
                 BlockedPaneTarget::Local {
                     ws_idx: entry.ws_idx,
                     tab_idx: entry.tab_idx,
                     pane_id: entry.pane_id,
                 },
-                blocked,
+                needs_attention,
             )
         })
         .collect::<Vec<_>>();
     panes.extend(state.remote_agent_panel_entries.iter().map(|entry| {
         (
             BlockedPaneTarget::Remote(entry.agent_ref.clone()),
-            crate::terminal::counts_as_blocked(
-                entry.state,
-                entry.open_blockers,
-                entry.usage_limited,
-            ),
+            crate::ui::sidebar::entry_needs_human_attention(entry),
         )
     }));
     panes
@@ -3689,6 +3682,31 @@ mod tests {
         }];
     }
 
+    fn set_pane_open_item(
+        state: &mut AppState,
+        workspace: usize,
+        tab: usize,
+        pane: crate::layout::PaneId,
+    ) {
+        let terminal_id = state.workspaces[workspace].tabs[tab].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+    }
+
     fn expand_all_workspaces_for_sidebar(state: &mut AppState) {
         for workspace in &state.workspaces {
             state
@@ -3726,6 +3744,35 @@ mod tests {
         );
 
         let mut state = app_with_blocked_window_fixture().state;
+        assert_headless_window_cycle(
+            &mut state,
+            NavigateAction::NextBlockedWindow,
+            &[(0, 1), (1, 0), (0, 1)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_visits_yellow_and_red_in_sidebar_order() {
+        let configure = |state: &mut AppState| {
+            expand_all_workspaces_for_sidebar(state);
+            let yellow = state.workspaces[0].tabs[1].root_pane;
+            let red = state.workspaces[1].tabs[0].root_pane;
+            set_tab_agent_state(state, 0, 1, crate::detect::AgentState::Blocked);
+            set_pane_open_item(state, 0, 1, yellow);
+            set_tab_agent_state(state, 1, 0, crate::detect::AgentState::Idle);
+            set_pane_open_blocker(state, 1, 0, red);
+        };
+
+        let mut app = app_with_global_window_fixture();
+        configure(&mut app.state);
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextBlockedWindow,
+            &[(0, 1), (1, 0), (0, 1)],
+        );
+
+        let mut state = app_with_global_window_fixture().state;
+        configure(&mut state);
         assert_headless_window_cycle(
             &mut state,
             NavigateAction::NextBlockedWindow,
@@ -3783,6 +3830,7 @@ mod tests {
             .expect("agent panel fixture");
         remote.state = crate::detect::AgentState::Idle;
         remote.open_blockers = true;
+        remote.attention_tier = crate::terminal::state::AttentionTier::Blocked;
         let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/with/slash")
             .expect("valid remote agent reference");
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(

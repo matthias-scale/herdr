@@ -20,7 +20,7 @@ use crate::app::{AppState, Mode};
 use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
 use crate::terminal::state::derive_completion_tier;
-use crate::terminal::state::CompletionTier;
+use crate::terminal::state::{AttentionTier, CompletionTier};
 use crate::terminal::TerminalRuntimeRegistry;
 use crate::ui::work_list_detail::{PrAction, PrActionKind, PrActionPlacement, PrItem};
 use crate::ui::work_status::WorkGroupStatus;
@@ -117,12 +117,34 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 /// The terminal predicate is the single rule for this section and the inbox.
 /// A human gate blocks only after the pane stops working. Usage limits remain
 /// blocked because the pane cannot proceed until the reset window.
+fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
+    if entry.attention_tier != AttentionTier::None {
+        entry.attention_tier
+    } else {
+        crate::terminal::state::attention_tier(
+            entry.state,
+            entry.open_blockers,
+            false,
+            entry.usage_limited,
+        )
+    }
+}
+
 pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
-    crate::terminal::counts_as_blocked(entry.state, entry.open_blockers, entry.usage_limited)
+    entry_attention_tier(entry) == AttentionTier::Blocked
+        && (entry.state != AgentState::Working || entry.usage_limited)
+}
+
+pub(crate) fn entry_needs_human_attention(entry: &AgentPanelEntry) -> bool {
+    entry_attention_tier(entry) == AttentionTier::Attention || entry_is_blocked(entry)
 }
 
 pub(crate) fn entry_has_red_dot(entry: &AgentPanelEntry) -> bool {
-    entry.state == AgentState::Blocked || entry.usage_limited || entry_has_gate(entry)
+    entry_attention_tier(entry) == AttentionTier::Blocked
+}
+
+pub(crate) fn entry_has_attention_dot(entry: &AgentPanelEntry) -> bool {
+    entry_attention_tier(entry) == AttentionTier::Attention
 }
 
 /// A working pane keeps its blue lifecycle label while a human gate is latched.
@@ -165,8 +187,11 @@ pub(super) fn agent_panel_label_color(
     entry: &AgentPanelEntry,
     p: &Palette,
 ) -> ratatui::style::Color {
-    if gate_overrides_label(entry) {
+    if entry_is_blocked(entry) {
         return p.red;
+    }
+    if entry_attention_tier(entry) == AttentionTier::Attention {
+        return p.peach;
     }
     state_label_color(entry.state, entry.seen, p)
 }
@@ -425,8 +450,10 @@ fn compact_row_widths(
 }
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
-    if entry_has_gate(entry) || entry.usage_limited {
-        return p.red;
+    match entry_attention_tier(entry) {
+        AttentionTier::Blocked => return p.red,
+        AttentionTier::Attention => return p.peach,
+        AttentionTier::None => {}
     }
     // A session that declared a contract and reported it met is the one kind of
     // done you can act on without reading the pane: close it. That earns its own
@@ -858,6 +885,8 @@ pub(crate) struct AgentPanelEntry {
     /// reorders or regroups the row.
     pub starred: bool,
     pub state: AgentState,
+    /// Runtime-derived human-attention severity. The TUI maps it to colour.
+    pub attention_tier: AttentionTier,
     /// The last closing-block report still names at least one gate, even if
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
     /// pane stops working.
@@ -1297,6 +1326,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         prio,
                         starred,
                         state: detail.state,
+                        attention_tier: detail.attention_tier,
                         open_blockers: detail.open_blockers,
                         completion_tier,
                         usage_limited: detail.usage_limited,
@@ -1344,6 +1374,7 @@ pub(crate) fn remote_agent_panel_entries(
                 terminal_title,
                 terminal_title_stripped,
                 open_blockers,
+                attention_tier,
                 usage_limited,
                 gate_count,
                 state_change_seq,
@@ -1375,6 +1406,7 @@ pub(crate) fn remote_agent_panel_entries(
                         None,
                         None,
                         false,
+                        crate::terminal::state::attention_tier(state, false, false, false),
                         false,
                         0,
                         None,
@@ -1383,14 +1415,22 @@ pub(crate) fn remote_agent_panel_entries(
                     )
                 },
                 |info| {
-                    let state = match info.agent_status {
-                        crate::api::schema::AgentStatus::Idle
-                        | crate::api::schema::AgentStatus::Done => AgentState::Idle,
-                        crate::api::schema::AgentStatus::Working => AgentState::Working,
-                        crate::api::schema::AgentStatus::Blocked => AgentState::Blocked,
-                        crate::api::schema::AgentStatus::Stale
-                        | crate::api::schema::AgentStatus::Unknown => AgentState::Unknown,
+                    let settled = info.settled_at.is_some();
+                    let state = if settled {
+                        AgentState::Idle
+                    } else {
+                        match info.agent_status {
+                            crate::api::schema::AgentStatus::Idle
+                            | crate::api::schema::AgentStatus::Done => AgentState::Idle,
+                            crate::api::schema::AgentStatus::Working => AgentState::Working,
+                            crate::api::schema::AgentStatus::Blocked => AgentState::Blocked,
+                            crate::api::schema::AgentStatus::Stale
+                            | crate::api::schema::AgentStatus::Unknown => AgentState::Unknown,
+                        }
                     };
+                    let has_gates = !settled && !info.gates.is_empty();
+                    let has_items = !settled && !info.items.is_empty();
+                    let usage_limited = !settled && info.usage_limited;
                     (
                         state,
                         info.agent_status != crate::api::schema::AgentStatus::Done,
@@ -1404,9 +1444,15 @@ pub(crate) fn remote_agent_panel_entries(
                         row.title.clone(),
                         info.terminal_title.clone(),
                         info.terminal_title_stripped.clone(),
-                        !info.gates.is_empty(),
-                        info.usage_limited,
-                        info.gates.len(),
+                        has_gates,
+                        crate::terminal::state::attention_tier(
+                            state,
+                            has_gates,
+                            has_items,
+                            usage_limited,
+                        ),
+                        usage_limited,
+                        usize::from(has_gates) * info.gates.len(),
                         Some(info.state_change_seq),
                         info.state_labels.clone(),
                         info.tokens.clone(),
@@ -1454,6 +1500,7 @@ pub(crate) fn remote_agent_panel_entries(
                         prio: false,
                         starred: false,
                         state,
+                        attention_tier,
                         open_blockers,
                         completion_tier: None,
                         usage_limited,
@@ -1612,6 +1659,7 @@ fn aggregate_tab_entries(
                     *has_agent |= entry.has_agent;
                     *has_current_agent |= entry.agent.is_some();
                     tab_entry.open_blockers |= entry.open_blockers;
+                    tab_entry.attention_tier = tab_entry.attention_tier.max(entry.attention_tier);
                     tab_entry.usage_limited |= entry.usage_limited;
                 },
             )
@@ -2094,7 +2142,7 @@ fn compact_sidebar_rows_inner(
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
-            .filter(|entry| entry_has_red_dot(entry))
+            .filter(|entry| entry_is_blocked(entry))
             .cloned()
             .collect::<Vec<_>>()
     } else {
@@ -5870,6 +5918,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     continue;
                 };
                 let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
+                let attention_tier = ws.aggregate_attention_tier(&app.terminals);
                 let has_agent = ws.tabs.iter().any(|tab| {
                     tab.panes.values().any(|pane| {
                         app.terminals
@@ -5879,7 +5928,11 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 });
                 let icon = compact_dot_for_state(agg_state, agg_seen, has_agent, false, false);
                 let icon_style = Style::default().fg(if has_agent {
-                    state_label_color(agg_state, agg_seen, p)
+                    match attention_tier {
+                        AttentionTier::Blocked => p.red,
+                        AttentionTier::Attention => p.peach,
+                        AttentionTier::None => state_label_color(agg_state, agg_seen, p),
+                    }
                 } else {
                     p.overlay0
                 });
@@ -8509,6 +8562,65 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn remote_answer_only_entry_uses_the_yellow_attention_tier() {
+        let mut info = remote_agent_info(
+            "pane/attention",
+            "remote question",
+            crate::api::schema::AgentStatus::Blocked,
+            false,
+            false,
+        );
+        info.items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote".into()],
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "remote",
+                    info.clone(),
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let entries = remote_agent_panel_entries(&snapshot);
+        let entry = &entries[0].entry;
+        assert_eq!(entry.attention_tier, AttentionTier::Attention);
+        assert!(entry_needs_human_attention(entry));
+        assert!(!entry_is_blocked(entry));
+        let palette = Palette::catppuccin();
+        assert_eq!(compact_row_color(entry, &palette), palette.peach);
+
+        info.settled_at = Some(1_725_000_023);
+        let settled_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote".into()],
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row("remote", info)],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let settled_entries = remote_agent_panel_entries(&settled_snapshot);
+        let settled_entry = &settled_entries[0].entry;
+        assert_eq!(settled_entry.attention_tier, AttentionTier::None);
+        assert!(!entry_needs_human_attention(settled_entry));
+        assert!(!entry_is_blocked(settled_entry));
+    }
+
+    #[test]
     fn remote_projection_keeps_a_host_named_like_self() {
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![fleet_host_snapshot(
@@ -10009,6 +10121,7 @@ pub(crate) mod tests {
             prio: true,
             starred: false,
             state,
+            attention_tier: crate::terminal::state::attention_tier(state, false, false, false),
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
@@ -10609,6 +10722,62 @@ pub(crate) mod tests {
             .find(|entry| entry.pane_id == pane)
             .expect("pane entry");
         assert!(!entry.open_blockers);
+    }
+
+    #[test]
+    fn closing_items_render_at_their_runtime_attention_tier() {
+        let mut app = app_with_agents(&["gate", "items", "mixed", "resumed"]);
+        let item = |label: &str| crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: label.into(),
+            text: "Needs the human".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        };
+        for (ws_idx, gates, items, state) in [
+            (0, vec![item("Gate")], Vec::new(), AgentState::Blocked),
+            (1, Vec::new(), vec![item("Answer")], AgentState::Blocked),
+            (
+                2,
+                vec![item("Gate")],
+                vec![item("Verify")],
+                AgentState::Blocked,
+            ),
+            (3, Vec::new(), vec![item("Answer")], AgentState::Working),
+        ] {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].terminal_id(pane).unwrap().clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.state = state;
+            terminal.apply_closing_block_payload(gates, items, Vec::new());
+        }
+
+        let entries = sidebar_thread_entries(&app);
+        let entry = |ws_idx| entries.iter().find(|entry| entry.ws_idx == ws_idx).unwrap();
+        assert_eq!(compact_row_color(entry(0), &app.palette), app.palette.red);
+        assert_eq!(compact_row_color(entry(1), &app.palette), app.palette.peach);
+        assert_ne!(app.palette.peach, app.palette.yellow);
+        assert_eq!(compact_row_color(entry(2), &app.palette), app.palette.red);
+        assert_eq!(
+            compact_row_color(entry(3), &app.palette),
+            app.palette.blue,
+            "the yellow tier clears when the agent resumes working"
+        );
+
+        let attention_pane = app.workspaces[1].tabs[0].root_pane;
+        app.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&attention_pane)
+            .unwrap()
+            .settled_at = Some(1);
+        assert_eq!(
+            app.workspaces[1].aggregate_attention_tier(&app.terminals),
+            AttentionTier::None,
+            "settled panes leave the workspace attention roll-up"
+        );
     }
 
     /// Owner correction to #77: the same latched gate is not blocking while

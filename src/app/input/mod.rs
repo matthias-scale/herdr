@@ -807,11 +807,11 @@ impl App {
                     self.state.home_browse_cancel();
                 }
                 KeyCode::Tab if event.modifiers.is_empty() => {
-                    let queue_empty = self.state.blocked_agents().is_empty();
+                    let queue_empty = self.state.home_attention_agents().is_empty();
                     self.state.home_move_composer_focus(false, queue_empty);
                 }
                 KeyCode::BackTab => {
-                    let queue_empty = self.state.blocked_agents().is_empty();
+                    let queue_empty = self.state.home_attention_agents().is_empty();
                     self.state.home_move_composer_focus(true, queue_empty);
                 }
                 KeyCode::Up if event.modifiers.is_empty() => {
@@ -872,7 +872,7 @@ impl App {
         }
 
         let focus = self.state.home.as_ref().and_then(|home| home.focus);
-        let queue = self.state.blocked_agents();
+        let queue = self.state.home_attention_agents();
 
         match event.code {
             KeyCode::Tab if event.modifiers.is_empty() => {
@@ -1176,6 +1176,9 @@ impl App {
                     self.state.view.sidebar_rect,
                     self.state.workspace_scroll,
                 );
+            }
+            StatusButtonAction::Attention => {
+                self.state.toggle_home();
             }
             StatusButtonAction::Dock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
@@ -8395,7 +8398,7 @@ navigate_workspace_down = "ctrl+j"
         // Click the second row rather than the first, so a jump proves the
         // click chose the row instead of the cursor happening to be there.
         let (index, rect) = hits[1];
-        let queue = app.state.blocked_agents();
+        let queue = app.state.home_attention_agents();
         let target = queue[index].pane_id;
         assert_ne!(target, pane_ids[0]);
 
@@ -8877,7 +8880,7 @@ navigate_workspace_down = "ctrl+j"
                 .home
                 .as_ref()
                 .expect("home overlay")
-                .selected(&app.state.blocked_agents())
+                .selected(&app.state.home_attention_agents())
         };
 
         assert_eq!(selected(&app), 0);

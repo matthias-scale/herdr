@@ -7598,6 +7598,14 @@
             "screen_detection_skipped": {
               "type": "boolean"
             },
+            "settled_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "state_change_seq": {
               "default": 0,
               "format": "uint64",

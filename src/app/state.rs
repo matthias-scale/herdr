@@ -2293,6 +2293,7 @@ pub(crate) enum StatusButtonAction {
     Home,
     Work,
     BlockedFilter,
+    Attention,
     Dock,
     /// Expand or collapse the usage detail in the status row.
     StatusDetail,
