@@ -4460,15 +4460,22 @@ impl App {
         }
     }
 
-    pub(super) async fn handle_paste(&mut self, text: String) {
+    pub(super) fn try_route_paste_to_overlay(&mut self, text: &str) -> bool {
         if self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.dock_object_preview.is_some()
         {
-            return;
+            return true;
         }
         if self.state.home.is_some() {
-            self.handle_home_text_commit(&text);
+            self.handle_home_text_commit(text);
+            return true;
+        }
+        false
+    }
+
+    pub(super) async fn handle_paste(&mut self, text: String) {
+        if self.try_route_paste_to_overlay(&text) {
             return;
         }
         if self.state.popup_pane.is_some() {
