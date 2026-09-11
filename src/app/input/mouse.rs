@@ -184,10 +184,6 @@ impl AppState {
         ) {
             self.remote_agent_presses.remove(&source_id);
         }
-        // Same rule as the keyboard: a due break reminder owns the screen.
-        if self.pomodoro.prompt.is_some() {
-            return None;
-        }
         if self.handle_notepad_mouse(&mouse) {
             return None;
         }

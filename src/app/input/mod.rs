@@ -4651,6 +4651,30 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        // A due break reminder is the topmost modal and must decide the click
+        // before hover, pane focus, or any underlying control can react.
+        if self.state.pomodoro.prompt.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some((confirm, snooze)) =
+                    crate::ui::pomodoro::prompt_button_rects(self.state.screen_rect())
+                {
+                    let hit = |rect: ratatui::layout::Rect| {
+                        mouse.column >= rect.x
+                            && mouse.column < rect.right()
+                            && mouse.row >= rect.y
+                            && mouse.row < rect.bottom()
+                    };
+                    if hit(confirm) {
+                        self.confirm_pomodoro(std::time::Instant::now());
+                    } else if hit(snooze) {
+                        self.state
+                            .pomodoro
+                            .dismiss_and_pause(std::time::Instant::now());
+                    }
+                }
+            }
+            return;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) {
             let hovered = crate::ui::hovered_control_at(&self.state, mouse.column, mouse.row);
             self.state
@@ -5738,6 +5762,234 @@ async fn wait_for_custom_command_reap(app: &mut App, pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hidden_sidebar_config_app() -> App {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-hidden-sidebar-input-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("create config fixture directory");
+        let config_path = directory.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+onboarding = false
+
+[keys]
+prefix = "ctrl+a"
+
+[ui]
+sidebar_width = 42
+sidebar_min_width = 24
+sidebar_max_width = 120
+sidebar_collapsed_mode = "hidden"
+mouse_capture = true
+
+[notepad]
+enabled = true
+
+[pomodoro]
+enabled = true
+"#,
+        )
+        .expect("write config fixture");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &config_path);
+        let loaded = crate::config::Config::load();
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        let mut app = App::new(
+            &loaded.config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.mode = Mode::Terminal;
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("ub1")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.dock_width = 82;
+        app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::Repo;
+        app.state.sidebar_work_filter = crate::app::state::SidebarWorkFilter::default();
+        std::fs::remove_dir_all(directory).expect("remove config fixture directory");
+        app
+    }
+
+    fn compute_hidden_sidebar(app: &mut App) {
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 30));
+    }
+
+    #[test]
+    fn hidden_sidebar_config_toggles_through_raw_key_and_mouse_input() {
+        let key_encodings = [
+            (vec![0x01], b"B".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[98;2u".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[98:66;2u".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[66;1u".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[66;2u".to_vec()),
+        ];
+
+        for (prefix, rhs) in key_encodings {
+            let mut app = hidden_sidebar_config_app();
+            compute_hidden_sidebar(&mut app);
+            assert_eq!(app.state.view.sidebar_rect.width, 42);
+
+            app.route_client_input(prefix.clone());
+            app.route_client_input(rhs.clone());
+            compute_hidden_sidebar(&mut app);
+            assert!(app.state.sidebar_collapsed, "failed encoding: {rhs:?}");
+            assert_eq!(
+                app.state.view.sidebar_rect.width, 0,
+                "failed encoding: {rhs:?}"
+            );
+
+            app.route_client_input(prefix);
+            app.route_client_input(rhs.clone());
+            compute_hidden_sidebar(&mut app);
+            assert!(!app.state.sidebar_collapsed, "failed encoding: {rhs:?}");
+            assert_eq!(
+                app.state.view.sidebar_rect.width, 42,
+                "failed encoding: {rhs:?}"
+            );
+        }
+
+        let mut app = hidden_sidebar_config_app();
+        app.route_client_input(vec![0x01]);
+        app.route_client_input(b"b".to_vec());
+        assert!(!app.state.sidebar_collapsed);
+
+        let mut app = hidden_sidebar_config_app();
+        compute_hidden_sidebar(&mut app);
+        let sidebar = app.state.view.sidebar_rect;
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(sidebar);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .expect("render ub1 sidebar");
+
+        let mouse = format!("\x1b[<0;{};{}M", toggle.x + 1, toggle.y + 1);
+        app.route_client_input(mouse.into_bytes());
+        compute_hidden_sidebar(&mut app);
+        assert!(app.state.sidebar_collapsed);
+        assert_eq!(app.state.view.sidebar_rect.width, 0);
+
+        app.route_client_input(vec![0x01]);
+        app.route_client_input(b"B".to_vec());
+        compute_hidden_sidebar(&mut app);
+        assert!(!app.state.sidebar_collapsed);
+        assert_eq!(app.state.view.sidebar_rect.width, 42);
+    }
+
+    #[test]
+    fn due_break_prompt_blocks_then_releases_hidden_sidebar_toggles() {
+        let mut app = hidden_sidebar_config_app();
+        let now = std::time::Instant::now();
+        app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            now,
+        );
+
+        app.route_client_input(vec![0x01]);
+        app.route_client_input(b"B".to_vec());
+        compute_hidden_sidebar(&mut app);
+        assert!(app.state.sidebar_collapsed);
+        assert_eq!(app.state.view.sidebar_rect.width, 0);
+
+        app.state
+            .pomodoro
+            .tick(now + std::time::Duration::from_secs(25 * 60));
+        assert!(app.state.pomodoro.prompt.is_some());
+
+        app.route_client_input(vec![0x01]);
+        app.route_client_input(b"B".to_vec());
+        compute_hidden_sidebar(&mut app);
+        assert!(
+            app.state.sidebar_collapsed,
+            "due prompt owns the toggle key"
+        );
+
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .expect("render due prompt over hidden sidebar");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("time for a break"), "{rendered:?}");
+        assert!(rendered.contains("↵ confirm"), "{rendered:?}");
+        assert!(rendered.contains("^⌥b snooze"), "{rendered:?}");
+
+        for key in b"tea" {
+            app.route_client_input(vec![*key]);
+        }
+        app.route_client_input(b"\r".to_vec());
+        assert!(app.state.pomodoro.prompt.is_none());
+
+        app.route_client_input(vec![0x01]);
+        app.route_client_input(b"B".to_vec());
+        compute_hidden_sidebar(&mut app);
+        assert!(
+            !app.state.sidebar_collapsed,
+            "toggle key works after answer"
+        );
+
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(app.state.view.sidebar_rect);
+        let mouse = format!("\x1b[<0;{};{}M", toggle.x + 1, toggle.y + 1);
+        app.route_client_input(mouse.into_bytes());
+        compute_hidden_sidebar(&mut app);
+        assert!(
+            app.state.sidebar_collapsed,
+            "toggle icon works after answer"
+        );
+        assert_eq!(app.state.view.sidebar_rect.width, 0);
+    }
+
+    #[test]
+    fn due_break_prompt_buttons_confirm_and_snooze_through_raw_mouse_input() {
+        fn prompted_app() -> App {
+            let mut app = hidden_sidebar_config_app();
+            let now = std::time::Instant::now();
+            app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+                &crate::config::PomodoroConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                now,
+            );
+            app.state
+                .pomodoro
+                .tick(now + std::time::Duration::from_secs(25 * 60));
+            compute_hidden_sidebar(&mut app);
+            app
+        }
+
+        let mut app = prompted_app();
+        for key in b"tea" {
+            app.route_client_input(vec![*key]);
+        }
+        let (confirm, _) = crate::ui::pomodoro::prompt_button_rects(app.state.screen_rect())
+            .expect("prompt buttons");
+        let mouse = format!("\x1b[<0;{};{}M", confirm.x + 1, confirm.y + 1);
+        app.route_client_input(mouse.into_bytes());
+        assert!(app.state.pomodoro.prompt.is_none());
+
+        let mut app = prompted_app();
+        let (_, snooze) = crate::ui::pomodoro::prompt_button_rects(app.state.screen_rect())
+            .expect("prompt buttons");
+        let mouse = format!("\x1b[<0;{};{}M", snooze.x + 1, snooze.y + 1);
+        app.route_client_input(mouse.into_bytes());
+        assert!(app.state.pomodoro.prompt.is_none());
+        assert!(app.state.pomodoro.paused());
+    }
 
     fn terminal_app_with_blocked_hook() -> (
         App,
