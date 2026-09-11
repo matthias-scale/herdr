@@ -904,18 +904,16 @@ mod tests {
         assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
 
-        assert!(!app.tick_auto_nudges(now + Duration::from_secs(39 * 60)));
+        assert!(!app.tick_auto_nudges(now + Duration::from_secs(9 * 60)));
         assert_eq!(drain(&mut rx), "");
-        assert!(app.tick_auto_nudges(now + Duration::from_secs(40 * 60)));
+        assert!(app.tick_auto_nudges(now + Duration::from_secs(10 * 60)));
         assert!(drain(&mut rx)
             .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
 
-        assert!(app.tick_auto_nudges(now + Duration::from_secs(120 * 60)));
+        assert!(app.tick_auto_nudges(now + Duration::from_secs(30 * 60)));
         assert!(drain(&mut rx)
             .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
-        assert!(
-            app.tick_auto_nudges(now + Duration::from_secs(120 * 60) + STALL_NUDGE_SUBMIT_DELAY)
-        );
+        assert!(app.tick_auto_nudges(now + Duration::from_secs(30 * 60) + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(1_000 * 60)));
         assert_eq!(drain(&mut rx), "");
@@ -987,7 +985,7 @@ mod tests {
         assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
 
         let stale_at = report_at
-            .checked_add(crate::terminal::state::AGENT_STALE_SILENCE)
+            .checked_add(app.state.agent_stale_after)
             .expect("watchdog deadline");
         app.handle_scheduled_tasks(stale_at, false);
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
@@ -1023,11 +1021,11 @@ mod tests {
 
         assert_eq!(
             app.state.next_agent_watchdog_deadline(),
-            now.checked_add(crate::terminal::state::AGENT_STALE_SILENCE)
+            now.checked_add(app.state.agent_stale_after)
         );
         assert!(!app.state.terminals[&terminal_id].supervisor_stale);
 
-        app.handle_scheduled_tasks(now + crate::terminal::state::AGENT_STALE_SILENCE, false);
+        app.handle_scheduled_tasks(now + app.state.agent_stale_after, false);
 
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
         assert!(app.stall_nudge_episodes.is_empty());
@@ -1169,27 +1167,36 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut config = crate::config::Config::default();
         config.session.auto_nudge_stalled_agents = true;
+        config.session.agent_stale_after_minutes = 9;
         config.session.nudge_after_minutes = 12;
         config.session.max_nudges = 5;
         config.session.stall_nudge_message = "report".into();
         let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
         assert!(app.state.auto_nudge_stalled_agents);
+        assert_eq!(app.state.agent_stale_after, Duration::from_secs(9 * 60));
         assert_eq!(app.state.nudge_after, Duration::from_secs(12 * 60));
         assert_eq!(app.state.max_nudges, 5);
         assert_eq!(app.state.stall_nudge_message, "report");
 
         config.session.auto_nudge_stalled_agents = false;
+        config.session.agent_stale_after_minutes = 4;
         config.session.nudge_after_minutes = 7;
         config.session.max_nudges = 2;
         config.session.stall_nudge_message = "still working?".into();
         app.apply_live_config(&config, &[], &[], false);
         assert!(!app.state.auto_nudge_stalled_agents);
+        assert_eq!(app.state.agent_stale_after, Duration::from_secs(4 * 60));
         assert_eq!(app.state.nudge_after, Duration::from_secs(7 * 60));
         assert_eq!(app.state.max_nudges, 2);
         assert_eq!(app.state.stall_nudge_message, "still working?");
 
+        config.session.agent_stale_after_minutes = u64::MAX;
         config.session.nudge_after_minutes = u64::MAX;
         app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.agent_stale_after,
+            Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)
+        );
         assert_eq!(
             app.state.nudge_after,
             Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)

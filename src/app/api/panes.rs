@@ -5580,7 +5580,7 @@ mod tests {
 
         let updates = app
             .state
-            .mark_due_agent_status_stale_at(started + crate::terminal::state::AGENT_STALE_SILENCE);
+            .mark_due_agent_status_stale_at(started + app.state.agent_stale_after);
         assert_eq!(updates.len(), 1);
         for update in &updates {
             app.emit_pane_state_update(update);
