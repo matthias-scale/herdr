@@ -1385,6 +1385,7 @@ impl App {
             return false;
         }
 
+        self.note_human_key(pane_id, &key);
         self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
         self.state.mode = Mode::Terminal;
         true
@@ -4089,6 +4090,26 @@ mod tests {
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+    }
+
+    /// AC6: a successfully forwarded prefix pass-through key records the human draft.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prefix_pass_through_records_a_human_draft() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        app.state.prefix_code = KeyCode::Char('x');
+        app.state.prefix_mods = KeyModifiers::empty();
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ));
+
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(app.state.pending_human_drafts[&pane_id], "x");
     }
 
     #[test]

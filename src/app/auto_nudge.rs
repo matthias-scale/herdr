@@ -165,6 +165,11 @@ impl App {
         self.state.note_human_text(pane_id, text);
     }
 
+    pub(crate) fn note_human_bytes(&mut self, pane_id: crate::layout::PaneId, bytes: &[u8]) {
+        self.cancel_pending_stall_nudge_for_pane(pane_id);
+        self.state.note_human_bytes(pane_id, bytes);
+    }
+
     pub(super) fn cancel_pending_stall_nudge_for_pane(&mut self, pane_id: crate::layout::PaneId) {
         self.pending_stall_nudge_submissions
             .retain(|_, pending| pending.pane_id != pane_id);

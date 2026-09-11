@@ -56,6 +56,7 @@ impl App {
         pane_id: PaneId,
         text: &str,
     ) -> bool {
+        self.cancel_pending_stall_nudge_for_pane(pane_id);
         let Some(runtime) =
             self.state
                 .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
@@ -290,5 +291,52 @@ mod tests {
 
         assert!(app.state.agent_picker.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    /// AC6: pane-send abandons the pending stall-nudge Enter before writing its own turn.
+    #[tokio::test]
+    async fn pane_send_cancels_a_pending_stall_nudge_submission() {
+        let now = std::time::Instant::now();
+        let (mut app, panes) = app_with_agents(1);
+        let pane_id = panes[0];
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("pane terminal");
+        app.state.auto_nudge_stalled_agents = true;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("agent pane")
+            .activity
+            .set_last_at(now - app.state.nudge_after);
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.supervisor_stale = true;
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 8,
+            );
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        assert!(app.tick_auto_nudges(now));
+        assert!(rx.try_recv().is_ok(), "stall nudge text was not written");
+        assert!(app
+            .pending_stall_nudge_submissions
+            .contains_key(&terminal_id));
+
+        assert!(app.send_text_to_agent_pane(0, pane_id, "human turn"));
+
+        assert!(!app
+            .pending_stall_nudge_submissions
+            .contains_key(&terminal_id));
+        assert!(!app.tick_auto_nudges(now + SUBMIT_DELAY));
     }
 }
