@@ -184,6 +184,7 @@ impl Drop for ProcessControlReader {
 struct SessionHandle {
     outbound_tx: tokio::sync::mpsc::Sender<ProxyOutbound>,
     detached: Arc<AtomicBool>,
+    detach_requested: Arc<AtomicBool>,
 }
 
 pub(crate) struct SshRemoteFocusTransport {
@@ -243,6 +244,7 @@ impl SshRemoteFocusTransport {
         let agent_ref = agent_ref.clone();
         let runner = Arc::clone(&self.runner);
         let detached = Arc::new(AtomicBool::new(false));
+        let detach_requested = Arc::new(AtomicBool::new(false));
         self.sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -251,6 +253,7 @@ impl SshRemoteFocusTransport {
                 SessionHandle {
                     outbound_tx: channels.detach_tx.clone(),
                     detached: Arc::clone(&detached),
+                    detach_requested: Arc::clone(&detach_requested),
                 },
             );
         let sessions = Arc::clone(&self.sessions);
@@ -268,6 +271,7 @@ impl SshRemoteFocusTransport {
                     channels,
                     sessions,
                     detached,
+                    detach_requested,
                     event_tx,
                 )
             })
@@ -368,15 +372,12 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
             let Some(handle) = handle else {
                 return;
             };
+            handle.detach_requested.store(true, Ordering::Release);
             handle.detached.store(true, Ordering::Release);
-            if handle.outbound_tx.try_send(ProxyOutbound::Detach).is_err() {
-                // A full or closing channel must not block the app loop; the
-                // writer drains quickly, so a helper thread delivers it.
-                let outbound_tx = handle.outbound_tx.clone();
-                std::thread::spawn(move || {
-                    let _ = outbound_tx.blocking_send(ProxyOutbound::Detach);
-                });
-            }
+            // The flag is the urgent side channel. If the normal queue is
+            // full, the writer drops queued input and writes Detach directly
+            // instead of waiting behind it.
+            let _ = handle.outbound_tx.try_send(ProxyOutbound::Detach);
         }
         #[cfg(not(unix))]
         {
@@ -423,8 +424,16 @@ fn run_control_writer(
     mut outbound_rx: tokio::sync::mpsc::Receiver<ProxyOutbound>,
     resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
     detached: Arc<AtomicBool>,
+    detach_requested: Arc<AtomicBool>,
 ) {
     while let Some(message) = outbound_rx.blocking_recv() {
+        if detach_requested.load(Ordering::Acquire) {
+            let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
+            return;
+        }
+        if detached.load(Ordering::Acquire) {
+            return;
+        }
         let is_detach = matches!(message, ProxyOutbound::Detach);
         let wire = match message {
             ProxyOutbound::Input(bytes) => ClientMessage::Input {
@@ -449,7 +458,7 @@ fn run_control_writer(
             return;
         }
     }
-    if !detached.load(Ordering::Acquire) {
+    if detach_requested.load(Ordering::Acquire) || !detached.load(Ordering::Acquire) {
         let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
     }
 }
@@ -467,6 +476,7 @@ fn run_control_session(
     channels: RemoteProxyChannels,
     sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
     detached: Arc<AtomicBool>,
+    detach_requested: Arc<AtomicBool>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) {
     let RemoteProxyChannels {
@@ -588,11 +598,18 @@ fn run_control_session(
     }
     let (mut reader, writer) = stream.split();
     let writer_detached = Arc::clone(&detached);
+    let writer_detach_requested = Arc::clone(&detach_requested);
     let writer_resize_slot = Arc::clone(&resize_slot);
     let writer_thread = std::thread::Builder::new()
         .name(format!("herdr-remote-focus-writer-{operation_id}"))
         .spawn(move || {
-            run_control_writer(writer, outbound_rx, writer_resize_slot, writer_detached)
+            run_control_writer(
+                writer,
+                outbound_rx,
+                writer_resize_slot,
+                writer_detached,
+                writer_detach_requested,
+            )
         });
     if let Err(error) = writer_thread {
         SshRemoteFocusTransport::fail(
@@ -1282,10 +1299,22 @@ mod tests {
         outbound_tx
             .blocking_send(ProxyOutbound::SyncResize)
             .expect("resize queued");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if wire_messages(&output.lock().expect("fake output lock")).len() >= 4 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "input and resize did not reach the wire before detach"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         transport.detach("operation");
         read_gate.store(true, Ordering::Release);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             {
                 let written = output.lock().expect("fake output lock");
@@ -1316,6 +1345,53 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn detach_preempts_pending_outbound_input() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport = transport_with_read_gate(
+            input,
+            Arc::clone(&output),
+            None,
+            Some(Arc::clone(&read_gate)),
+        );
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        let channels = RemoteProxyChannels {
+            outbound_rx,
+            detach_tx: outbound_tx.clone(),
+            resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
+        };
+        outbound_tx
+            .try_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"stale")))
+            .expect("pending input queued");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        transport.detach("operation");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let messages = wire_messages(&output.lock().expect("fake output lock"));
+            if messages.len() >= 3 {
+                assert!(matches!(messages[0], ClientMessage::Hello { .. }));
+                assert!(matches!(messages[1], ClientMessage::ControlTerminal { .. }));
+                assert!(matches!(messages[2], ClientMessage::Detach));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detach did not preempt pending input: {messages:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        read_gate.store(true, Ordering::Release);
     }
 
     #[test]

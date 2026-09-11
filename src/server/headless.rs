@@ -1671,6 +1671,11 @@ impl HeadlessServer {
             return Err(err);
         }
 
+        // Proxy panes have no local PTY to transfer. Once the replacement has
+        // committed, release every remote lease and remove each ephemeral pane
+        // before the old runtime registry is drained.
+        self.teardown_remote_focus_proxies();
+
         let transferred: std::collections::HashSet<_> = handoff_entries
             .iter()
             .map(|(terminal_id, _)| terminal_id.clone())
@@ -1688,10 +1693,74 @@ impl HeadlessServer {
     }
 
     fn finish_live_handoff_shutdown(&mut self) {
+        self.teardown_remote_focus_proxies();
         self.shutting_down = true;
         self.app.state.should_quit = true;
         self.app.no_session = true;
         info!("live handoff completed; old server exiting");
+    }
+
+    /// Ends every proxy operation owned by this server. Proxy panes are
+    /// ephemeral and cannot cross a handoff, so their pane, terminal state,
+    /// runtime, and remote lease must leave together. The App runtime shutdown
+    /// path owns the exactly-once lease release invariant.
+    fn teardown_remote_focus_proxies(&mut self) {
+        let proxy_terminal_ids = self
+            .app
+            .state
+            .terminals
+            .iter()
+            .filter(|(_, terminal)| terminal.remote_proxy)
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect::<Vec<_>>();
+        if proxy_terminal_ids.is_empty() {
+            return;
+        }
+
+        let proxy_panes = self
+            .app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.iter())
+                    .filter_map(|(pane_id, pane)| {
+                        proxy_terminal_ids
+                            .contains(&pane.attached_terminal_id)
+                            .then_some((*pane_id, pane.attached_terminal_id.clone()))
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        for (pane_id, terminal_id) in proxy_panes {
+            let Some(ws_idx) = self
+                .app
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.pane_state(pane_id).is_some())
+            else {
+                continue;
+            };
+            let should_close_workspace = self
+                .app
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .is_some_and(|workspace| workspace.remove_pane(pane_id));
+            if should_close_workspace {
+                self.app.state.close_workspace_exact(ws_idx);
+            }
+            self.app.state.remove_unattached_terminal_ids([terminal_id]);
+        }
+        self.app
+            .state
+            .remove_unattached_terminal_ids(proxy_terminal_ids);
+        self.app.state.mark_session_dirty();
+        self.app.shutdown_detached_terminal_runtimes();
     }
 
     #[cfg(not(unix))]
@@ -6459,6 +6528,7 @@ impl HeadlessServer {
         }
         info!("server shutdown initiated");
         self.shutting_down = true;
+        self.teardown_remote_focus_proxies();
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.
         self.send_all_clients_graphics_cleanup();
@@ -6481,6 +6551,7 @@ impl HeadlessServer {
     /// close client connections, remove socket files, and clean up.
     async fn complete_shutdown(&mut self) -> io::Result<()> {
         info!("completing server shutdown");
+        self.teardown_remote_focus_proxies();
         self.reject_late_client_connections().await;
 
         // Send ServerShutdown to all remaining clients.
@@ -6581,6 +6652,7 @@ fn events_for_app_routing(
 
 impl Drop for HeadlessServer {
     fn drop(&mut self) {
+        self.teardown_remote_focus_proxies();
         let staged_files = self
             .clients
             .drain()
@@ -7037,6 +7109,127 @@ mod tests {
             server_event_rx,
             server_event_tx,
         }
+    }
+
+    struct RecordingRemoteFocusTransport {
+        detached: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::app::remote_focus::RemoteFocusTransport for RecordingRemoteFocusTransport {
+        fn start(
+            &mut self,
+            _operation_id: &str,
+            _agent_ref: &api::schema::AgentRef,
+            _proxy_pane_id: &str,
+            _channels: crate::pane::RemoteProxyChannels,
+            _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        ) -> Result<(), api::schema::ErrorBody> {
+            Ok(())
+        }
+
+        fn detach(&mut self, operation_id: &str) {
+            self.detached
+                .lock()
+                .expect("detach recording lock")
+                .push(operation_id.to_owned());
+        }
+    }
+
+    fn server_with_remote_focus_proxy() -> (
+        HeadlessServer,
+        String,
+        crate::layout::PaneId,
+        crate::terminal::TerminalId,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let mut server = test_headless_server();
+        server.app.state.workspaces =
+            vec![crate::workspace::Workspace::test_new("proxy-lifecycle")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let detached = Arc::new(std::sync::Mutex::new(Vec::new()));
+        server.app.remote_focus_transport = Box::new(RecordingRemoteFocusTransport {
+            detached: Arc::clone(&detached),
+        });
+        let started = server
+            .app
+            .start_remote_focus_operation(
+                api::schema::AgentRef::new("buildbox", "proxy-lifecycle:p1")
+                    .expect("proxy agent ref"),
+            )
+            .expect("proxy operation starts");
+        let (pane_id, terminal_id) = server
+            .app
+            .remote_focus_operations
+            .proxy_location(&started.operation_id)
+            .expect("proxy location");
+        (server, started.operation_id, pane_id, terminal_id, detached)
+    }
+
+    fn assert_remote_focus_proxy_torn_down(
+        server: &mut HeadlessServer,
+        operation_id: &str,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        detached: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        assert!(!server
+            .app
+            .state
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.pane_state(pane_id).is_some()));
+        assert!(!server.app.state.terminals.contains_key(terminal_id));
+        assert!(server.app.terminal_runtimes.get(terminal_id).is_none());
+        assert_eq!(
+            detached.lock().expect("detach recording lock").as_slice(),
+            [operation_id]
+        );
+        assert_eq!(
+            server
+                .app
+                .remote_focus_status(operation_id)
+                .expect("proxy operation status")
+                .state,
+            api::schema::RemoteFocusState::Closed
+        );
+    }
+
+    #[test]
+    fn server_shutdown_tears_down_remote_focus_proxy_once() {
+        let (mut server, operation_id, pane_id, terminal_id, detached) =
+            server_with_remote_focus_proxy();
+
+        server.initiate_shutdown();
+        server.initiate_shutdown();
+
+        assert_remote_focus_proxy_torn_down(
+            &mut server,
+            &operation_id,
+            pane_id,
+            &terminal_id,
+            &detached,
+        );
+    }
+
+    #[test]
+    fn committed_live_handoff_tears_down_remote_focus_proxy_once() {
+        let (mut server, operation_id, pane_id, terminal_id, detached) =
+            server_with_remote_focus_proxy();
+
+        server.finish_live_handoff_shutdown();
+        server.finish_live_handoff_shutdown();
+
+        assert_remote_focus_proxy_torn_down(
+            &mut server,
+            &operation_id,
+            pane_id,
+            &terminal_id,
+            &detached,
+        );
     }
 
     #[test]
