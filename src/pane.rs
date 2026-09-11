@@ -1520,6 +1520,12 @@ impl PaneRuntimeIo {
         }
     }
 
+    fn sync_remote_proxy_resize(&self) {
+        if let PaneRuntimeIo::RemoteProxy { outbound, .. } = self {
+            let _ = outbound.try_send(ProxyOutbound::SyncResize);
+        }
+    }
+
     #[cfg(unix)]
     fn nudge_child_redraw_after_handoff(
         &self,
@@ -3433,6 +3439,31 @@ impl PaneRuntime {
 
     /// Resize if the dimensions actually changed.
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+        self.resize_inner(rows, cols, cell_width_px, cell_height_px, true);
+    }
+
+    /// Reconcile a remote proxy's local terminal geometry without queueing a
+    /// resize marker. The marker is sent by the event loop after view
+    /// computation, keeping wire work out of the render path.
+    pub fn resize_remote_proxy_without_wire(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) {
+        debug_assert!(self.is_remote_proxy());
+        self.resize_inner(rows, cols, cell_width_px, cell_height_px, false);
+    }
+
+    fn resize_inner(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        sync_remote_proxy: bool,
+    ) {
         let rows = rows.max(2);
         let cols = cols.max(4);
         let size = (rows, cols, cell_width_px, cell_height_px);
@@ -3453,13 +3484,19 @@ impl PaneRuntime {
         // that distinction out of the time-based retirement window entirely.
         mark_detection_content_changed(&self.detection_content_seq);
         self.rebaseline_full_lifecycle_hook_content();
-        self.io.resize(
-            rows,
-            cols,
-            cell_width_px,
-            cell_height_px,
-            terminal_responses,
-        );
+        if sync_remote_proxy {
+            self.io.resize(
+                rows,
+                cols,
+                cell_width_px,
+                cell_height_px,
+                terminal_responses,
+            );
+        }
+    }
+
+    pub fn sync_remote_proxy_resize(&self) {
+        self.io.sync_remote_proxy_resize();
     }
 
     #[cfg(unix)]

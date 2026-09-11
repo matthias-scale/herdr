@@ -216,12 +216,7 @@ pub(super) fn resize_tab_panes(
             let pane_inner = pane_inner_rect(area, borders);
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
-                rt.resize(
-                    inner_rect.height,
-                    inner_rect.width,
-                    cell_size.width_px,
-                    cell_size.height_px,
-                );
+                resize_runtime_without_remote_wire(rt, inner_rect, cell_size);
             }
         }
         return;
@@ -238,14 +233,31 @@ pub(super) fn resize_tab_panes(
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
-                rt.resize(
-                    inner_rect.height,
-                    inner_rect.width,
-                    cell_size.width_px,
-                    cell_size.height_px,
-                );
+                resize_runtime_without_remote_wire(rt, inner_rect, cell_size);
             }
         }
+    }
+}
+
+fn resize_runtime_without_remote_wire(
+    runtime: &TerminalRuntime,
+    inner_rect: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
+    if runtime.is_remote_proxy() {
+        runtime.resize_remote_proxy_without_wire(
+            inner_rect.height,
+            inner_rect.width,
+            cell_size.width_px,
+            cell_size.height_px,
+        );
+    } else {
+        runtime.resize(
+            inner_rect.height,
+            inner_rect.width,
+            cell_size.width_px,
+            cell_size.height_px,
+        );
     }
 }
 
@@ -284,12 +296,7 @@ pub(super) fn compute_pane_infos(
                     !app.direct_attach_resize_locks.contains(terminal_id)
                 })
             {
-                rt.resize(
-                    inner_rect.height,
-                    inner_rect.width,
-                    cell_size.width_px,
-                    cell_size.height_px,
-                );
+                resize_runtime_without_remote_wire(rt, inner_rect, cell_size);
             }
         }
         return vec![PaneInfo {
@@ -322,12 +329,7 @@ pub(super) fn compute_pane_infos(
                     !app.direct_attach_resize_locks.contains(terminal_id)
                 })
             {
-                rt.resize(
-                    inner_rect.height,
-                    inner_rect.width,
-                    cell_size.width_px,
-                    cell_size.height_px,
-                );
+                resize_runtime_without_remote_wire(rt, inner_rect, cell_size);
             }
         }
 
@@ -1016,6 +1018,38 @@ mod tests {
             &app.view.pane_infos,
             &app.view.split_borders,
             frame,
+        );
+    }
+
+    #[test]
+    fn view_computation_does_not_enqueue_remote_proxy_resize_wire_work() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("proxy");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut channels) = TerminalRuntime::spawn_remote_proxy(
+            pane_id,
+            24,
+            80,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("proxy runtime");
+        workspace.tabs[0].runtimes.insert(pane_id, runtime);
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let _ = compute_pane_infos(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+
+        assert!(
+            channels.outbound_rx.try_recv().is_err(),
+            "view computation must not enqueue remote wire work"
         );
     }
 

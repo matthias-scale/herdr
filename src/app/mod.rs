@@ -2055,6 +2055,7 @@ impl App {
                         &self.render_dirty,
                     );
                 })?;
+                self.sync_remote_proxy_resizes();
                 self.status_metrics_visible =
                     self.state.view.status_bar_rect != ratatui::layout::Rect::default();
                 if kitty_graphics_enabled {
@@ -2786,6 +2787,25 @@ impl App {
             .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
             .and_then(|runtime| runtime.remote_proxy_input_enabled())
             .is_some_and(|enabled| !enabled)
+    }
+
+    /// Publish resize markers after view computation has completed. Geometry
+    /// reconciliation stays local to the render path; only this event-loop
+    /// boundary is allowed to touch the proxy wire.
+    pub(crate) fn sync_remote_proxy_resizes(&self) {
+        for workspace in &self.state.workspaces {
+            for tab in &workspace.tabs {
+                for pane in tab.panes.values() {
+                    let Some(runtime) = self.terminal_runtimes.get(&pane.attached_terminal_id)
+                    else {
+                        continue;
+                    };
+                    if runtime.is_remote_proxy() {
+                        runtime.sync_remote_proxy_resize();
+                    }
+                }
+            }
+        }
     }
 
     fn execute_repeat_plan_headless(

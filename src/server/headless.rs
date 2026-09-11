@@ -1328,6 +1328,7 @@ impl HeadlessServer {
                 area,
             );
         }
+        self.app.sync_remote_proxy_resizes();
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
         // even if the next rendered buffer compares equal to its cached frame.
