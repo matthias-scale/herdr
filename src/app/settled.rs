@@ -1143,7 +1143,10 @@ mod tests {
             quiet_since,
         );
         terminal
-            .mark_agent_status_stale_at(quiet_since + crate::terminal::state::AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(
+                quiet_since + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+                state.agent_stale_after,
+            )
             .expect("working report should become stale");
         assert!(terminal.supervisor_stale);
         if screen_state.is_none() {

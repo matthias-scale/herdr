@@ -2012,9 +2012,15 @@
           "description": "Nudge an unsettled agent pane after its status declaration is stale and its pane activity has also stayed quiet. Blocked panes, closing gates, human drafts, pending launches, and panes without a matching live agent runtime are skipped."
         },
         {
+          "key": "session.agent_stale_after_minutes",
+          "type": "integer",
+          "default": "5",
+          "description": "Quiet period before Herdr marks an unattended agent status report stale: a finished report still holding sub-processes, or a pane parked on an unverified subagent claim. An agent that reports itself working keeps a 20-minute budget, and declared waits use their ETA plus grace."
+        },
+        {
           "key": "session.nudge_after_minutes",
           "type": "integer",
-          "default": "20",
+          "default": "5",
           "description": "Minimum pane inactivity before the first stalled-agent nudge. Later nudges wait two and four times this interval."
         },
         {

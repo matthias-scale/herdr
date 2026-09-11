@@ -1113,15 +1113,17 @@ resume_agents_on_restore = true
     }
 
     #[test]
-    fn load_live_config_clamps_stall_nudge_delay() {
-        let loaded =
-            load_live_config_from_str("[session]\nnudge_after_minutes = 9223372036854775807\n")
-                .expect("live session config");
+    fn load_live_config_parses_and_clamps_stall_supervision_delays() {
+        let loaded = load_live_config_from_str(
+            "[session]\nagent_stale_after_minutes = 9223372036854775807\nnudge_after_minutes = 7\n",
+        )
+        .expect("live session config");
 
         assert_eq!(
-            loaded.config.session.nudge_after_minutes,
+            loaded.config.session.agent_stale_after_minutes,
             super::super::MAX_NUDGE_AFTER_MINUTES
         );
+        assert_eq!(loaded.config.session.nudge_after_minutes, 7);
     }
 
     #[test]
