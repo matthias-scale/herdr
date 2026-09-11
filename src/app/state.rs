@@ -1462,6 +1462,44 @@ impl SidebarGroupMode {
     }
 }
 
+/// How one sidebar group orders its rows. `Default` is the canonical order the
+/// projection already builds; every other mode re-sorts only the rows of the
+/// group the operator picked. Persisted per group key in the client-local
+/// presentation file, so the serde names are a compatibility contract.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SidebarSortMode {
+    /// The projection's canonical order; lifecycle changes never move a row.
+    #[default]
+    Default,
+    /// Case-insensitive alphabetical by the row's primary label.
+    Name,
+    /// Blocked/gated first, then working, then done/idle; ties by most recent
+    /// state change.
+    Status,
+    /// Most recent state change first.
+    Recent,
+}
+
+impl SidebarSortMode {
+    pub(crate) const ALL: [Self; 4] = [Self::Default, Self::Name, Self::Status, Self::Recent];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Name => "Name A→Z",
+            Self::Status => "Status",
+            Self::Recent => "Recent",
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0)
+    }
+}
+
 /// Attach-local sidebar state. The headless server swaps one instance into
 /// `AppState` while routing input or rendering for that client; the monolithic
 /// app keeps its own instance directly.
@@ -1490,6 +1528,10 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) project_menu: Option<SidebarProjectMenuState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
+    pub(crate) sort_menu: Option<SidebarSortMenuState>,
+    /// Per-group sort choices, keyed by the group's canonical key. Client
+    /// presentation: two attaches may sort the same group differently.
+    pub(crate) group_sorts: std::collections::HashMap<String, SidebarSortMode>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
@@ -1559,6 +1601,32 @@ pub(crate) enum SidebarObjectMenuPage {
     TicketTransitions,
     TicketPriorities,
     Confirmation,
+}
+
+/// Attach-local state for the sort dropdown anchored to a sidebar group header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarSortMenuState {
+    /// Canonical key of the group being sorted (never namespaced or settled).
+    pub(crate) target: String,
+    /// Sort the menu marks as current: the group's effective sort, inheritance
+    /// included, captured when the menu opened.
+    pub(crate) current: SidebarSortMode,
+    /// Cell the dropdown hangs from: the clicked sort glyph.
+    pub(crate) anchor: (u16, u16),
+    pub(crate) selected: usize,
+}
+
+/// Picker that assigns a window to a named sidebar subgroup. Opened from the
+/// window's context menu; the typed query doubles as the new-subgroup name.
+/// Transient like the context menu that opened it, so it lives on `AppState`
+/// directly rather than in the per-attach presentation swap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SidebarSubgroupPickerState {
+    pub(crate) ws_idx: usize,
+    pub(crate) tab_idx: usize,
+    /// Cell the dropdown hangs from: the context menu item the operator chose.
+    pub(crate) anchor: (u16, u16),
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -2932,6 +3000,9 @@ pub enum ContextMenuKind {
         /// Snapshot of the tab's star at open time, so the entry can read
         /// "Star" or "Unstar" without the menu reaching back into state.
         starred: bool,
+        /// Snapshot of the tab's subgroup membership at open time, so the menu
+        /// offers "Remove from subgroup" exactly when there is one to remove.
+        has_subgroup: bool,
     },
     Pane {
         ws_idx: usize,
@@ -3040,6 +3111,9 @@ impl PaneOpenWith {
 /// Labels of the session-star entries in the tab context menu.
 pub const STAR_ITEM: &str = "Star";
 pub const UNSTAR_ITEM: &str = "Unstar";
+/// Labels of the sidebar-subgroup entries in the tab context menu.
+pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
+pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
@@ -3195,12 +3269,23 @@ impl ContextMenuState {
                 "Open worktree...",
                 if *collapsed { "Expand" } else { "Collapse" },
             ],
-            ContextMenuKind::Tab { starred, .. } => vec![
-                "New tab",
-                "Rename",
-                if *starred { UNSTAR_ITEM } else { STAR_ITEM },
-                "Close",
-            ],
+            ContextMenuKind::Tab {
+                starred,
+                has_subgroup,
+                ..
+            } => {
+                let mut items = vec![
+                    "New tab",
+                    "Rename",
+                    if *starred { UNSTAR_ITEM } else { STAR_ITEM },
+                    MOVE_TO_SUBGROUP_ITEM,
+                ];
+                if *has_subgroup {
+                    items.push(REMOVE_FROM_SUBGROUP_ITEM);
+                }
+                items.push("Close");
+                items
+            }
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -3544,6 +3629,7 @@ pub struct AppState {
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
+    pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
     pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
@@ -3602,6 +3688,16 @@ pub struct AppState {
     /// Downward action menu for a Linear, GitHub, or Missive sidebar object.
     /// This is client-local presentation; writes remain in `dock_pending_write`.
     pub(crate) sidebar_object_menu: Option<SidebarObjectMenuState>,
+    /// Downward sort dropdown for one sidebar group. Client-local presentation;
+    /// the choices themselves live in `sidebar_group_sorts`.
+    pub(crate) sidebar_sort_menu: Option<SidebarSortMenuState>,
+    /// Picker assigning a window to a named sidebar subgroup. Transient UI
+    /// state; the assignment itself lives on the tab and persists with the
+    /// session.
+    pub(crate) sidebar_subgroup_picker: Option<SidebarSubgroupPickerState>,
+    /// Per-group sidebar sort choices keyed by canonical group key. Only groups
+    /// with an explicit non-default choice have an entry.
+    pub(crate) sidebar_group_sorts: std::collections::HashMap<String, SidebarSortMode>,
     /// Views whose Unassigned section has expanded past its ten newest rows.
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
@@ -4844,6 +4940,36 @@ impl AppState {
         self.sidebar_work_filter_persistence_request.take()
     }
 
+    /// The sort one sidebar group is explicitly set to, `Default` when the
+    /// group never chose one. Inheritance from an enclosing group is resolved
+    /// by the row builders, which walk parent-first.
+    pub(crate) fn sidebar_group_sort(&self, key: &str) -> SidebarSortMode {
+        self.sidebar_group_sorts
+            .get(key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_sidebar_group_sort(&mut self, key: String, mode: SidebarSortMode) {
+        self.sidebar_sort_menu = None;
+        if self.sidebar_group_sort(key.as_str()) == mode {
+            return;
+        }
+        if mode == SidebarSortMode::Default {
+            self.sidebar_group_sorts.remove(&key);
+        } else {
+            self.sidebar_group_sorts.insert(key.clone(), mode);
+        }
+        self.sidebar_group_sort_persistence_request = Some((key, mode));
+        self.mark_sidebar_projection_changed();
+    }
+
+    pub(crate) fn take_sidebar_group_sort_persistence_request(
+        &mut self,
+    ) -> Option<(String, SidebarSortMode)> {
+        self.sidebar_group_sort_persistence_request.take()
+    }
+
     pub(crate) fn request_sidebar_refresh(&mut self) -> bool {
         if self.sidebar_refreshing {
             return false;
@@ -4902,6 +5028,8 @@ impl AppState {
             &mut other.selected_work_group,
         );
         std::mem::swap(&mut self.sidebar_object_menu, &mut other.object_menu);
+        std::mem::swap(&mut self.sidebar_sort_menu, &mut other.sort_menu);
+        std::mem::swap(&mut self.sidebar_group_sorts, &mut other.group_sorts);
         std::mem::swap(
             &mut self.sidebar_unassigned_expanded_views,
             &mut other.unassigned_expanded_views,
@@ -5998,6 +6126,7 @@ impl AppState {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_group_sort_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -6028,6 +6157,9 @@ impl AppState {
             sidebar_refreshing: false,
             sidebar_selected_work_group: None,
             sidebar_object_menu: None,
+            sidebar_sort_menu: None,
+            sidebar_subgroup_picker: None,
+            sidebar_group_sorts: std::collections::HashMap::new(),
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,

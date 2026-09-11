@@ -115,6 +115,10 @@ pub struct TabSnapshot {
     /// before stars existed restore unchanged.
     #[serde(default)]
     pub starred: bool,
+    /// User-named sidebar subgroup. Defaulted so session files written before
+    /// subgroups existed restore unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subgroup: Option<String>,
     #[serde(default)]
     pub prio: bool,
     #[serde(default)]
@@ -225,6 +229,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             prio: false,
             pinned: false,
             starred: false,
+            subgroup: None,
             focused: snap.focused,
             root_pane: snap.root_pane,
         };
@@ -520,6 +525,7 @@ fn capture_tab(
         prio: tab.prio,
         pinned: tab.pinned,
         starred: tab.starred,
+        subgroup: tab.subgroup.clone(),
         focused: Some(tab.layout.focused().raw()),
         root_pane: Some(tab.root_pane.raw()),
     }
@@ -714,6 +720,37 @@ mod tests {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
             LayoutSnapshot::Pane(_) => None,
         }
+    }
+
+    #[test]
+    fn tab_subgroup_round_trips_through_the_session_snapshot() {
+        let mut state = state_with_workspaces(&["subgrouped"]);
+        state.workspaces[0].tabs[0].set_subgroup(Some(" api ".to_string()));
+        let snapshot = capture_from_state(&state);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("api"),
+            "the assignment is captured normalized"
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize session snapshot");
+        let restored: SessionSnapshot =
+            serde_json::from_str(&json).expect("parse session snapshot");
+        assert_eq!(
+            restored.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("api")
+        );
+    }
+
+    #[test]
+    fn tab_snapshot_defaults_a_missing_subgroup_for_legacy_sessions() {
+        let snapshot: TabSnapshot =
+            serde_json::from_str(r#"{"layout":{"Pane":1},"panes":{},"zoomed":false}"#)
+                .expect("legacy tab snapshot without a subgroup field");
+        assert_eq!(snapshot.subgroup, None);
+        // An unset subgroup is also omitted when writing, so sessions that
+        // never used subgroups keep their old shape.
+        let json = serde_json::to_string(&snapshot).expect("serialize tab snapshot");
+        assert!(!json.contains("subgroup"), "{json}");
     }
 
     #[test]
@@ -1354,6 +1391,7 @@ mod tests {
                     prio: false,
                     pinned: false,
                     starred: false,
+                    subgroup: None,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -2104,6 +2142,7 @@ mod tests {
                     prio: false,
                     pinned: false,
                     starred: false,
+                    subgroup: None,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],

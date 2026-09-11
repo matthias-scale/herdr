@@ -173,6 +173,12 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        // The subgroup picker floats above panes and is not sidebar-focus
+        // gated: it opens from a right-click menu that never claims the
+        // sidebar's bare-key focus.
+        if self.state.handle_sidebar_subgroup_picker_key(key_event) {
+            return None;
+        }
         // Every sidebar shortcut below is a bare key the operator also types
         // into a pane, so they are reachable only while the sidebar owns the
         // keyboard. Gating them on their own selection or menu state instead
@@ -205,6 +211,9 @@ impl App {
                 return None;
             }
             if self.handle_sidebar_object_menu_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_sort_menu_key(key_event) {
                 return None;
             }
             if self.state.handle_sidebar_group_menu_key(key_event) {
