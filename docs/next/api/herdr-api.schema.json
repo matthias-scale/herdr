@@ -7533,6 +7533,13 @@
                 "null"
               ]
             },
+            "display_title": {
+              "description": "Exact session title resolved by the host that owns this agent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "eta_s": {
               "format": "uint64",
               "minimum": 0,

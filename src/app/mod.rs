@@ -1055,6 +1055,7 @@ impl App {
             drag: None,
             workspace_presses: HashMap::new(),
             tab_presses: HashMap::new(),
+            remote_agent_presses: HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,

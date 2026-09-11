@@ -2911,6 +2911,10 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
+pub(crate) struct RemoteAgentPressState {
+    pub agent_ref: crate::api::schema::AgentRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
@@ -3624,6 +3628,8 @@ pub struct AppState {
     pub(crate) workspace_presses:
         std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
+    pub(crate) remote_agent_presses:
+        std::collections::HashMap<crate::app::InputSourceId, RemoteAgentPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -6062,6 +6068,7 @@ impl AppState {
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
+            remote_agent_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -6381,6 +6388,10 @@ impl AppState {
             assert!(
                 self.tab_presses.is_empty(),
                 "empty app state must not keep tab press state"
+            );
+            assert!(
+                self.remote_agent_presses.is_empty(),
+                "empty app state must not keep remote agent press state"
             );
             assert!(
                 self.context_menu.is_none(),
