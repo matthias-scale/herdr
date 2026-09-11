@@ -181,9 +181,9 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
-/// The normal composer card has a border, a three-row prompt, two control rows,
+/// The normal composer card has a border, a six-row prompt, two control rows,
 /// and a closing border. Short frames fall back to the previous one-row prompt.
-const NORMAL_COMPOSER_CARD_ROWS: u16 = 8;
+const NORMAL_COMPOSER_CARD_ROWS: u16 = 11;
 const COMPACT_COMPOSER_CARD_ROWS: u16 = 6;
 /// The card is a reading surface, not a pane: past this it stops being one
 /// glance and the headline drifts away from the prompt it introduces.
@@ -304,7 +304,7 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
         );
         let inner = frame.inner(Margin::new(1, 1));
         let [prompt, chips_row, divider_row, bottom] = Layout::vertical([
-            Constraint::Length(if normal { 3 } else { 1 }),
+            Constraint::Length(if normal { 6 } else { 1 }),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1920,17 +1920,17 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_is_drawn_as_a_card_around_its_three_rows() {
+    fn the_composer_is_drawn_as_a_card_around_its_six_rows() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 60, 14);
+        let area = Rect::new(0, 0, 60, 17);
         let layout = bands(area, queue.len());
         let composer = layout.composer.expect("composer should fit");
         let buffer = draw_home(&app, &queue, area);
 
         assert_eq!(composer.frame.height, NORMAL_COMPOSER_CARD_ROWS);
-        assert_eq!(composer.prompt.height, 3);
+        assert_eq!(composer.prompt.height, 6);
         assert_eq!(buffer[(composer.frame.x, composer.frame.y)].symbol(), "┌");
         assert_eq!(
             buffer[(composer.frame.right() - 1, composer.frame.y)].symbol(),
@@ -2198,11 +2198,23 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_hit_area_matches_all_three_normal_rows() {
+    fn the_compact_composer_still_fits_at_the_old_normal_threshold() {
+        let old_normal_threshold = crate::app::home::HOME_COMPOSER_MIN_HEIGHT + 2;
+        let area = Rect::new(0, 0, 60, old_normal_threshold);
+        let layout = bands(area, 1);
+        let composer = layout.composer.expect("compact composer should fit");
+
+        assert_eq!(composer.frame.height, COMPACT_COMPOSER_CARD_ROWS);
+        assert_eq!(composer.prompt.height, 1);
+        assert!(composer.frame.bottom() <= layout.hint.y);
+    }
+
+    #[test]
+    fn the_prompt_hit_area_matches_all_six_normal_rows() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 60, 14);
+        let area = Rect::new(0, 0, 60, 17);
         let layout = bands(area, queue.len());
         let prompt = layout.composer.expect("normal composer").prompt;
         let hit = home_hit_areas(&app, &queue, area)
@@ -2210,7 +2222,7 @@ mod tests {
             .find(|hit| hit.target == HomeHitTarget::Prompt)
             .expect("prompt hit area");
 
-        assert_eq!(prompt.height, 3);
+        assert_eq!(prompt.height, 6);
         assert_eq!(hit.rect, prompt);
     }
 
@@ -2218,10 +2230,12 @@ mod tests {
     fn a_wrapped_unicode_prompt_keeps_its_tail_and_cursor_visible() {
         let mut app = AppState::test_new();
         let mut home = HomeState::default();
-        home.prompt = "开头一 开头二 开始 重构用户认证模块 继续检查边界 最后尾部".into();
+        home.prompt =
+            "开头一 开头二 开头三 开头四 开头五 开头六 开头七 开头八 开头九 开头十 开始 重构用户认证模块 继续检查边界 最后尾部"
+                .into();
         app.home = Some(home);
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 20, 14);
+        let area = Rect::new(0, 0, 20, 17);
         let composer = bands(area, queue.len()).composer.expect("normal composer");
         let buffer = draw_home(&app, &queue, area);
         let prompt_text = (composer.prompt.y..composer.prompt.bottom())
