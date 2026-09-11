@@ -314,6 +314,12 @@ pub(crate) fn latest_app_client(clients: &HashMap<u64, ClientConnection>) -> Opt
         .map(|(&client_id, _)| client_id)
 }
 
+/// Focus reporting is optional. An attached client that has not reported focus
+/// must preserve the pre-reporting behaviour and count as focused.
+pub(crate) fn aggregate_outer_focus(reports: impl IntoIterator<Item = Option<bool>>) -> bool {
+    reports.into_iter().any(|focused| focused != Some(false))
+}
+
 pub(crate) fn terminal_stream_client_ids(
     clients: &HashMap<u64, ClientConnection>,
     terminal_id: &str,
@@ -361,4 +367,17 @@ pub(crate) fn render_targets(
 
     targets.sort_by_key(|(client_id, _, _, is_foreground, _)| (*is_foreground, *client_id));
     targets
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::aggregate_outer_focus;
+
+    #[test]
+    fn f2_focus_aggregation_accepts_any_focused_or_unknown_client() {
+        assert!(aggregate_outer_focus([Some(false), Some(true)]));
+        assert!(aggregate_outer_focus([Some(false), None]));
+        assert!(!aggregate_outer_focus([Some(false), Some(false)]));
+        assert!(!aggregate_outer_focus([]));
+    }
 }

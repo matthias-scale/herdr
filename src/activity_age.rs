@@ -13,6 +13,9 @@ const MAX_DISPLAY_DAYS: u64 = 999;
 /// repaint footers and status lines without doing new work.
 pub(crate) struct PaneActivity {
     last_at: Instant,
+    restored_age_at_last_at: Option<Duration>,
+    quiet_since: Option<Instant>,
+    restored_age_at_quiet_since: Option<Duration>,
     content_revision: Option<u64>,
     detection_agent: Option<crate::detect::Agent>,
     detection_snapshot: Option<String>,
@@ -22,6 +25,9 @@ impl PaneActivity {
     pub(crate) fn new(now: Instant) -> Self {
         Self {
             last_at: now,
+            restored_age_at_last_at: None,
+            quiet_since: None,
+            restored_age_at_quiet_since: None,
             content_revision: None,
             detection_agent: None,
             detection_snapshot: None,
@@ -30,6 +36,7 @@ impl PaneActivity {
 
     pub(crate) fn note(&mut self, now: Instant) {
         self.last_at = now;
+        self.restored_age_at_last_at = None;
     }
 
     pub(crate) fn needs_detection_snapshot(
@@ -65,13 +72,119 @@ impl PaneActivity {
     }
 
     pub(crate) fn inactive_for(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.last_at)
+        self.restored_age_at_last_at
+            .unwrap_or(Duration::ZERO)
+            .saturating_add(now.saturating_duration_since(self.last_at))
+    }
+
+    pub(crate) fn deadline_after(&self, quiet_for: Duration) -> Option<Instant> {
+        deadline_after_age(self.last_at, self.restored_age_at_last_at, quiet_for)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_at(&self) -> Instant {
+        self.last_at
+    }
+
+    pub(crate) fn unix_timestamp_at(&self, now: Instant, now_unix: u64) -> u64 {
+        now_unix.saturating_sub(self.inactive_for(now).as_secs())
+    }
+
+    pub(crate) fn restore_unix_timestamp_at(
+        &mut self,
+        last_at_unix: u64,
+        now: Instant,
+        now_unix: u64,
+    ) {
+        let elapsed = Duration::from_secs(now_unix.saturating_sub(last_at_unix));
+        if let Some(last_at) = now.checked_sub(elapsed) {
+            self.last_at = last_at;
+            self.restored_age_at_last_at = None;
+        } else {
+            self.last_at = now;
+            self.restored_age_at_last_at = Some(elapsed);
+        }
+    }
+
+    /// Observe the shared settle predicate without coupling its inputs to this
+    /// clock. A missing observation is not evidence that a pane was already
+    /// quiet, so the first quiet scan starts a fresh window.
+    pub(crate) fn observe_quiet(&mut self, quiet: bool, now: Instant) -> bool {
+        match (quiet, self.quiet_since) {
+            (true, None) => {
+                self.quiet_since = Some(now);
+                self.restored_age_at_quiet_since = None;
+                true
+            }
+            (false, Some(_)) => {
+                self.quiet_since = None;
+                self.restored_age_at_quiet_since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn quiet_observation_changes(&self, quiet: bool) -> bool {
+        self.quiet_since.is_some() != quiet
+    }
+
+    /// Age from the later of last activity and the latest quiet transition.
+    pub(crate) fn quiet_for(&self, now: Instant) -> Option<Duration> {
+        let quiet_since = self.quiet_since?;
+        let quiet_age = self
+            .restored_age_at_quiet_since
+            .unwrap_or(Duration::ZERO)
+            .saturating_add(now.saturating_duration_since(quiet_since));
+        Some(self.inactive_for(now).min(quiet_age))
+    }
+
+    pub(crate) fn quiet_deadline_after(&self, threshold: Duration) -> Option<Instant> {
+        let quiet_since = self.quiet_since?;
+        let activity_deadline = self.deadline_after(threshold)?;
+        let quiet_deadline =
+            deadline_after_age(quiet_since, self.restored_age_at_quiet_since, threshold)?;
+        Some(activity_deadline.max(quiet_deadline))
+    }
+
+    pub(crate) fn quiet_unix_timestamp_at(&self, now: Instant, now_unix: u64) -> Option<u64> {
+        let quiet_since = self.quiet_since?;
+        let age = self
+            .restored_age_at_quiet_since
+            .unwrap_or(Duration::ZERO)
+            .saturating_add(now.saturating_duration_since(quiet_since));
+        Some(now_unix.saturating_sub(age.as_secs()))
+    }
+
+    pub(crate) fn restore_quiet_unix_timestamp_at(
+        &mut self,
+        quiet_since_unix: u64,
+        now: Instant,
+        now_unix: u64,
+    ) {
+        let elapsed = Duration::from_secs(now_unix.saturating_sub(quiet_since_unix));
+        if let Some(quiet_since) = now.checked_sub(elapsed) {
+            self.quiet_since = Some(quiet_since);
+            self.restored_age_at_quiet_since = None;
+        } else {
+            self.quiet_since = Some(now);
+            self.restored_age_at_quiet_since = Some(elapsed);
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn set_last_at(&mut self, at: Instant) {
         self.last_at = at;
+        self.restored_age_at_last_at = None;
     }
+}
+
+fn deadline_after_age(
+    observed_at: Instant,
+    restored_age: Option<Duration>,
+    threshold: Duration,
+) -> Option<Instant> {
+    observed_at.checked_add(threshold.saturating_sub(restored_age.unwrap_or(Duration::ZERO)))
 }
 
 pub(crate) fn compact_label(observed_at: Option<Instant>, now: Instant) -> String {
@@ -202,6 +315,55 @@ mod tests {
         assert_eq!(
             next_change_at(Some(started), started + Duration::from_secs(7_200)),
             Some(started + Duration::from_secs(10_800))
+        );
+    }
+
+    #[test]
+    fn restore_preserves_age_beyond_the_monotonic_clock_range() {
+        let now = Instant::now();
+        let mut activity = PaneActivity::new(now);
+        let persisted_age = Duration::from_secs(u64::MAX);
+        assert!(now.checked_sub(persisted_age).is_none());
+
+        activity.restore_unix_timestamp_at(0, now, u64::MAX);
+
+        assert!(activity.inactive_for(now) >= persisted_age);
+        assert_eq!(
+            activity.deadline_after(Duration::from_secs(30 * 60)),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn restore_preserves_quiet_age_beyond_the_monotonic_clock_range() {
+        let now = Instant::now();
+        let mut activity = PaneActivity::new(now);
+        let persisted_age = Duration::from_secs(u64::MAX);
+
+        activity.restore_unix_timestamp_at(0, now, u64::MAX);
+        activity.restore_quiet_unix_timestamp_at(0, now, u64::MAX);
+
+        assert!(activity.quiet_for(now).unwrap() >= persisted_age);
+        assert_eq!(
+            activity.quiet_deadline_after(Duration::from_secs(30 * 60)),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn quiet_age_uses_the_later_of_activity_and_quiet_transition() {
+        let started = Instant::now();
+        let mut activity = PaneActivity::new(started);
+        activity.observe_quiet(true, started);
+        activity.note(started + Duration::from_secs(40));
+
+        assert_eq!(
+            activity.quiet_for(started + Duration::from_secs(60)),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            activity.quiet_deadline_after(Duration::from_secs(60)),
+            Some(started + Duration::from_secs(100))
         );
     }
 }

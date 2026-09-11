@@ -1445,6 +1445,107 @@ mod tests {
         }
     }
 
+    fn completed_observation(
+        terminal_id: crate::terminal::TerminalId,
+        path: PathBuf,
+        target_generation: u64,
+        active_id: &str,
+    ) -> RefreshObservation {
+        let mut tracker =
+            TranscriptTracker::new(SESSION_ID.into(), path.clone(), target_generation);
+        tracker.cursor.ingest(&launch(active_id), true);
+        tracker.cursor.ingest(&completion(active_id), true);
+        RefreshObservation {
+            target: TargetIdentity {
+                terminal_id,
+                source: "herdr:claude".into(),
+                session_id: SESSION_ID.into(),
+                path,
+                target_generation,
+            },
+            count: tracker.count(),
+            observations: tracker.observations(),
+            tracker,
+            stats: ScanStats::default(),
+        }
+    }
+
+    #[test]
+    fn last_subagent_completion_starts_the_quiet_settle_window() {
+        let dir = TestDir::new("settle-after-completion");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let now = Instant::now();
+        let old_activity = now - std::time::Duration::from_secs(2 * 60 * 60);
+        app.state.active = None;
+        app.state.auto_settle_inactive = false;
+        app.state.auto_settle_finished = false;
+        app.state.auto_settle_done = true;
+        app.state.settle_done_after = std::time::Duration::from_secs(30 * 60);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .activity
+            .set_last_at(old_activity);
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path.clone(), 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+        assert!(app.handle_claude_subagents_refreshed(
+            1,
+            vec![observation(terminal_id.clone(), path.clone(), 7, AGENT_A)],
+            BatchStats::default(),
+        ));
+        assert_eq!(
+            app.state.refresh_settled_panes_at(None, now, 1_725_000_000),
+            0
+        );
+
+        app.last_claude_subagent_refresh_generation = 2;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 2,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+        assert!(app.handle_claude_subagents_refreshed(
+            2,
+            vec![completed_observation(terminal_id, path, 7, AGENT_A)],
+            BatchStats::default(),
+        ));
+        assert_eq!(
+            app.state.refresh_settled_panes_at(None, now, 1_725_000_001),
+            0,
+            "clearing the last sub-agent must start, not consume, the quiet window"
+        );
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                now + app.state.settle_done_after - std::time::Duration::from_nanos(1),
+                1_725_001_799,
+            ),
+            0
+        );
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                now + app.state.settle_done_after,
+                1_725_001_800,
+            ),
+            1
+        );
+    }
+
     #[test]
     fn refresh_applies_live_count_and_rejects_stale_session_result() {
         let dir = TestDir::new("stale-result");

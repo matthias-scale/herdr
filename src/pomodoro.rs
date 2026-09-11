@@ -72,6 +72,9 @@ pub struct PomodoroState {
     pub phase: PomodoroPhase,
     pub completed_work_intervals: u32,
     pub prompt: Option<PomodoroPrompt>,
+    /// The current phase expired while every attached host terminal was unfocused.
+    /// It stays at zero until focus returns or the operator changes the timer.
+    held: bool,
     /// Set while the phase is counting down. Cleared while paused or prompting,
     /// which is what makes "paused" a single unambiguous fact.
     deadline: Option<Instant>,
@@ -95,6 +98,7 @@ impl Default for PomodoroState {
             phase: PomodoroPhase::Work,
             completed_work_intervals: 0,
             prompt: None,
+            held: false,
             deadline: None,
             remaining: work,
             rendered_secs: work.as_secs(),
@@ -135,6 +139,7 @@ impl PomodoroState {
         if !self.enabled {
             self.deadline = None;
             self.prompt = None;
+            self.held = false;
         } else if !was_enabled {
             self.reset(now);
         }
@@ -145,7 +150,11 @@ impl PomodoroState {
     }
 
     pub fn paused(&self) -> bool {
-        self.enabled && self.prompt.is_none() && self.deadline.is_none()
+        self.enabled && !self.held && self.prompt.is_none() && self.deadline.is_none()
+    }
+
+    pub fn held(&self) -> bool {
+        self.enabled && self.held
     }
 
     pub fn phase_duration(&self, phase: PomodoroPhase) -> Duration {
@@ -169,7 +178,7 @@ impl PomodoroState {
     }
 
     pub fn start(&mut self, now: Instant) {
-        if !self.enabled || self.prompt.is_some() {
+        if !self.enabled || self.held || self.prompt.is_some() {
             return;
         }
         self.deadline = Some(now + self.remaining);
@@ -184,7 +193,7 @@ impl PomodoroState {
     }
 
     pub fn toggle_pause(&mut self, now: Instant) {
-        if !self.enabled || self.prompt.is_some() {
+        if !self.enabled || self.held || self.prompt.is_some() {
             return;
         }
         if self.running() {
@@ -200,6 +209,7 @@ impl PomodoroState {
         self.rendered_secs = self.remaining.as_secs();
         self.deadline = None;
         self.prompt = None;
+        self.held = false;
         if self.enabled {
             self.start(now);
         }
@@ -217,9 +227,22 @@ impl PomodoroState {
 
     /// Advances the countdown. Returns whether the frame has to be redrawn and
     /// whether this tick is the one that ended a phase.
+    #[cfg(test)]
     pub fn tick(&mut self, now: Instant) -> PomodoroTick {
+        self.tick_with_host_focus(now, true)
+    }
+
+    /// Advances the countdown, holding an expired phase while no host terminal
+    /// is focused. Unknown focus support is resolved by the caller.
+    pub fn tick_with_host_focus(&mut self, now: Instant, host_focused: bool) -> PomodoroTick {
         if !self.enabled {
             return PomodoroTick::default();
+        }
+        if self.held {
+            return PomodoroTick {
+                changed: host_focused && self.resume_held(now),
+                phase_ended: false,
+            };
         }
         let Some(deadline) = self.deadline else {
             return PomodoroTick::default();
@@ -228,13 +251,11 @@ impl PomodoroState {
             self.deadline = None;
             self.remaining = Duration::ZERO;
             self.rendered_secs = 0;
-            let ended = self.phase;
-            self.prompt = Some(PomodoroPrompt {
-                ended,
-                next: self.next_phase(),
-                input: String::new(),
-                error: None,
-            });
+            if host_focused {
+                self.raise_prompt();
+            } else {
+                self.held = true;
+            }
             return PomodoroTick {
                 changed: true,
                 phase_ended: true,
@@ -249,6 +270,22 @@ impl PomodoroState {
             changed: true,
             phase_ended: false,
         }
+    }
+
+    /// Resolves a phase that expired while all host terminals were unfocused.
+    /// Work still requires the normal confirmation; a finished break starts
+    /// the next focus interval immediately.
+    pub fn resume_held(&mut self, now: Instant) -> bool {
+        if !self.held {
+            return false;
+        }
+        self.held = false;
+        if self.phase.is_break() {
+            self.enter(PomodoroPhase::Work, now);
+        } else {
+            self.raise_prompt();
+        }
+        true
     }
 
     /// Rejects an answer shorter than `min_confirm_chars` so the overlay cannot
@@ -310,7 +347,17 @@ impl PomodoroState {
         self.remaining = self.phase_duration(phase);
         self.rendered_secs = self.remaining.as_secs();
         self.deadline = None;
+        self.held = false;
         self.start(now);
+    }
+
+    fn raise_prompt(&mut self) {
+        self.prompt = Some(PomodoroPrompt {
+            ended: self.phase,
+            next: self.next_phase(),
+            input: String::new(),
+            error: None,
+        });
     }
 }
 
@@ -370,6 +417,102 @@ mod tests {
         assert_eq!(prompt.ended, PomodoroPhase::Work);
         assert_eq!(prompt.next, PomodoroPhase::ShortBreak);
         assert!(!state.running());
+    }
+
+    #[test]
+    fn f1_unfocused_work_expiry_is_held_without_a_prompt() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+
+        let tick = state.tick_with_host_focus(now + Duration::from_secs(25 * 60), false);
+
+        assert_eq!(
+            tick,
+            PomodoroTick {
+                changed: true,
+                phase_ended: true,
+            }
+        );
+        assert!(state.held());
+        assert!(state.prompt.is_none());
+        assert!(!state.paused());
+        assert_eq!(state.remaining_at(now), Duration::ZERO);
+    }
+
+    #[test]
+    fn f3_focus_return_raises_work_prompt_but_starts_focus_after_break() {
+        let now = Instant::now();
+        let mut work = enabled_state(now);
+        work.tick_with_host_focus(now + Duration::from_secs(25 * 60), false);
+        assert!(work.resume_held(now));
+        assert!(!work.held());
+        let prompt = work.prompt.as_ref().expect("work reminder raised");
+        assert_eq!(prompt.ended, PomodoroPhase::Work);
+        assert_eq!(prompt.next, PomodoroPhase::ShortBreak);
+
+        let mut break_state = enabled_state(now);
+        break_state.skip(now);
+        break_state.tick_with_host_focus(now + Duration::from_secs(5 * 60), false);
+        assert!(break_state.held());
+        assert!(break_state.resume_held(now));
+        assert_eq!(break_state.phase, PomodoroPhase::Work);
+        assert!(break_state.prompt.is_none());
+        assert!(break_state.running());
+    }
+
+    #[test]
+    fn f4_focus_loss_keeps_an_existing_prompt() {
+        let now = Instant::now();
+        let mut state = enabled_state(now);
+        state.tick(now + Duration::from_secs(25 * 60));
+        let prompt = state.prompt.clone();
+
+        assert_eq!(
+            state.tick_with_host_focus(now + Duration::from_secs(60 * 60), false),
+            PomodoroTick::default()
+        );
+        assert_eq!(state.prompt, prompt);
+        assert!(!state.held());
+    }
+
+    #[test]
+    fn f4_held_phase_respects_pause_skip_reset_and_config_reload() {
+        let now = Instant::now();
+        let mut held = enabled_state(now);
+        held.tick_with_host_focus(now + Duration::from_secs(25 * 60), false);
+
+        held.toggle_pause(now);
+        assert!(held.held());
+        assert!(!held.running());
+
+        held.apply_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                short_break_minutes: 9,
+                ..Default::default()
+            },
+            now,
+        );
+        assert!(held.held());
+
+        let mut disabled = held.clone();
+        disabled.apply_config(&crate::config::PomodoroConfig::default(), now);
+        assert!(!disabled.enabled);
+        assert!(!disabled.held());
+        assert!(disabled.prompt.is_none());
+
+        let mut skipped = held.clone();
+        skipped.skip(now);
+        assert_eq!(skipped.phase, PomodoroPhase::ShortBreak);
+        assert_eq!(skipped.remaining_at(now), Duration::from_secs(9 * 60));
+        assert!(skipped.running());
+        assert!(!skipped.held());
+
+        held.reset(now);
+        assert_eq!(held.phase, PomodoroPhase::Work);
+        assert_eq!(held.remaining_at(now), Duration::from_secs(25 * 60));
+        assert!(held.running());
+        assert!(!held.held());
     }
 
     #[test]

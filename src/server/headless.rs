@@ -2018,16 +2018,26 @@ impl HeadlessServer {
         &mut self,
         client_id: u64,
         events: &[crate::raw_input::RawInputEvent],
-    ) {
+    ) -> bool {
         let Some(client) = self.clients.get_mut(&client_id) else {
-            return;
+            return false;
         };
         let Some(next_focus) = client.update_outer_focus_from_events(events) else {
-            return;
+            return false;
         };
         if self.foreground_client_id == Some(client_id) {
             self.app.state.outer_terminal_focus = Some(next_focus);
         }
+        self.app_clients_host_focused() && self.app.state.pomodoro.resume_held(Instant::now())
+    }
+
+    fn app_clients_host_focused(&self) -> bool {
+        crate::server::clients::aggregate_outer_focus(
+            self.clients
+                .values()
+                .filter(|client| client.is_full_app_client() && client.writer.is_some())
+                .map(|client| client.outer_terminal_focus),
+        )
     }
 
     /// Accepts pending client connections from the non-blocking listener.
@@ -3941,8 +3951,9 @@ impl HeadlessServer {
                 client.request_semantic_redraw_after_input();
             }
         }
+        let mut pomodoro_changed = false;
         if source_is_full_app {
-            self.update_client_outer_focus_from_events(client_id, &events);
+            pomodoro_changed = self.update_client_outer_focus_from_events(client_id, &events);
             if events
                 .iter()
                 .any(|event| matches!(event, crate::raw_input::RawInputEvent::OuterFocusLost))
@@ -4104,7 +4115,10 @@ impl HeadlessServer {
 
             false
         } else {
-            foreground_changed || theme_changed || (interaction && !render_neutral_mouse_motion)
+            pomodoro_changed
+                || foreground_changed
+                || theme_changed
+                || (interaction && !render_neutral_mouse_motion)
         }
     }
 
@@ -4163,6 +4177,7 @@ impl HeadlessServer {
                     return false;
                 }
                 let first_app_client = !direct_attach_requested && self.app_client_count() == 0;
+                let attach_now = Instant::now();
                 info!(
                     client_id,
                     cols,
@@ -4191,6 +4206,12 @@ impl HeadlessServer {
                 connection.direct_graphics = direct_graphics;
                 connection.pixel_mouse = direct_graphics;
                 self.clients.insert(client_id, connection);
+                if first_app_client {
+                    self.app.tick_pomodoro(attach_now, false);
+                }
+                if !direct_attach_requested && self.app_clients_host_focused() {
+                    self.app.state.pomodoro.resume_held(attach_now);
+                }
                 self.seed_client_dock_presentation(client_id);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
@@ -6185,7 +6206,8 @@ impl HeadlessServer {
         changed |= self.app.handle_loop_receipt_fallback(now);
         changed |= self.app.tick_notepad(now);
         if has_app_client {
-            changed |= self.app.tick_pomodoro(now);
+            let host_focused = self.app_clients_host_focused();
+            changed |= self.app.tick_pomodoro(now, host_focused);
             // The sidebar only exists in front of an attached client, and this
             // loop - not `App::handle_scheduled_tasks` - is the one every
             // server-backed session actually runs.
@@ -11931,6 +11953,253 @@ next_tab = ""
         assert_eq!(server.foreground_client_id, Some(2));
         assert_eq!(server.clients[&1].outer_terminal_focus, Some(false));
         assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+    }
+
+    #[test]
+    fn f2_detached_client_stops_counting_toward_aggregate_focus() {
+        let mut server = test_headless_server();
+        let (lost_writer, _lost_control_rx, _lost_render_rx) = test_client_writer();
+        let (unknown_writer, _unknown_control_rx, _unknown_render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(lost_writer),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(unknown_writer),
+            ),
+        );
+
+        assert!(server.app_clients_host_focused());
+        server.clients.get_mut(&2).expect("client").writer = None;
+        assert!(server.clients.contains_key(&2));
+        assert!(!server.app_clients_host_focused());
+    }
+
+    #[test]
+    fn f5_raw_focus_path_holds_work_then_raises_prompt_on_focus_gain() {
+        let mut server = test_headless_server();
+        let now = Instant::now();
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            now,
+        );
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[O".to_vec(),
+        });
+        server.handle_scheduled_tasks_headless(now + Duration::from_secs(60), false);
+        assert!(server.app.state.pomodoro.held());
+        assert!(server.app.state.pomodoro.prompt.is_none());
+
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        });
+        let prompt = server
+            .app
+            .state
+            .pomodoro
+            .prompt
+            .as_ref()
+            .expect("focus return raises work reminder");
+        assert_eq!(prompt.ended, crate::pomodoro::PomodoroPhase::Work);
+        assert!(!server.app.state.pomodoro.held());
+    }
+
+    #[test]
+    fn f5_raw_focus_path_holds_break_then_starts_focus_on_focus_gain() {
+        let mut server = test_headless_server();
+        let now = Instant::now();
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                short_break_minutes: 1,
+                ..Default::default()
+            },
+            now,
+        );
+        server.app.state.pomodoro.skip(now);
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[O".to_vec(),
+        });
+        server.handle_scheduled_tasks_headless(now + Duration::from_secs(60), false);
+        assert!(server.app.state.pomodoro.held());
+
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        });
+        assert_eq!(
+            server.app.state.pomodoro.phase,
+            crate::pomodoro::PomodoroPhase::Work
+        );
+        assert!(server.app.state.pomodoro.running());
+        assert!(server.app.state.pomodoro.prompt.is_none());
+        assert!(!server.app.state.pomodoro.held());
+    }
+
+    #[test]
+    fn detached_break_expiry_starts_focus_when_an_app_client_attaches() {
+        let mut server = test_headless_server();
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+
+        let expired_at = Instant::now() - Duration::from_secs(61);
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                short_break_minutes: 1,
+                ..Default::default()
+            },
+            expired_at,
+        );
+        server.app.state.pomodoro.skip(expired_at);
+        server.clients.get_mut(&1).expect("client").writer = None;
+        assert!(!server.has_app_client());
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(server.app.state.pomodoro.running());
+        assert!(!server.app.state.pomodoro.held());
+        assert!(server.app.state.pomodoro.prompt.is_none());
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+
+        assert_eq!(
+            server.app.state.pomodoro.phase,
+            crate::pomodoro::PomodoroPhase::Work
+        );
+        assert!(server.app.state.pomodoro.running());
+        assert!(server.app.state.pomodoro.prompt.is_none());
+        assert!(!server.app.state.pomodoro.held());
+    }
+
+    #[test]
+    fn detached_focus_expiry_prompts_when_an_app_client_attaches() {
+        let mut server = test_headless_server();
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            Instant::now() - Duration::from_secs(61),
+        );
+        server.clients.get_mut(&1).expect("client").writer = None;
+        assert!(!server.has_app_client());
+        assert!(server.app.state.pomodoro.prompt.is_none());
+
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+
+        let prompt = server
+            .app
+            .state
+            .pomodoro
+            .prompt
+            .as_ref()
+            .expect("ended focus phase prompts on attach");
+        assert_eq!(prompt.ended, crate::pomodoro::PomodoroPhase::Work);
+        assert!(!server.app.state.pomodoro.held());
     }
 
     #[test]

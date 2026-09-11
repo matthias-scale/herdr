@@ -130,6 +130,27 @@ pub(crate) fn take_terminal_resize_signal() -> bool {
     false
 }
 
+/// Non-Linux clients cannot distinguish host-terminal writes from their own output.
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct HostTerminalWriteWatcher;
+
+#[cfg(not(target_os = "linux"))]
+impl HostTerminalWriteWatcher {
+    pub(crate) fn wait_for_write(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Foreign host-terminal write detection is currently Linux-only.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn prepare_host_terminal_write_watcher(
+) -> std::io::Result<Option<HostTerminalWriteWatcher>> {
+    Ok(None)
+}
+
 #[cfg(not(windows))]
 pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
     title

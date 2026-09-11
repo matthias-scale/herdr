@@ -61,6 +61,25 @@ type RestoredTab = (
 );
 type RestoreFailures<T> = (T, usize);
 
+fn restore_pane_activity(pane: &mut PaneState, saved: Option<&super::snapshot::PaneSnapshot>) {
+    let Some(saved) = saved else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Some(last_activity_at) = saved.last_activity_at {
+        pane.activity
+            .restore_unix_timestamp_at(last_activity_at, now, now_unix);
+    }
+    if let Some(quiet_since_at) = saved.quiet_since_at {
+        pane.activity
+            .restore_quiet_unix_timestamp_at(quiet_since_at, now, now_unix);
+    }
+}
+
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
 pub fn restore(
     snapshot: &SessionSnapshot,
@@ -603,6 +622,7 @@ fn restore_tab(
             let mut pane = PaneState::new(terminal_id);
             pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
             pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
+            restore_pane_activity(&mut pane, saved_pane);
             panes.insert(*id, pane);
             terminals.push(terminal);
             continue;
@@ -732,6 +752,7 @@ fn restore_tab(
                 let mut pane = PaneState::new(terminal_id.clone());
                 pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
                 pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
+                restore_pane_activity(&mut pane, saved_pane);
                 #[cfg(unix)]
                 let pane = {
                     let mut pane = pane;
@@ -1099,7 +1120,39 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    #[test]
+    fn restore_pane_activity_restores_the_quiet_clock() {
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let saved = super::super::snapshot::PaneSnapshot {
+            cwd: "/tmp".into(),
+            last_activity_at: Some(now_unix.saturating_sub(120)),
+            quiet_since_at: Some(now_unix.saturating_sub(60)),
+            settled_at: None,
+            settled_work_key: None,
+            settled_auto_label: None,
+            work_context: Default::default(),
+            work_context_tiers: None,
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+        };
+        let mut pane = PaneState::new(TerminalId::alloc());
+
+        restore_pane_activity(&mut pane, Some(&saved));
+
+        let quiet_for = pane.activity.quiet_for(Instant::now()).unwrap();
+        assert!(quiet_for >= Duration::from_secs(60));
+        assert!(quiet_for < Duration::from_secs(65));
+    }
 
     fn agent_session_snapshot(
         blocked: Option<super::super::snapshot::PaneAgentBlockedSnapshot>,
@@ -1258,6 +1311,94 @@ mod tests {
         assert_eq!(ids.len(), 3);
         let unique: std::collections::HashSet<u32> = ids.iter().map(|id| id.raw()).collect();
         assert_eq!(unique.len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pane_quiet_clock_survives_cold_restore_and_live_handoff() {
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("quiet-clock")];
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("quiet-clock")
+                    .expect("valid session id"),
+            });
+        let quiet_for = std::time::Duration::from_secs(31 * 60);
+        let quiet_since = std::time::Instant::now() - quiet_for;
+        let pane = state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane");
+        pane.activity.set_last_at(quiet_since);
+        pane.activity.observe_quiet(true, quiet_since);
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.terminals,
+            &Default::default(),
+            None,
+            0,
+            26,
+            0.5,
+            Default::default(),
+            false,
+        );
+        let encoded = serde_json::to_string(&snapshot).expect("encode snapshot");
+        let decoded: SessionSnapshot = serde_json::from_str(&encoded).expect("decode snapshot");
+        let (events, _events_rx) = mpsc::channel(4);
+        let (cold_workspaces, _cold_terminals, _cold_runtimes) = restore(
+            &decoded,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let cold_pane = &cold_workspaces[0].tabs[0].panes[&cold_workspaces[0].tabs[0].root_pane];
+        assert!(
+            cold_pane
+                .activity
+                .quiet_for(std::time::Instant::now())
+                .is_some_and(|age| age >= quiet_for),
+            "cold restore reset the quiet clock"
+        );
+
+        let mut imports = HashMap::new();
+        let (handoff_workspaces, _handoff_terminals, handoff_runtimes) = restore_handoff(
+            &decoded,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("live handoff restore");
+        let handoff_pane =
+            &handoff_workspaces[0].tabs[0].panes[&handoff_workspaces[0].tabs[0].root_pane];
+        assert!(
+            handoff_pane
+                .activity
+                .quiet_for(std::time::Instant::now())
+                .is_some_and(|age| age >= quiet_for),
+            "live handoff reset the quiet clock"
+        );
+        assert!(handoff_runtimes.is_empty());
     }
 
     #[test]
@@ -1505,6 +1646,8 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            last_activity_at: None,
+                            quiet_since_at: None,
                             settled_at: None,
                             settled_work_key: None,
                             settled_auto_label: Some("#3 Restore context".into()),
@@ -1638,6 +1781,8 @@ mod tests {
                             10,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                last_activity_at: None,
+                                quiet_since_at: None,
                                 settled_at: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
@@ -1654,6 +1799,8 @@ mod tests {
                             20,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                last_activity_at: None,
+                                quiet_since_at: None,
                                 settled_at: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
@@ -1716,6 +1863,8 @@ mod tests {
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
+                    last_activity_at: None,
+                    quiet_since_at: None,
                     settled_at: None,
                     settled_work_key: None,
                     settled_auto_label: None,
@@ -1731,6 +1880,8 @@ mod tests {
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
+            last_activity_at: None,
+            quiet_since_at: None,
             settled_at: None,
             settled_work_key: None,
             settled_auto_label: None,
@@ -1921,6 +2072,8 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            last_activity_at: None,
+                            quiet_since_at: None,
                             settled_at: None,
                             settled_work_key: None,
                             settled_auto_label: None,
@@ -2169,6 +2322,8 @@ mod tests {
             0,
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
+                last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,

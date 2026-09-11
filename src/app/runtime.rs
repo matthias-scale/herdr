@@ -278,6 +278,7 @@ impl App {
                     self.request_repaint();
                 }
                 self.state.outer_terminal_focus = Some(true);
+                self.state.pomodoro.resume_held(std::time::Instant::now());
                 self.state.mark_active_pane_seen();
                 true
             }
@@ -348,7 +349,7 @@ impl App {
         let mut changed = self.take_due_agent_activity_refresh(now);
         changed |= self.handle_loop_receipt_fallback(now);
         changed |= self.tick_notepad(now);
-        changed |= self.tick_pomodoro(now);
+        changed |= self.tick_pomodoro(now, self.state.outer_terminal_focus != Some(false));
         changed |= self.tick_sidebar_animation(now);
         let mut resized = false;
 
@@ -1171,6 +1172,41 @@ mod tests {
         let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "test interrupt");
 
         assert!(retain_detached_process_after_wait(42, Err(interrupted)));
+    }
+
+    #[tokio::test]
+    async fn monolithic_focus_return_raises_a_held_pomodoro_prompt() {
+        let mut app = test_app_with_pane().0;
+        let started_at = Instant::now();
+        app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            started_at,
+        );
+
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert!(app.handle_scheduled_tasks(started_at + Duration::from_secs(60), false));
+        assert!(app.state.pomodoro.held());
+        assert!(app.state.pomodoro.prompt.is_none());
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        let prompt = app
+            .state
+            .pomodoro
+            .prompt
+            .as_ref()
+            .expect("focus return raises the held prompt");
+        assert_eq!(prompt.ended, crate::pomodoro::PomodoroPhase::Work);
+        assert!(!app.state.pomodoro.held());
     }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {

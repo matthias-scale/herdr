@@ -562,11 +562,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # settle_finished_after_minutes = 10
 # Settle a pane that has only gone quiet for settle_after_days.
 # auto_settle_inactive = true
-# Settle a resumable pane whose agent read Done and then stayed quiet, instead
-# of leaving it running until reap_done_after_minutes closes it. A pane with no
-# resume plan is left to reaping.
+# Settle an agent pane after it stays idle without gates, usage limits, active
+# sub-agents, or a held shell. Seen panes and stale panes whose screen resolves
+# idle use the same quiet clock.
 # auto_settle_done = true
-# How long a Done pane stays quiet before auto_settle_done settles it.
+# How long an eligible agent pane stays quiet before auto_settle_done settles it.
 # settle_done_after_minutes = 30
 # Stop resumable agent processes when their pane settles.
 # settle_stops_agent = true

@@ -7859,6 +7859,13 @@ pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
 /// `ui.confirm_close` is on.
 pub(crate) fn settled_menu_labels(app: &AppState) -> [&'static str; 4] {
     let mut labels = SETTLED_MENU_LABELS;
+    if app
+        .sidebar_settled_menu_target
+        .as_ref()
+        .is_some_and(|target| !app.settled_target_has_resume_plan(target))
+    {
+        labels[0] = "↪ Focus live pane";
+    }
     if app.sidebar_settled_menu_delete_armed {
         labels[3] = "🗑 Delete — press again to confirm";
     }
