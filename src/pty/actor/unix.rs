@@ -593,13 +593,66 @@ impl PtyIoActorRunner {
     }
 
     fn mark_local_write_drained(&self, user_writes: &mut UserWriteGate) {
-        if user_writes.pending_local_writes == 0 {
+        self.mark_local_writes_drained(user_writes, 1);
+    }
+
+    fn mark_local_writes_drained(&self, user_writes: &mut UserWriteGate, count: usize) {
+        if count == 0 {
+            return;
+        }
+        if user_writes.pending_local_writes < count {
             warn!(
                 pane = self.pane_id,
-                "PTY actor completed a local write without a pending-write reservation"
+                pending = user_writes.pending_local_writes,
+                count,
+                "PTY actor completed or discarded local writes without enough pending-write reservations"
             );
+            user_writes.pending_local_writes = 0;
         } else {
-            user_writes.pending_local_writes -= 1;
+            user_writes.pending_local_writes -= count;
+        }
+    }
+
+    fn discard_local_write(&self) {
+        match self.user_writes.lock() {
+            Ok(mut user_writes) => self.mark_local_write_drained(&mut user_writes),
+            Err(poisoned) => {
+                self.mark_user_writes_poisoned();
+                let mut user_writes = poisoned.into_inner();
+                self.mark_local_write_drained(&mut user_writes);
+            }
+        }
+    }
+
+    fn discard_pending_local_writes(&mut self) {
+        let pending_queue_count = self
+            .pending_writes
+            .iter()
+            .filter(|(_, user_input)| *user_input)
+            .count();
+        self.pending_writes.clear();
+        self.current_write_offset = 0;
+
+        let mut data_queue_count = 0;
+        while let Ok(command) = self.data_rx.try_recv() {
+            match command {
+                PtyIoDataCommand::WriteUserInput { .. } => data_queue_count += 1,
+            }
+        }
+        self.mark_local_writes_discarded(pending_queue_count + data_queue_count);
+    }
+
+    fn mark_local_writes_discarded(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        match self.user_writes.lock() {
+            Ok(mut user_writes) => self.mark_local_writes_drained(&mut user_writes, count),
+            Err(poisoned) => {
+                self.mark_user_writes_poisoned();
+                let mut user_writes = poisoned.into_inner();
+                self.mark_local_writes_drained(&mut user_writes, count);
+            }
         }
     }
 
@@ -675,6 +728,7 @@ impl PtyIoActorRunner {
             }
             Err(_) => self.mark_user_writes_poisoned(),
         }
+        self.discard_pending_local_writes();
 
         if let Some(on_reader_exit) = self.on_reader_exit.take() {
             on_reader_exit();
@@ -734,6 +788,8 @@ impl PtyIoActorRunner {
             PtyIoDataCommand::WriteUserInput { bytes } => {
                 if self.state == ActorState::Running && !bytes.is_empty() {
                     self.pending_writes.push_back((bytes, true));
+                } else {
+                    self.discard_local_write();
                 }
             }
         }
@@ -775,7 +831,7 @@ impl PtyIoActorRunner {
             }
             PtyIoControlCommand::ReleaseAfterCommit(reply) => {
                 self.state = ActorState::Released;
-                self.pending_writes.clear();
+                self.discard_pending_local_writes();
                 let _ = reply.send(Ok(()));
                 return true;
             }
@@ -829,10 +885,8 @@ impl PtyIoActorRunner {
     }
 
     fn drain_pre_quiesce_commands(&mut self) {
-        while let Ok(PtyIoDataCommand::WriteUserInput { bytes }) = self.data_rx.try_recv() {
-            if self.state != ActorState::Released {
-                self.pending_writes.push_back((bytes, true));
-            }
+        while let Ok(command) = self.data_rx.try_recv() {
+            let _ = self.handle_data_command(command);
         }
     }
 
@@ -916,6 +970,7 @@ impl PtyIoActorRunner {
                         self.mark_user_writes_poisoned();
                         self.pending_writes.pop_front();
                         self.current_write_offset = 0;
+                        self.discard_local_write();
                         continue;
                     }
                 }
@@ -959,8 +1014,8 @@ impl PtyIoActorRunner {
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => return,
                 Err(err) => {
                     warn!(pane = self.pane_id, err = %err, "PTY actor write failed");
-                    self.pending_writes.clear();
-                    self.current_write_offset = 0;
+                    drop(user_writes);
+                    self.discard_pending_local_writes();
                     return;
                 }
             }
@@ -1036,6 +1091,7 @@ mod tests {
     use super::*;
     use std::{
         io::{Read, Write},
+        net::Shutdown,
         os::fd::{AsRawFd, FromRawFd, IntoRawFd},
         os::unix::net::UnixStream,
         sync::atomic::{AtomicBool, Ordering},
@@ -1107,7 +1163,7 @@ mod tests {
             user_writes: Arc::new(Mutex::new(UserWriteGate {
                 accepting: true,
                 remote_owner: None,
-                pending_local_writes: 0,
+                pending_local_writes: 1,
             })),
             pty_write: Arc::new(Mutex::new(())),
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
@@ -1313,6 +1369,140 @@ mod tests {
         );
 
         assert!(runner.pending_writes.is_empty());
+        assert_eq!(
+            runner
+                .user_writes
+                .lock()
+                .expect("user-write gate lock")
+                .pending_local_writes,
+            0
+        );
+    }
+
+    #[test]
+    fn empty_local_input_allows_later_remote_lease() {
+        let (handle, _peer, _read_rx) = actor_with_socket_pair(false);
+
+        handle
+            .try_write_user_input(Bytes::new())
+            .expect("empty local input is accepted before the actor discards it");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match handle.try_acquire_remote_owner(7) {
+                RemoteOwnerAcquireResult::Acquired => break,
+                RemoteOwnerAcquireResult::AlreadyControlled => {
+                    panic!("remote lease unexpectedly already controlled")
+                }
+                RemoteOwnerAcquireResult::RefusedForSafety => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "empty local input reservation was not released"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        handle.release_remote_owner(7);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn failed_local_write_does_not_block_later_remote_lease() {
+        let (handle, peer, _read_rx) = actor_with_socket_pair(false);
+        let write_guard = handle
+            .pty_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        handle
+            .try_write_user_input(Bytes::from_static(b"failed-local"))
+            .expect("local input is accepted before the write fails");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+
+        peer.shutdown(Shutdown::Read)
+            .expect("peer read shutdown makes the actor write fail");
+        drop(write_guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match handle.try_acquire_remote_owner(7) {
+                RemoteOwnerAcquireResult::Acquired => break,
+                RemoteOwnerAcquireResult::AlreadyControlled => {
+                    panic!("remote lease unexpectedly already controlled")
+                }
+                RemoteOwnerAcquireResult::RefusedForSafety => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "failed local write reservation was not released"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        handle.release_remote_owner(7);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn release_discards_local_write_for_later_remote_lease() {
+        let (handle, _peer, _read_rx) = actor_with_socket_pair(true);
+        handle
+            .user_writes
+            .lock()
+            .expect("user-write gate lock")
+            .accepting = true;
+
+        handle
+            .try_write_user_input(Bytes::from_static(b"released-local"))
+            .expect("local input is accepted before release");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+
+        handle
+            .release_after_commit()
+            .expect("release should complete");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::Acquired
+        );
+        handle.release_remote_owner(7);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn actor_exit_discards_local_write_for_later_remote_lease() {
+        let (handle, _peer, _read_rx) = actor_with_socket_pair(false);
+
+        handle
+            .try_write_user_input(Bytes::from_static(b"exited-local"))
+            .expect("local input is accepted before actor exit");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+
+        handle.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match handle.try_acquire_remote_owner(7) {
+                RemoteOwnerAcquireResult::Acquired => break,
+                RemoteOwnerAcquireResult::AlreadyControlled => {
+                    panic!("remote lease unexpectedly already controlled")
+                }
+                RemoteOwnerAcquireResult::RefusedForSafety => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "actor exit did not release the local write reservation"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
     }
 
     #[test]
@@ -1901,6 +2091,34 @@ mod tests {
     }
 
     #[test]
+    fn handoff_drains_local_write_for_later_remote_lease() {
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+        let local = Bytes::from_static(b"handoff-local");
+
+        handle
+            .try_write_user_input(local.clone())
+            .expect("local input is accepted before handoff");
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+
+        handle
+            .begin_handoff(Duration::from_secs(1))
+            .expect("handoff should drain local input");
+        let mut received = vec![0; local.len()];
+        peer.read_exact(&mut received)
+            .expect("handoff-drained local input reaches the PTY");
+        assert_eq!(received, local.as_ref());
+        assert_eq!(
+            handle.try_acquire_remote_owner(7),
+            RemoteOwnerAcquireResult::Acquired
+        );
+        handle.release_remote_owner(7);
+        handle.shutdown();
+    }
+
+    #[test]
     fn duplicate_for_handoff_requires_quiesced_actor() {
         let (handle, mut peer, read_rx) = actor_with_socket_pair(false);
 
@@ -2304,6 +2522,14 @@ mod tests {
             .expect("queued write reaches peer before quiesce ack");
         assert_eq!(&buf, b"queued-before-ack");
         assert_eq!(runner.state, ActorState::Quiesced);
+        assert_eq!(
+            runner
+                .user_writes
+                .lock()
+                .expect("user-write gate lock")
+                .pending_local_writes,
+            0
+        );
     }
 
     #[test]
