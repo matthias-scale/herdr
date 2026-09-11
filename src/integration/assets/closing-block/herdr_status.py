@@ -9,8 +9,8 @@ The closing-block adapter writes one payload:
      "items": [], "decisions": [], "agent_names": []}
 
 The arrays are sent through the existing agent-report channel. The blocked state
-label carries the first gate so the existing sidebar/detail view is answerable
-in place. A turn-end hook never raises.
+label names the action-point kind while the full item stays in its payload array.
+A turn-end hook never raises.
 """
 
 from __future__ import annotations
@@ -25,22 +25,29 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 VERSION = 2
 
 
 STATES = ("idle", "working", "blocked")
 
 
-def state_for(blocking: int, agents: int) -> str:
+def state_for(blocking: int, agents: int, action_points: int = 0) -> str:
     if blocking > 0:
         return "blocked"
     if agents > 0:
         return "working"
+    if action_points > 0:
+        return "blocked"
     return "idle"
 
 
-def resolve_state(blocking: int, agents: int, override: str | None) -> str:
+def resolve_state(
+    blocking: int,
+    agents: int,
+    override: str | None,
+    action_points: int = 0,
+) -> str:
     """Counts imply the state unless a caller names one it knows better.
 
     A mid-turn source -- the question gate closing itself -- knows the turn is
@@ -50,7 +57,7 @@ def resolve_state(blocking: int, agents: int, override: str | None) -> str:
     """
     if isinstance(override, str) and override in STATES:
         return override
-    return state_for(blocking, agents)
+    return state_for(blocking, agents, action_points)
 
 
 def _item_text(item: dict[str, Any]) -> str:
@@ -102,15 +109,23 @@ def _normalize_decision(
     return decision
 
 
-def blocked_state_label(blocking: int) -> str:
-    """The sidebar state label names the STATE, never the gate's text.
+def blocked_state_label(
+    blocking: int,
+    action_points: list[dict[str, Any]] | None = None,
+) -> str:
+    """Name the blocked action kind, never the action text.
 
     Row width is scarce and the pane's own title already sits beside it, so a
-    truncated copy of the gate body crowds out the identity that says which
-    agent is asking. The full text stays available in the `closing_gates`
-    token and in `gates[]`.
+    truncated body crowds out the identity that says which agent is asking.
+    Full Gate text stays in `closing_gates` and `gates[]`; Answer and Verify
+    text stays in `items[]`.
     """
     if blocking <= 0:
+        action_points = action_points or []
+        if len(action_points) == 1:
+            return str(action_points[0].get("label") or "action point").lower()
+        if action_points:
+            return f"{len(action_points)} action points"
         return "blocked"
     return "gate" if blocking == 1 else f"{blocking} gates"
 
@@ -119,6 +134,7 @@ def message_for(
     blocking: int,
     agents: int,
     gates: list[dict[str, Any]],
+    action_points: list[dict[str, Any]] | None = None,
 ) -> str | None:
     if blocking > 0:
         head = _item_text(gates[0]) if gates else ""
@@ -126,6 +142,8 @@ def message_for(
         return ((head or f"{blocking} blocking")[:80]) + extra
     if agents > 0:
         return f"{agents} agent{'s' if agents != 1 else ''} running"
+    if action_points:
+        return _item_text(action_points[0])[:80] or None
     return None
 
 
@@ -223,6 +241,11 @@ def report(
         _normalize_item(value, index=index, label="Answer")
         for index, value in enumerate(items or [], start=1)
     ]
+    action_points = [
+        item
+        for item in item_objects
+        if str(item.get("label") or "").lower() in {"answer", "verify"}
+    ]
     decision_objects = [
         _normalize_decision(value, index=index)
         for index, value in enumerate(decisions or [], start=1)
@@ -233,7 +256,7 @@ def report(
 
     seq = time.time_ns()
     reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    state = resolve_state(blocking, agents, state)
+    state = resolve_state(blocking, agents, state, len(action_points))
     payload = {
         "v": VERSION,
         "agent": agent,
@@ -279,7 +302,7 @@ def report(
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
         agent_params["wait"] = wait
         agent_params["eta_s"] = eta_s
-    message = message_for(blocking, agents, gate_objects)
+    message = message_for(blocking, agents, gate_objects, action_points)
     if message:
         agent_params["message"] = message
 
@@ -301,7 +324,7 @@ def report(
         "applies_to_source": source,
         "tokens": tokens,
         "state_labels": {
-            "blocked": blocked_state_label(blocking),
+            "blocked": blocked_state_label(blocking, action_points),
             "working": "working",
         },
         "seq": seq,
