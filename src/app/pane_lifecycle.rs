@@ -248,6 +248,9 @@ pub(crate) fn pane_is_quiet(
     pane: &crate::pane::PaneState,
     terminal: &crate::terminal::TerminalState,
 ) -> bool {
+    if terminal.supervisor_stale && terminal.stale_resolution.is_none() {
+        return false;
+    }
     let state = terminal.sidebar_projection(pane.seen).0;
     crate::terminal::state::session_is_quiet(
         state,

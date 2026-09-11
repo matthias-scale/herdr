@@ -13,6 +13,7 @@ const MAX_DISPLAY_DAYS: u64 = 999;
 /// repaint footers and status lines without doing new work.
 pub(crate) struct PaneActivity {
     last_at: Instant,
+    restored_age_at_last_at: Option<Duration>,
     content_revision: Option<u64>,
     detection_agent: Option<crate::detect::Agent>,
     detection_snapshot: Option<String>,
@@ -22,6 +23,7 @@ impl PaneActivity {
     pub(crate) fn new(now: Instant) -> Self {
         Self {
             last_at: now,
+            restored_age_at_last_at: None,
             content_revision: None,
             detection_agent: None,
             detection_snapshot: None,
@@ -30,6 +32,7 @@ impl PaneActivity {
 
     pub(crate) fn note(&mut self, now: Instant) {
         self.last_at = now;
+        self.restored_age_at_last_at = None;
     }
 
     pub(crate) fn needs_detection_snapshot(
@@ -65,11 +68,15 @@ impl PaneActivity {
     }
 
     pub(crate) fn inactive_for(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.last_at)
+        self.restored_age_at_last_at
+            .unwrap_or(Duration::ZERO)
+            .saturating_add(now.saturating_duration_since(self.last_at))
     }
 
     pub(crate) fn deadline_after(&self, quiet_for: Duration) -> Option<Instant> {
-        self.last_at.checked_add(quiet_for)
+        self.last_at.checked_add(
+            quiet_for.saturating_sub(self.restored_age_at_last_at.unwrap_or(Duration::ZERO)),
+        )
     }
 
     pub(crate) fn last_at(&self) -> Instant {
@@ -87,12 +94,19 @@ impl PaneActivity {
         now_unix: u64,
     ) {
         let elapsed = Duration::from_secs(now_unix.saturating_sub(last_at_unix));
-        self.last_at = now.checked_sub(elapsed).unwrap_or(now);
+        if let Some(last_at) = now.checked_sub(elapsed) {
+            self.last_at = last_at;
+            self.restored_age_at_last_at = None;
+        } else {
+            self.last_at = now;
+            self.restored_age_at_last_at = Some(elapsed);
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn set_last_at(&mut self, at: Instant) {
         self.last_at = at;
+        self.restored_age_at_last_at = None;
     }
 }
 
@@ -224,6 +238,22 @@ mod tests {
         assert_eq!(
             next_change_at(Some(started), started + Duration::from_secs(7_200)),
             Some(started + Duration::from_secs(10_800))
+        );
+    }
+
+    #[test]
+    fn restore_preserves_age_beyond_the_monotonic_clock_range() {
+        let now = Instant::now();
+        let mut activity = PaneActivity::new(now);
+        let persisted_age = Duration::from_secs(u64::MAX);
+        assert!(now.checked_sub(persisted_age).is_none());
+
+        activity.restore_unix_timestamp_at(0, now, u64::MAX);
+
+        assert!(activity.inactive_for(now) >= persisted_age);
+        assert_eq!(
+            activity.deadline_after(Duration::from_secs(30 * 60)),
+            Some(now)
         );
     }
 }

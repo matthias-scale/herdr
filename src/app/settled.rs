@@ -237,12 +237,7 @@ impl AppState {
                     };
                     let state = terminal.sidebar_projection(pane.seen).0;
                     let open_blockers = !terminal.closing_gates.is_empty();
-                    let quiet = crate::terminal::state::session_is_quiet(
-                        state,
-                        open_blockers || terminal.usage_limited,
-                        terminal.effective_active_subagents(),
-                        terminal.holds_shell,
-                    );
+                    let quiet = crate::app::pane_lifecycle::pane_is_quiet(pane, terminal);
                     if crate::terminal::counts_as_blocked(
                         state,
                         open_blockers,
@@ -1111,7 +1106,7 @@ mod tests {
         (state, pane_id)
     }
 
-    fn stale_state(screen_state: AgentState, now: Instant) -> (AppState, PaneId) {
+    fn stale_state(screen_state: Option<AgentState>, quiet_since: Instant) -> (AppState, PaneId) {
         let (mut state, pane_id) = state_with_context(Default::default());
         let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -1128,22 +1123,24 @@ mod tests {
             None,
             None,
             Some(1_000),
-            now,
+            quiet_since,
         );
         terminal
-            .mark_agent_status_stale_at(now + crate::terminal::state::AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(quiet_since + crate::terminal::state::AGENT_STALE_SILENCE)
             .expect("working report should become stale");
         assert!(terminal.supervisor_stale);
-        assert!(terminal.set_process_state(false, Some((screen_state, false))));
-        state.workspaces[0].tabs[0]
-            .panes
-            .get_mut(&pane_id)
-            .expect("root pane")
-            .activity
-            .set_last_at(now);
+        if screen_state.is_none() {
+            terminal.state = AgentState::Idle;
+        }
+        state.note_pane_activity_at(pane_id, quiet_since);
         state.auto_settle_inactive = false;
         state.auto_settle_finished = false;
         state.settle_done_after = Duration::from_secs(30 * 60);
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: false,
+            stale_resolution: screen_state.map(|state| (state, false)),
+        });
         (state, pane_id)
     }
 
@@ -1205,18 +1202,37 @@ mod tests {
     #[test]
     fn stale_pane_settles_only_when_its_screen_resolves_idle() {
         let now = Instant::now();
-        let settle_at = now + Duration::from_secs(30 * 60);
-        let (mut idle, idle_pane) = stale_state(AgentState::Idle, now);
+        let (mut idle, idle_pane) = stale_state(Some(AgentState::Idle), now);
+        let settle_at = idle.workspaces[0].tabs[0].panes[&idle_pane]
+            .activity
+            .last_at()
+            + idle.settle_done_after;
         assert_eq!(
             idle.refresh_settled_panes_at(None, settle_at, 1_725_000_037),
             1
         );
         assert!(idle.pane_is_settled(0, idle_pane));
 
+        let (mut unresolved, unresolved_pane) = stale_state(None, now);
+        let settle_at = unresolved.workspaces[0].tabs[0].panes[&unresolved_pane]
+            .activity
+            .last_at()
+            + unresolved.settle_done_after;
+        assert_eq!(
+            unresolved.refresh_settled_panes_at(None, settle_at, 1_725_000_038),
+            0,
+            "a stale pane needs screen evidence before it can settle"
+        );
+        assert!(!unresolved.pane_is_settled(0, unresolved_pane));
+
         for screen_state in [AgentState::Working, AgentState::Blocked] {
-            let (mut state, pane_id) = stale_state(screen_state, now);
+            let (mut state, pane_id) = stale_state(Some(screen_state), now);
+            let settle_at = state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .last_at()
+                + state.settle_done_after;
             assert_eq!(
-                state.refresh_settled_panes_at(None, settle_at, 1_725_000_038),
+                state.refresh_settled_panes_at(None, settle_at, 1_725_000_039),
                 0,
                 "stale {screen_state:?} pane settled"
             );
@@ -1237,8 +1253,106 @@ mod tests {
         pane.activity.set_last_at(now);
         assert_eq!(seen.next_done_settle_deadline(now), Some(expected));
 
-        let (stale, _) = stale_state(AgentState::Idle, now);
-        assert_eq!(stale.next_done_settle_deadline(now), Some(expected));
+        let (stale, stale_pane) = stale_state(Some(AgentState::Idle), now);
+        let stale_expected = stale.workspaces[0].tabs[0].panes[&stale_pane]
+            .activity
+            .last_at()
+            + stale.settle_done_after;
+        assert_eq!(stale.next_done_settle_deadline(now), Some(stale_expected));
+    }
+
+    #[test]
+    fn stale_resolution_event_restarts_the_quiet_window() {
+        let now = Instant::now();
+        let old_activity = now - Duration::from_secs(2 * 60 * 60);
+        let (mut state, pane_id) = stale_state(Some(AgentState::Working), old_activity);
+
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: false,
+            stale_resolution: Some((AgentState::Idle, false)),
+        });
+
+        let event_at = state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+        assert!(event_at > old_activity);
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                None,
+                event_at + state.settle_done_after - Duration::from_nanos(1),
+                1_725_000_040,
+            ),
+            0
+        );
+        assert_eq!(
+            state
+                .refresh_settled_panes_at(None, event_at + state.settle_done_after, 1_725_000_041,),
+            1
+        );
+    }
+
+    #[test]
+    fn held_shell_end_event_restarts_the_quiet_window() {
+        let now = Instant::now();
+        let old_activity = now - Duration::from_secs(2 * 60 * 60);
+        let (mut state, pane_id) = stale_state(Some(AgentState::Idle), old_activity);
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: true,
+            stale_resolution: Some((AgentState::Idle, false)),
+        });
+        let held_at = state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: false,
+            stale_resolution: Some((AgentState::Idle, false)),
+        });
+
+        let event_at = state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+        assert!(event_at > held_at);
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                None,
+                event_at + state.settle_done_after - Duration::from_nanos(1),
+                1_725_000_042,
+            ),
+            0
+        );
+        assert_eq!(
+            state
+                .refresh_settled_panes_at(None, event_at + state.settle_done_after, 1_725_000_043,),
+            1
+        );
+    }
+
+    #[test]
+    fn stale_resolution_event_unsettles_an_active_projection() {
+        let now = Instant::now();
+        for active_state in [AgentState::Working, AgentState::Blocked] {
+            let (mut state, pane_id) = stale_state(Some(AgentState::Idle), now);
+            state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .expect("root pane")
+                .settled_at = Some(1_725_000_044);
+
+            state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+                pane_id,
+                holds_shell: false,
+                stale_resolution: Some((active_state, false)),
+            });
+
+            assert!(
+                !state.pane_is_settled(0, pane_id),
+                "stale {active_state:?} projection stayed settled"
+            );
+        }
     }
 
     #[test]
