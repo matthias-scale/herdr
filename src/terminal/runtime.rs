@@ -499,6 +499,16 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
+    pub(crate) fn remote_control_guard(&self) -> crate::pty::actor::PtyWriteGuard {
+        self.0.remote_control_guard()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn revoke_remote_control(&self) {
+        self.0.revoke_remote_control();
+    }
+
+    #[cfg(unix)]
     pub(crate) fn release_remote_owner(&self, owner_id: u64) {
         self.0.release_remote_owner(owner_id);
     }

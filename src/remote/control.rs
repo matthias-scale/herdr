@@ -1,4 +1,8 @@
 //! Non-interactive OpenSSH control transport for remote focus.
+//
+// This transport is intentionally retained as compiled/tested code while the
+// production default remains the step-4 proxy-pane stub.
+#![allow(dead_code)]
 
 #[cfg(unix)]
 use std::io;

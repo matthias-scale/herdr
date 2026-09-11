@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -11,7 +11,7 @@ use std::{
 
 use bytes::Bytes;
 use tokio::sync::mpsc::{self, error::TryRecvError as DataTryRecvError};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::pty::fd;
 
@@ -81,28 +81,126 @@ enum PtyIoDataCommand {
     },
 }
 
+/// Shared invalidation state for a runtime's guarded remote writes.
+///
+/// The boundary mutex serializes lease invalidation with the actor's final
+/// validation and syscall. The epoch is an independent check so a missed
+/// invalidation site cannot make a queued authorization valid again.
+#[derive(Debug, Clone)]
+pub(crate) struct PtyWriteGuard {
+    active: Arc<AtomicBool>,
+    context_epoch: Arc<AtomicU64>,
+    authorization_epoch: Arc<AtomicU64>,
+    boundary: Arc<Mutex<()>>,
+}
+
+impl PtyWriteGuard {
+    pub(crate) fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(false)),
+            context_epoch: Arc::new(AtomicU64::new(0)),
+            authorization_epoch: Arc::new(AtomicU64::new(0)),
+            boundary: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn lock_boundary(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.boundary
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn activate(&self, context_epoch: u64) {
+        let _boundary = self.lock_boundary();
+        self.context_epoch.store(context_epoch, Ordering::Release);
+        self.authorization_epoch.fetch_add(1, Ordering::AcqRel);
+        self.active.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn revoke(&self) {
+        let _boundary = self.lock_boundary();
+        self.revoke_locked();
+    }
+
+    pub(crate) fn revoke_locked(&self) {
+        if self.active.swap(false, Ordering::AcqRel) {
+            self.authorization_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn authorization(
+        &self,
+        expected_process_group_id: u32,
+        expected_context_epoch: u64,
+        on_unknown: Arc<dyn Fn() + Send + Sync>,
+    ) -> PtyWriteAuthorization {
+        let _boundary = self.lock_boundary();
+        PtyWriteAuthorization::new_with_context_epoch(
+            expected_process_group_id,
+            expected_context_epoch,
+            self.authorization_epoch.load(Ordering::Acquire),
+            Arc::clone(&self.active),
+            Arc::clone(&self.context_epoch),
+            Arc::clone(&self.authorization_epoch),
+            Arc::clone(&self.boundary),
+            on_unknown,
+        )
+    }
+}
+
 /// Authorization carried with a guarded remote write until the actor writes it.
 /// The actor owns the final check because the channel and pending-write queue
 /// outlive the server event-loop turn that accepted the batch.
 #[derive(Clone)]
 pub(crate) struct PtyWriteAuthorization {
     expected_process_group_id: u32,
+    expected_context_epoch: u64,
+    expected_authorization_epoch: u64,
     active: Arc<AtomicBool>,
+    context_epoch: Arc<AtomicU64>,
+    authorization_epoch: Arc<AtomicU64>,
     boundary: Arc<Mutex<()>>,
     reported: Arc<AtomicBool>,
     on_unknown: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl PtyWriteAuthorization {
+    #[cfg(test)]
     pub(crate) fn new(
         expected_process_group_id: u32,
         active: Arc<AtomicBool>,
         boundary: Arc<Mutex<()>>,
         on_unknown: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
+        Self::new_with_context_epoch(
+            expected_process_group_id,
+            0,
+            0,
+            active,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            boundary,
+            on_unknown,
+        )
+    }
+
+    fn new_with_context_epoch(
+        expected_process_group_id: u32,
+        expected_context_epoch: u64,
+        expected_authorization_epoch: u64,
+        active: Arc<AtomicBool>,
+        context_epoch: Arc<AtomicU64>,
+        authorization_epoch: Arc<AtomicU64>,
+        boundary: Arc<Mutex<()>>,
+        on_unknown: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         Self {
             expected_process_group_id,
+            expected_context_epoch,
+            expected_authorization_epoch,
             active,
+            context_epoch,
+            authorization_epoch,
             boundary,
             reported: Arc::new(AtomicBool::new(false)),
             on_unknown,
@@ -111,6 +209,8 @@ impl PtyWriteAuthorization {
 
     fn is_valid(&self, tty_fd: RawFd) -> bool {
         self.active.load(Ordering::Acquire)
+            && self.context_epoch.load(Ordering::Acquire) == self.expected_context_epoch
+            && self.authorization_epoch.load(Ordering::Acquire) == self.expected_authorization_epoch
             && crate::platform::foreground_process_group_id_for_tty_fd(tty_fd)
                 == Some(self.expected_process_group_id)
     }
@@ -137,6 +237,8 @@ pub(crate) struct PtyIoActorHandle {
     control_tx: std_mpsc::Sender<PtyIoControlCommand>,
     wake: fd::WakeWriter,
     user_writes: Arc<Mutex<UserWriteGate>>,
+    user_writes_poisoned: Arc<AtomicBool>,
+    write_guard: PtyWriteGuard,
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
 }
@@ -148,18 +250,44 @@ struct UserWriteGate {
 }
 
 impl PtyIoActorHandle {
+    fn mark_user_writes_poisoned(&self) {
+        if !self.user_writes_poisoned.swap(true, Ordering::AcqRel) {
+            error!("PTY user-write gate was poisoned; retiring pane and refusing input");
+        }
+        if self.control_tx.send(PtyIoControlCommand::Shutdown).is_ok() {
+            self.wake_actor();
+        }
+    }
+
+    fn lock_user_writes(&self) -> Option<std::sync::MutexGuard<'_, UserWriteGate>> {
+        if self.user_writes_poisoned.load(Ordering::Acquire) {
+            return None;
+        }
+        match self.user_writes.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                self.mark_user_writes_poisoned();
+                None
+            }
+        }
+    }
+
+    pub(crate) fn remote_control_guard(&self) -> PtyWriteGuard {
+        self.write_guard.clone()
+    }
+
     pub(crate) async fn write_user_input(
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::SendError<Bytes>> {
-        {
-            let user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !user_writes.accepting {
+        let accepting = {
+            let Some(user_writes) = self.lock_user_writes() else {
                 return Err(mpsc::error::SendError(bytes));
-            }
+            };
+            user_writes.accepting
+        };
+        if !accepting {
+            return Err(mpsc::error::SendError(bytes));
         }
 
         let permit = match self.data_tx.reserve().await {
@@ -167,11 +295,13 @@ impl PtyIoActorHandle {
             Err(_) => return Err(mpsc::error::SendError(bytes)),
         };
 
-        let user_writes = self
-            .user_writes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !user_writes.accepting || user_writes.remote_owner.is_some() {
+        let allowed = {
+            let Some(user_writes) = self.lock_user_writes() else {
+                return Err(mpsc::error::SendError(bytes));
+            };
+            user_writes.accepting && user_writes.remote_owner.is_none()
+        };
+        if !allowed {
             return Err(mpsc::error::SendError(bytes));
         }
         permit.send(PtyIoDataCommand::WriteUserInput {
@@ -186,10 +316,9 @@ impl PtyIoActorHandle {
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        let user_writes = self
-            .user_writes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(user_writes) = self.lock_user_writes() else {
+            return Err(mpsc::error::TrySendError::Closed(bytes));
+        };
         if !user_writes.accepting {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
@@ -225,10 +354,9 @@ impl PtyIoActorHandle {
     }
 
     pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
-        let mut user_writes = self
-            .user_writes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(mut user_writes) = self.lock_user_writes() else {
+            return false;
+        };
         match user_writes.remote_owner {
             None => {
                 user_writes.remote_owner = Some(owner_id);
@@ -239,10 +367,9 @@ impl PtyIoActorHandle {
     }
 
     pub(crate) fn release_remote_owner(&self, owner_id: u64) {
-        let mut user_writes = self
-            .user_writes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(mut user_writes) = self.lock_user_writes() else {
+            return;
+        };
         if user_writes.remote_owner == Some(owner_id) {
             user_writes.remote_owner = None;
         }
@@ -254,10 +381,9 @@ impl PtyIoActorHandle {
         bytes: Bytes,
         authorization: PtyWriteAuthorization,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        let user_writes = self
-            .user_writes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(user_writes) = self.lock_user_writes() else {
+            return Err(mpsc::error::TrySendError::Closed(bytes));
+        };
         if !user_writes.accepting || user_writes.remote_owner != Some(owner_id) {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
@@ -351,10 +477,11 @@ impl PtyIoActorHandle {
     pub(crate) fn begin_handoff(&self, timeout: Duration) -> std::io::Result<()> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         {
-            let mut user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(mut user_writes) = self.lock_user_writes() else {
+                return Err(std::io::Error::other(
+                    "PTY user-write gate was poisoned; pane is retiring",
+                ));
+            };
             user_writes.accepting = false;
             if self
                 .control_tx
@@ -421,10 +548,11 @@ impl PtyIoActorHandle {
             )
         })?;
         if result.is_ok() {
-            let mut user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(mut user_writes) = self.lock_user_writes() else {
+                return Err(std::io::Error::other(
+                    "PTY user-write gate was poisoned; pane is retiring",
+                ));
+            };
             user_writes.accepting = true;
         }
         result
@@ -432,10 +560,11 @@ impl PtyIoActorHandle {
 
     pub(crate) fn release_after_commit(&self) -> std::io::Result<()> {
         {
-            let mut user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(mut user_writes) = self.lock_user_writes() else {
+                return Err(std::io::Error::other(
+                    "PTY user-write gate was poisoned; pane is retiring",
+                ));
+            };
             user_writes.accepting = false;
         }
         let (reply_tx, reply_rx) = std_mpsc::channel();
@@ -452,11 +581,7 @@ impl PtyIoActorHandle {
     }
 
     pub(crate) fn shutdown(&self) {
-        {
-            let mut user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut user_writes) = self.lock_user_writes() {
             user_writes.accepting = false;
         }
         if self.control_tx.send(PtyIoControlCommand::Shutdown).is_ok() {
@@ -492,6 +617,8 @@ impl PtyIoActor {
             accepting: !config.initially_quiesced,
             remote_owner: None,
         }));
+        let user_writes_poisoned = Arc::new(AtomicBool::new(false));
+        let write_guard = PtyWriteGuard::new();
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let response_order = Arc::new(Mutex::new(()));
         let handle = PtyIoActorHandle {
@@ -499,6 +626,8 @@ impl PtyIoActor {
             control_tx,
             wake: wake_pipe.writer,
             user_writes: Arc::clone(&user_writes),
+            user_writes_poisoned: Arc::clone(&user_writes_poisoned),
+            write_guard: write_guard.clone(),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
         };
@@ -517,6 +646,7 @@ impl PtyIoActor {
             current_write_offset: 0,
             wake_read_fd: wake_pipe.read_fd,
             user_writes: Arc::clone(&user_writes),
+            user_writes_poisoned,
             controls,
             response_order,
             on_read: config.on_read,
@@ -550,6 +680,7 @@ struct PtyIoActorRunner {
     current_write_offset: usize,
     wake_read_fd: OwnedFd,
     user_writes: Arc<Mutex<UserWriteGate>>,
+    user_writes_poisoned: Arc<AtomicBool>,
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
     on_read: ReadCallback,
@@ -558,6 +689,15 @@ struct PtyIoActorRunner {
 }
 
 impl PtyIoActorRunner {
+    fn mark_user_writes_poisoned(&self) {
+        if !self.user_writes_poisoned.swap(true, Ordering::AcqRel) {
+            error!(
+                pane = self.pane_id,
+                "PTY user-write gate was poisoned; retiring pane and refusing input"
+            );
+        }
+    }
+
     fn enqueue_write(&mut self, bytes: Bytes) {
         if !bytes.is_empty() {
             self.pending_writes.push_back((bytes, None, false));
@@ -586,6 +726,9 @@ impl PtyIoActorRunner {
 
             if !self.pending_writes.is_empty() {
                 self.flush_pending_writes_once();
+                if self.state == ActorState::Released {
+                    break;
+                }
             }
 
             if let Some(poll_observer) = &self.poll_observer {
@@ -615,6 +758,9 @@ impl PtyIoActorRunner {
                     }
                     if readiness.pty_write_ready && !self.pending_writes.is_empty() {
                         self.flush_pending_writes_once();
+                        if self.state == ActorState::Released {
+                            break;
+                        }
                     }
                 }
                 Err(err) => {
@@ -870,24 +1016,35 @@ impl PtyIoActorRunner {
 
     fn flush_pending_writes_once(&mut self) {
         while let Some((bytes, authorization, user_input)) = self.pending_writes.front() {
+            let bytes = bytes.clone();
+            let authorization = authorization.clone();
+            let user_input = *user_input;
             let authorization_boundary = authorization.as_ref().map(|authorization| {
                 authorization
                     .boundary
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
             });
-            let user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if *user_input && authorization.is_none() && user_writes.remote_owner.is_some() {
+            let user_writes_mutex = Arc::clone(&self.user_writes);
+            let user_writes = match user_writes_mutex.lock() {
+                Ok(user_writes) => user_writes,
+                Err(_) => {
+                    self.mark_user_writes_poisoned();
+                    self.state = ActorState::Released;
+                    self.report_unknown_pending_writes();
+                    self.pending_writes.clear();
+                    self.current_write_offset = 0;
+                    return;
+                }
+            };
+            if user_input && authorization.is_none() && user_writes.remote_owner.is_some() {
                 drop(user_writes);
                 drop(authorization_boundary);
                 self.pending_writes.pop_front();
                 self.current_write_offset = 0;
                 continue;
             }
-            if let Some(authorization) = authorization {
+            if let Some(authorization) = &authorization {
                 if !authorization.is_valid(self.file.as_raw_fd()) {
                     drop(user_writes);
                     drop(authorization_boundary);
@@ -897,6 +1054,12 @@ impl PtyIoActorRunner {
                     continue;
                 }
             }
+            // The foreground-process-group check and write(2) are not one atomic
+            // kernel operation. The kernel can change the tty's foreground group
+            // between the tcgetpgrp(2) performed by is_valid and write(2); no
+            // userspace mutex can close that window because it does not serialize
+            // with the kernel's tty state. The window is bounded to this single
+            // check-to-write syscall sequence, and every retry repeats the full check.
             let chunk = &bytes[self.current_write_offset..];
             let write_result = self.file.write(chunk);
             drop(user_writes);
@@ -1012,6 +1175,7 @@ impl PtyIoActorRunner {
 mod tests {
     use super::*;
     use std::{
+        fs::File,
         io::{Read, Write},
         os::fd::{AsRawFd, FromRawFd, IntoRawFd},
         os::unix::net::UnixStream,
@@ -1084,6 +1248,7 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             on_read: Box::new(|_| PtyReadResult::empty()),
@@ -1091,6 +1256,133 @@ mod tests {
             poll_observer: None,
         };
         (runner, peer)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn actor_runner_for_real_pty() -> (PtyIoActorRunner, File, libc::pid_t, u32) {
+        let mut master = -1;
+        let mut slave_name = [0 as libc::c_char; 128];
+        // SAFETY: forkpty initializes a real PTY pair and returns the child pid
+        // in the parent. The child immediately execs below.
+        let child = unsafe {
+            libc::forkpty(
+                &mut master,
+                slave_name.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            child >= 0,
+            "forkpty failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            // SAFETY: the forkpty child owns stdin/stdout/stderr and execs now.
+            unsafe {
+                libc::execl(
+                    c"/bin/sleep".as_ptr(),
+                    c"sleep".as_ptr(),
+                    c"60".as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(127);
+            }
+        }
+        let actor_fd = fd::duplicate_cloexec_fd(master).expect("duplicate PTY master");
+        // SAFETY: forkpty returned a NUL-terminated slave path in `slave_name`.
+        let peer_fd = unsafe {
+            libc::open(
+                slave_name.as_ptr(),
+                libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        assert!(
+            peer_fd >= 0,
+            "open PTY slave failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let mut foreground_group = None;
+        for _ in 0..100 {
+            if let Some(group) = crate::platform::foreground_process_group_id_for_tty_fd(master) {
+                foreground_group = Some(group);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let foreground_group = foreground_group.expect("child did not become PTY foreground");
+        // SAFETY: fcntl changes only the duplicated descriptors' flags.
+        let flags = unsafe { libc::fcntl(actor_fd, libc::F_GETFL) };
+        assert!(flags >= 0, "fcntl(F_GETFL) failed");
+        assert_eq!(
+            unsafe { libc::fcntl(actor_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0,
+            "fcntl(F_SETFL) failed"
+        );
+        // SAFETY: the observer descriptor is open and remains owned by `peer`.
+        let peer = unsafe { File::from_raw_fd(peer_fd) };
+        let mut termios = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(peer.as_raw_fd(), &mut termios) },
+            0,
+            "PTY slave tcgetattr failed"
+        );
+        unsafe {
+            libc::cfmakeraw(&mut termios);
+            libc::tcsetattr(peer.as_raw_fd(), libc::TCSANOW, &termios);
+        }
+        // SAFETY: ownership of the duplicated actor descriptor is transferred once.
+        let master_fd = unsafe { OwnedFd::from_raw_fd(actor_fd) };
+        let (_data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
+        let (_control_tx, control_rx) = std_mpsc::channel();
+        let wake_pipe = fd::create_wake_pipe().expect("wake pipe");
+        let runner = PtyIoActorRunner {
+            pane_id: 1,
+            file: File::from(master_fd),
+            data_rx,
+            control_rx,
+            state: ActorState::Running,
+            pending_writes: VecDeque::new(),
+            current_write_offset: 0,
+            wake_read_fd: wake_pipe.read_fd,
+            user_writes: Arc::new(Mutex::new(UserWriteGate {
+                accepting: true,
+                remote_owner: None,
+            })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            controls: Arc::new(Mutex::new(SharedPtyControls::default())),
+            response_order: Arc::new(Mutex::new(())),
+            on_read: Box::new(|_| PtyReadResult::empty()),
+            on_reader_exit: None,
+            poll_observer: None,
+        };
+        (runner, peer, child, foreground_group)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reap_test_pty(child: libc::pid_t) {
+        // SAFETY: child is the process created by actor_runner_for_real_pty.
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+    }
+
+    fn authorization_for(
+        guard: &PtyWriteGuard,
+        process_group_id: u32,
+        context_epoch: u64,
+        unknown: &Arc<AtomicUsize>,
+    ) -> PtyWriteAuthorization {
+        let unknown = Arc::clone(unknown);
+        guard.authorization(
+            process_group_id,
+            context_epoch,
+            Arc::new(move || {
+                unknown.fetch_add(1, Ordering::AcqRel);
+            }),
+        )
     }
 
     #[test]
@@ -1141,6 +1433,191 @@ mod tests {
             )
         ));
         assert_eq!(unknown.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn context_epoch_change_after_enqueue_writes_zero_bytes() {
+        let (mut runner, mut peer, child, process_group_id) = actor_runner_for_real_pty();
+        let guard = PtyWriteGuard::new();
+        guard.activate(41);
+        let unknown = Arc::new(AtomicUsize::new(0));
+        let authorization = authorization_for(&guard, process_group_id, 41, &unknown);
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"stale-context"),
+                authorization: Some(authorization),
+            })
+        );
+
+        // This models a server-observed context revision update even if a
+        // future call site forgets to revoke the active lease.
+        guard.context_epoch.store(42, Ordering::Release);
+        runner.flush_pending_writes_once();
+
+        let mut received = [0u8; 32];
+        assert!(matches!(
+            peer.read(&mut received),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+        ));
+        assert_eq!(unknown.load(Ordering::Acquire), 1);
+        reap_test_pty(child);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreground_agent_change_with_same_process_group_writes_zero_bytes() {
+        let (mut runner, mut peer, child, process_group_id) = actor_runner_for_real_pty();
+        let guard = PtyWriteGuard::new();
+        guard.activate(41);
+        let unknown = Arc::new(AtomicUsize::new(0));
+        let authorization = authorization_for(&guard, process_group_id, 41, &unknown);
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"stale-agent"),
+                authorization: Some(authorization),
+            })
+        );
+
+        // The observed foreground agent changed while its process group stayed
+        // constant. The observation revokes the lease before this flush. Even
+        // reactivating the same context cannot resurrect the queued batch.
+        guard.revoke();
+        guard.activate(41);
+        runner.flush_pending_writes_once();
+
+        let mut received = [0u8; 32];
+        assert!(matches!(
+            peer.read(&mut received),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+        ));
+        assert_eq!(unknown.load(Ordering::Acquire), 1);
+        reap_test_pty(child);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partial_write_then_revoke_does_not_retry_remainder() {
+        let (mut runner, mut peer, child, process_group_id) = actor_runner_for_real_pty();
+        let guard = PtyWriteGuard::new();
+        guard.activate(41);
+        let unknown = Arc::new(AtomicUsize::new(0));
+        let authorization = authorization_for(&guard, process_group_id, 41, &unknown);
+        let bytes = Bytes::from(vec![b'x'; 1024 * 1024]);
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: bytes.clone(),
+                authorization: Some(authorization),
+            })
+        );
+        runner.flush_pending_writes_once();
+        let written = runner.current_write_offset;
+        assert!(written > 0, "PTY write should make a partial write first");
+        let mut received = vec![0; written];
+        peer.read_exact(&mut received)
+            .expect("PTY slave receives the partial write");
+        assert!(received.iter().all(|byte| *byte == b'x'));
+        guard.revoke();
+        runner.flush_pending_writes_once();
+
+        assert!(runner.pending_writes.is_empty());
+        assert_eq!(runner.current_write_offset, 0);
+        assert_eq!(unknown.load(Ordering::Acquire), 1);
+        let mut remainder = [0u8; 1];
+        assert!(matches!(
+            peer.read(&mut remainder),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        reap_test_pty(child);
+        drop(peer);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn eagain_then_revoke_does_not_write_controlled_input() {
+        let (mut runner, mut peer, child, process_group_id) = actor_runner_for_real_pty();
+        let mut filler = vec![b'f'; 1024 * 1024];
+        while !filler.is_empty() {
+            match runner.file.write(&filler) {
+                Ok(written) => {
+                    filler.drain(..written);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("failed to fill PTY input: {error}"),
+            }
+        }
+        let guard = PtyWriteGuard::new();
+        guard.activate(41);
+        let unknown = Arc::new(AtomicUsize::new(0));
+        let authorization = authorization_for(&guard, process_group_id, 41, &unknown);
+        let marker = Bytes::from_static(b"controlled-after-eagain");
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: marker.clone(),
+                authorization: Some(authorization),
+            })
+        );
+        runner.flush_pending_writes_once();
+        assert_eq!(runner.current_write_offset, 0);
+        guard.revoke();
+        runner.flush_pending_writes_once();
+
+        assert!(runner.pending_writes.is_empty());
+        assert_eq!(unknown.load(Ordering::Acquire), 1);
+        let mut observed = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match peer.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(length) => observed.extend_from_slice(&buffer[..length]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
+                Err(error) => panic!("failed to inspect PTY input: {error}"),
+            }
+        }
+        assert!(!observed
+            .windows(marker.len())
+            .any(|window| window == marker.as_ref()));
+        reap_test_pty(child);
+    }
+
+    #[test]
+    fn poisoned_user_write_gate_refuses_local_and_controlled_writes() {
+        let (handle, _peer, _read_rx) = actor_with_socket_pair(false);
+        assert!(handle.acquire_remote_owner(7));
+        let user_writes = Arc::clone(&handle.user_writes);
+        let poison = std::thread::spawn(move || {
+            let _guard = user_writes.lock().expect("poisoning lock is healthy");
+            panic!("intentional test panic");
+        });
+        assert!(poison.join().is_err());
+
+        assert!(handle
+            .try_write_user_input(Bytes::from_static(b"local"))
+            .is_err());
+        let unknown = Arc::new(AtomicUsize::new(0));
+        let authorization = PtyWriteAuthorization::new(
+            0,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(())),
+            Arc::new({
+                let unknown = Arc::clone(&unknown);
+                move || {
+                    unknown.fetch_add(1, Ordering::AcqRel);
+                }
+            }),
+        );
+        assert!(handle
+            .try_write_controlled_user_input(7, Bytes::from_static(b"controlled"), authorization)
+            .is_err());
+        assert!(handle.user_writes_poisoned.load(Ordering::Acquire));
+        handle.shutdown();
     }
 
     #[test]
@@ -1415,6 +1892,8 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            write_guard: PtyWriteGuard::new(),
             controls: Arc::clone(&controls),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1479,6 +1958,7 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
             on_read: Box::new(move |_| PtyReadResult {
@@ -1499,6 +1979,8 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            write_guard: PtyWriteGuard::new(),
             controls,
             response_order,
         };
@@ -1572,6 +2054,8 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            write_guard: PtyWriteGuard::new(),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1622,6 +2106,8 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            write_guard: PtyWriteGuard::new(),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1681,6 +2167,8 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            write_guard: PtyWriteGuard::new(),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
         };
@@ -1731,6 +2219,7 @@ mod tests {
                 accepting: true,
                 remote_owner: None,
             })),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             on_read: Box::new(|_| PtyReadResult::empty()),

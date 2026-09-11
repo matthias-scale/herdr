@@ -40,6 +40,40 @@ fn retain_custom_command_after_wait(
 }
 
 impl App {
+    #[cfg(unix)]
+    pub(crate) fn revoke_remote_control_for_pane(&self, pane_id: crate::layout::PaneId) {
+        let Some(terminal_id) = self.state.workspaces.iter().find_map(|workspace| {
+            workspace
+                .pane_state(pane_id)
+                .map(|pane| pane.attached_terminal_id.clone())
+        }) else {
+            return;
+        };
+        self.revoke_remote_control_for_terminal(&terminal_id);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn revoke_remote_control_for_terminal(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+    ) {
+        if let Some(runtime) = self.terminal_runtimes.get(terminal_id) {
+            runtime.revoke_remote_control();
+        }
+    }
+
+    #[cfg(unix)]
+    fn revoke_due_managed_agent_control(&self, now: Instant) {
+        for (terminal_id, terminal) in &self.state.terminals {
+            if terminal
+                .next_managed_agent_deadline()
+                .is_some_and(|deadline| now >= deadline)
+            {
+                self.revoke_remote_control_for_terminal(terminal_id);
+            }
+        }
+    }
+
     pub(crate) fn reap_finished_custom_commands(&mut self) {
         self.detached_custom_command_children
             .retain_mut(|child| retain_custom_command_after_wait(child.id(), child.try_wait()));
@@ -56,6 +90,8 @@ impl App {
         };
         self.release_input_target_headless(&target);
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+            #[cfg(unix)]
+            runtime.revoke_remote_control();
             runtime.shutdown();
         }
     }
@@ -395,6 +431,8 @@ impl App {
             .next_managed_agent_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
+            #[cfg(unix)]
+            self.revoke_due_managed_agent_control(now);
             let panes = self.state.reconcile_managed_agents_at(now);
             if !panes.is_empty() {
                 for (ws_idx, pane_id) in panes {

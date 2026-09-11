@@ -12,6 +12,22 @@ use super::{
     LimitedRead, Signal,
 };
 
+/// Resolve the server's effective UID through the kernel user database.
+/// Environment variables are deliberately not consulted for identity checks.
+pub(crate) fn effective_user_name() -> Option<String> {
+    effective_user_name_for_uid(unsafe { libc::geteuid() })
+}
+
+fn effective_user_name_for_uid(uid: libc::uid_t) -> Option<String> {
+    let passwd = unsafe { libc::getpwuid(uid) };
+    if passwd.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr((*passwd).pw_name) };
+    let name = name.to_str().ok()?.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }

@@ -21,6 +21,8 @@ use tracing::{error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
+#[cfg(unix)]
+use crate::pty::actor::PtyWriteGuard;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
 
@@ -1281,6 +1283,8 @@ enum PaneRuntimeIo {
         sender: mpsc::Sender<Bytes>,
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
         remote_owner: Arc<Mutex<Option<u64>>>,
+        #[cfg(unix)]
+        write_guard: PtyWriteGuard,
     },
 }
 
@@ -1330,6 +1334,24 @@ impl PaneRuntimeIo {
                     Some(existing) => existing == owner_id,
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    fn remote_control_guard(&self) -> PtyWriteGuard {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.remote_control_guard(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { write_guard, .. } => write_guard.clone(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn revoke_remote_control(&self) {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.remote_control_guard().revoke(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { write_guard, .. } => write_guard.revoke(),
         }
     }
 
@@ -3422,6 +3444,16 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
+    pub(crate) fn remote_control_guard(&self) -> PtyWriteGuard {
+        self.io.remote_control_guard()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn revoke_remote_control(&self) {
+        self.io.revoke_remote_control();
+    }
+
+    #[cfg(unix)]
     pub(crate) fn release_remote_owner(&self, owner_id: u64) {
         self.io.release_remote_owner(owner_id);
     }
@@ -3731,6 +3763,8 @@ impl PaneRuntime {
                     sender: tx,
                     resize_tx,
                     remote_owner: Arc::new(Mutex::new(None)),
+                    #[cfg(unix)]
+                    write_guard: PtyWriteGuard::new(),
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 resize_count: Cell::new(0),
@@ -4518,6 +4552,8 @@ mod tests {
                 sender: tx,
                 resize_tx,
                 remote_owner: Arc::new(Mutex::new(None)),
+                #[cfg(unix)]
+                write_guard: PtyWriteGuard::new(),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
@@ -4558,6 +4594,8 @@ mod tests {
                 sender: tx,
                 resize_tx,
                 remote_owner: Arc::new(Mutex::new(None)),
+                #[cfg(unix)]
+                write_guard: PtyWriteGuard::new(),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),

@@ -36,6 +36,22 @@ use super::{
     LimitedRead, Signal,
 };
 
+/// Resolve the server's effective UID through the kernel user database.
+/// Environment variables are deliberately not consulted for identity checks.
+pub(crate) fn effective_user_name() -> Option<String> {
+    effective_user_name_for_uid(unsafe { libc::geteuid() })
+}
+
+fn effective_user_name_for_uid(uid: libc::uid_t) -> Option<String> {
+    let passwd = unsafe { libc::getpwuid(uid) };
+    if passwd.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr((*passwd).pw_name) };
+    let name = name.to_str().ok()?.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
     create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
@@ -127,6 +143,14 @@ fn status_cpu_ticks() -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod status_metric_tests {
+    #[test]
+    fn effective_user_name_uses_the_effective_uid_and_rejects_unknown_uids() {
+        let uid = unsafe { libc::geteuid() };
+        assert!(super::effective_user_name().is_some());
+        assert!(super::effective_user_name_for_uid(uid).is_some());
+        assert!(super::effective_user_name_for_uid(libc::uid_t::MAX).is_none());
+    }
+
     #[test]
     fn platform_metric_sampler_returns_local_linux_snapshot() {
         // AC6: Linux collection stays in linux.rs and uses /proc, /sys, libc.

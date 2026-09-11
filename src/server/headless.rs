@@ -1933,6 +1933,25 @@ impl HeadlessServer {
         }
     }
 
+    /// Any mutating API request can replace a validated workspace, pane,
+    /// terminal, readiness, cwd, or draft fact. Revoke before dispatch so the
+    /// PTY actor cannot flush a queued authorization while the mutation runs.
+    #[cfg(unix)]
+    fn revoke_remote_control_before_api_mutation(&self, request: &api::schema::Request) {
+        if !api::request_changes_ui(request) {
+            return;
+        }
+        for client in self.clients.values() {
+            if let ClientConnectionMode::TerminalAttach {
+                control: Some(control),
+                ..
+            } = &client.mode
+            {
+                control.revoke();
+            }
+        }
+    }
+
     fn client_removal_needs_shared_resize(&self, client_id: u64) -> bool {
         if self.foreground_client_id == Some(client_id) {
             return true;
@@ -2159,10 +2178,17 @@ impl HeadlessServer {
         let current = match provider.fresh_remote_control_context(&lease.agent_ref) {
             Ok(context) => context,
             Err(error) => {
+                lease.revoke();
                 self.reject_remote_control(client_id, error);
                 return false;
             }
         };
+        // This is the server's fresh observation of every fact carried by the
+        // lease. Revoke before validation so a queued write cannot survive a
+        // context change merely because this request is refused.
+        if lease.context != current {
+            lease.revoke();
+        }
         let configured_host = self.app.state.agent_host_name.clone();
         let terminal_id = lease.context.terminal_id.clone();
         let has_bytes = !data.is_empty();
@@ -2444,9 +2470,18 @@ impl HeadlessServer {
         let expected = expected_context
             .map(|context| *context)
             .unwrap_or_else(|| current.clone());
+        let Some(effective_user) = crate::platform::effective_user_name() else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "refused_for_safety".to_owned(),
+                    message: "effective remote user is unavailable".to_owned(),
+                },
+            );
+        };
         if let Err(error) = crate::server::remote_control::validate_context(
             &self.app.state.agent_host_name,
-            &current.user,
+            &effective_user,
             &expected,
             &current,
         ) {
@@ -2487,7 +2522,7 @@ impl HeadlessServer {
                 },
             );
         }
-        if self.app.terminal_runtimes.get(&real_terminal_id).is_none() {
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
             return self.reject_remote_control(
                 client_id,
                 crate::api::schema::ErrorBody {
@@ -2495,12 +2530,9 @@ impl HeadlessServer {
                     message: "controlled terminal runtime is gone".to_owned(),
                 },
             );
-        }
-        let acquired_runtime_owner = self
-            .app
-            .terminal_runtimes
-            .get(&real_terminal_id)
-            .is_some_and(|runtime| runtime.acquire_remote_owner(client_id));
+        };
+        let write_guard = runtime.remote_control_guard();
+        let acquired_runtime_owner = runtime.acquire_remote_owner(client_id);
         if !acquired_runtime_owner {
             return self.reject_remote_control(
                 client_id,
@@ -2510,8 +2542,11 @@ impl HeadlessServer {
                 },
             );
         }
-        let lease =
-            crate::server::remote_control::RemoteControlLease::new(agent_ref, current.clone());
+        let lease = crate::server::remote_control::RemoteControlLease::new_with_guard(
+            agent_ref,
+            current.clone(),
+            write_guard,
+        );
         let lease_for_attach = lease.clone();
         if !self.attach_terminal_client_with_control(
             client_id,
@@ -3722,6 +3757,18 @@ impl HeadlessServer {
         }
         let events = events_for_app_routing(events, source_was_foreground, source_is_full_app);
         let interaction = events_include_interaction(&events);
+        #[cfg(unix)]
+        if source_is_full_app && interaction {
+            if let Some(pane_id) = self
+                .app
+                .state
+                .active
+                .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
+                .and_then(crate::workspace::Workspace::focused_pane_id)
+            {
+                self.app.revoke_remote_control_for_pane(pane_id);
+            }
+        }
         let foreground_changed = if interaction {
             self.promote_client_to_foreground(client_id)
         } else {
@@ -4686,6 +4733,8 @@ impl HeadlessServer {
         &mut self,
         msg: api::ApiRequestMessage,
     ) -> RenderImpact {
+        #[cfg(unix)]
+        self.revoke_remote_control_before_api_mutation(&msg.request);
         if matches!(
             &msg.request.method,
             api::schema::Method::PaneGraphicsStreamSet(_)
@@ -4722,6 +4771,9 @@ impl HeadlessServer {
             let _ = msg.respond_to.send(response);
             return false;
         }
+
+        #[cfg(unix)]
+        self.revoke_remote_control_before_api_mutation(&msg.request);
 
         let skip_alt_screen_capture =
             match self.cancel_alt_screen_read_conflict(&msg.request, Instant::now()) {

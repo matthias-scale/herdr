@@ -468,6 +468,12 @@ impl crate::app::App {
                     terminal.foreground_process_name != observation.process_name
                         || terminal.foreground_process_active() != observation.process_active
                 });
+            #[cfg(unix)]
+            if process_changed {
+                if let Some(runtime) = self.terminal_runtimes.get(&terminal_id) {
+                    runtime.revoke_remote_control();
+                }
+            }
             let update = self
                 .state
                 .update_terminal_state(observation.pane_id, |terminal| {

@@ -278,6 +278,8 @@ impl App {
         &mut self,
         ev: AppEvent,
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        #[cfg(unix)]
+        self.revoke_remote_control_for_context_event(&ev);
         if matches!(
             ev,
             AppEvent::StateChanged { .. }
@@ -303,7 +305,30 @@ impl App {
         Vec::new()
     }
 
+    #[cfg(unix)]
+    fn revoke_remote_control_for_context_event(&self, event: &AppEvent) {
+        let pane_id = match event {
+            AppEvent::PaneDied { pane_id }
+            | AppEvent::AgentProcessDetected { pane_id, .. }
+            | AppEvent::StateChanged { pane_id, .. }
+            | AppEvent::PaneProcessStateChanged { pane_id, .. }
+            | AppEvent::HookStateReported { pane_id, .. }
+            | AppEvent::AgentSessionReported { pane_id, .. }
+            | AppEvent::HookMetadataReported { pane_id, .. }
+            | AppEvent::HookAuthorityCleared { pane_id, .. }
+            | AppEvent::HookAuthorityRetired { pane_id, .. }
+            | AppEvent::HookAgentReleased { pane_id, .. }
+            | AppEvent::TerminalCwdReported { pane_id, .. } => Some(*pane_id),
+            _ => None,
+        };
+        if let Some(pane_id) = pane_id {
+            self.revoke_remote_control_for_pane(pane_id);
+        }
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        #[cfg(unix)]
+        self.revoke_remote_control_for_context_event(&ev);
         let hook_report = match &ev {
             AppEvent::HookStateReported {
                 pane_id,

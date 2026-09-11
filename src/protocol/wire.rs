@@ -481,6 +481,7 @@ enum LegacyClientMessageV21 {
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
 enum LegacyServerMessageV21 {
     Welcome {
@@ -523,6 +524,7 @@ pub(crate) fn decode_legacy_client_hello(payload: &[u8]) -> Option<ClientMessage
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(crate) fn decode_legacy_server_welcome(payload: &[u8]) -> Option<ServerMessage> {
     let (message, consumed) = bincode::serde::decode_from_slice::<LegacyServerMessageV21, _>(
         payload,

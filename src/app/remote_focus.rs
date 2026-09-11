@@ -9,6 +9,27 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{AgentRef, ErrorBody, RemoteControlContext, RemoteFocusState};
 
+/// The production transport is intentionally inert until the local proxy pane
+/// exists. Step 4 must consume terminal and graphics frames and provide input,
+/// resize, and detach before this default may change.
+#[derive(Debug, Default)]
+pub(crate) struct StubRemoteFocusTransport;
+
+impl RemoteFocusTransport for StubRemoteFocusTransport {
+    fn start(
+        &mut self,
+        _operation_id: &str,
+        _agent_ref: &AgentRef,
+        _proxy_pane_id: &str,
+        _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Result<(), ErrorBody> {
+        Err(ErrorBody {
+            code: "host_unreachable".to_owned(),
+            message: "remote focus proxy pane is not available yet".to_owned(),
+        })
+    }
+}
+
 pub(crate) fn configured_remote_hosts(
     fleet: &crate::config::FleetConfig,
 ) -> std::collections::HashSet<String> {
@@ -342,10 +363,7 @@ impl crate::app::App {
                 message: "agent is not interactive_ready".into(),
             });
         }
-        let Some(user) = std::env::var("USER")
-            .ok()
-            .filter(|user| !user.trim().is_empty())
-        else {
+        let Some(user) = crate::platform::effective_user_name() else {
             return Err(ErrorBody {
                 code: "refused_for_safety".into(),
                 message: "effective remote user is unavailable".into(),

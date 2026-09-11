@@ -12,8 +12,8 @@ use crate::api::schema::{AgentRef, RemoteControlContext};
 pub(crate) struct RemoteControlLease {
     pub(crate) agent_ref: AgentRef,
     pub(crate) context: RemoteControlContext,
-    pub(crate) active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) boundary: std::sync::Arc<std::sync::Mutex<()>>,
+    #[cfg(unix)]
+    pub(crate) write_guard: crate::pty::actor::PtyWriteGuard,
 }
 
 impl PartialEq for RemoteControlLease {
@@ -27,23 +27,33 @@ impl Eq for RemoteControlLease {}
 impl RemoteControlLease {
     // The guarded write path exists only on Unix, but Windows test fixtures
     // still construct a lease to exercise shared protocol state.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn new(agent_ref: AgentRef, context: RemoteControlContext) -> Self {
+        #[cfg(unix)]
+        {
+            Self::new_with_guard(agent_ref, context, crate::pty::actor::PtyWriteGuard::new())
+        }
+        #[cfg(not(unix))]
+        Self { agent_ref, context }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn new_with_guard(
+        agent_ref: AgentRef,
+        context: RemoteControlContext,
+        write_guard: crate::pty::actor::PtyWriteGuard,
+    ) -> Self {
+        write_guard.activate(context.context_epoch);
         Self {
             agent_ref,
             context,
-            active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            boundary: std::sync::Arc::new(std::sync::Mutex::new(())),
+            write_guard,
         }
     }
 
     pub(crate) fn revoke(&self) {
-        let _boundary = self
-            .boundary
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.active
-            .store(false, std::sync::atomic::Ordering::Release);
+        #[cfg(unix)]
+        self.write_guard.revoke();
     }
 
     #[cfg(unix)]
@@ -51,10 +61,9 @@ impl RemoteControlLease {
         &self,
         on_unknown: std::sync::Arc<dyn Fn() + Send + Sync>,
     ) -> crate::pty::actor::PtyWriteAuthorization {
-        crate::pty::actor::PtyWriteAuthorization::new(
+        self.write_guard.authorization(
             self.context.foreground_process.process_group_id,
-            std::sync::Arc::clone(&self.active),
-            std::sync::Arc::clone(&self.boundary),
+            self.context.context_epoch,
             on_unknown,
         )
     }
@@ -262,6 +271,19 @@ mod tests {
     fn configured_host_and_user_are_authoritative() {
         assert_refused_for_configured_fact("other-host", "operator");
         assert_refused_for_configured_fact("buildbox", "other-user");
+    }
+
+    #[test]
+    fn mismatched_reported_user_is_refused_against_effective_uid_fact() {
+        let expected = context();
+        let mut current = expected.clone();
+        current.user = "spoofed-user".into();
+        let effective_user = crate::platform::effective_user_name().expect("effective user");
+        let result = validate_context("buildbox", &effective_user, &expected, &current);
+        assert_eq!(
+            result.as_ref().err().map(|error| error.code.as_str()),
+            Some("refused_for_safety")
+        );
     }
 
     #[test]

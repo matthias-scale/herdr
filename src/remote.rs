@@ -4,6 +4,9 @@ mod control;
 mod host_unix;
 
 pub(crate) use attach::*;
+// SSH remote focus remains compiled and testable, but production wiring is
+// intentionally stubbed until the step-4 proxy pane consumes its streams.
+#[allow(unused_imports)]
 pub(crate) use control::SshRemoteFocusTransport;
 #[cfg(unix)]
 pub(crate) use host_unix::{run_remote_client_bridge, run_remote_control_bridge};
