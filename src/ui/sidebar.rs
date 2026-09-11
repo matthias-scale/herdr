@@ -32,8 +32,7 @@ const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
-const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
-const SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH: usize = 16;
+const SIDEBAR_WIDE_ROW_MIN_WIDTH: usize = 44;
 const SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH: usize = 6;
 const SIDEBAR_HOST_TOKEN_NARROW_WIDTH: usize = 4;
 
@@ -310,7 +309,7 @@ fn compact_row_title_for_width<'a>(
     width: usize,
     requested_prefix: usize,
 ) -> &'a str {
-    if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+    if width >= SIDEBAR_WIDE_ROW_MIN_WIDTH {
         return title;
     }
     let Some(title_only) = title_without_object_identifier(title) else {
@@ -710,30 +709,12 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let trailing_tag = tab
-        .then_some(entry.space_label.as_str())
-        .filter(|_| !entry.space_label_redundant)
-        .filter(|tag| !tag.is_empty());
-    let mut space_suffix = None;
-    let mut displayed_title_width = title_width;
-    if let Some(tag) = trailing_tag {
-        if usize::from(rect.width) >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
-            let suffix = format!(" · {tag}");
-            let candidate_title_width = title_width.saturating_sub(display_width(&suffix));
-            if candidate_title_width >= SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH {
-                space_suffix = Some(suffix);
-                displayed_title_width = candidate_title_width;
-            }
-        }
-    }
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
-        && displayed_title_width
-            >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
+        && title_width >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
     .then_some(SIDEBAR_STAR_SUFFIX);
-    let title_text_width =
-        displayed_title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text_width = title_width.saturating_sub(star_suffix.map_or(0, display_width));
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
@@ -781,15 +762,6 @@ fn render_compact_agent_row_with_prefix(
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
     ]);
-    if let Some(suffix) = space_suffix.as_deref() {
-        spans.push(Span::styled(
-            suffix,
-            compact_row_style(
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                bg,
-            ),
-        ));
-    }
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
@@ -7100,7 +7072,7 @@ fn render_workspace_list(
 }
 
 fn narrow_view_tab_prefix(app: &AppState, width: usize) -> Option<usize> {
-    if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+    if width >= SIDEBAR_WIDE_ROW_MIN_WIDTH {
         return None;
     }
     let rows = sidebar_rows(app);
@@ -12029,7 +12001,7 @@ row_gap = 1
     }
 
     #[test]
-    fn reported_at_age_refreshes_with_space_suffix() {
+    fn reported_at_age_refreshes_for_agent_rows() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -12096,7 +12068,7 @@ row_gap = 1
     }
 
     #[test]
-    fn space_suffix_preserves_visible_activity_age_deadlines() {
+    fn agent_rows_preserve_visible_activity_age_deadlines() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -12861,7 +12833,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn a_blocked_worklist_row_hides_its_redundant_space_suffix() {
+    fn a_blocked_worklist_row_ends_at_its_age() {
         let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
         app.sidebar_group_mode = SidebarGroupMode::Spaces;
         let blocked_pane = app.workspaces[0].tabs[0].root_pane;
@@ -12883,12 +12855,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
-        assert!(rendered.contains('—'), "{rendered:?}");
+        assert!(rendered.ends_with('—'), "{rendered:?}");
         assert!(!rendered.contains(" · ws0"), "{rendered:?}");
     }
 
     #[test]
-    fn f19_1a_keeps_age_and_appends_divergent_space_suffix_when_wide() {
+    fn agent_rows_end_at_age_and_return_suffix_width_to_title() {
         let mut app = app_with_agents(&["one", "two"]);
         app.workspaces[0].custom_name = Some("t3-sample".into());
         app.workspaces[1].custom_name = Some("other-space".into());
@@ -12959,15 +12931,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("compact row should render");
             row_text(terminal.backend().buffer(), 0, width)
         };
-        let below_suffix_threshold = render_at_row_width(&entry, 43, 0);
+        let mut width_probe = entry.clone();
+        width_probe.primary_tab_label = Some("sample-pr-title-uses-width".into());
+        let wide_enough_for_old_suffix = render_at_row_width(&width_probe, 44, 0);
         assert!(
-            !below_suffix_threshold.contains("· t3-sample"),
-            "{below_suffix_threshold:?}"
+            wide_enough_for_old_suffix.contains("sample-pr-title-uses-width"),
+            "{wide_enough_for_old_suffix:?}"
         );
-        let at_suffix_threshold = render_at_row_width(&entry, 44, 0);
         assert!(
-            at_suffix_threshold.contains("2m · t3-sample"),
-            "{at_suffix_threshold:?}"
+            wide_enough_for_old_suffix.ends_with("2m"),
+            "{wide_enough_for_old_suffix:?}"
+        );
+        assert!(
+            !wide_enough_for_old_suffix.contains("t3-sample"),
+            "{wide_enough_for_old_suffix:?}"
         );
 
         let default_width = render_first_tab_row(&app, 40);
@@ -12984,34 +12961,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
         assert_eq!(nested_ticket, "   ●  sample-line… pi  2m");
 
-        let area = Rect::new(0, 0, 80, 12);
-        let cards = compute_tab_card_areas(&app, area);
-        let card = cards[0].clone();
-        let rect_width = usize::from(card.rect.width);
-        let requested_prefix_width = usize::from(card.depth) * 3 + 1;
-        let provider = compact_provider(&entry);
-        let widths = compact_row_widths(
-            compact_row_title(&entry, true),
-            &provider,
-            rect_width,
-            requested_prefix_width,
-        );
-        let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
-        let retained_title_width = rect_width
-            .saturating_sub(fixed_width)
-            .saturating_sub(display_width(" · t3-sample"));
-        assert!(
-            rect_width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH,
-            "{rect_width}"
-        );
-        assert!(
-            retained_title_width >= SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH,
-            "{retained_title_width}"
-        );
-
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
-        assert!(wide.contains("2m · t3-sample"), "{wide:?}");
+        assert!(wide.ends_with("2m"), "{wide:?}");
+        assert!(!wide.contains("t3-sample"), "{wide:?}");
     }
 
     #[test]
@@ -13038,7 +12991,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn compact_rows_keep_space_suffix_when_group_header_differs_in_every_mode() {
+    fn compact_rows_omit_space_suffix_when_group_header_differs_in_every_mode() {
         for mode in SidebarGroupMode::ALL {
             let app = space_tag_fixture(mode, SpaceTagFixture::DivergentHeaders);
             let entries = sidebar_tab_entries(&app);
@@ -13047,7 +13000,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(!first.space_label_redundant, "mode {mode:?}");
             let rendered = render_first_tab_row(&app, 120);
             assert!(
-                rendered.contains(&format!(" · {}", first.space_label)),
+                !rendered.contains(&first.space_label),
                 "{mode:?}: {rendered:?}"
             );
         }
@@ -13133,7 +13086,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn duplicate_space_headers_keep_space_suffix_for_disambiguation() {
+    fn duplicate_space_headers_are_disambiguated_without_row_suffixes() {
         let mut app = app_with_agents(&["first", "second", "third"]);
         app.workspaces[0].custom_name = Some("same".into());
         app.workspaces[1].custom_name = Some("same".into());
@@ -13147,7 +13100,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .filter(|entry| entry.space_label == "same")
             .all(|entry| !entry.space_label_redundant));
-        assert!(render_first_tab_row(&app, 80).contains(" · same"));
+        assert!(!render_first_tab_row(&app, 80).contains(" · same"));
     }
 
     #[test]
@@ -18083,19 +18036,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .unwrap();
                 let suffix_start = row.find(suffix).expect("agent suffix");
                 assert!(title_start < suffix_start, "{row:?}");
-                let space = if card.ws_idx == 0 {
-                    "claude-code"
-                } else {
-                    "codex"
-                };
-                if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH as u16 {
-                    let space_start = row
-                        .rfind(&format!(" · {space}"))
-                        .unwrap_or_else(|| panic!("Space suffix at width {width}: {row:?}"));
-                    assert!(suffix_start < space_start, "{row:?}");
-                } else {
-                    assert!(!row.contains(&format!(" · {space}")), "{row:?}");
-                }
+                assert!(!row.contains("claude-code"), "{row:?}");
+                assert!(!row.contains("codex"), "{row:?}");
                 assert!(
                     !row.contains("2.1.237") && !row.contains("0.42.0"),
                     "{row:?}"
