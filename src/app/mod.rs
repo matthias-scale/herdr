@@ -2995,8 +2995,7 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     self.state.clear_hovered_control();
-                    if self.state.symphony_detail.is_some()
-                        || self.state.work_view.is_some()
+                    if self.try_route_paste_to_overlay(&text)
                         || self.try_route_paste_to_popup(&text)
                     {
                     } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
@@ -8855,6 +8854,59 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.name_input, "feature/logs");
         assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_pastes_into_home_composer_without_forwarding_to_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.home = Some(home::HomeState::default());
+
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::Paste("first".into()),
+                crate::raw_input::RawInputEvent::Paste(" second".into()),
+                crate::raw_input::RawInputEvent::Paste(" third".into()),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some("first second third")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_paste_is_swallowed_by_dock_object_preview() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.dock_object_preview = Some(state::DockObjectRef {
+            surface: state::DockSurface::Linear,
+            key: "SCA-1".into(),
+        });
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("hidden".into())],
+            true,
+        );
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
