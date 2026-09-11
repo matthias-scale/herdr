@@ -389,15 +389,15 @@ impl Tab {
         // title. The session name outranks the terminal title because the
         // latter is whatever the agent last painted — often the checkout
         // directory before a session has been named.
-        let terminal_title = terminal.terminal_title_stripped();
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from);
         let title = terminal
             .manual_label
             .clone()
             .or_else(|| context.session_name.clone())
             .or_else(|| {
+                let terminal_title = terminal.terminal_title_stripped();
+                let home = std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(PathBuf::from);
                 agent_title_from_terminal_or_work(AgentTitleContext {
                     terminal_title: terminal_title.as_deref(),
                     work_title: context.work_title.as_deref(),
