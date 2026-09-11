@@ -646,16 +646,8 @@ mod tests {
             .map(|entry| entry_title(&app, entry))
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            work,
-            [
-                "Pull request #159",
-                "Pull request #206",
-                "Linear SCA-3165",
-                "Missive"
-            ]
-        );
-        assert_eq!(entries.len(), DockSurface::CARDS.len() + 1);
+        assert_eq!(work, ["Pull request #206", "Linear SCA-3165", "Missive"]);
+        assert_eq!(entries.len(), DockSurface::CARDS.len());
     }
 
     #[test]

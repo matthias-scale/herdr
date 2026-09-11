@@ -342,7 +342,7 @@ fn ac1_ac2_ac3_turn_hooks_forward_derived_work_context_without_asset_changes() {
             "codex",
             include_str!("../fixtures/work-titles/codex-work-context-user-prompt-submit.json"),
             vec![("CODEX_THREAD_ID", "fixture-codex-context-session")],
-            vec!["MAT-7", "SCA-9"],
+            vec!["SCA-9"],
             "https://github.com/scalable-so/herdr/pull/21",
             "https://codex-preview.vercel.app",
         ),

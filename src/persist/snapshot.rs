@@ -794,6 +794,51 @@ mod tests {
     }
 
     #[test]
+    fn legacy_multi_item_snapshot_restores_only_its_latest_assignments() {
+        let raw = r#"{
+            "version": 3,
+            "workspaces": [{
+                "id": "workspace",
+                "identity_cwd": "/tmp",
+                "tabs": [{
+                    "layout": {"Pane": 0},
+                    "panes": {"0": {
+                        "cwd": "/tmp",
+                        "work_context": {
+                            "ticket_ids": ["SCA-1", "SCA-2"],
+                            "pr_urls": [
+                                "https://github.com/o/r/pull/1",
+                                "https://github.com/o/r/pull/2"
+                            ]
+                        }
+                    }},
+                    "zoomed": false
+                }]
+            }],
+            "selected": 0
+        }"#;
+        let parsed = parse_snapshot(raw).expect("legacy snapshot should parse");
+        let saved = &parsed.workspaces[0].tabs[0].panes[&0];
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .expect("legacy work context should restore");
+
+        assert_eq!(restored.effective_work_context().ticket_ids, ["SCA-2"]);
+        assert_eq!(
+            restored.effective_work_context().pr_urls,
+            ["https://github.com/o/r/pull/2"]
+        );
+    }
+
+    #[test]
     fn ac25_v4_snapshot_restore_preserves_git_preview_tier() {
         let state = state_with_workspaces(&["context"]);
         let root = state.workspaces[0].tabs[0].root_pane;

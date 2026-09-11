@@ -2445,7 +2445,10 @@ mod tests {
                 patch: crate::work_context::PaneWorkContextPatch {
                     repo: None,
                     ticket_ids: Some(vec!["mat-7".into(), "SCA-2".into()]),
-                    pr_urls: Some(vec!["https://github.com/o/r/pull/09".into()]),
+                    pr_urls: Some(vec![
+                        "https://github.com/o/r/pull/08".into(),
+                        "https://github.com/o/r/pull/09".into(),
+                    ]),
                     missive_urls: Some(vec![
                         "https://MAIL.missiveapp.com/#inbox/conversations/sample-1".into(),
                     ]),
@@ -2461,7 +2464,7 @@ mod tests {
         let ResponseResult::PaneInfo { pane } = success.result else {
             panic!("expected pane info");
         };
-        assert_eq!(pane.work_context.ticket_ids, vec!["MAT-7", "SCA-2"]);
+        assert_eq!(pane.work_context.ticket_ids, vec!["SCA-2"]);
         assert_eq!(
             pane.work_context.pr_urls,
             vec!["https://github.com/o/r/pull/9"]
@@ -5817,7 +5820,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .effective_work_context()
                 .ticket_ids,
-            vec!["MAT-1", "SCA-88"]
+            vec!["MAT-1"]
         );
         assert_eq!(
             app.state.terminals[&terminal_id]
@@ -5892,7 +5895,7 @@ mod tests {
             serde_json::from_str(&app.handle_pane_report_metadata("second".into(), second))
                 .unwrap();
         let context = app.state.terminals[&terminal_id].effective_work_context();
-        assert_eq!(context.ticket_ids, vec!["MAT-2", "SCA-88"]);
+        assert_eq!(context.ticket_ids, vec!["MAT-2"]);
         assert_eq!(context.pr_urls, vec!["https://github.com/o/r/pull/2"]);
         assert_eq!(context.preview_urls, vec!["https://second.vercel.app"]);
         assert_eq!(

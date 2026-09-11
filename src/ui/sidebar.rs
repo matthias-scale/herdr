@@ -2682,50 +2682,16 @@ fn entry_terminal<'a>(
     app.terminals.get(&pane.attached_terminal_id)
 }
 
-fn stable_binding_values<'a>(sources: impl IntoIterator<Item = &'a [String]>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    sources
-        .into_iter()
-        .flatten()
-        .filter(|value| seen.insert((*value).clone()))
-        .cloned()
-        .collect()
-}
-
 fn preferred_pr_urls(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
-    let Some(terminal) = entry_terminal(app, entry) else {
-        return Vec::new();
-    };
-    let tiers = terminal.work_context.snapshot_tiers();
-    let declared = stable_binding_values([
-        tiers.manual.pr_urls.as_slice(),
-        tiers.hook_turn.pr_urls.as_slice(),
-    ]);
-    if !declared.is_empty() {
-        return declared;
-    }
-    if !tiers.git_observation.pr_urls.is_empty() {
-        return tiers.git_observation.pr_urls;
-    }
-    tiers.restored_fallback.pr_urls
+    entry_work_context(app, entry)
+        .map(|context| context.pr_urls.clone())
+        .unwrap_or_default()
 }
 
 fn preferred_ticket_ids(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
-    let Some(terminal) = entry_terminal(app, entry) else {
-        return Vec::new();
-    };
-    let tiers = terminal.work_context.snapshot_tiers();
-    let declared = stable_binding_values([
-        tiers.manual.ticket_ids.as_slice(),
-        tiers.hook_turn.ticket_ids.as_slice(),
-    ]);
-    if !declared.is_empty() {
-        return declared;
-    }
-    if !tiers.git_observation.ticket_ids.is_empty() {
-        return tiers.git_observation.ticket_ids;
-    }
-    tiers.restored_fallback.ticket_ids
+    entry_work_context(app, entry)
+        .map(|context| context.ticket_ids.clone())
+        .unwrap_or_default()
 }
 
 fn pull_request_number(url: &str) -> Option<&str> {
@@ -14508,11 +14474,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             work_group_shape(&app),
             vec![
                 ("SCA-3102 · annual credits".to_string(), 1, false),
-                ("SCA-3165 · image-edit v3".to_string(), 1, false),
-                // The two-ticket pane is listed under both of its tickets.
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
                 ("OPS-12 · pixel EMQ drop".to_string(), 0, true),
+                ("SCA-3165 · image-edit v3".to_string(), 0, true),
             ]
         );
     }
@@ -14593,7 +14558,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn multi_ticket_pane_appears_under_every_ticket() {
+    fn legacy_multi_ticket_context_keeps_only_its_latest_ticket() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         let panes_under = |app: &AppState, title: &str| {
@@ -14602,8 +14567,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .find(|(header, _, _)| header.starts_with(title))
                 .map(|(_, count, _)| count)
         };
-        // The fixture pane declares SCA-3165 and SCA-3170.
-        assert_eq!(panes_under(&app, "SCA-3165"), Some(1));
+        // The fixture pane's last declaration is SCA-3170.
+        assert_eq!(panes_under(&app, "SCA-3165"), Some(0));
         assert_eq!(panes_under(&app, "SCA-3170"), Some(1));
     }
 
@@ -14758,7 +14723,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .filter(|row| matches!(row, SidebarRow::NestedHeader { dim: true, .. }))
             .count();
-        assert_eq!(dim_rows, 1);
+        assert_eq!(dim_rows, 2);
 
         let mut terminal =
             Terminal::new(TestBackend::new(106, 40)).expect("test terminal for dim rows");
@@ -14818,20 +14783,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .collect::<Vec<_>>(),
             vec![
                 "SCA-3102 · annual credits",
-                "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
                 "unlinked",
+                "SCA-3165 · image-edit v3",
             ]
         );
 
         app.sidebar_work_filter.assignee = Some("jacob".into());
-        // Every SCA ticket is pane-linked in this fixture, so the assignee
-        // filter may only keep narrowing the unassigned section.
+        // Pane links survive the assignee filter; the old SCA-3165 assignment
+        // is now unassigned and therefore filtered out.
         assert_eq!(
             work_group_shape(&app),
             vec![
                 ("SCA-3102 · annual credits".to_string(), 1, false),
-                ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
@@ -15343,9 +15307,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             linear_titles,
             [
                 "SCA-3102 · annual credits",
-                "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
                 "unlinked",
+                "SCA-3165 · image-edit v3",
             ]
         );
 
@@ -16280,7 +16244,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f19_multiple_declared_objects_render_once_under_each_object() {
+    fn f19_multiple_declared_objects_keep_only_the_latest_object() {
         let mut app = AppState::test_new();
         app.workspaces = vec![Workspace::test_new("declared")];
         app.ensure_test_terminals();
@@ -16310,7 +16274,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .iter()
                 .map(|group| (group.title.as_str(), group.entries.len()))
                 .collect::<Vec<_>>(),
-            [("#159", 1), ("#160", 1)]
+            [("#160", 1)]
         );
     }
 
@@ -16384,6 +16348,51 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             linear_counts,
             [("linear:SCA-159", 1), ("linear:SCA-206", 4)]
+        );
+    }
+
+    #[test]
+    fn sidebar_projects_only_the_explicit_ticket_and_pull_request_for_an_agent() {
+        const EXPLICIT_PR: &str = "https://github.com/herdrdev/herdr/pull/159";
+        const INFERRED_PR: &str = "https://github.com/herdrdev/herdr/pull/206";
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("single assignment")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                pr_urls: vec![INFERRED_PR.into()],
+                ticket_ids: vec!["SCA-206".into()],
+                ..Default::default()
+            })
+            .expect("valid inferred context");
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![EXPLICIT_PR.into()],
+            ticket_ids: vec!["SCA-159".into()],
+            ..Default::default()
+        });
+        let entries = sidebar_thread_entries(&app);
+
+        let github = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        assert_eq!(
+            github
+                .iter()
+                .map(|group| group.key.clone())
+                .collect::<Vec<_>>(),
+            vec![format!("github:{EXPLICIT_PR}")]
+        );
+        let linear = sidebar_work_groups(&app, &entries, SidebarGroupMode::LinearTeam);
+        assert_eq!(
+            linear
+                .iter()
+                .map(|group| group.key.as_str())
+                .collect::<Vec<_>>(),
+            ["linear:SCA-159"]
         );
     }
 

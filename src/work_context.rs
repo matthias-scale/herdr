@@ -183,6 +183,15 @@ fn missive_link_label(url: &str) -> String {
 
 impl PaneWorkContext {
     pub(crate) fn normalized(self) -> Result<Self, String> {
+        self.normalized_for_write(None)
+    }
+
+    fn normalized_restored(self, tier: &'static str) -> Result<Self, String> {
+        self.normalized_for_write(Some(tier))
+    }
+
+    fn normalized_for_write(mut self, restored_tier: Option<&'static str>) -> Result<Self, String> {
+        self.set_latest_work_items(restored_tier);
         let normalized = Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
@@ -204,6 +213,13 @@ impl PaneWorkContext {
         Ok(normalized)
     }
 
+    /// Enforce the per-agent assignment cardinality while preserving the array
+    /// wire shape. Array order is assignment order, so the last value wins.
+    pub(crate) fn set_latest_work_items(&mut self, restored_tier: Option<&'static str>) {
+        keep_latest_work_item(&mut self.ticket_ids, "ticket_ids", restored_tier);
+        keep_latest_work_item(&mut self.pr_urls, "pr_urls", restored_tier);
+    }
+
     /// Fill an absent repository from an explicitly bound pull request.
     ///
     /// Applied only to declaration tiers. A pull request URL a human or agent
@@ -222,9 +238,6 @@ impl PaneWorkContext {
 
     pub(crate) fn normalized_spawn_binding(self) -> Result<Self, String> {
         let normalized = self.normalized()?.with_repo_implied_by_pull_request();
-        if normalized.pr_urls.len() > 1 {
-            return Err("a spawn-time binding accepts one pull request".into());
-        }
         if !normalized.pr_urls.is_empty() && normalized.role.is_none() {
             return Err("a spawn-time pull-request binding requires --role".into());
         }
@@ -400,7 +413,7 @@ impl PaneWorkContextState {
     /// promoted to a manual pin.
     pub fn from_restored(context: PaneWorkContext) -> Result<Self, String> {
         let mut state = Self {
-            restored_fallback: context.normalized()?,
+            restored_fallback: context.normalized_restored("restored_fallback")?,
             ..Self::default()
         };
         state.recompute();
@@ -414,11 +427,15 @@ impl PaneWorkContextState {
         let Some(tiers) = tiers else {
             return Self::from_restored(flat);
         };
-        let mut manual = tiers.manual.normalized()?;
+        let mut manual = tiers.manual.normalized_restored("manual")?;
         manual.preview_urls.clear();
-        let hook_turn = tiers.hook_turn.normalized()?;
-        let git_observation = tiers.git_observation.normalized()?;
-        let restored_fallback = tiers.restored_fallback.normalized()?;
+        let hook_turn = tiers.hook_turn.normalized_restored("hook_turn")?;
+        let git_observation = tiers
+            .git_observation
+            .normalized_restored("git_observation")?;
+        let restored_fallback = tiers
+            .restored_fallback
+            .normalized_restored("restored_fallback")?;
         let mut state = Self {
             manual,
             hook_turn,
@@ -521,7 +538,8 @@ impl PaneWorkContextState {
         Ok(true)
     }
 
-    pub(crate) fn replace_manual_normalized(&mut self, context: PaneWorkContext) -> bool {
+    pub(crate) fn replace_manual_normalized(&mut self, mut context: PaneWorkContext) -> bool {
+        context.set_latest_work_items(None);
         if context == self.manual {
             return false;
         }
@@ -553,7 +571,8 @@ impl PaneWorkContextState {
         let context = context.normalized()?;
         // Any live observation supersedes the unknown-provenance legacy value.
         let fallback_changed = self.clear_restored_fallback();
-        if context == self.hook_turn && !fallback_changed {
+        let superseded_changed = supersede_inferred_work_items(&context, &mut self.git_observation);
+        if context == self.hook_turn && !fallback_changed && !superseded_changed {
             return Ok(false);
         }
         self.hook_turn = context;
@@ -592,7 +611,8 @@ impl PaneWorkContextState {
         let context = context.normalized()?;
         // Any live observation supersedes the unknown-provenance legacy value.
         let fallback_changed = self.clear_restored_fallback();
-        if context == self.git_observation && !fallback_changed {
+        let superseded_changed = supersede_inferred_work_items(&context, &mut self.hook_turn);
+        if context == self.git_observation && !fallback_changed && !superseded_changed {
             return Ok(false);
         }
         self.git_observation = context;
@@ -686,7 +706,45 @@ impl PaneWorkContextState {
             role,
             active_owner,
         };
+        self.effective.set_latest_work_items(None);
     }
+}
+
+fn keep_latest_work_item<T>(
+    values: &mut Vec<T>,
+    field: &'static str,
+    restored_tier: Option<&'static str>,
+) {
+    if values.len() <= 1 {
+        return;
+    }
+    let original_count = values.len();
+    let latest = values.pop();
+    values.clear();
+    values.extend(latest);
+    if let Some(tier) = restored_tier {
+        tracing::warn!(
+            tier,
+            field,
+            original_count,
+            "truncated restored work context to its latest assignment"
+        );
+    }
+}
+
+fn supersede_inferred_work_items(newer: &PaneWorkContext, older: &mut PaneWorkContext) -> bool {
+    let mut changed = false;
+    if !newer.ticket_ids.is_empty() {
+        changed |= !older.ticket_ids.is_empty();
+        older.ticket_ids.clear();
+    }
+    if !newer.pr_urls.is_empty() {
+        changed |= !older.pr_urls.is_empty() || older.role.is_some() || older.active_owner;
+        older.pr_urls.clear();
+        older.role = None;
+        older.active_owner = false;
+    }
+    changed
 }
 
 fn first_present<const N: usize>(values: [Option<&String>; N]) -> Option<String> {
@@ -978,8 +1036,8 @@ pub(crate) fn hook_turn_context(
     }
     ticket_ids.extend(prompt_context.ticket_ids);
 
-    Ok(PaneWorkContext {
-        ticket_ids: normalize_ticket_ids(ticket_ids)?,
+    PaneWorkContext {
+        ticket_ids,
         pr_urls: prompt_context.pr_urls,
         preview_urls: prompt_context.preview_urls,
         missive_urls: prompt_context.missive_urls,
@@ -993,7 +1051,8 @@ pub(crate) fn hook_turn_context(
         session_name: prompt_context.session_name,
         role: None,
         active_owner: false,
-    })
+    }
+    .normalized()
 }
 
 pub(crate) fn normalize_ticket_id(ticket: &str) -> Result<String, String> {
@@ -1701,7 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_tiers_replace_and_merge_with_stable_dedupe() {
+    fn ac1_tiers_replace_and_keep_the_latest_assignment() {
         let mut state = PaneWorkContextState::default();
         state
             .replace_git_observation(PaneWorkContext {
@@ -1727,9 +1786,8 @@ mod tests {
             .unwrap();
 
         // The declaration replaces the tiers below it rather than stacking on
-        // them, so the git-observed SCA-3 is gone; dedupe still applies within
-        // the winning tier.
-        assert_eq!(state.effective().ticket_ids, vec!["MAT-2", "SCA-1"]);
+        // them, and its last assignment wins within the tier.
+        assert_eq!(state.effective().ticket_ids, vec!["SCA-1"]);
         assert_eq!(state.effective().branch.as_deref(), Some("feat/work"));
         assert_eq!(
             state.effective().preview_urls,
@@ -1749,7 +1807,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state.effective().ticket_ids,
-            vec!["MAT-2", "SCA-1"],
+            vec!["SCA-1"],
             "a new hook turn does not outrank the human's declaration"
         );
         assert_eq!(
@@ -1766,6 +1824,65 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state.effective().ticket_ids, vec!["MAT-9"]);
+    }
+
+    #[test]
+    fn inferred_work_items_keep_only_the_most_recent_assignment() {
+        let context = hook_turn_context(
+            Some("Start SCA-1".into()),
+            Some("fix/SCA-2-follow-up"),
+            PaneWorkContext {
+                ticket_ids: vec!["SCA-3".into(), "SCA-4".into(), "SCA-3".into()],
+                pr_urls: vec![
+                    "https://github.com/o/r/pull/3".into(),
+                    "https://github.com/o/r/pull/4".into(),
+                    "https://github.com/o/r/pull/3".into(),
+                ],
+                ..PaneWorkContext::default()
+            },
+        )
+        .expect("valid inferred context");
+
+        assert_eq!(context.ticket_ids, ["SCA-3"]);
+        assert_eq!(context.pr_urls, ["https://github.com/o/r/pull/3"]);
+    }
+
+    #[test]
+    fn newer_inference_replaces_older_inference_but_not_an_explicit_assignment() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-1".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                ticket_ids: vec!["SCA-2".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(state.effective().ticket_ids, ["SCA-2"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/2"]);
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                ticket_ids: Some(vec!["SCA-3".into()]),
+                pr_urls: Some(vec!["https://github.com/o/r/pull/3".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-4".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/4".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(state.effective().ticket_ids, ["SCA-3"]);
+        assert_eq!(state.effective().pr_urls, ["https://github.com/o/r/pull/3"]);
     }
 
     #[test]
@@ -2269,6 +2386,52 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
+    }
+
+    #[test]
+    fn restore_truncates_each_persisted_tier_before_recomputing() {
+        let context = |first: u64| PaneWorkContext {
+            ticket_ids: vec![format!("SCA-{first}"), format!("SCA-{}", first + 1)],
+            pr_urls: vec![
+                format!("https://github.com/o/r/pull/{first}"),
+                format!("https://github.com/o/r/pull/{}", first + 1),
+            ],
+            ..Default::default()
+        };
+        let state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: context(10),
+                hook_turn: context(20),
+                git_observation: context(30),
+                restored_fallback: context(40),
+            }),
+        )
+        .expect("persisted tiers should restore");
+
+        let tiers = state.snapshot_tiers();
+        for (tier, ticket, pr) in [
+            (&tiers.manual, "SCA-11", "https://github.com/o/r/pull/11"),
+            (&tiers.hook_turn, "SCA-21", "https://github.com/o/r/pull/21"),
+            (
+                &tiers.git_observation,
+                "SCA-31",
+                "https://github.com/o/r/pull/31",
+            ),
+            (
+                &tiers.restored_fallback,
+                "SCA-41",
+                "https://github.com/o/r/pull/41",
+            ),
+        ] {
+            assert_eq!(tier.ticket_ids, [ticket]);
+            assert_eq!(tier.pr_urls, [pr]);
+        }
+        assert_eq!(state.effective().ticket_ids, ["SCA-11"]);
+        assert_eq!(
+            state.effective().pr_urls,
+            ["https://github.com/o/r/pull/11"]
+        );
     }
 
     #[test]

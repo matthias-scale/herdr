@@ -302,15 +302,7 @@ fn pr_url_from_screen(screen: &str) -> Option<String> {
 }
 
 fn apply_pr_url(terminal: &mut crate::terminal::TerminalState, url: &str) -> Result<bool, String> {
-    let mut pr_urls = terminal.effective_work_context().pr_urls.clone();
-    if pr_urls.iter().any(|existing| existing == url) {
-        return Ok(false);
-    }
-    pr_urls.push(url.to_string());
-    terminal.apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
-        pr_urls: Some(pr_urls),
-        ..Default::default()
-    })
+    terminal.set_inferred_pr_url(url.to_string())
 }
 
 impl App {
@@ -1100,7 +1092,7 @@ exit "$HERDR_TEST_GENERATOR_STATUS"
     }
 
     #[test]
-    fn pr_url_screen_result_patches_work_context() {
+    fn inferred_pr_url_from_screen_does_not_replace_an_explicit_assignment() {
         let mut terminal = crate::terminal::TerminalState::new(
             crate::terminal::TerminalId::alloc(),
             std::path::PathBuf::from("/repo"),
@@ -1117,10 +1109,15 @@ exit "$HERDR_TEST_GENERATOR_STATUS"
         assert!(apply_pr_url(&mut terminal, &url).expect("valid PR URL"));
         assert_eq!(
             terminal.effective_work_context().pr_urls,
-            vec![
-                "https://github.com/acme/repo/pull/12",
-                "https://github.com/acme/repo/pull/42"
-            ]
+            vec!["https://github.com/acme/repo/pull/12"]
+        );
+        assert_eq!(
+            terminal
+                .work_context
+                .snapshot_tiers()
+                .git_observation
+                .pr_urls,
+            vec!["https://github.com/acme/repo/pull/42"]
         );
     }
 

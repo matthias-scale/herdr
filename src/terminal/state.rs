@@ -768,6 +768,12 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<bool, String> {
+        let mut context = self.work_context.snapshot_tiers().git_observation;
+        context.pr_urls = vec![url];
+        self.replace_git_work_context(context)
+    }
+
     /// The hook tier is persisted for restore fidelity, but any accepted
     /// mutation that tears down or replaces the session identity that authorized guarded
     /// work-title reports must also drop the hook tier, so stale ticket/PR refs
