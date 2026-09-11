@@ -7,14 +7,17 @@
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, Wrap},
     Frame,
 };
 
 use super::text::display_width_u16;
-use super::widgets::{render_modal_header, render_modal_shell};
+use super::widgets::{
+    action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
+    render_modal_header, render_modal_shell, ActionButtonSpec,
+};
 use crate::app::AppState;
 use crate::pomodoro::PomodoroPhase;
 
@@ -22,6 +25,58 @@ use crate::pomodoro::PomodoroPhase;
 const INDICATOR_WIDTH: u16 = 9;
 /// Columns the footer icon strip already owns.
 const FOOTER_ICON_COLUMNS: u16 = 13;
+const PROMPT_WIDTH: u16 = 62;
+const PROMPT_HEIGHT: u16 = 12;
+
+fn prompt_inner_rect(area: Rect) -> Option<Rect> {
+    centered_popup_rect(area, PROMPT_WIDTH, PROMPT_HEIGHT).map(|popup| {
+        Rect::new(
+            popup.x.saturating_add(1),
+            popup.y.saturating_add(1),
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        )
+    })
+}
+
+pub(crate) fn prompt_button_rects(area: Rect) -> Option<(Rect, Rect)> {
+    let inner = prompt_inner_rect(area)?;
+    if inner.height < 9 {
+        return None;
+    }
+    let buttons = [
+        ActionButtonSpec {
+            hint: Some("↵"),
+            label: "confirm",
+        },
+        ActionButtonSpec {
+            hint: Some("^⌥b"),
+            label: "snooze",
+        },
+    ];
+    let needed_width = buttons
+        .iter()
+        .map(|button| super::widgets::action_button_width(button.hint, button.label))
+        .sum::<u16>()
+        .saturating_add(2);
+    let rects = if needed_width <= inner.width {
+        action_button_row_rects(inner, &buttons, 2, inner.height.saturating_sub(1))
+    } else {
+        buttons
+            .iter()
+            .enumerate()
+            .flat_map(|(index, button)| {
+                action_button_row_rects(
+                    inner,
+                    std::slice::from_ref(button),
+                    0,
+                    inner.height.saturating_sub(2).saturating_add(index as u16),
+                )
+            })
+            .collect()
+    };
+    Some((*rects.first()?, *rects.get(1)?))
+}
 
 /// The countdown's slot at the right end of the sidebar footer row. Empty when
 /// the timer is off or the sidebar is too narrow to hold it beside the icons.
@@ -79,10 +134,10 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     };
     let palette = &app.palette;
     super::veil_background(frame, area, palette);
-    let Some(inner) = render_modal_shell(frame, area, 62, 10, palette) else {
+    let Some(inner) = render_modal_shell(frame, area, PROMPT_WIDTH, PROMPT_HEIGHT, palette) else {
         return;
     };
-    if inner.height < 6 {
+    if inner.height < 9 {
         return;
     }
 
@@ -93,33 +148,49 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas::<7>(inner);
+    .areas::<9>(inner);
 
     let title = if prompt.ended.is_break() {
         "break over"
+    } else if inner.width < 16 {
+        "break due"
     } else {
         "time for a break"
     };
     render_modal_header(frame, rows[0], title, palette);
 
     let minutes = app.pomodoro.phase_duration(prompt.next).as_secs() / 60;
-    let body = format!(
-        "{} finished. next up: {} for {minutes} minutes.",
-        prompt.ended.label(),
-        prompt.next.label()
-    );
+    let body = if inner.width < 32 {
+        format!(
+            "{} → {} ({minutes}m)",
+            prompt.ended.label(),
+            prompt.next.label()
+        )
+    } else {
+        format!(
+            "{} finished. next up: {} for {minutes} minutes.",
+            prompt.ended.label(),
+            prompt.next.label()
+        )
+    };
     frame.render_widget(
         Paragraph::new(Span::styled(body, Style::default().fg(palette.text)))
             .wrap(Wrap { trim: true }),
         rows[2],
     );
 
-    let hint = format!(
-        "type at least {} characters to confirm:",
-        app.pomodoro.min_confirm_chars
-    );
+    let hint = if inner.width < 32 {
+        format!("min {} chars", app.pomodoro.min_confirm_chars)
+    } else {
+        format!(
+            "type at least {} characters to confirm:",
+            app.pomodoro.min_confirm_chars
+        )
+    };
     frame.render_widget(
         Paragraph::new(Span::styled(hint, Style::default().fg(palette.overlay0))),
         rows[3],
@@ -127,16 +198,46 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     render_input(app, frame, rows[4], &prompt.input);
 
-    let footer = match prompt.error.as_deref() {
-        Some(error) => Span::styled(error.to_string(), Style::default().fg(palette.red)),
-        // The escape hatch is only useful if it is on the overlay that traps
-        // the keyboard, so it is named here rather than only in the docs.
-        None => Span::styled(
-            "↵ confirm   ^c clear   ^⌥b snooze".to_string(),
+    if let Some(error) = prompt.error.as_deref() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                error.to_string(),
+                Style::default().fg(palette.red),
+            )),
+            rows[5],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "^c clear".to_string(),
             Style::default().fg(palette.overlay0),
-        ),
+        )),
+        rows[6],
+    );
+
+    let Some((confirm, snooze)) = prompt_button_rects(area) else {
+        return;
     };
-    frame.render_widget(Paragraph::new(footer), rows[5]);
+    render_action_button(
+        frame,
+        confirm,
+        Some("↵"),
+        "confirm",
+        Style::default()
+            .fg(panel_contrast_fg(palette))
+            .bg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_action_button(
+        frame,
+        snooze,
+        Some("^⌥b"),
+        "snooze",
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
 }
 
 fn render_input(app: &AppState, frame: &mut Frame, area: Rect, input: &str) {
@@ -303,6 +404,68 @@ mod render_tests {
             .collect();
         assert!(text.contains("time for a break"), "overlay title is drawn");
         assert!(text.contains("stretching"), "typed answer is drawn");
+    }
+
+    #[test]
+    fn the_due_reminder_is_visible_in_every_sidebar_state() {
+        const WIDTH: u16 = 120;
+        const HEIGHT: u16 = 30;
+        let states = [
+            (
+                false,
+                crate::config::SidebarCollapsedModeConfig::Compact,
+                "expanded",
+            ),
+            (
+                true,
+                crate::config::SidebarCollapsedModeConfig::Compact,
+                "compact",
+            ),
+            (
+                true,
+                crate::config::SidebarCollapsedModeConfig::Hidden,
+                "hidden",
+            ),
+        ];
+
+        for width in [18, WIDTH] {
+            for (collapsed, mode, name) in states {
+                let mut app = prompted();
+                app.sidebar_collapsed = collapsed;
+                app.sidebar_collapsed_mode = mode;
+                crate::ui::compute_view(&mut app, Rect::new(0, 0, width, HEIGHT));
+
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, HEIGHT)).expect("test terminal");
+                terminal
+                    .draw(|frame| crate::ui::render(&app, frame))
+                    .expect("render prompt");
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                let expected_title = if width < 22 {
+                    "break due"
+                } else {
+                    "time for a break"
+                };
+                assert!(
+                    text.contains(expected_title),
+                    "{width} columns, {name}: {text:?}"
+                );
+                assert!(
+                    text.contains("↵ confirm"),
+                    "{width} columns, {name}: {text:?}"
+                );
+                assert!(
+                    text.contains("^⌥b snooze"),
+                    "{width} columns, {name}: {text:?}"
+                );
+            }
+        }
     }
 
     #[test]
