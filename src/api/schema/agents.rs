@@ -319,6 +319,65 @@ pub struct AgentInfo {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentInfoProjection {
+    pub(crate) state: crate::detect::AgentState,
+    pub(crate) seen: bool,
+    pub(crate) stale: bool,
+    pub(crate) attention_tier: crate::terminal::state::AttentionTier,
+    pub(crate) open_blockers: bool,
+    pub(crate) usage_limited: bool,
+    pub(crate) settled: bool,
+}
+
+impl AgentInfoProjection {
+    pub(crate) fn counts_as_blocked(self) -> bool {
+        self.attention_tier == crate::terminal::state::AttentionTier::Blocked
+            && (self.state != crate::detect::AgentState::Working || self.usage_limited)
+    }
+}
+
+impl AgentInfo {
+    /// Pane-aware meaning of lifecycle fields received over the stable wire.
+    /// The raw status stays serialized unchanged; consumers use this projection.
+    pub(crate) fn agent_projection(&self) -> AgentInfoProjection {
+        if self.settled_at.is_some() {
+            return AgentInfoProjection {
+                state: crate::detect::AgentState::Unknown,
+                seen: true,
+                stale: false,
+                attention_tier: crate::terminal::state::AttentionTier::None,
+                open_blockers: false,
+                usage_limited: false,
+                settled: true,
+            };
+        }
+        let (state, seen, stale) = match self.agent_status {
+            AgentStatus::Idle => (crate::detect::AgentState::Idle, true, false),
+            AgentStatus::Working => (crate::detect::AgentState::Working, true, false),
+            AgentStatus::Blocked => (crate::detect::AgentState::Blocked, true, false),
+            AgentStatus::Done => (crate::detect::AgentState::Idle, false, false),
+            AgentStatus::Stale => (crate::detect::AgentState::Unknown, true, true),
+            AgentStatus::Unknown => (crate::detect::AgentState::Unknown, true, false),
+        };
+        let open_blockers = !self.gates.is_empty();
+        AgentInfoProjection {
+            state,
+            seen,
+            stale,
+            attention_tier: crate::terminal::state::attention_tier(
+                state,
+                open_blockers,
+                !self.items.is_empty(),
+                self.usage_limited,
+            ),
+            open_blockers,
+            usage_limited: self.usage_limited,
+            settled: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentSessionInfo {
     pub source: String,

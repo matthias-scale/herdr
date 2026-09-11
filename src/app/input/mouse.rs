@@ -7223,7 +7223,7 @@ mod tests {
             .terminals
             .get_mut(&target_terminal_id)
             .unwrap()
-            .state = AgentState::Working;
+            .set_raw_agent_state_for_test(AgentState::Working);
 
         app.state
             .handle_app_event(crate::events::AppEvent::StateChanged {

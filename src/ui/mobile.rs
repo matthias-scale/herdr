@@ -1479,7 +1479,7 @@ mod tests {
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(crate::detect::Agent::Codex);
-        terminal_state.state = AgentState::Blocked;
+        terminal_state.set_raw_agent_state_for_test(AgentState::Blocked);
         terminal_state.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {
@@ -1577,7 +1577,7 @@ mod tests {
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         }
         app.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
             source: "example.views".to_string(),
@@ -1605,7 +1605,7 @@ mod tests {
         let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(crate::detect::Agent::Claude);
-        terminal.state = AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
             n: 1,
             label: "Verify".into(),
@@ -1634,7 +1634,7 @@ mod tests {
             .clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(crate::detect::Agent::Claude);
-        terminal.state = AgentState::Working;
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.supervisor_stale = true;
 
         let counts = global_agent_counts(&app);
@@ -1703,7 +1703,7 @@ mod tests {
             .clone();
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(crate::detect::Agent::Claude);
-        terminal_state.state = AgentState::Blocked;
+        terminal_state.set_raw_agent_state_for_test(AgentState::Blocked);
 
         let area = Rect::new(0, 0, 12, 2);
         let mut terminal =
@@ -1730,7 +1730,7 @@ mod tests {
             .clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(crate::detect::Agent::Claude);
-        terminal.state = AgentState::Working;
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.supervisor_stale = true;
 
         let entry = agent_panel_entries(&app).remove(0);
@@ -1848,7 +1848,7 @@ mod tests {
         app.ensure_test_terminals();
         for terminal in app.terminals.values_mut() {
             terminal.agent_name = Some("pi".to_string());
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
         app.active = Some(0);
         app.selected = 0;
@@ -1949,7 +1949,7 @@ mod tests {
             let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
             let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
             terminal_state.detected_agent = Some(crate::detect::Agent::Pi);
-            terminal_state.state = AgentState::Working;
+            terminal_state.set_raw_agent_state_for_test(AgentState::Working);
             terminal_state.set_active_subagents(Some(3));
             app.active = Some(0);
             app.selected = 0;
@@ -2003,7 +2003,7 @@ mod tests {
         app.ensure_test_terminals();
         for terminal in app.terminals.values_mut() {
             terminal.agent_name = Some("pi".to_string());
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
         app.active = Some(0);
         app.selected = 0;
@@ -2047,7 +2047,7 @@ mod tests {
         app.ensure_test_terminals();
         for terminal in app.terminals.values_mut() {
             terminal.agent_name = Some("pi".to_string());
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
         app.active = Some(0);
         app.selected = 0;

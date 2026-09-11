@@ -1114,13 +1114,25 @@ impl FleetRow {
 
     fn from_agent(host: &str, host_is_local: bool, agent: AgentInfo, now_s: u64) -> Option<Self> {
         let agent_info = agent.clone();
-        let liveness = match agent.agent_status {
-            AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
-            AgentStatus::Done => Liveness::Terminal,
-            AgentStatus::Stale | AgentStatus::Unknown => Liveness::Unknown,
+        let projection = agent.agent_projection();
+        let liveness = if projection.settled {
+            Liveness::Terminal
+        } else {
+            match agent.agent_status {
+                AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
+                AgentStatus::Done => Liveness::Terminal,
+                AgentStatus::Stale | AgentStatus::Unknown => Liveness::Unknown,
+            }
         };
-        let blocked = agent.agent_status == AgentStatus::Blocked || !agent.gates.is_empty();
-        let raw_state = agent_status_str(agent.agent_status).to_string();
+        let blocked = projection.counts_as_blocked();
+        let raw_state = if projection.settled {
+            "done"
+        } else if projection.attention_tier == crate::terminal::state::AttentionTier::Attention {
+            "attention"
+        } else {
+            agent_status_str(agent.agent_status)
+        }
+        .to_string();
         let state = effective_state(&raw_state, liveness, blocked);
         let reported_at = agent.reported_at.clone();
         let age_s = reported_at
@@ -1130,6 +1142,7 @@ impl FleetRow {
         let gates = agent
             .gates
             .iter()
+            .filter(|_| projection.open_blockers)
             .map(|gate| FleetGate {
                 n: gate.n,
                 label: gate.label.clone(),
@@ -1874,6 +1887,35 @@ mod tests {
             row.gate_summary.as_deref(),
             Some("Ship? | (a-rec) ship after CI")
         );
+    }
+
+    #[test]
+    fn agent_attention_projection_excludes_questions_and_settled_panes_from_blocked() {
+        let mut answer = agent(AgentStatus::Blocked, serde_json::json!([]));
+        answer.items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let answer_row =
+            FleetRow::from_agent("ub1", false, answer, 1_777_000_000).expect("valid attention row");
+        assert!(!answer_row.blocked);
+        assert_eq!(answer_row.state, "attention");
+
+        let mut settled = agent(
+            AgentStatus::Blocked,
+            serde_json::json!([{"n": 1, "label": "Gate", "text": "Approve"}]),
+        );
+        settled.settled_at = Some(1_777_000_000);
+        let settled_row =
+            FleetRow::from_agent("ub1", false, settled, 1_777_000_000).expect("valid settled row");
+        assert!(!settled_row.blocked);
+        assert_eq!(settled_row.state, "done");
     }
 
     #[test]

@@ -1637,7 +1637,7 @@ mod tests {
         let pane_id = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.state = crate::detect::AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
             n: 1,
             label: "Answer".into(),

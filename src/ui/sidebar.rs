@@ -1430,26 +1430,11 @@ pub(crate) fn remote_agent_panel_entries(
                     )
                 },
                 |info| {
-                    let settled = info.settled_at.is_some();
-                    let state = if settled {
-                        AgentState::Idle
-                    } else {
-                        match info.agent_status {
-                            crate::api::schema::AgentStatus::Idle
-                            | crate::api::schema::AgentStatus::Done => AgentState::Idle,
-                            crate::api::schema::AgentStatus::Working => AgentState::Working,
-                            crate::api::schema::AgentStatus::Blocked => AgentState::Blocked,
-                            crate::api::schema::AgentStatus::Stale
-                            | crate::api::schema::AgentStatus::Unknown => AgentState::Unknown,
-                        }
-                    };
-                    let has_gates = !settled && !info.gates.is_empty();
-                    let has_items = !settled && !info.items.is_empty();
-                    let usage_limited = !settled && info.usage_limited;
+                    let projection = info.agent_projection();
                     (
-                        state,
-                        info.agent_status != crate::api::schema::AgentStatus::Done,
-                        info.agent_status == crate::api::schema::AgentStatus::Stale,
+                        projection.state,
+                        projection.seen,
+                        projection.stale,
                         info.display_agent.clone().or_else(|| info.agent.clone()),
                         row.title
                             .clone()
@@ -1459,15 +1444,10 @@ pub(crate) fn remote_agent_panel_entries(
                         row.title.clone(),
                         info.terminal_title.clone(),
                         info.terminal_title_stripped.clone(),
-                        has_gates,
-                        Some(crate::terminal::state::attention_tier(
-                            state,
-                            has_gates,
-                            has_items,
-                            usage_limited,
-                        )),
-                        usage_limited,
-                        usize::from(has_gates) * info.gates.len(),
+                        projection.open_blockers,
+                        Some(projection.attention_tier),
+                        projection.usage_limited,
+                        usize::from(projection.open_blockers) * info.gates.len(),
                         Some(info.state_change_seq),
                         info.state_labels.clone(),
                         info.tokens.clone(),
@@ -2215,25 +2195,37 @@ fn sidebar_rows_inner(
     compact_sidebar_rows_inner(app, terminal_runtimes, expand_worktrees, true)
 }
 
-fn compact_sidebar_rows_inner(
+pub(crate) fn sidebar_navigation_agent_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    let mut entries = sidebar_filtered_agent_entries_from(app, None);
+    crate::app::agent_view::apply_agent_view(app, &mut entries);
+    entries
+}
+
+fn sidebar_filtered_agent_entries_from(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
-    expand_worktrees: bool,
-    include_remote: bool,
-) -> Vec<SidebarRow> {
+) -> Vec<AgentPanelEntry> {
     let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
     }
     .into_iter()
-    // Cheap scalar gate first: when the star filter is on it discards most
-    // entries before the query matcher builds its haystack string.
     .filter(|entry| !app.sidebar_starred_only || entry.starred)
     .filter(|entry| sidebar_entry_matches_query(app, entry))
     .collect::<Vec<_>>();
     if let Some(scope) = sidebar_project_scope(app) {
         entries.retain(|entry| scope.holds(app, entry));
     }
+    entries
+}
+
+fn compact_sidebar_rows_inner(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+    expand_worktrees: bool,
+    include_remote: bool,
+) -> Vec<SidebarRow> {
+    let mut entries = sidebar_filtered_agent_entries_from(app, terminal_runtimes);
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -10022,7 +10014,7 @@ pub(crate) mod tests {
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         }
         for pane in app.workspaces[2].tabs[0].panes.values_mut() {
             pane.seen = true;
@@ -10338,7 +10330,7 @@ pub(crate) mod tests {
                 for pane in tab.panes.values() {
                     let terminal = app.terminals.get_mut(&pane.attached_terminal_id).unwrap();
                     terminal.detected_agent = Some(Agent::Pi);
-                    terminal.state = AgentState::Working;
+                    terminal.set_raw_agent_state_for_test(AgentState::Working);
                 }
             }
         }
@@ -10549,7 +10541,7 @@ pub(crate) mod tests {
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal_state.state = AgentState::Idle;
+        terminal_state.set_raw_agent_state_for_test(AgentState::Idle);
         terminal_state.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
                 n: 1,
@@ -10665,7 +10657,7 @@ pub(crate) mod tests {
             );
         }
         terminal.detected_agent = Some(agent);
-        terminal.state = state;
+        terminal.set_raw_agent_state_for_test(state);
         terminal.foreground_process_name = Some(provider.to_string());
         terminal
             .set_agent_metadata(crate::terminal::AgentMetadataReport {
@@ -11264,9 +11256,12 @@ pub(crate) mod tests {
         let second_terminal = app.workspaces[1].tabs[0].panes[&second_pane]
             .attached_terminal_id
             .clone();
-        app.terminals.get_mut(&first_terminal).unwrap().state = AgentState::Blocked;
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Blocked);
         let second_terminal_state = app.terminals.get_mut(&second_terminal).unwrap();
-        second_terminal_state.state = AgentState::Idle;
+        second_terminal_state.set_raw_agent_state_for_test(AgentState::Idle);
         app.workspaces[1].tabs[0]
             .panes
             .get_mut(&second_pane)
@@ -11311,7 +11306,7 @@ pub(crate) mod tests {
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.state = AgentState::Working;
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
                 n: 1,
@@ -11408,7 +11403,7 @@ pub(crate) mod tests {
             let pane = app.workspaces[ws_idx].tabs[0].root_pane;
             let terminal_id = app.workspaces[ws_idx].terminal_id(pane).unwrap().clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
             terminal.apply_closing_block_payload(gates, items, Vec::new());
         }
 
@@ -11445,7 +11440,7 @@ pub(crate) mod tests {
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.state = AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         terminal.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {
@@ -11466,7 +11461,10 @@ pub(crate) mod tests {
         assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
 
         assert!(app.settle_pane_at(0, pane, 1_725_000_000));
-        assert_eq!(app.terminals[&terminal_id].state, AgentState::Blocked);
+        assert_eq!(
+            app.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Blocked
+        );
         let settled = sidebar_thread_entries(&app).remove(0);
         assert_eq!(settled.attention_tier, Some(AttentionTier::None));
         assert_eq!(entry_attention_tier(&settled), AttentionTier::None);
@@ -11486,7 +11484,7 @@ pub(crate) mod tests {
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.state = AgentState::Working;
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
                 n: 1,
@@ -11530,7 +11528,10 @@ pub(crate) mod tests {
         };
         assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
 
-        app.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.reconcile_sidebar_presentation();
         let entry = sidebar_thread_entries(&app)
             .into_iter()
@@ -11549,7 +11550,7 @@ pub(crate) mod tests {
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.state = AgentState::Working;
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
                 n: 1,
@@ -11708,7 +11709,7 @@ pub(crate) mod tests {
                 seq: None,
             })
             .expect("test presentation accepted");
-        terminal.state = AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         terminal.usage_limited = true;
         app.reconcile_sidebar_presentation();
 
@@ -11805,7 +11806,7 @@ pub(crate) mod tests {
         terminal.detected_agent = Some(Agent::Claude);
         terminal.agent_name = Some("reviewer".into());
         terminal.manual_label = Some("right pane".into());
-        terminal.state = AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
 
         let entries = all_agent_panel_entries(&app);
         let review = entries.iter().find(|entry| entry.tab_idx == 1).unwrap();
@@ -11888,13 +11889,19 @@ pub(crate) mod tests {
         let working_terminal = app.workspaces[0].tabs[0].panes[&working_pane]
             .attached_terminal_id
             .clone();
-        app.terminals.get_mut(&done_terminal).unwrap().state = AgentState::Idle;
+        app.terminals
+            .get_mut(&done_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.workspaces[0].tabs[0]
             .panes
             .get_mut(&done_pane)
             .unwrap()
             .seen = false;
-        app.terminals.get_mut(&working_terminal).unwrap().state = AgentState::Working;
+        app.terminals
+            .get_mut(&working_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
         app.active = Some(0);
         app.reconcile_sidebar_presentation();
 
@@ -12151,7 +12158,10 @@ pub(crate) mod tests {
         let completed_terminal = app.workspaces[2].tabs[0].panes[&completed_pane]
             .attached_terminal_id
             .clone();
-        app.terminals.get_mut(&completed_terminal).unwrap().state = AgentState::Idle;
+        app.terminals
+            .get_mut(&completed_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.workspaces[2].tabs[0]
             .panes
             .get_mut(&completed_pane)
@@ -12224,9 +12234,15 @@ pub(crate) mod tests {
         assert!(app.workspaces[2].tabs[0].panes[&completed_pane].seen);
         assert_eq!(row_identities(sidebar_rows(&app)), canonical_order);
 
-        app.terminals.get_mut(&completed_terminal).unwrap().state = AgentState::Working;
+        app.terminals
+            .get_mut(&completed_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
         assert_eq!(row_identities(sidebar_rows(&app)), canonical_order);
-        app.terminals.get_mut(&completed_terminal).unwrap().state = AgentState::Idle;
+        app.terminals
+            .get_mut(&completed_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.workspaces[2].tabs[0]
             .panes
             .get_mut(&completed_pane)
@@ -12441,7 +12457,7 @@ row_gap = 1
             .clone();
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(Agent::Codex);
-        terminal_state.state = AgentState::Working;
+        terminal_state.set_raw_agent_state_for_test(AgentState::Working);
         app.reconcile_sidebar_presentation();
 
         let width = 60;
@@ -12523,7 +12539,7 @@ row_gap = 1
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Codex);
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
         app.reconcile_sidebar_presentation();
 
@@ -12577,7 +12593,7 @@ row_gap = 1
             .clone();
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(Agent::Pi);
-        terminal_state.state = AgentState::Working;
+        terminal_state.set_raw_agent_state_for_test(AgentState::Working);
 
         let area = Rect::new(0, 0, 60, 20);
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
@@ -14277,7 +14293,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         };
         set_state(&mut app, 0, AgentState::Working);
         set_state(&mut app, 1, AgentState::Idle);
@@ -14335,7 +14351,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = *state;
+            terminal.set_raw_agent_state_for_test(*state);
         }
         app
     }
@@ -14729,7 +14745,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = AgentState::Idle;
+            terminal.set_raw_agent_state_for_test(AgentState::Idle);
         }
 
         let area = Rect::new(0, 0, 4, 12);
@@ -14967,7 +14983,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .clone();
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         };
         set_state(&mut app, 0, first_pane, AgentState::Idle);
         set_state(&mut app, 1, second_pane, AgentState::Working);
@@ -18662,7 +18678,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let terminal_id = app.workspaces[0].terminal_id(pane).cloned().unwrap();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(Agent::Codex);
-        terminal.state = AgentState::Working;
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
                 work_title: Some("Codex".into()),
@@ -20150,7 +20166,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
             );
             terminal.detected_agent = Some(Agent::Pi);
-            terminal.state = spec.state;
+            terminal.set_raw_agent_state_for_test(spec.state);
             terminal.last_agent_state_change_seq = Some(spec.seq);
         }
         app.active = Some(0);

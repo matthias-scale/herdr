@@ -222,7 +222,7 @@ mod tests {
         let stamped = Instant::now();
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Blocked;
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
             terminal.blocked_since = Some(stamped);
         }
 
@@ -256,7 +256,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Blocked;
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
             terminal.closing_items = vec![item.clone()];
         }
         assert!(
@@ -268,7 +268,10 @@ mod tests {
             crate::terminal::state::AttentionTier::Attention
         );
 
-        app.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
         assert!(
             app.home_attention_agents().is_empty(),
             "working clears yellow"
@@ -276,7 +279,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-            terminal.state = AgentState::Idle;
+            terminal.set_raw_agent_state_for_test(AgentState::Idle);
             terminal.closing_items.clear();
         }
         assert!(
@@ -286,7 +289,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-            terminal.state = AgentState::Blocked;
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
             terminal.closing_items = vec![item];
         }
         app.workspaces[0].tabs[0]
@@ -327,7 +330,7 @@ mod tests {
                 default: None,
                 default_at: None,
             }];
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
 
         assert!(
@@ -338,7 +341,7 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("terminal state")
-            .state = AgentState::Idle;
+            .set_raw_agent_state_for_test(AgentState::Idle);
 
         let queue = app.blocked_agents();
         assert_eq!(queue.len(), 1, "the unchanged gate blocks after work stops");
@@ -360,7 +363,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
             terminal.closing_gates.clear();
         }
 
@@ -383,7 +386,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
             terminal.usage_limited = true;
         }
 
@@ -416,7 +419,7 @@ mod tests {
 
                     {
                         let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-                        terminal.state = state;
+                        terminal.set_raw_agent_state_for_test(state);
                         if latched_gate {
                             terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
                                 n: 1,

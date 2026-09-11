@@ -921,7 +921,7 @@ impl App {
             })
             .filter(|count| *count > 0);
         let tier = crate::terminal::state::derive_completion_tier(
-            terminal.state,
+            terminal.raw_agent_state(),
             terminal.closing_contract.as_deref(),
             terminal.closing_contract_met,
             terminal.closing_idle,
@@ -3243,7 +3243,7 @@ mod tests {
         });
 
         let terminal = &app.state.terminals[&terminal_id];
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.agent_name.is_none());
         assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
             event.data,

@@ -510,7 +510,7 @@ impl App {
                         supervisor_stale: terminal.supervisor_stale,
                         quiet_for,
                         nudge_after: self.state.nudge_after,
-                        blocked: terminal.state == crate::detect::AgentState::Blocked,
+                        blocked: terminal.raw_agent_state() == crate::detect::AgentState::Blocked,
                         has_closing_block_items: !terminal.closing_gates.is_empty()
                             || !terminal.closing_items.is_empty(),
                         human_draft: self

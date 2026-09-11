@@ -376,7 +376,7 @@ mod tests {
             .clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(Agent::Codex);
-        terminal.state = state;
+        terminal.set_raw_agent_state_for_test(state);
         let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
         pane.seen = seen;
         pane.done_since = Some(done_since);
@@ -421,10 +421,8 @@ mod tests {
             default: None,
             default_at: None,
         }];
-        assert!(
-            crate::terminal::state::counts_as_blocked(AgentState::Idle, true, false, false),
-            "an idle pane with an open gate is blocking in the sidebar"
-        );
+        let pane = app.workspaces[0].pane_state(pane_id).expect("pane state");
+        assert!(pane.agent_projection(terminal).counts_as_blocked());
         let due = app.due_done_pane_ids(Instant::now());
         assert!(
             due.is_empty(),

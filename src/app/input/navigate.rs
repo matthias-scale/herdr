@@ -2104,7 +2104,7 @@ enum BlockedPaneTarget {
 }
 
 fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
-    let visible_local = crate::ui::agent_panel_entries(state)
+    let visible_local = crate::ui::sidebar::sidebar_navigation_agent_entries(state)
         .into_iter()
         .map(|entry| (entry.ws_idx, entry.pane_id))
         .collect::<std::collections::HashSet<_>>();
@@ -3901,6 +3901,169 @@ mod tests {
     }
 
     #[test]
+    fn next_blocked_window_skips_sidebar_query_hidden_sibling_until_visible_targets() {
+        let mut app = app_with_test_workspaces(&["mixed", "later"]);
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        let hidden = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let later = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        for (ws_idx, pane_id, label) in [
+            (0, first, "visible first"),
+            (0, hidden, "hidden sibling"),
+            (1, later, "visible later"),
+        ] {
+            set_pane_agent_state(
+                &mut app.state,
+                ws_idx,
+                0,
+                pane_id,
+                crate::detect::AgentState::Blocked,
+            );
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .cloned()
+                .expect("terminal identity");
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .set_manual_label(label.into());
+        }
+        app.state.sidebar_work_filter.query = "visible".into();
+        app.state.assert_invariants_for_test();
+
+        let targets = blocked_pane_cycle(&app.state)
+            .into_iter()
+            .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: first,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 1,
+                    tab_idx: 0,
+                    pane_id: later,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: hidden,
+                },
+            ]
+        );
+        app.state.assert_invariants_for_test();
+        app.state.workspaces[0].assert_invariants_for_test();
+    }
+
+    #[test]
+    fn next_blocked_window_skips_unstarred_target_until_visible_targets() {
+        let mut app = app_with_global_window_fixture();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        let hidden = app.state.workspaces[0].tabs[1].root_pane;
+        let later = app.state.workspaces[1].tabs[0].root_pane;
+        for (ws_idx, tab_idx) in [(0, 0), (0, 1), (1, 0)] {
+            set_tab_agent_state(
+                &mut app.state,
+                ws_idx,
+                tab_idx,
+                crate::detect::AgentState::Blocked,
+            );
+        }
+        app.state.workspaces[0].tabs[0].starred = true;
+        app.state.workspaces[1].tabs[0].starred = true;
+        app.state.sidebar_starred_only = true;
+        app.state.assert_invariants_for_test();
+
+        let targets = blocked_pane_cycle(&app.state)
+            .into_iter()
+            .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: first,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 1,
+                    tab_idx: 0,
+                    pane_id: later,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 1,
+                    pane_id: hidden,
+                },
+            ]
+        );
+        app.state.assert_invariants_for_test();
+        app.state.workspaces[0].assert_invariants_for_test();
+    }
+
+    #[test]
+    fn next_blocked_window_keeps_blocked_split_at_its_visible_tab_row() {
+        let mut app = app_with_test_workspaces(&["mixed", "later"]);
+        let working_root = app.state.workspaces[0].tabs[0].root_pane;
+        let blocked_split = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let later = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        set_pane_agent_state(
+            &mut app.state,
+            0,
+            0,
+            working_root,
+            crate::detect::AgentState::Working,
+        );
+        set_pane_agent_state(
+            &mut app.state,
+            0,
+            0,
+            blocked_split,
+            crate::detect::AgentState::Blocked,
+        );
+        set_pane_agent_state(
+            &mut app.state,
+            1,
+            0,
+            later,
+            crate::detect::AgentState::Blocked,
+        );
+        app.state.assert_invariants_for_test();
+
+        let targets = blocked_pane_cycle(&app.state)
+            .into_iter()
+            .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: blocked_split,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 1,
+                    tab_idx: 0,
+                    pane_id: later,
+                },
+            ]
+        );
+        app.state.assert_invariants_for_test();
+        app.state.workspaces[0].assert_invariants_for_test();
+    }
+
+    #[test]
     fn next_blocked_window_visits_yellow_and_red_in_sidebar_order() {
         let configure = |state: &mut AppState| {
             expand_all_workspaces_for_sidebar(state);
@@ -4283,7 +4446,7 @@ mod tests {
         assert!(rx.try_recv().is_ok());
         assert_eq!(app.state.mode, Mode::Terminal);
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -5227,11 +5390,11 @@ mod tests {
                 .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
-            terminal.state = if ws_idx == 0 {
+            terminal.set_raw_agent_state_for_test(if ws_idx == 0 {
                 crate::detect::AgentState::Idle
             } else {
                 crate::detect::AgentState::Working
-            };
+            });
         }
         app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
             source: "example.views".to_string(),
@@ -5260,11 +5423,11 @@ mod tests {
                 .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
-            terminal.state = if ws_idx == 1 {
+            terminal.set_raw_agent_state_for_test(if ws_idx == 1 {
                 crate::detect::AgentState::Idle
             } else {
                 crate::detect::AgentState::Blocked
-            };
+            });
         }
         app.state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
         app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 30, 6);

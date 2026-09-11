@@ -63,7 +63,7 @@ pub struct PaneDetail {
 }
 
 impl Tab {
-    fn aggregate_state_and_attention(
+    pub(crate) fn aggregate_state_and_attention(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
     ) -> (AgentState, bool, AttentionTier) {
@@ -150,7 +150,7 @@ impl Tab {
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen,
                     done_since: pane.done_since,
-                    stale: terminal.supervisor_stale,
+                    stale: projection.stale,
                     reported_at: terminal.status_reported_at(),
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     activity_at: terminal.agent_activity_at(),
@@ -274,10 +274,10 @@ mod tests {
             .unwrap();
         let mut terminals = HashMap::new();
         let mut root_terminal = terminal_for_pane(&ws, root_id);
-        root_terminal.state = AgentState::Idle;
+        root_terminal.set_raw_agent_state_for_test(AgentState::Idle);
         terminals.insert(root_terminal.id.clone(), root_terminal);
         let mut second_terminal = terminal_for_pane(&ws, id2);
-        second_terminal.state = AgentState::Working;
+        second_terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminals.insert(second_terminal.id.clone(), second_terminal);
 
         let (state, seen) = ws.aggregate_state(&terminals);
@@ -320,10 +320,10 @@ mod tests {
             .unwrap();
         let mut terminals = HashMap::new();
         let mut root_terminal = terminal_for_pane(&ws, root_id);
-        root_terminal.state = AgentState::Idle;
+        root_terminal.set_raw_agent_state_for_test(AgentState::Idle);
         terminals.insert(root_terminal.id.clone(), root_terminal);
         let mut second_terminal = terminal_for_pane(&ws, id2);
-        second_terminal.state = AgentState::Working;
+        second_terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminals.insert(second_terminal.id.clone(), second_terminal);
         let root = ws.tabs[0].panes.get_mut(&root_id).unwrap();
         root.seen = false;
@@ -442,7 +442,7 @@ mod tests {
         let pane = ws.tabs[0].root_pane;
         let mut terminals = HashMap::new();
         let mut terminal = terminal_for_pane(&ws, pane);
-        terminal.state = AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         terminal.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {

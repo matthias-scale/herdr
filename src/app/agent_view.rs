@@ -444,7 +444,7 @@ mod tests {
                 .clone();
             let terminal = state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = agent_state;
+            terminal.set_raw_agent_state_for_test(agent_state);
         }
         state
     }
@@ -489,7 +489,11 @@ mod tests {
         let first_terminal = state.workspaces[0].tabs[0].panes[&first_pane]
             .attached_terminal_id
             .clone();
-        state.terminals.get_mut(&first_terminal).unwrap().state = AgentState::Working;
+        state
+            .terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
         state.agent_view_override = Some(AgentViewSetParams {
             source: "example.views".to_string(),
             label: None,
@@ -579,7 +583,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let stale = state.terminals.get_mut(&stale_terminal).unwrap();
-        stale.state = AgentState::Working;
+        stale.set_raw_agent_state_for_test(AgentState::Working);
         stale.supervisor_stale = true;
         state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
 
@@ -618,7 +622,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let stale = state.terminals.get_mut(&stale_terminal).unwrap();
-        stale.state = AgentState::Working;
+        stale.set_raw_agent_state_for_test(AgentState::Working);
         stale.supervisor_stale = true;
         state.agent_view_override = Some(AgentViewSetParams {
             source: "example.views".to_string(),

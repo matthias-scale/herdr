@@ -1848,7 +1848,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
 
         let working = status_segments(&app, &StatusMetrics::default(), &app.palette);
@@ -1859,7 +1859,10 @@ mod tests {
         assert_eq!(dot.text.trim(), format!("{DOT} 1"));
         assert_eq!(dot.style.fg, Some(app.palette.accent));
 
-        app.terminals.get_mut(&terminal_id).expect("terminal").state = AgentState::Blocked;
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_raw_agent_state_for_test(AgentState::Blocked);
         let blocked = status_segments(&app, &StatusMetrics::default(), &app.palette);
         let dot = blocked
             .iter()
@@ -2025,7 +2028,7 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("terminal state")
-            .state = AgentState::Blocked;
+            .set_raw_agent_state_for_test(AgentState::Blocked);
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let blocked = button_for(&blocked, StatusButtonAction::BlockedFilter);

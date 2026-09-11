@@ -1033,12 +1033,18 @@ fn lens_snapshot(
             reason: Some("pane is no longer available".into()),
         });
     };
-    if !crate::terminal::needs_human_attention(
-        terminal.state,
-        !terminal.closing_gates.is_empty(),
-        !terminal.closing_items.is_empty(),
-        terminal.usage_limited,
-    ) {
+    let Some(pane) = app
+        .workspaces
+        .get(agent.ws_idx)
+        .and_then(|workspace| workspace.pane_state(agent.pane_id))
+    else {
+        return Some(LensSnapshot {
+            title,
+            output: String::new(),
+            reason: Some("pane is no longer available".into()),
+        });
+    };
+    if !pane.agent_projection(terminal).needs_human_attention() {
         return Some(LensSnapshot {
             title,
             output: String::new(),
@@ -1770,7 +1776,7 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("test terminal")
-            .state = crate::detect::AgentState::Blocked;
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         let mut home = HomeState::default();
         home.focus = None;
         app.home = Some(home);
@@ -2658,7 +2664,7 @@ mod tests {
             .terminals
             .get_mut(&stale_queue[0].terminal_id)
             .expect("test terminal")
-            .state = crate::detect::AgentState::Idle;
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         assert_eq!(
             lens_snapshot(&no_longer_blocked, &runtimes, &stale_queue, 2)
                 .expect("lens")

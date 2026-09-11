@@ -6049,7 +6049,7 @@ enabled = true
 
     fn assert_blocked_hook_retired(app: &App, terminal_id: &crate::terminal::TerminalId) {
         assert_eq!(
-            app.state.terminals[terminal_id].state,
+            app.state.terminals[terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[terminal_id].full_lifecycle_hook_authority_active());
@@ -8391,7 +8391,7 @@ navigate_workspace_down = "ctrl+j"
                 .terminals
                 .get_mut(&terminal_id)
                 .expect("test terminal state")
-                .state = crate::detect::AgentState::Blocked;
+                .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         }
         app.state.toggle_home();
         (app, pane_ids)

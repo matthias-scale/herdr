@@ -2309,7 +2309,7 @@ impl HeadlessServer {
                         .state
                         .terminals
                         .get(&pane.attached_terminal_id)
-                        .map(|terminal| terminal.state)
+                        .map(|terminal| terminal.raw_agent_state())
                 })
             })
             .unwrap_or(crate::detect::AgentState::Unknown)
@@ -3995,7 +3995,7 @@ impl HeadlessServer {
             .values()
             .find(|terminal| terminal.id.as_str() == target.terminal_id)?;
         if terminal.effective_known_agent().is_none()
-            || terminal.state == crate::detect::AgentState::Idle
+            || terminal.raw_agent_state() == crate::detect::AgentState::Idle
         {
             return None;
         }
@@ -4006,7 +4006,7 @@ impl HeadlessServer {
         {
             return None;
         }
-        let status = crate::detect::manifest::agent_state_label(terminal.state);
+        let status = crate::detect::manifest::agent_state_label(terminal.raw_agent_state());
         Some(api::schema::ErrorBody {
             code: "agent_not_idle".into(),
             message: format!(
@@ -4058,7 +4058,7 @@ impl HeadlessServer {
             .values()
             .find(|terminal| terminal.id.as_str() == target.terminal_id)?;
         if terminal.effective_known_agent().is_none()
-            || terminal.state != crate::detect::AgentState::Idle
+            || terminal.raw_agent_state() != crate::detect::AgentState::Idle
         {
             return None;
         }
@@ -4084,12 +4084,14 @@ impl HeadlessServer {
         for read in pending {
             let terminal_id = read.terminal_id.clone();
             let runtime = self.app.terminal_runtimes.get(&read.terminal_id);
-            let remains_idle = self
-                .app
-                .state
-                .terminals
-                .get(&read.terminal_id)
-                .is_some_and(|terminal| terminal.state == crate::detect::AgentState::Idle);
+            let remains_idle =
+                self.app
+                    .state
+                    .terminals
+                    .get(&read.terminal_id)
+                    .is_some_and(|terminal| {
+                        terminal.raw_agent_state() == crate::detect::AgentState::Idle
+                    });
             let attached = self
                 .terminal_attach_owners
                 .contains_key(read.terminal_id.as_str());
@@ -4391,7 +4393,7 @@ impl HeadlessServer {
                                 (
                                     ws_idx,
                                     pane_id,
-                                    terminal.state,
+                                    terminal.raw_agent_state(),
                                     terminal.effective_agent_label().map(str::to_string),
                                 )
                             })
@@ -4527,7 +4529,7 @@ impl HeadlessServer {
                 continue;
             };
 
-            let new_state = terminal_after.state;
+            let new_state = terminal_after.raw_agent_state();
             if new_state == *prev_state {
                 continue;
             }
@@ -8290,7 +8292,7 @@ next_tab = ""
                     .get_mut(&terminal_id)
                     .expect("terminal");
                 terminal.detected_agent = Some(crate::detect::Agent::Claude);
-                terminal.state = crate::detect::AgentState::Working;
+                terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Working);
                 server.app.terminal_runtimes.insert(
                     terminal_id,
                     crate::terminal::TerminalRuntime::test_with_screen_bytes(
@@ -9593,7 +9595,7 @@ next_tab = ""
             Bytes::from_static(b"continue")
         );
         assert_eq!(
-            server.app.state.terminals[&terminal_id].state,
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!server.app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -9905,7 +9907,7 @@ next_tab = ""
 
         assert!(server.handle_scheduled_tasks_headless(deadline, false));
         assert_eq!(
-            server.app.state.terminals[&terminal_id].state,
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!server.app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -14757,7 +14759,13 @@ next_tab = ""
         assert!(changed);
         assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
         assert_eq!(
-            server.app.state.terminals.get(&terminal_id).unwrap().state,
+            server
+                .app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .raw_agent_state(),
             crate::detect::AgentState::Working
         );
         assert!(

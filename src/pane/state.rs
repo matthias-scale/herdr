@@ -6,6 +6,7 @@ use crate::terminal::{TerminalId, TerminalState};
 pub(crate) struct PaneAgentProjection {
     pub state: AgentState,
     pub seen: bool,
+    pub stale: bool,
     pub attention_tier: AttentionTier,
     pub open_blockers: bool,
     pub gate_count: usize,
@@ -20,6 +21,25 @@ impl PaneAgentProjection {
 
     pub(crate) fn needs_human_attention(self) -> bool {
         self.attention_tier == AttentionTier::Attention || self.counts_as_blocked()
+    }
+
+    pub(crate) fn status_key(self) -> &'static str {
+        if self.attention_tier == AttentionTier::Attention {
+            return "attention";
+        }
+        if self.counts_as_blocked() {
+            return "blocked";
+        }
+        if self.stale {
+            return "stale";
+        }
+        match (self.state, self.seen) {
+            (AgentState::Blocked, _) => "blocked",
+            (AgentState::Working, _) => "working",
+            (AgentState::Idle, false) => "done",
+            (AgentState::Idle, true) => "idle",
+            (AgentState::Unknown, _) => "unknown",
+        }
     }
 }
 
@@ -69,6 +89,7 @@ impl PaneState {
             return PaneAgentProjection {
                 state: AgentState::Unknown,
                 seen: true,
+                stale: false,
                 attention_tier: AttentionTier::None,
                 open_blockers: false,
                 gate_count: 0,
@@ -80,6 +101,7 @@ impl PaneState {
         PaneAgentProjection {
             state,
             seen,
+            stale: terminal.supervisor_stale,
             attention_tier: attention_tier(
                 state,
                 open_blockers,
@@ -90,5 +112,38 @@ impl PaneState {
             gate_count: terminal.closing_gates.len(),
             usage_limited: terminal.usage_limited,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn projection(state: AgentState, attention_tier: AttentionTier) -> PaneAgentProjection {
+        PaneAgentProjection {
+            state,
+            seen: true,
+            stale: false,
+            attention_tier,
+            open_blockers: attention_tier == AttentionTier::Blocked,
+            gate_count: usize::from(attention_tier == AttentionTier::Blocked),
+            usage_limited: false,
+        }
+    }
+
+    #[test]
+    fn status_key_uses_attention_projection_instead_of_raw_lifecycle() {
+        assert_eq!(
+            projection(AgentState::Blocked, AttentionTier::Attention).status_key(),
+            "attention"
+        );
+        assert_eq!(
+            projection(AgentState::Idle, AttentionTier::Blocked).status_key(),
+            "blocked"
+        );
+        assert_eq!(
+            projection(AgentState::Working, AttentionTier::Blocked).status_key(),
+            "working"
+        );
     }
 }

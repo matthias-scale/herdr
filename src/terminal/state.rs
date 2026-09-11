@@ -105,42 +105,9 @@ pub(crate) fn attention_tier(
     }
 }
 
-/// One red-blocker rule for the sidebar worklist and inbox.
-///
-/// A latched human gate does not block while the agent is still working. The
-/// action already in flight may resolve or refine that gate. Once work stops,
-/// the unanswered gate becomes blocking. A usage limit stays blocking because
-/// the pane cannot proceed until its reset window.
-pub(crate) fn counts_as_blocked(
-    state: AgentState,
-    has_closing_gates: bool,
-    has_closing_items: bool,
-    usage_limited: bool,
-) -> bool {
-    attention_tier(state, has_closing_gates, has_closing_items, usage_limited)
-        == AttentionTier::Blocked
-        && (state != AgentState::Working || usage_limited)
-}
-
-/// Whether prefix navigation should stop on this pane.
-pub(crate) fn needs_human_attention(
-    state: AgentState,
-    has_closing_gates: bool,
-    has_closing_items: bool,
-    usage_limited: bool,
-) -> bool {
-    match attention_tier(state, has_closing_gates, has_closing_items, usage_limited) {
-        AttentionTier::None => false,
-        AttentionTier::Attention => true,
-        AttentionTier::Blocked => {
-            counts_as_blocked(state, has_closing_gates, has_closing_items, usage_limited)
-        }
-    }
-}
-
-#[path = "metadata.rs"]
-mod metadata;
-pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
+#[cfg(test)]
+use super::metadata::AgentMetadataReport;
+use super::metadata::{AgentMetadata, EffectivePresentation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
@@ -280,7 +247,7 @@ pub(crate) struct TerminalAgentHandoffState {
     recent_agent_process_exit: Option<RecentAgentProcessExitHandoffState>,
     hook_authority: Option<HookAuthorityHandoffState>,
     supervisor_stale: bool,
-    metadata: Vec<metadata::AgentMetadataHandoffState>,
+    metadata: Vec<super::metadata::AgentMetadataHandoffState>,
     closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -484,8 +451,8 @@ impl AgentActivityOwner {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RecentAgentProcessExit {
-    agent: Agent,
+pub(super) struct RecentAgentProcessExit {
+    pub(super) agent: Agent,
     observed_at: Instant,
 }
 
@@ -544,10 +511,10 @@ pub struct TerminalState {
     hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
-    metadata_report_sequences: HashMap<String, u64>,
-    metadata_report_agents: HashMap<String, Agent>,
-    metadata_token_sequence_sources: std::collections::HashSet<String>,
-    pub state: AgentState,
+    pub(super) metadata_report_sequences: HashMap<String, u64>,
+    pub(super) metadata_report_agents: HashMap<String, Agent>,
+    pub(super) metadata_token_sequence_sources: std::collections::HashSet<String>,
+    state: AgentState,
     /// A live child process remains below the pane shell or agent process.
     pub holds_shell: bool,
     /// Process evidence used to project stale hook state in the sidebar.
@@ -572,7 +539,7 @@ pub struct TerminalState {
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
-    recent_agent_process_exit: Option<RecentAgentProcessExit>,
+    pub(super) recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
 }
@@ -655,6 +622,17 @@ impl TerminalState {
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
         }
+    }
+
+    /// Effective lifecycle before pane settlement and attention policy.
+    /// Most callers need `PaneState::agent_projection` instead.
+    pub(crate) fn raw_agent_state(&self) -> AgentState {
+        self.state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_raw_agent_state_for_test(&mut self, state: AgentState) {
+        self.state = state;
     }
 
     pub fn set_detected_agent_process_at(
@@ -3571,7 +3549,7 @@ impl TerminalState {
         })
     }
 
-    fn recompute_effective_state(
+    pub(super) fn recompute_effective_state(
         &mut self,
         previous_agent_label: Option<String>,
         previous_known_agent: Option<Agent>,

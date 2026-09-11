@@ -1415,7 +1415,7 @@ mod tests {
             .expect("terminal");
         let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
         terminal.detected_agent = Some(crate::detect::Agent::Codex);
-        terminal.state = crate::detect::AgentState::Working;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Working);
         terminal
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
                 pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/125".into()]),
@@ -1505,7 +1505,7 @@ mod tests {
                 .expect("terminal");
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
             terminal.detected_agent = Some(crate::detect::Agent::Codex);
-            terminal.state = *state;
+            terminal.set_raw_agent_state_for_test(*state);
             terminal
                 .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
                     pr_urls: Some(vec![format!(
@@ -2294,11 +2294,11 @@ mod tests {
         app.terminals
             .get_mut(&terminal_ids[0])
             .expect("first terminal")
-            .state = crate::detect::AgentState::Idle;
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         app.terminals
             .get_mut(&terminal_ids[1])
             .expect("second terminal")
-            .state = crate::detect::AgentState::Working;
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Working);
 
         let after = line_text(&render(&app, area), 1);
         assert_eq!(after.find("#129"), Some(before_129));
