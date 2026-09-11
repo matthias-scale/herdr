@@ -3573,13 +3573,14 @@ mod tests {
 
     fn terminal_with_restored_git_pr(url: &str) -> TerminalState {
         let mut terminal = test_terminal();
+        let repo = crate::work_context::repo_slug_from_pr_url(url).expect("PR repository");
         terminal
             .restore_work_context_with_tiers(
                 crate::work_context::PaneWorkContext::default(),
                 Some(crate::work_context::PaneWorkContextTiers {
                     git_observation: crate::work_context::PaneWorkContext {
                         pr_urls: vec![url.into()],
-                        repo: Some("o/r".into()),
+                        repo: Some(repo),
                         role: Some(crate::work_context::PaneWorkRole::Ship),
                         active_owner: true,
                         ..Default::default()
@@ -3592,18 +3593,23 @@ mod tests {
     }
 
     #[test]
-    fn inferred_different_pr_clears_git_role_and_owner() {
-        let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+    fn inferred_pr_change_rebinds_repo_only_when_the_repository_changes() {
+        for (next_pr, expected_repo) in [
+            ("https://github.com/o/r/pull/2", "o/r"),
+            ("https://github.com/new/repo/pull/2", "new/repo"),
+        ] {
+            let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
 
-        assert!(terminal
-            .set_inferred_pr_url("https://github.com/o/r/pull/2".into())
-            .expect("infer different PR"));
+            assert!(terminal
+                .set_inferred_pr_url(next_pr.into())
+                .expect("infer different PR"));
 
-        let git = terminal.work_context.snapshot_tiers().git_observation;
-        assert_eq!(git.pr_urls, ["https://github.com/o/r/pull/2"]);
-        assert_eq!(git.repo.as_deref(), Some("o/r"));
-        assert_eq!(git.role, None);
-        assert!(!git.active_owner);
+            let git = terminal.work_context.snapshot_tiers().git_observation;
+            assert_eq!(git.pr_urls, [next_pr]);
+            assert_eq!(git.repo.as_deref(), Some(expected_repo));
+            assert_eq!(git.role, None);
+            assert!(!git.active_owner);
+        }
     }
 
     #[test]

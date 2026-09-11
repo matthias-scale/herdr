@@ -223,11 +223,11 @@ impl PaneWorkContext {
 
     pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<(), String> {
         let pr_urls = normalize_pr_urls([url])?;
-        if self.pr_urls != pr_urls {
-            self.role = None;
-            self.active_owner = false;
-        }
+        let previous = self.clone();
         self.pr_urls = pr_urls;
+        if self.reset_pr_bound_fields_if_pr_changed(&previous, false) {
+            self.repo = self.primary_pr().and_then(repo_slug_from_pr_url);
+        }
         Ok(())
     }
 
@@ -295,6 +295,31 @@ impl PaneWorkContext {
             && self
                 .primary_pr()
                 .is_some_and(|candidate| candidate.eq_ignore_ascii_case(pr_url))
+    }
+
+    fn repo_is_derived_from_primary_pr(&self) -> bool {
+        self.repo.is_some()
+            && self.primary_pr().and_then(repo_slug_from_pr_url).as_ref() == self.repo.as_ref()
+    }
+
+    /// Reset metadata whose meaning is scoped to the primary pull request.
+    /// Returns whether a derived repository was cleared so an inferred PR can
+    /// bind the replacement repository without overwriting an explicit pin.
+    fn reset_pr_bound_fields_if_pr_changed(
+        &mut self,
+        previous: &Self,
+        repo_replaced: bool,
+    ) -> bool {
+        if self.pr_urls == previous.pr_urls {
+            return false;
+        }
+        self.role = None;
+        self.active_owner = false;
+        let reset_repo = !repo_replaced && previous.repo_is_derived_from_primary_pr();
+        if reset_repo {
+            self.repo = None;
+        }
+        reset_repo
     }
 
     #[allow(dead_code)]
@@ -489,13 +514,6 @@ impl PaneWorkContextState {
         let pr_urls_supplied = patch.pr_urls.is_some();
         let repo_supplied = patch.repo.is_some();
         let repo_cleared = patch.clear_fields.contains(&PaneWorkContextField::Repo);
-        let existing_repo_is_pr_derived = self.manual.repo.is_some()
-            && self
-                .manual
-                .primary_pr()
-                .and_then(repo_slug_from_pr_url)
-                .as_ref()
-                == self.manual.repo.as_ref();
         // A pull request implies its repository only when this patch actually
         // binds one, and never when the same patch clears the repository. A
         // patch that merely touches an unrelated field must not re-derive it,
@@ -541,14 +559,7 @@ impl PaneWorkContextState {
         }
         candidate.set_latest_work_items();
         candidate.pr_urls = normalize_pr_urls(candidate.pr_urls)?;
-        let pr_binding_changed = candidate.pr_urls != self.manual.pr_urls;
-        if pr_binding_changed {
-            candidate.role = None;
-            candidate.active_owner = false;
-            if existing_repo_is_pr_derived && !repo_supplied {
-                candidate.repo = None;
-            }
-        }
+        candidate.reset_pr_bound_fields_if_pr_changed(&self.manual, repo_supplied);
         if let Some(role) = patched_role {
             candidate.role = Some(role);
         }
@@ -643,15 +654,26 @@ impl PaneWorkContextState {
     }
 
     fn recompute(&mut self) {
-        let (role, active_owner) = [
+        let contexts = [
             &self.manual,
             &self.hook_turn,
             &self.git_observation,
             &self.restored_fallback,
-        ]
-        .into_iter()
-        .find_map(|context| context.role.map(|role| (Some(role), context.active_owner)))
-        .unwrap_or((None, false));
+        ];
+        let pr_tier = contexts
+            .iter()
+            .position(|context| !context.pr_urls.is_empty());
+        let pr_urls = pr_tier
+            .map(|tier| stable_merge([&contexts[tier].pr_urls]))
+            .unwrap_or_default();
+        let role = pr_tier.and_then(|tier| contexts[tier].role);
+        let active_owner = pr_tier.is_some_and(|tier| contexts[tier].active_owner);
+        let repo = contexts.iter().enumerate().find_map(|(tier, context)| {
+            context.repo.as_ref().and_then(|repo| {
+                (Some(tier) == pr_tier || !context.repo_is_derived_from_primary_pr())
+                    .then(|| repo.clone())
+            })
+        });
         self.effective = PaneWorkContext {
             // Declaration beats observation for the link fields, the same way
             // it does for `repo` and `branch` below. A union let the git tier
@@ -664,12 +686,7 @@ impl PaneWorkContextState {
                 &self.git_observation.ticket_ids,
                 &self.restored_fallback.ticket_ids,
             ]),
-            pr_urls: first_declared([
-                &self.manual.pr_urls,
-                &self.hook_turn.pr_urls,
-                &self.git_observation.pr_urls,
-                &self.restored_fallback.pr_urls,
-            ]),
+            pr_urls,
             preview_urls: stable_merge([
                 &self.manual.preview_urls,
                 &self.hook_turn.preview_urls,
@@ -694,17 +711,10 @@ impl PaneWorkContextState {
                 self.git_observation.branch.as_ref(),
                 self.restored_fallback.branch.as_ref(),
             ]),
-            // Declaration beats observation. The git tier is derived from the
-            // pane cwd, which is a poor proxy for the work: many sessions run
-            // from one shared worktree while operating on other repositories.
-            // Ordering it last is what stops a misleading cwd from misfiling a
-            // pane that has declared its repository.
-            repo: first_present([
-                self.manual.repo.as_ref(),
-                self.hook_turn.repo.as_ref(),
-                self.git_observation.repo.as_ref(),
-                self.restored_fallback.repo.as_ref(),
-            ]),
+            // Explicit repository declarations retain normal tier precedence.
+            // A repository matching a tier's PR is PR-derived and participates
+            // only when that tier also supplies the effective PR.
+            repo,
             work_title: first_present([
                 self.manual.work_title.as_ref(),
                 self.hook_turn.work_title.as_ref(),
@@ -1926,26 +1936,59 @@ mod tests {
     }
 
     #[test]
-    fn hook_pr_url_precedes_git_observation_pr_url() {
+    fn hook_pr_binding_does_not_borrow_git_role_owner_or_repo() {
+        const GIT_PR: &str = "https://github.com/git/repo/pull/1";
+        const HOOK_PR: &str = "https://github.com/hook/repo/pull/2";
         let mut state = PaneWorkContextState::default();
         state
             .replace_git_observation(PaneWorkContext {
-                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                pr_urls: vec![GIT_PR.into()],
+                repo: Some("git/repo".into()),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: true,
                 ..PaneWorkContext::default()
             })
             .unwrap();
         state
             .replace_hook_turn(PaneWorkContext {
-                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                pr_urls: vec![HOOK_PR.into()],
                 ..PaneWorkContext::default()
             })
             .unwrap();
 
-        // The hook wins in the effective view without deleting the observation.
-        assert_eq!(
-            state.effective().pr_urls,
-            vec!["https://github.com/o/r/pull/2"]
-        );
+        assert_eq!(state.effective().pr_urls, [HOOK_PR]);
+        assert_eq!(state.effective().repo, None);
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+        assert!(!state.effective().is_active_owner_of(GIT_PR));
+        assert!(!state.effective().is_active_owner_of(HOOK_PR));
+    }
+
+    #[test]
+    fn git_pr_binding_does_not_borrow_restored_role_owner_or_repo() {
+        const RESTORED_PR: &str = "https://github.com/restored/repo/pull/1";
+        const GIT_PR: &str = "https://github.com/git/repo/pull/2";
+        let mut state = PaneWorkContextState::from_restored(PaneWorkContext {
+            pr_urls: vec![RESTORED_PR.into()],
+            repo: Some("restored/repo".into()),
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
+            ..PaneWorkContext::default()
+        })
+        .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec![GIT_PR.into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().pr_urls, [GIT_PR]);
+        assert_eq!(state.effective().repo, None);
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+        assert!(!state.effective().is_active_owner_of(RESTORED_PR));
+        assert!(!state.effective().is_active_owner_of(GIT_PR));
     }
 
     #[test]
