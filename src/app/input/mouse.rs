@@ -175,6 +175,15 @@ impl AppState {
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
         self.forwarded_pane_input = None;
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            self.remote_agent_presses.remove(&source_id);
+        }
         // Same rule as the keyboard: a due break reminder owns the screen.
         if self.pomodoro.prompt.is_some() {
             return None;
@@ -3942,6 +3951,67 @@ mod tests {
                 .is_none(),
             "a drag must cancel the pending fleet open"
         );
+    }
+
+    #[test]
+    fn scrolling_at_sidebar_limit_cancels_only_that_sources_fleet_row_press() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let entry = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .next()
+            .expect("local agent panel entry");
+        let agent_ref = crate::api::schema::AgentRef::new("ub1", "w3K:p11")
+            .expect("valid remote agent reference");
+        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
+        )];
+        app.state
+            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let row =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .next()
+                .expect("the fleet row owns a hit area");
+        let local_source = crate::app::LOCAL_INPUT_SOURCE;
+        let other_source = local_source + 1;
+        let event = |kind| mouse(kind, row.rect.x + 2, row.rect.y);
+
+        for source_id in [local_source, other_source] {
+            assert!(app
+                .state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    source_id,
+                    event(MouseEventKind::Down(MouseButton::Left)),
+                )
+                .is_none());
+        }
+        assert_eq!(app.state.workspace_scroll, 0, "sidebar starts at its limit");
+
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                local_source,
+                event(MouseEventKind::ScrollDown),
+            )
+            .is_none());
+        assert_eq!(app.state.workspace_scroll, 0, "wheel remains clamped");
+        assert!(!app.state.remote_agent_presses.contains_key(&local_source));
+        assert!(app.state.remote_agent_presses.contains_key(&other_source));
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                local_source,
+                event(MouseEventKind::Up(MouseButton::Left)),
+            )
+            .is_none());
+        app.state.assert_invariants_for_test();
     }
 
     #[test]
