@@ -49,6 +49,7 @@ rustPlatform.buildRustPackage {
         ../Cargo.lock
         ../Cargo.toml
         ../skills/herdr/SKILL.md
+        ../skills/herdr-status/SKILL.md
       ]
     );
   };

@@ -15,6 +15,7 @@ pub(crate) enum GeneralRow {
     AutoSettleDone,
     SettleDoneAfterMinutes,
     NudgeResumedAgents,
+    AutoNudgeStalledAgents,
     HideWhitespace,
     NewThreadWorkspace,
     AddProjectStartDir,
@@ -63,6 +64,7 @@ impl GeneralRow {
         Self::AutoSettleDone,
         Self::SettleDoneAfterMinutes,
         Self::NudgeResumedAgents,
+        Self::AutoNudgeStalledAgents,
         Self::HideWhitespace,
         Self::NewThreadWorkspace,
         Self::AddProjectStartDir,
@@ -85,6 +87,7 @@ impl GeneralRow {
             Self::AutoSettleDone => "Auto-settle done threads",
             Self::SettleDoneAfterMinutes => "Minutes done before auto-settle",
             Self::NudgeResumedAgents => "Continue resumed agents",
+            Self::AutoNudgeStalledAgents => "Nudge stalled agents",
             Self::HideWhitespace => "Hide whitespace changes in diff",
             Self::NewThreadWorkspace => "New threads default workspace",
             Self::AddProjectStartDir => "Add project starts in",
@@ -109,6 +112,9 @@ impl GeneralRow {
             Self::NudgeResumedAgents => {
                 Some("after a restart, tell an idle resumed agent to carry on")
             }
+            Self::AutoNudgeStalledAgents => {
+                Some("after both its status report and pane activity go quiet")
+            }
             Self::Notepad => Some("markdown notes under the workspace list"),
             Self::BreakTimer => Some("countdown in the sidebar footer, break prompt on expiry"),
             _ => None,
@@ -125,6 +131,7 @@ impl GeneralRow {
             Self::AutoSettleDone => ("session", "auto_settle_done"),
             Self::SettleDoneAfterMinutes => ("session", "settle_done_after_minutes"),
             Self::NudgeResumedAgents => ("session", "nudge_resumed_agents"),
+            Self::AutoNudgeStalledAgents => ("session", "auto_nudge_stalled_agents"),
             Self::HideWhitespace => ("ui", "hide_whitespace_in_diff"),
             Self::NewThreadWorkspace => ("ui", "new_thread_workspace"),
             Self::AddProjectStartDir => ("ui", "add_project_start_dir"),
@@ -155,6 +162,7 @@ impl GeneralRow {
             Self::AutoSettleDone => on_off(state.auto_settle_done),
             Self::SettleDoneAfterMinutes => minutes(state.settle_done_after),
             Self::NudgeResumedAgents => on_off(state.nudge_resumed_agents),
+            Self::AutoNudgeStalledAgents => on_off(state.auto_nudge_stalled_agents),
             Self::HideWhitespace => on_off(state.dock_diff_ignore_whitespace),
             Self::NewThreadWorkspace => state.new_thread_workspace.label().to_string(),
             Self::AddProjectStartDir => {
@@ -237,6 +245,7 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
             ),
         }),
         GeneralRow::NudgeResumedAgents => toggle(state.nudge_resumed_agents),
+        GeneralRow::AutoNudgeStalledAgents => toggle(state.auto_nudge_stalled_agents),
         GeneralRow::HideWhitespace => toggle(state.dock_diff_ignore_whitespace),
         GeneralRow::DeleteConfirmation => toggle(state.confirm_close),
         GeneralRow::Notepad => toggle(state.notepad.enabled),
@@ -310,8 +319,8 @@ mod tests {
         let total = keys.len();
         keys.sort_unstable();
         keys.dedup();
+        assert_eq!(total, 19);
         assert_eq!(keys.len(), total);
-        assert_eq!(total, 18);
     }
 
     #[test]
@@ -442,6 +451,23 @@ mod tests {
 
         state.nudge_resumed_agents = false;
         assert_eq!(GeneralRow::NudgeResumedAgents.value(&state), "off");
+    }
+
+    #[test]
+    fn the_stalled_agent_nudge_row_toggles_the_session_key() {
+        let mut state = AppState::test_new();
+        assert_eq!(GeneralRow::AutoNudgeStalledAgents.value(&state), "off");
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::AutoNudgeStalledAgents),
+            Some(ConfigEdit::Bool {
+                section: "session",
+                key: "auto_nudge_stalled_agents",
+                value: true
+            })
+        );
+
+        state.auto_nudge_stalled_agents = true;
+        assert_eq!(GeneralRow::AutoNudgeStalledAgents.value(&state), "on");
     }
 
     #[test]

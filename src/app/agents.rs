@@ -404,6 +404,14 @@ impl App {
         if !terminal.is_agent_terminal() {
             return None;
         }
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let title_projection = ws.tab_display_projection(&self.state.terminals, tab_idx);
+        let display_title = crate::workspace::session_title(
+            title_projection.as_ref(),
+            title_projection
+                .as_ref()
+                .map(|projection| projection.full_label()),
+        );
         let pane = self.pane_info(ws_idx, pane_id)?;
         let agent_ref = self
             .state
@@ -430,6 +438,7 @@ impl App {
             name: terminal.agent_name.clone(),
             agent: pane.agent,
             title: pane.title,
+            display_title,
             terminal_title: pane.terminal_title,
             terminal_title_stripped: pane.terminal_title_stripped,
             display_agent: pane.display_agent,

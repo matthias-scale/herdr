@@ -4434,7 +4434,7 @@ impl App {
                 });
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                self.state.note_human_text(pane_id, text);
+                self.note_human_text(pane_id, text);
             }
         }
     }
@@ -4486,20 +4486,27 @@ impl App {
             };
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                self.state.note_human_text(pane_id, &text);
+                self.note_human_text(pane_id, &text);
             }
         }
     }
 
-    pub(super) async fn handle_paste(&mut self, text: String) {
+    pub(super) fn try_route_paste_to_overlay(&mut self, text: &str) -> bool {
         if self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.dock_object_preview.is_some()
         {
-            return;
+            return true;
         }
         if self.state.home.is_some() {
-            self.handle_home_text_commit(&text);
+            self.handle_home_text_commit(text);
+            return true;
+        }
+        false
+    }
+
+    pub(super) async fn handle_paste(&mut self, text: String) {
+        if self.try_route_paste_to_overlay(&text) {
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -4538,7 +4545,7 @@ impl App {
             };
             if let (true, Some(pane_id)) = (sent && has_text, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                self.state.note_human_text(pane_id, &draft);
+                self.note_human_text(pane_id, &draft);
             }
         }
     }
@@ -5033,9 +5040,9 @@ impl App {
                         self.state.clear_home();
                         self.open_symphony_workflow_at(index);
                     }
-                    MouseAction::OpenFleetHost { name } => {
+                    MouseAction::OpenFleetHost { name, focus_agent } => {
                         self.state.clear_home();
-                        self.open_fleet_host(&name);
+                        self.open_fleet_host_focused(&name, focus_agent.as_deref());
                     }
                     MouseAction::FocusToastTarget => {
                         self.state.clear_home();

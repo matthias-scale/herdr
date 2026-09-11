@@ -1,9 +1,9 @@
 """Parse the existing closing block into herdr status channels.
 
 The adapter deliberately keeps the authoring format unchanged. Critical action
-points retain their Gate/Answer/Verify labels; only Gate items block. The
-optional What to test section is non-blocking context, and auto-proceeded
-decisions are a separate delimited list.
+points retain their Gate/Answer/Verify labels. A Gate always blocks; Answer and
+Verify block once no sub-agent work remains. The optional What to test section
+is context, and auto-proceeded decisions are a separate delimited list.
 """
 
 from __future__ import annotations
@@ -13,12 +13,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 # The header line alone is the trigger: agents drop the bold markers, add a
 # heading marker or a colon, or vary the case often enough that any strictness
-# here silently un-latches gates. The `(N blocking)` count on this line is what
-# blocks; item parsing below it is best-effort detail. Only the full-line
-# anchor is kept so prose mentions never match.
+# here silently un-latches gates. The `(N blocking)` count still counts Gates;
+# parsed Answer and Verify items independently mark an idle pane as blocked.
+# Only the full-line anchor is kept so prose mentions never match.
 _HEADER_RE = re.compile(
     r"^(?:#{1,6}[ \t]*)?(?:\*\*)?Critical action points"
     r"(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?(?:\*\*)?"
@@ -194,14 +194,17 @@ class ClosingBlock:
         return [item for item in self.items if not item.blocking]
 
     @property
+    def action_points(self) -> list[Item]:
+        return [item for item in self.items if item.label in {"Answer", "Verify"}]
+
+    @property
     def blocking(self) -> int:
-        # Labels are the authority on what blocks: Gate means authority is
-        # owed before the agent may execute, while Answer and Verify are
-        # non-blocking by definition and the agent proceeds past them. So
-        # once *any* item parsed with a label, the labeled gates are the
-        # count -- a header that says "(1 blocking)" above a lone Answer is
-        # a miscounted header, not a hidden gate, and latching it would
-        # block a pane whose agent is not actually waiting on anything.
+        # Labels are the authority for the authored Gate count. Answer and
+        # Verify do not increment `(N blocking)`, though they still block an
+        # idle pane because the human owes an action. Once any item parsed with
+        # a label, the labeled gates are the count. A header that says
+        # "(1 blocking)" above a lone Answer is a miscounted header, not a
+        # hidden Gate.
         #
         # The header still wins when nothing labeled parsed at all: there
         # under-reporting a gate is the real failure mode, and a declared
@@ -228,6 +231,8 @@ class ClosingBlock:
             return "blocked"
         if self.agents_running > 0:
             return "working"
+        if self.action_points:
+            return "blocked"
         return "idle"
 
     def message(self) -> str | None:
@@ -240,6 +245,8 @@ class ClosingBlock:
         if self.agents_running > 0:
             n = self.agents_running
             return f"{n} agent{'s' if n != 1 else ''} running"
+        if self.action_points:
+            return self.action_points[0].text[:80] or None
         return None
 
     def wire_gates(self) -> list[dict[str, Any]]:

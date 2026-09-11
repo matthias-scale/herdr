@@ -268,6 +268,9 @@ pub struct AgentInfo {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Exact session title resolved by the host that owns this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

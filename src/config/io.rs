@@ -141,7 +141,8 @@ impl Config {
         };
 
         match deserialize_with_ignored::<Config, _>(toml::Deserializer::new(&content)) {
-            Ok((config, ignored_keys)) => {
+            Ok((mut config, ignored_keys)) => {
+                config.clamp_safety_bounds();
                 let (unknown_sections, mut diagnostics) =
                     unknown_top_level_sections_from_str(&content);
                 diagnostics.extend(unknown_config_key_diagnostics(
@@ -448,6 +449,7 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
 
     diagnostics.extend(config.theme.diagnostics());
+    config.clamp_safety_bounds();
 
     Ok(LoadedConfig {
         config,
@@ -1108,6 +1110,18 @@ resume_agents_on_restore = true
         assert!(loaded.config.session.resume_agents_on_restore);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_clamps_stall_nudge_delay() {
+        let loaded =
+            load_live_config_from_str("[session]\nnudge_after_minutes = 9223372036854775807\n")
+                .expect("live session config");
+
+        assert_eq!(
+            loaded.config.session.nudge_after_minutes,
+            super::super::MAX_NUDGE_AFTER_MINUTES
+        );
     }
 
     #[test]

@@ -768,6 +768,12 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<bool, String> {
+        let mut context = self.work_context.snapshot_tiers().git_observation;
+        context.set_inferred_pr_url(url)?;
+        self.replace_git_work_context(context)
+    }
+
     /// The hook tier is persisted for restore fidelity, but any accepted
     /// mutation that tears down or replaces the session identity that authorized guarded
     /// work-title reports must also drop the hook tier, so stale ticket/PR refs
@@ -1571,6 +1577,23 @@ impl TerminalState {
                 .is_some_and(|authority| authority.state != AgentState::Working)
     }
 
+    /// True while the pane claims subagents are still running.
+    ///
+    /// The claim comes either from the live transcript scan or from the agent's
+    /// own `closing_agents` token. Neither source expires on its own: the token is
+    /// written without a TTL, and transcript rows simply stop arriving when the
+    /// parent stalls. So a parent that said "3 agents running" keeps reading busy
+    /// forever unless the watchdog ages the claim out.
+    pub(crate) fn declares_running_subagents(&self) -> bool {
+        self.active_subagents
+            .or_else(|| {
+                self.metadata_tokens
+                    .get("closing_agents")
+                    .and_then(|value| value.parse::<u32>().ok())
+            })
+            .is_some_and(|count| count > 0)
+    }
+
     pub fn agent_status_watchdog_deadline(&self) -> Option<Instant> {
         let authority = self.hook_authority.as_ref()?;
         if self.supervisor_stale {
@@ -1586,6 +1609,11 @@ impl TerminalState {
             // A declared wait belongs to a working report; a finished report that
             // is still holding sub-processes gets the plain silence budget.
             _ if self.subprocess_held_working() => AGENT_STALE_SILENCE,
+            // A parent parked on subagents has ended its own turn, so it reports idle
+            // with an idle screen and neither branch above can see it. The claim is
+            // still a declaration nobody has re-verified, and it earns the same silence
+            // budget as any other.
+            _ if self.declares_running_subagents() => AGENT_STALE_SILENCE,
             _ => return None,
         };
         authority.reported_at.checked_add(age)
@@ -3574,10 +3602,89 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::AgentDetection;
+    use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    fn terminal_with_restored_git_pr(url: &str) -> TerminalState {
+        let mut terminal = test_terminal();
+        let repo = crate::work_context::repo_slug_from_pr_url(url).expect("PR repository");
+        terminal
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    git_observation: crate::work_context::PaneWorkContext {
+                        pr_urls: vec![url.into()],
+                        repo: Some(repo),
+                        role: Some(crate::work_context::PaneWorkRole::Ship),
+                        active_owner: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .expect("restore git tier");
+        terminal
+    }
+
+    #[test]
+    fn inferred_pr_change_rebinds_repo_only_when_the_repository_changes() {
+        for (next_pr, expected_repo) in [
+            ("https://github.com/o/r/pull/2", "o/r"),
+            ("https://github.com/new/repo/pull/2", "new/repo"),
+        ] {
+            let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+
+            assert!(terminal
+                .set_inferred_pr_url(next_pr.into())
+                .expect("infer different PR"));
+
+            let git = terminal.work_context.snapshot_tiers().git_observation;
+            assert_eq!(git.pr_urls, [next_pr]);
+            assert_eq!(git.repo.as_deref(), Some(expected_repo));
+            assert_eq!(git.role, None);
+            assert!(!git.active_owner);
+        }
+    }
+
+    #[test]
+    fn inferred_pr_change_rebinds_case_variant_derived_repo() {
+        let mut terminal = test_terminal();
+        terminal
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    git_observation: crate::work_context::PaneWorkContext {
+                        repo: Some("owner/repo".into()),
+                        pr_urls: vec!["https://github.com/Owner/Repo/pull/1".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .expect("restore git tier");
+
+        assert!(terminal
+            .set_inferred_pr_url("https://github.com/new/repo/pull/2".into())
+            .expect("infer cross-repository pull request"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.repo.as_deref(), Some("new/repo"));
+    }
+
+    #[test]
+    fn inferring_same_pr_keeps_git_role_and_owner() {
+        let mut terminal = terminal_with_restored_git_pr("https://github.com/o/r/pull/1");
+
+        assert!(!terminal
+            .set_inferred_pr_url("https://github.com/o/r/pull/1".into())
+            .expect("re-infer same PR"));
+
+        let git = terminal.work_context.snapshot_tiers().git_observation;
+        assert_eq!(git.role, Some(crate::work_context::PaneWorkRole::Ship));
+        assert!(git.active_owner);
     }
 
     fn closing_tokens(items: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
@@ -5430,6 +5537,201 @@ mod tests {
         );
         assert!(!terminal.supervisor_stale);
         assert!(terminal.agent_status_watchdog_deadline().is_some());
+    }
+
+    /// Builds a pane whose parent has ended its turn while declaring that
+    /// subagents remain active.
+    fn subagent_claim_terminal(now: Instant) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-subagent-watchdog"),
+            Some(999),
+            Some("startup".into()),
+        );
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), Some("3".into()))]),
+            None,
+            now,
+        ));
+        assert_eq!(terminal.state, AgentState::Idle);
+        terminal
+    }
+
+    /// Pins the live active-subagent count as a watchdog claim, while zero stays unarmed.
+    #[test]
+    fn live_active_subagent_count_arms_watchdog_only_when_positive() {
+        let now = Instant::now();
+        let mut active = test_terminal();
+        active.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        active.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        active.set_active_subagents(Some(1));
+
+        assert!(active.metadata_tokens.get("closing_agents").is_none());
+        assert!(active.declares_running_subagents());
+        assert_eq!(
+            active.agent_status_watchdog_deadline(),
+            now.checked_add(AGENT_STALE_SILENCE)
+        );
+        assert!(active
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .is_none());
+        assert!(active
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_some());
+        assert!(active.supervisor_stale);
+
+        let mut zero = test_terminal();
+        zero.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        zero.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        zero.set_active_subagents(Some(0));
+
+        assert!(!zero.declares_running_subagents());
+        assert!(zero.agent_status_watchdog_deadline().is_none());
+        assert!(zero
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_none());
+        assert!(!zero.supervisor_stale);
+    }
+
+    #[test]
+    fn a_subagent_claim_goes_stale_when_the_silence_runs_out() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+
+        assert!(terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_some());
+        assert!(terminal.supervisor_stale);
+    }
+
+    /// Pins that a stale unverified subagent claim blocks the armed Done auto-settle trigger.
+    #[test]
+    fn a_stale_subagent_claim_never_becomes_done_or_auto_settles() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the subagent claim stale");
+        assert!(terminal.supervisor_stale);
+        assert!(crate::app::settled::pane_has_resume_plan(&terminal));
+
+        let active_subagents = terminal
+            .metadata_tokens
+            .get("closing_agents")
+            .and_then(|value| value.parse::<u32>().ok());
+        assert!(!session_is_quiet(
+            terminal.state,
+            false,
+            active_subagents,
+            terminal.holds_shell,
+        ));
+        assert_eq!(
+            derive_completion_tier(
+                terminal.state,
+                terminal.closing_contract.as_deref(),
+                terminal.closing_contract_met,
+                terminal.closing_idle,
+                false,
+                active_subagents,
+                terminal.holds_shell,
+                true,
+            ),
+            None
+        );
+
+        let mut state = AppState::test_new();
+        let workspace = Workspace::test_new("stale-subagent-claim");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .pane_state(pane_id)
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        terminal.id = terminal_id.clone();
+        state.terminals.insert(terminal_id, terminal);
+        state.workspaces.push(workspace);
+        state.auto_settle_inactive = false;
+        state.auto_settle_finished = false;
+        state.settle_done_after = Duration::ZERO;
+        let pane = state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane");
+        pane.seen = false;
+        pane.done_since = Some(now);
+
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_000), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn a_fresh_report_resets_the_subagent_claim_watchdog() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the subagent claim stale");
+
+        let refreshed_at = now + AGENT_STALE_SILENCE + Duration::from_secs(1);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1001),
+            refreshed_at,
+        );
+
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(),
+            refreshed_at.checked_add(AGENT_STALE_SILENCE)
+        );
+    }
+
+    #[test]
+    fn a_non_working_authority_without_a_subagent_claim_has_no_watchdog() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), None)]),
+            None,
+            now,
+        ));
+
+        assert!(terminal.agent_status_watchdog_deadline().is_none());
     }
 
     #[test]

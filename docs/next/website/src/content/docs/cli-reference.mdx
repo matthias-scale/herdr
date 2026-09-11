@@ -223,9 +223,9 @@ Right-clicking the pane frame still opens Herdr's menu. `pane split
 
 After `pane move`, use `.result.move_result.pane.pane_id` for later commands. A cross-workspace move changes the workspace-qualified pane ID; the prior value remains at `.result.move_result.previous_pane_id`. The running process keeps its launch-time `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID`; Herdr retains the old pane ID as an alias for that terminal, so pane commands using `--current` still resolve it. A live agent name follows the terminal and continues to resolve after the move.
 
-`pane work-context set` applies one atomic manual patch. Repeated `--ticket` and
-`--pr` flags replace those lists in first-seen order; omitted fields stay
-unchanged. `--clear` accepts `ticket_ids`, `pr_urls`, `branch`, `repo`, or `work_title`.
+`pane work-context set` applies one atomic manual patch. Each of `--ticket` and
+`--pr` holds one value, and repeating either flag keeps its last value; omitted
+fields stay unchanged. `--clear` accepts `ticket_ids`, `pr_urls`, `branch`, `repo`, or `work_title`.
 `pane work-context get` returns the same `PaneInfo` response as `pane get`,
 including its effective `work_context` object. In the TUI, right-clicking a
 pull-request or ticket URL printed in a terminal pane offers **Link PR to this

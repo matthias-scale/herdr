@@ -89,7 +89,7 @@ pub(crate) fn request_from_turn_start(
     // text, and a repository named in prose is ambient noise rather than
     // evidence of the work. Repositories are declared or observed, never read
     // out of what the human happened to type.
-    let work_context = crate::work_context::PaneWorkContext {
+    let mut work_context = crate::work_context::PaneWorkContext {
         ticket_ids: crate::work_context::extract_ticket_ids(prompt),
         pr_urls: crate::work_context::extract_pr_urls(prompt),
         preview_urls: crate::work_context::extract_preview_urls(prompt),
@@ -103,6 +103,7 @@ pub(crate) fn request_from_turn_start(
         role: None,
         active_owner: false,
     };
+    work_context.set_latest_work_items();
 
     Some(PaneReportMetadataParams {
         pane_id: pane_id.to_string(),
@@ -715,7 +716,7 @@ mod tests {
         )
         .unwrap();
         let codex_context = codex.work_context.expect("derived Codex work context");
-        assert_eq!(codex_context.ticket_ids, vec!["MAT-7", "SCA-9"]);
+        assert_eq!(codex_context.ticket_ids, vec!["SCA-9"]);
         assert_eq!(
             codex_context.pr_urls,
             vec!["https://github.com/scalable-so/herdr/pull/21"]
@@ -744,6 +745,25 @@ mod tests {
             claude_context.preview_urls,
             vec!["https://claude-preview.vercel.app"]
         );
+    }
+
+    #[test]
+    fn turn_hook_assigns_the_last_mentioned_ticket_and_pull_request() {
+        let request = request_from_turn_start(
+            WorkTitleProvider::Codex,
+            Some("w1:p1"),
+            r#"{
+                "hook_event_name":"UserPromptSubmit",
+                "session_id":"session-last-work-item",
+                "prompt":"SCA-1 SCA-2 SCA-1 https://github.com/o/r/pull/1 https://github.com/o/r/pull/2 https://github.com/o/r/pull/1"
+            }"#,
+            46,
+        )
+        .expect("guarded turn hook should produce metadata");
+        let context = request.work_context.expect("work context");
+
+        assert_eq!(context.ticket_ids, ["SCA-1"]);
+        assert_eq!(context.pr_urls, ["https://github.com/o/r/pull/1"]);
     }
 
     #[test]

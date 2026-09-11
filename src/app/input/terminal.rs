@@ -110,7 +110,7 @@ impl App {
         };
         if sent && has_bytes {
             if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
-                self.state.note_human_key(pane_id, &key_for_draft);
+                self.note_human_key(pane_id, &key_for_draft);
             }
             self.retire_blocked_hook_authority_for_terminal(
                 &input.target.terminal_id,
@@ -407,7 +407,7 @@ impl App {
         };
         if sent && has_bytes {
             if let Some(pane_id) = self.state.pane_id_for_terminal(&target.terminal_id) {
-                self.state.note_human_key(pane_id, &key);
+                self.note_human_key(pane_id, &key);
             }
             self.retire_blocked_hook_authority_for_terminal(
                 &target.terminal_id,
@@ -435,7 +435,7 @@ impl App {
         };
         if sent && has_bytes {
             if let Some(pane_id) = self.state.pane_id_for_terminal(&target.terminal_id) {
-                self.state.note_human_key(pane_id, &key);
+                self.note_human_key(pane_id, &key);
             }
             self.retire_blocked_hook_authority_for_terminal(
                 &target.terminal_id,
@@ -511,7 +511,7 @@ impl App {
         };
         if sent && has_bytes {
             if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
-                self.state.note_human_key(pane_id, &key_for_draft);
+                self.note_human_key(pane_id, &key_for_draft);
             }
             self.retire_blocked_hook_authority_for_terminal(
                 &input.target.terminal_id,

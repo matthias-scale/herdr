@@ -9,6 +9,7 @@ mod add_project;
 pub(crate) mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
+pub(crate) mod auto_nudge;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
@@ -287,6 +288,13 @@ pub struct App {
     /// be nudged back into their work, keyed by the terminal they run in.
     pub(crate) pending_resume_nudges:
         std::collections::HashMap<crate::terminal::TerminalId, agent_resume::ResumeNudge>,
+    /// Runtime-only nudge budgets for currently stale agent declarations.
+    pub(crate) stall_nudge_episodes:
+        std::collections::HashMap<crate::terminal::TerminalId, auto_nudge::StallNudgeEpisode>,
+    pub(crate) pending_stall_nudge_submissions: std::collections::HashMap<
+        crate::terminal::TerminalId,
+        auto_nudge::PendingStallNudgeSubmission,
+    >,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -810,6 +818,7 @@ impl App {
                 crate::ui::RECENTLY_DONE_SECTION_TITLE
             ))
             .collect(),
+            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode,
             sidebar_focused: false,
             sidebar_group_menu_open: false,
@@ -1059,6 +1068,7 @@ impl App {
             drag: None,
             workspace_presses: HashMap::new(),
             tab_presses: HashMap::new(),
+            remote_agent_presses: HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -1205,6 +1215,10 @@ impl App {
             settle_stops_agent: config.session.settle_stops_agent,
             nudge_resumed_agents: config.session.nudge_resumed_agents,
             resume_nudge_message: config.session.resume_nudge_message.clone(),
+            auto_nudge_stalled_agents: config.session.auto_nudge_stalled_agents,
+            nudge_after: auto_nudge::nudge_after_duration(config.session.nudge_after_minutes),
+            max_nudges: config.session.max_nudges,
+            stall_nudge_message: config.session.stall_nudge_message.clone(),
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
@@ -1455,6 +1469,8 @@ impl App {
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             pending_resume_nudges: std::collections::HashMap::new(),
+            stall_nudge_episodes: std::collections::HashMap::new(),
+            pending_stall_nudge_submissions: std::collections::HashMap::new(),
             session_save_deadline: None,
             session_save_scheduled_revision: None,
             session_save_thread: None,
@@ -1520,6 +1536,27 @@ impl App {
                     .map(|import| (editor.clone(), import))
             })
             .collect();
+        let imported_stall_nudges = imports
+            .iter()
+            .filter_map(|(pane_id, import)| {
+                import
+                    .state
+                    .stall_nudge
+                    .clone()
+                    .map(|state| (*pane_id, state))
+            })
+            .collect();
+        let imported_human_drafts = imports
+            .iter()
+            .filter_map(|(pane_id, import)| {
+                import
+                    .state
+                    .human_draft
+                    .clone()
+                    .filter(|draft| !draft.is_empty())
+                    .map(|draft| (*pane_id, draft))
+            })
+            .collect();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1546,11 +1583,13 @@ impl App {
             app.next_agent_manifest_update_check = Some(now + AUTO_UPDATE_CHECK_INTERVAL);
         }
         app.state.detach_exits = false;
-        app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
         app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.restore_stall_nudge_episodes(imported_stall_nudges, &pane_id_aliases, now);
+        app.restore_handoff_human_drafts(imported_human_drafts, &pane_id_aliases);
+        app.state.pane_id_aliases = pane_id_aliases;
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());
@@ -2348,6 +2387,13 @@ impl App {
             self.state
                 .resume_nudge_message
                 .clone_from(&config.session.resume_nudge_message);
+            self.state.auto_nudge_stalled_agents = config.session.auto_nudge_stalled_agents;
+            self.state.nudge_after =
+                auto_nudge::nudge_after_duration(config.session.nudge_after_minutes);
+            self.state.max_nudges = config.session.max_nudges;
+            self.state
+                .stall_nudge_message
+                .clone_from(&config.session.stall_nudge_message);
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session
@@ -3002,8 +3048,7 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     self.state.clear_hovered_control();
-                    if self.state.symphony_detail.is_some()
-                        || self.state.work_view.is_some()
+                    if self.try_route_paste_to_overlay(&text)
                         || self.try_route_paste_to_popup(&text)
                     {
                     } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
@@ -8973,6 +9018,59 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.name_input, "feature/logs");
         assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_pastes_into_home_composer_without_forwarding_to_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.home = Some(home::HomeState::default());
+
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::Paste("first".into()),
+                crate::raw_input::RawInputEvent::Paste(" second".into()),
+                crate::raw_input::RawInputEvent::Paste(" third".into()),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some("first second third")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_paste_is_swallowed_by_dock_object_preview() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.dock_object_preview = Some(state::DockObjectRef {
+            surface: state::DockSurface::Linear,
+            key: "SCA-1".into(),
+        });
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("hidden".into())],
+            true,
+        );
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

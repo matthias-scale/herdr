@@ -434,6 +434,17 @@ class ClosingBlockV2Tests(unittest.TestCase):
         )
         self.assertIn("Confirm the gate text is visible.", items[1]["text"])
 
+    def test_what_to_test_alone_stays_idle_because_it_is_not_an_action_point(self):
+        block = closing_block.parse(
+            "**Critical action points (0 blocking)**\n\n"
+            "**What to test**\n\n"
+            "1. Confirm the green state remains visible.\n\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual([item["label"] for item in block.wire_items()], ["What to test"])
+        self.assertEqual(block.herdr_state, "idle")
+
     def test_decisions_are_separate_and_reversible(self):
         decisions = closing_block.parse(REALISTIC_CAP).wire_decisions()
 
@@ -544,6 +555,9 @@ class ClosingBlockV2Tests(unittest.TestCase):
     def test_adversarial_repeated_nothing_markers_keep_the_final_section(self):
         block = closing_block.parse(ADVERSARIAL_REPEATED_NOTHING)
 
+        self.assertEqual(block.wire_gates(), [])
+        self.assertEqual(block.wire_items(), [])
+        self.assertEqual(block.herdr_state, "idle")
         self.assertEqual(
             [decision["text"] for decision in block.wire_decisions()],
             ["Decision between repeated Nothing markers."],
@@ -614,10 +628,9 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
     def test_labeled_items_outrank_the_declared_count_and_keep_their_labels(self):
         # Reverses the previous "declared count floors blocking" contract.
-        # Answer and Verify are non-blocking by definition, so a header that
-        # over-declares above them is a miscounted header, not a hidden gate.
-        # Latching it parked panes as blocked whose agent was free to proceed,
-        # which is the whole point of the non-blocking labels.
+        # Answer and Verify do not count as Gates, so a header that over-declares
+        # above them is a miscounted header, not a hidden Gate. They still block
+        # the pane once no agent work remains.
         for count, text in DECLARED_COUNT_WITH_ONLY_NONBLOCKING_ITEMS.items():
             with self.subTest(count=count):
                 block = closing_block.parse(text)
@@ -702,7 +715,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 self.assertEqual(block.blocking, 1)
                 self.assertEqual(block.herdr_state, "blocked")
 
-    def test_a_complete_labeled_parse_still_lets_labels_win(self):
+    def test_a_complete_labeled_answer_blocks_because_no_agent_is_running(self):
         # The Part 2 fix itself: nothing was discarded and the author labeled
         # every line, so a miscounted header loses to the labels.
         block = closing_block.parse(
@@ -714,7 +727,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         )
 
         self.assertEqual(block.blocking, 0)
-        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(block.herdr_state, "blocked")
 
         # A real gate beside an answer is unaffected.
         mixed = closing_block.parse(
@@ -883,6 +896,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
 
         self.assertEqual(outcome["payload"]["v"], 2)
+        self.assertEqual(outcome["payload"]["state"], "blocked")
         self.assertIsInstance(outcome["payload"]["gates"][0], dict)
         self.assertEqual(len(outcome["payload"]["items"]), 2)
         self.assertTrue(outcome["payload"]["decisions"][0]["reversible"])
@@ -900,6 +914,48 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(params["state_labels"]["blocked"], "gate")
         self.assertNotIn("Approve PR #2606", params["state_labels"]["blocked"])
         self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
+
+    def test_non_gate_action_points_block_only_when_no_agent_is_running(self):
+        cases = [
+            ([{"label": "Answer", "text": "Choose the release lane"}], 0, "answer"),
+            ([{"label": "Verify", "text": "Confirm the deployed build"}], 0, "verify"),
+            (
+                [
+                    {"label": "Answer", "text": "Choose the release lane"},
+                    {"label": "Verify", "text": "Confirm the deployed build"},
+                ],
+                0,
+                "2 action points",
+            ),
+            ([{"label": "Answer", "text": "Choose the release lane"}], 2, "working"),
+        ]
+        for items, agents, expected_label in cases:
+            with self.subTest(agents=agents, expected_label=expected_label), mock.patch.object(
+                herdr_status, "_rpc"
+            ) as rpc, mock.patch.dict(
+                herdr_status.os.environ,
+                {"XDG_STATE_HOME": self._state_dir()},
+                clear=False,
+            ):
+                outcome = herdr_status.report(
+                    agent="claude",
+                    blocking=0,
+                    agents=agents,
+                    items=items,
+                    pane_id="w9:p17",
+                    sock_path="/tmp/herdr-test.sock",
+                )
+
+            expected_state = "working" if agents else "blocked"
+            self.assertEqual(outcome["payload"]["state"], expected_state)
+            self.assertEqual(outcome["payload"]["items"][0]["text"], items[0]["text"])
+            report_params = rpc.call_args_list[1].args[3]
+            self.assertEqual(report_params["state"], expected_state)
+            metadata_params = rpc.call_args_list[-1].args[3]
+            if agents:
+                self.assertEqual(metadata_params["state_labels"]["working"], expected_label)
+            else:
+                self.assertEqual(metadata_params["state_labels"]["blocked"], expected_label)
 
     def test_report_emits_contract_tokens_together_and_truncates_text(self):
         contract = "x" * 220

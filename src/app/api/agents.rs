@@ -486,6 +486,90 @@ mod tests {
             .set_detected_state(Some(Agent::Codex), AgentState::Idle);
     }
 
+    fn assert_list_display_title_matches_sidebar(
+        app: &mut App,
+        pane_id: crate::layout::PaneId,
+        expected: &str,
+    ) {
+        let response = app.handle_agent_list("titles".into());
+        let success: SuccessResponse = serde_json::from_str(&response).expect("agent list");
+        let ResponseResult::AgentList { agents } = success.result else {
+            panic!("expected agent list response");
+        };
+        let agent = agents.into_iter().next().expect("one agent");
+        let sidebar_title = crate::ui::sidebar_thread_entries(&app.state)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane_id)
+            .and_then(|entry| entry.primary_tab_label)
+            .expect("sidebar title");
+        assert_eq!(agent.display_title.as_deref(), Some(expected));
+        assert_eq!(agent.display_title.as_deref(), Some(sidebar_title.as_str()));
+    }
+
+    #[test]
+    fn agent_list_display_title_uses_manual_pane_label() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut app, 0, pane_id);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_manual_label("host pane label".into());
+        terminal.set_terminal_title(Some("ignored terminal title".into()));
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                work_title: Some("ignored work title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_list_display_title_matches_sidebar(&mut app, pane_id, "host pane label");
+    }
+
+    #[test]
+    fn agent_list_display_title_filters_tilde_cwd_with_host_home() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut app, 0, pane_id);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let home = std::env::var_os("HOME").expect("test host HOME");
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.cwd = std::path::PathBuf::from(home).join("fleet-title-project");
+        terminal.set_terminal_title(Some("~/fleet-title-project".into()));
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                work_title: Some("host work title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_list_display_title_matches_sidebar(&mut app, pane_id, "host work title");
+    }
+
+    #[test]
+    fn agent_list_display_title_uses_work_title_fallback() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut app, 0, pane_id);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("agent terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                work_title: Some("prompt-derived host title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_list_display_title_matches_sidebar(&mut app, pane_id, "prompt-derived host title");
+    }
+
     fn assert_agent_list_refs(app: &mut App, expected: &[(usize, crate::layout::PaneId)]) {
         let mut expected = expected
             .iter()

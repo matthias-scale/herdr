@@ -32,8 +32,7 @@ const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
-const SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH: usize = 44;
-const SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH: usize = 16;
+const SIDEBAR_WIDE_ROW_MIN_WIDTH: usize = 44;
 const SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH: usize = 6;
 const SIDEBAR_HOST_TOKEN_NARROW_WIDTH: usize = 4;
 
@@ -310,7 +309,7 @@ fn compact_row_title_for_width<'a>(
     width: usize,
     requested_prefix: usize,
 ) -> &'a str {
-    if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+    if width >= SIDEBAR_WIDE_ROW_MIN_WIDTH {
         return title;
     }
     let Some(title_only) = title_without_object_identifier(title) else {
@@ -710,30 +709,12 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let trailing_tag = tab
-        .then_some(entry.space_label.as_str())
-        .filter(|_| !entry.space_label_redundant)
-        .filter(|tag| !tag.is_empty());
-    let mut space_suffix = None;
-    let mut displayed_title_width = title_width;
-    if let Some(tag) = trailing_tag {
-        if usize::from(rect.width) >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
-            let suffix = format!(" · {tag}");
-            let candidate_title_width = title_width.saturating_sub(display_width(&suffix));
-            if candidate_title_width >= SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH {
-                space_suffix = Some(suffix);
-                displayed_title_width = candidate_title_width;
-            }
-        }
-    }
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
-        && displayed_title_width
-            >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
+        && title_width >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
     .then_some(SIDEBAR_STAR_SUFFIX);
-    let title_text_width =
-        displayed_title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text_width = title_width.saturating_sub(star_suffix.map_or(0, display_width));
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
@@ -781,15 +762,6 @@ fn render_compact_agent_row_with_prefix(
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
     ]);
-    if let Some(suffix) = space_suffix.as_deref() {
-        spans.push(Span::styled(
-            suffix,
-            compact_row_style(
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                bg,
-            ),
-        ));
-    }
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
@@ -1394,11 +1366,12 @@ pub(crate) fn remote_agent_panel_entries(
                         seen,
                         state == AgentState::Unknown,
                         row.agent.clone(),
-                        row.name
+                        row.title
                             .clone()
+                            .or_else(|| row.name.clone())
                             .unwrap_or_else(|| row.agent_ref.agent.clone()),
-                        row.name.is_some(),
-                        None,
+                        row.title.is_some(),
+                        row.title.clone(),
                         None,
                         None,
                         false,
@@ -1423,14 +1396,12 @@ pub(crate) fn remote_agent_panel_entries(
                         info.agent_status != crate::api::schema::AgentStatus::Done,
                         info.agent_status == crate::api::schema::AgentStatus::Stale,
                         info.display_agent.clone().or_else(|| info.agent.clone()),
-                        info.name
+                        row.title
                             .clone()
-                            .or_else(|| info.terminal_title_stripped.clone())
-                            .or_else(|| info.terminal_title.clone())
-                            .or_else(|| info.title.clone())
+                            .or_else(|| row.name.clone())
                             .unwrap_or_else(|| row.agent_ref.agent.clone()),
-                        info.name.is_some(),
-                        info.name.clone(),
+                        row.title.is_some(),
+                        row.title.clone(),
                         info.terminal_title.clone(),
                         info.terminal_title_stripped.clone(),
                         !info.gates.is_empty(),
@@ -1471,7 +1442,7 @@ pub(crate) fn remote_agent_panel_entries(
                         tab_has_custom_name,
                         tab_label_leads_with_agent: false,
                         pane_label,
-                        pane_label_is_agent_identity: false,
+                        pane_label_is_agent_identity: true,
                         terminal_title,
                         terminal_title_stripped,
                         agent_label,
@@ -1930,10 +1901,12 @@ fn section_header_color(title: &str, p: &Palette) -> ratatui::style::Color {
 /// every time an agent blocks or unblocks, and a collapse the user asked for
 /// must survive that churn.
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
-    app.collapsed_sidebar_groups.contains(&format!(
-        "{}:{title}",
-        app.sidebar_group_mode.collapse_namespace()
-    ))
+    let key = format!("{}:{title}", app.sidebar_group_mode.collapse_namespace());
+    if title.starts_with("host:") {
+        !app.expanded_remote_host_groups.contains(&key)
+    } else {
+        app.collapsed_sidebar_groups.contains(&key)
+    }
 }
 
 pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
@@ -2682,50 +2655,16 @@ fn entry_terminal<'a>(
     app.terminals.get(&pane.attached_terminal_id)
 }
 
-fn stable_binding_values<'a>(sources: impl IntoIterator<Item = &'a [String]>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    sources
-        .into_iter()
-        .flatten()
-        .filter(|value| seen.insert((*value).clone()))
-        .cloned()
-        .collect()
-}
-
 fn preferred_pr_urls(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
-    let Some(terminal) = entry_terminal(app, entry) else {
-        return Vec::new();
-    };
-    let tiers = terminal.work_context.snapshot_tiers();
-    let declared = stable_binding_values([
-        tiers.manual.pr_urls.as_slice(),
-        tiers.hook_turn.pr_urls.as_slice(),
-    ]);
-    if !declared.is_empty() {
-        return declared;
-    }
-    if !tiers.git_observation.pr_urls.is_empty() {
-        return tiers.git_observation.pr_urls;
-    }
-    tiers.restored_fallback.pr_urls
+    entry_work_context(app, entry)
+        .map(|context| context.pr_urls.clone())
+        .unwrap_or_default()
 }
 
 fn preferred_ticket_ids(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
-    let Some(terminal) = entry_terminal(app, entry) else {
-        return Vec::new();
-    };
-    let tiers = terminal.work_context.snapshot_tiers();
-    let declared = stable_binding_values([
-        tiers.manual.ticket_ids.as_slice(),
-        tiers.hook_turn.ticket_ids.as_slice(),
-    ]);
-    if !declared.is_empty() {
-        return declared;
-    }
-    if !tiers.git_observation.ticket_ids.is_empty() {
-        return tiers.git_observation.ticket_ids;
-    }
-    tiers.restored_fallback.ticket_ids
+    entry_work_context(app, entry)
+        .map(|context| context.ticket_ids.clone())
+        .unwrap_or_default()
 }
 
 fn pull_request_number(url: &str) -> Option<&str> {
@@ -7100,7 +7039,7 @@ fn render_workspace_list(
 }
 
 fn narrow_view_tab_prefix(app: &AppState, width: usize) -> Option<usize> {
-    if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH {
+    if width >= SIDEBAR_WIDE_ROW_MIN_WIDTH {
         return None;
     }
     let rows = sidebar_rows(app);
@@ -8174,6 +8113,7 @@ pub(crate) mod tests {
             target: name.into(),
             local,
             session: None,
+            socket: None,
             state: crate::fleet::HostState::Reachable,
             version: None,
             protocol: None,
@@ -8256,9 +8196,23 @@ pub(crate) mod tests {
             .collect()
     }
 
+    fn expand_remote_host(app: &mut AppState, host: &str) {
+        app.toggle_sidebar_group(&remote_host_collapse_key(host));
+    }
+
     #[test]
-    fn remote_rows_group_under_one_collapsible_header_per_host() {
+    fn remote_host_groups_start_collapsed_and_keep_an_explicit_expansion() {
         let mut app = app_with_two_remote_hosts();
+
+        assert_eq!(
+            remote_row_shape(&app),
+            [
+                "host remote-b (2) collapsed=true",
+                "host remote-a (1) collapsed=true",
+            ]
+        );
+
+        expand_remote_host(&mut app, "remote-b");
 
         assert_eq!(
             remote_row_shape(&app),
@@ -8266,31 +8220,95 @@ pub(crate) mod tests {
                 "host remote-b (2) collapsed=false",
                 "agent remote-b::pane/1 depth=1",
                 "agent remote-b::pane/2 depth=1",
-                "host remote-a (1) collapsed=false",
-                "agent remote-a::pane/4 depth=1",
-            ]
+                "host remote-a (1) collapsed=true",
+            ],
+            "one explicit expansion reveals only that host"
         );
 
-        app.collapsed_sidebar_groups.insert(format!(
-            "{}:{}",
-            app.sidebar_group_mode.collapse_namespace(),
-            remote_host_collapse_key("remote-b")
-        ));
+        app.remote_agent_panel_entries = app_with_two_remote_hosts().remote_agent_panel_entries;
+        assert!(remote_row_shape(&app)
+            .iter()
+            .any(|row| row == "agent remote-b::pane/1 depth=1"));
 
+        expand_remote_host(&mut app, "remote-b");
         assert_eq!(
             remote_row_shape(&app),
             [
                 "host remote-b (2) collapsed=true",
-                "host remote-a (1) collapsed=false",
-                "agent remote-a::pane/4 depth=1",
+                "host remote-a (1) collapsed=true",
             ],
-            "a collapsed host keeps its header and its count, and gives back its rows"
+            "a second toggle restores the default collapsed state"
         );
+    }
+
+    #[test]
+    fn remote_rows_render_the_host_title_and_fall_back_to_the_handle() {
+        let mut titled = remote_agent_info(
+            "w23:p1D",
+            "cl-ceea66cc",
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+        );
+        titled.terminal_title_stripped = Some("Scalable V2 cost levers handoff".into());
+        titled.work_context.work_title = Some("lower-priority work title".into());
+        let untitled = remote_agent_info(
+            "w23:p1E",
+            "cl-deadbeef",
+            crate::api::schema::AgentStatus::Idle,
+            false,
+            false,
+        );
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "ub1",
+                false,
+                vec![
+                    crate::fleet::FleetRow::test_agent_info_row("ub1", titled),
+                    crate::fleet::FleetRow::test_agent_info_row("ub1", untitled),
+                ],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let entries = remote_agent_panel_entries(&snapshot);
+        let app = AppState::test_new();
+        assert_eq!(
+            snapshot.hosts[0].entries[0].title.as_deref(),
+            Some("Scalable V2 cost levers handoff")
+        );
+        assert_eq!(
+            entries[0].entry.pane_label.as_deref(),
+            Some("Scalable V2 cost levers handoff")
+        );
+        assert_eq!(entries[0].render_title, "Scalable V2 cost levers handoff");
+        assert_eq!(entries[1].render_title, "cl-deadbeef");
+
+        for (entry, expected) in entries
+            .iter()
+            .zip(["Scalable V2 cost levers handoff", "cl-deadbeef"])
+        {
+            let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_remote_compact_agent_row(
+                        &app,
+                        frame,
+                        entry,
+                        Rect::new(0, 0, 80, 1),
+                        1,
+                        None,
+                    )
+                })
+                .unwrap();
+            let rendered = row_text(terminal.backend().buffer(), 0, 80);
+            assert!(rendered.contains(expected), "{rendered:?}");
+        }
     }
 
     #[test]
     fn grouped_remote_rows_hug_each_other_like_local_rows() {
         let mut app = app_with_two_remote_hosts();
+        expand_remote_host(&mut app, "remote-b");
         // The configured agent gap is what made the fleet list twice as tall as
         // the local one; inside a host group the rows must ignore it.
         app.sidebar_agents.row_gap = 1;
@@ -8433,6 +8451,8 @@ pub(crate) mod tests {
 
         let mut app = app_with_agents(&["local"]);
         app.remote_agent_panel_entries = entries.clone();
+        expand_remote_host(&mut app, "remote-b");
+        expand_remote_host(&mut app, "remote-a");
         let rows = sidebar_rows(&app);
         assert!(!rows.iter().any(|row| {
             matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
@@ -8540,6 +8560,7 @@ pub(crate) mod tests {
         };
         let mut app = app_with_agents(&["local"]);
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        expand_remote_host(&mut app, "WorkBox");
         app.sidebar_work_filter.query = "WORKBOX reviewagent".into();
 
         let rows = sidebar_rows(&app);
@@ -9468,6 +9489,9 @@ pub(crate) mod tests {
                 ..crate::fleet::Snapshot::default()
             };
             app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+            for host in hosts {
+                expand_remote_host(&mut app, host);
+            }
 
             let width = 18;
             let area = Rect::new(0, 0, width, 8);
@@ -12028,7 +12052,7 @@ row_gap = 1
     }
 
     #[test]
-    fn reported_at_age_refreshes_with_space_suffix() {
+    fn reported_at_age_refreshes_for_agent_rows() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -12095,7 +12119,7 @@ row_gap = 1
     }
 
     #[test]
-    fn space_suffix_preserves_visible_activity_age_deadlines() {
+    fn agent_rows_preserve_visible_activity_age_deadlines() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -12860,7 +12884,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn a_blocked_worklist_row_hides_its_redundant_space_suffix() {
+    fn a_blocked_worklist_row_ends_at_its_age() {
         let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
         app.sidebar_group_mode = SidebarGroupMode::Spaces;
         let blocked_pane = app.workspaces[0].tabs[0].root_pane;
@@ -12882,12 +12906,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
-        assert!(rendered.contains('—'), "{rendered:?}");
+        assert!(rendered.ends_with('—'), "{rendered:?}");
         assert!(!rendered.contains(" · ws0"), "{rendered:?}");
     }
 
     #[test]
-    fn f19_1a_keeps_age_and_appends_divergent_space_suffix_when_wide() {
+    fn agent_rows_end_at_age_and_return_suffix_width_to_title() {
         let mut app = app_with_agents(&["one", "two"]);
         app.workspaces[0].custom_name = Some("t3-sample".into());
         app.workspaces[1].custom_name = Some("other-space".into());
@@ -12958,15 +12982,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("compact row should render");
             row_text(terminal.backend().buffer(), 0, width)
         };
-        let below_suffix_threshold = render_at_row_width(&entry, 43, 0);
+        let mut width_probe = entry.clone();
+        width_probe.primary_tab_label = Some("sample-pr-title-uses-width".into());
+        let wide_enough_for_old_suffix = render_at_row_width(&width_probe, 44, 0);
         assert!(
-            !below_suffix_threshold.contains("· t3-sample"),
-            "{below_suffix_threshold:?}"
+            wide_enough_for_old_suffix.contains("sample-pr-title-uses-width"),
+            "{wide_enough_for_old_suffix:?}"
         );
-        let at_suffix_threshold = render_at_row_width(&entry, 44, 0);
         assert!(
-            at_suffix_threshold.contains("2m · t3-sample"),
-            "{at_suffix_threshold:?}"
+            wide_enough_for_old_suffix.ends_with("2m"),
+            "{wide_enough_for_old_suffix:?}"
+        );
+        assert!(
+            !wide_enough_for_old_suffix.contains("t3-sample"),
+            "{wide_enough_for_old_suffix:?}"
         );
 
         let default_width = render_first_tab_row(&app, 40);
@@ -12983,34 +13012,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
         assert_eq!(nested_ticket, "   ●  sample-line… pi  2m");
 
-        let area = Rect::new(0, 0, 80, 12);
-        let cards = compute_tab_card_areas(&app, area);
-        let card = cards[0].clone();
-        let rect_width = usize::from(card.rect.width);
-        let requested_prefix_width = usize::from(card.depth) * 3 + 1;
-        let provider = compact_provider(&entry);
-        let widths = compact_row_widths(
-            compact_row_title(&entry, true),
-            &provider,
-            rect_width,
-            requested_prefix_width,
-        );
-        let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
-        let retained_title_width = rect_width
-            .saturating_sub(fixed_width)
-            .saturating_sub(display_width(" · t3-sample"));
-        assert!(
-            rect_width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH,
-            "{rect_width}"
-        );
-        assert!(
-            retained_title_width >= SIDEBAR_SPACE_SUFFIX_MIN_TITLE_WIDTH,
-            "{retained_title_width}"
-        );
-
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
-        assert!(wide.contains("2m · t3-sample"), "{wide:?}");
+        assert!(wide.ends_with("2m"), "{wide:?}");
+        assert!(!wide.contains("t3-sample"), "{wide:?}");
     }
 
     #[test]
@@ -13037,7 +13042,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn compact_rows_keep_space_suffix_when_group_header_differs_in_every_mode() {
+    fn compact_rows_omit_space_suffix_when_group_header_differs_in_every_mode() {
         for mode in SidebarGroupMode::ALL {
             let app = space_tag_fixture(mode, SpaceTagFixture::DivergentHeaders);
             let entries = sidebar_tab_entries(&app);
@@ -13046,7 +13051,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(!first.space_label_redundant, "mode {mode:?}");
             let rendered = render_first_tab_row(&app, 120);
             assert!(
-                rendered.contains(&format!(" · {}", first.space_label)),
+                !rendered.contains(&first.space_label),
                 "{mode:?}: {rendered:?}"
             );
         }
@@ -13132,7 +13137,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn duplicate_space_headers_keep_space_suffix_for_disambiguation() {
+    fn duplicate_space_headers_are_disambiguated_without_row_suffixes() {
         let mut app = app_with_agents(&["first", "second", "third"]);
         app.workspaces[0].custom_name = Some("same".into());
         app.workspaces[1].custom_name = Some("same".into());
@@ -13146,7 +13151,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .filter(|entry| entry.space_label == "same")
             .all(|entry| !entry.space_label_redundant));
-        assert!(render_first_tab_row(&app, 80).contains(" · same"));
+        assert!(!render_first_tab_row(&app, 80).contains(" · same"));
     }
 
     #[test]
@@ -14507,11 +14512,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             work_group_shape(&app),
             vec![
                 ("SCA-3102 · annual credits".to_string(), 1, false),
-                ("SCA-3165 · image-edit v3".to_string(), 1, false),
-                // The two-ticket pane is listed under both of its tickets.
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
                 ("OPS-12 · pixel EMQ drop".to_string(), 0, true),
+                ("SCA-3165 · image-edit v3".to_string(), 0, true),
             ]
         );
     }
@@ -14592,7 +14596,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn multi_ticket_pane_appears_under_every_ticket() {
+    fn legacy_multi_ticket_context_keeps_only_its_latest_ticket() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         let panes_under = |app: &AppState, title: &str| {
@@ -14601,8 +14605,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .find(|(header, _, _)| header.starts_with(title))
                 .map(|(_, count, _)| count)
         };
-        // The fixture pane declares SCA-3165 and SCA-3170.
-        assert_eq!(panes_under(&app, "SCA-3165"), Some(1));
+        // The fixture pane's last declaration is SCA-3170.
+        assert_eq!(panes_under(&app, "SCA-3165"), Some(0));
         assert_eq!(panes_under(&app, "SCA-3170"), Some(1));
     }
 
@@ -14757,7 +14761,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .filter(|row| matches!(row, SidebarRow::NestedHeader { dim: true, .. }))
             .count();
-        assert_eq!(dim_rows, 1);
+        assert_eq!(dim_rows, 2);
 
         let mut terminal =
             Terminal::new(TestBackend::new(106, 40)).expect("test terminal for dim rows");
@@ -14817,20 +14821,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .collect::<Vec<_>>(),
             vec![
                 "SCA-3102 · annual credits",
-                "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
                 "unlinked",
+                "SCA-3165 · image-edit v3",
             ]
         );
 
         app.sidebar_work_filter.assignee = Some("jacob".into());
-        // Every SCA ticket is pane-linked in this fixture, so the assignee
-        // filter may only keep narrowing the unassigned section.
+        // Pane links survive the assignee filter; the old SCA-3165 assignment
+        // is now unassigned and therefore filtered out.
         assert_eq!(
             work_group_shape(&app),
             vec![
                 ("SCA-3102 · annual credits".to_string(), 1, false),
-                ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
@@ -15342,9 +15345,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             linear_titles,
             [
                 "SCA-3102 · annual credits",
-                "SCA-3165 · image-edit v3",
                 "SCA-3170 · ads skill map",
                 "unlinked",
+                "SCA-3165 · image-edit v3",
             ]
         );
 
@@ -16279,7 +16282,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f19_multiple_declared_objects_render_once_under_each_object() {
+    fn f19_multiple_declared_objects_keep_only_the_latest_object() {
         let mut app = AppState::test_new();
         app.workspaces = vec![Workspace::test_new("declared")];
         app.ensure_test_terminals();
@@ -16309,7 +16312,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .iter()
                 .map(|group| (group.title.as_str(), group.entries.len()))
                 .collect::<Vec<_>>(),
-            [("#159", 1), ("#160", 1)]
+            [("#160", 1)]
         );
     }
 
@@ -16383,6 +16386,51 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             linear_counts,
             [("linear:SCA-159", 1), ("linear:SCA-206", 4)]
+        );
+    }
+
+    #[test]
+    fn sidebar_projects_only_the_explicit_ticket_and_pull_request_for_an_agent() {
+        const EXPLICIT_PR: &str = "https://github.com/herdrdev/herdr/pull/159";
+        const INFERRED_PR: &str = "https://github.com/herdrdev/herdr/pull/206";
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("single assignment")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                pr_urls: vec![INFERRED_PR.into()],
+                ticket_ids: vec!["SCA-206".into()],
+                ..Default::default()
+            })
+            .expect("valid inferred context");
+        terminal.replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![EXPLICIT_PR.into()],
+            ticket_ids: vec!["SCA-159".into()],
+            ..Default::default()
+        });
+        let entries = sidebar_thread_entries(&app);
+
+        let github = sidebar_work_groups(&app, &entries, SidebarGroupMode::RepoPr);
+        assert_eq!(
+            github
+                .iter()
+                .map(|group| group.key.clone())
+                .collect::<Vec<_>>(),
+            vec![format!("github:{EXPLICIT_PR}")]
+        );
+        let linear = sidebar_work_groups(&app, &entries, SidebarGroupMode::LinearTeam);
+        assert_eq!(
+            linear
+                .iter()
+                .map(|group| group.key.as_str())
+                .collect::<Vec<_>>(),
+            ["linear:SCA-159"]
         );
     }
 
@@ -18082,19 +18130,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .unwrap();
                 let suffix_start = row.find(suffix).expect("agent suffix");
                 assert!(title_start < suffix_start, "{row:?}");
-                let space = if card.ws_idx == 0 {
-                    "claude-code"
-                } else {
-                    "codex"
-                };
-                if width >= SIDEBAR_SPACE_SUFFIX_MIN_ROW_WIDTH as u16 {
-                    let space_start = row
-                        .rfind(&format!(" · {space}"))
-                        .unwrap_or_else(|| panic!("Space suffix at width {width}: {row:?}"));
-                    assert!(suffix_start < space_start, "{row:?}");
-                } else {
-                    assert!(!row.contains(&format!(" · {space}")), "{row:?}");
-                }
+                assert!(!row.contains("claude-code"), "{row:?}");
+                assert!(!row.contains("codex"), "{row:?}");
                 assert!(
                     !row.contains("2.1.237") && !row.contains("0.42.0"),
                     "{row:?}"

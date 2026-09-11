@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
@@ -23,6 +23,126 @@ pub struct NewPane {
     pub pane_id: PaneId,
     pub terminal: TerminalState,
     pub runtime: TerminalRuntime,
+}
+
+pub(crate) struct AgentTitleContext<'a> {
+    pub terminal_title: Option<&'a str>,
+    pub work_title: Option<&'a str>,
+    pub cwd: Option<&'a Path>,
+    pub home: Option<&'a Path>,
+    pub agent_name: Option<&'a str>,
+    pub agent_label: Option<&'a str>,
+    pub display_agent: Option<&'a str>,
+    pub detected_agent: Option<crate::detect::Agent>,
+}
+
+fn is_agent_identity_segment(context: &AgentTitleContext<'_>, segment: &str) -> bool {
+    let same_text = |candidate: &str| segment.trim().eq_ignore_ascii_case(candidate.trim());
+    context.agent_name.is_some_and(same_text)
+        || context.agent_label.is_some_and(same_text)
+        || context.display_agent.is_some_and(same_text)
+        || context.detected_agent.is_some_and(|agent| {
+            crate::detect::agent_product_titles(agent)
+                .iter()
+                .any(|product| same_text(product))
+        })
+}
+
+fn is_novel_title_segment(context: &AgentTitleContext<'_>, title: &str) -> bool {
+    let title = title.trim();
+    let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
+
+    if is_agent_identity_segment(context, title) {
+        return false;
+    }
+
+    let Some(cwd) = context.cwd else {
+        return true;
+    };
+    let cwd_text = cwd.to_string_lossy();
+    if cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(same_text)
+        || same_text(&cwd_text)
+    {
+        return false;
+    }
+
+    if let Some(home) = context.home {
+        let home = home.to_string_lossy();
+        let cwd_lower = cwd_text.to_ascii_lowercase();
+        let home_lower = home.to_ascii_lowercase();
+        if let Some(relative) = cwd_lower.strip_prefix(&home_lower) {
+            if relative.is_empty() || relative.starts_with('/') || relative.starts_with('\\') {
+                let relative = relative.trim_start_matches(['/', '\\']);
+                let abbreviated = if relative.is_empty() {
+                    "~".to_string()
+                } else {
+                    format!("~/{relative}")
+                };
+                if same_text(&abbreviated) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    let path_parts = |value: &str| {
+        value
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>()
+    };
+    let cwd_parts = path_parts(&cwd_text);
+    let title_parts = path_parts(title);
+    if !title_parts.is_empty()
+        && (cwd_parts.starts_with(&title_parts) || cwd_parts.ends_with(&title_parts))
+    {
+        return false;
+    }
+
+    true
+}
+
+fn is_informative_terminal_title(context: &AgentTitleContext<'_>, title: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() || !is_novel_title_segment(context, title) {
+        return false;
+    }
+
+    let segments = title
+        .split(['—', '–', '·', '|'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    segments.len() <= 1
+        || segments
+            .iter()
+            .any(|segment| is_novel_title_segment(context, segment))
+}
+
+/// Pick the same terminal-derived title for local and fleet agent rows.
+pub(crate) fn agent_title_from_terminal_or_work(context: AgentTitleContext<'_>) -> Option<String> {
+    context
+        .detected_agent
+        .and(context.terminal_title)
+        .filter(|title| is_informative_terminal_title(&context, title))
+        .map(|title| {
+            let mut segments = title.splitn(2, ['—', '–', '·', '|']);
+            let leading = segments.next().unwrap_or_default().trim();
+            let remainder = segments
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if is_agent_identity_segment(&context, leading) {
+                remainder.unwrap_or(title).to_string()
+            } else {
+                title.to_string()
+            }
+        })
+        .or_else(|| context.work_title.map(str::to_string))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,128 +318,6 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Agent CLIs often set the terminal title to the current directory; that
-    /// location label duplicates the workspace and hides the useful work title.
-    ///
-    /// Codex composes both: `codex — ~/.herdr-test` is neither the bare cwd nor
-    /// a real session title, and rendering it produces `codex · codex —
-    /// ~/.herdr-test`. A title whose every segment merely restates the agent or
-    /// the location is therefore rejected too.
-    fn is_informative_terminal_title(terminal: &TerminalState, title: &str) -> bool {
-        let title = title.trim();
-        if title.is_empty() {
-            return false;
-        }
-        if !Self::is_novel_title_segment(terminal, title) {
-            return false;
-        }
-
-        let segments = title
-            .split(['—', '–', '·', '|'])
-            .map(str::trim)
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        if segments.len() > 1
-            && !segments
-                .iter()
-                .any(|segment| Self::is_novel_title_segment(terminal, segment))
-        {
-            return false;
-        }
-
-        true
-    }
-
-    /// True when `title` says something the tab bar does not already show from
-    /// the pane's agent name or working directory.
-    fn is_novel_title_segment(terminal: &TerminalState, title: &str) -> bool {
-        let title = title.trim();
-        let cwd = terminal.cwd.to_string_lossy();
-        let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
-
-        if Self::is_agent_identity_segment(terminal, title) {
-            return false;
-        }
-
-        if terminal
-            .cwd
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(same_text)
-            || same_text(&cwd)
-        {
-            return false;
-        }
-
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            let home = home.to_string_lossy();
-            let cwd_lower = cwd.to_ascii_lowercase();
-            let home_lower = home.to_ascii_lowercase();
-            if let Some(relative) = cwd_lower.strip_prefix(&home_lower) {
-                if relative.is_empty() || relative.starts_with('/') || relative.starts_with('\\') {
-                    let relative = relative.trim_start_matches(['/', '\\']);
-                    let abbreviated = if relative.is_empty() {
-                        "~".to_string()
-                    } else {
-                        format!("~/{relative}")
-                    };
-                    if same_text(&abbreviated) {
-                        return false;
-                    }
-                }
-            }
-        }
-
-        let path_parts = |value: &str| {
-            value
-                .split(['/', '\\'])
-                .filter(|part| !part.is_empty() && *part != ".")
-                .map(str::to_ascii_lowercase)
-                .collect::<Vec<_>>()
-        };
-        let cwd_parts = path_parts(&cwd);
-        let title_parts = path_parts(title);
-        if !title_parts.is_empty()
-            && (cwd_parts.starts_with(&title_parts) || cwd_parts.ends_with(&title_parts))
-        {
-            return false;
-        }
-
-        true
-    }
-
-    fn is_agent_identity_segment(terminal: &TerminalState, segment: &str) -> bool {
-        let same_text = |candidate: &str| segment.trim().eq_ignore_ascii_case(candidate.trim());
-        terminal.agent_name.as_deref().is_some_and(same_text)
-            || terminal.effective_agent_label().is_some_and(same_text)
-            || terminal
-                .effective_display_agent()
-                .as_deref()
-                .is_some_and(same_text)
-            // The provider's own product name is not an identity the sidebar
-            // derives, so it survives the checks above and would otherwise
-            // become the row's name once the agent repaints its idle title.
-            || terminal.detected_agent.is_some_and(|agent| {
-                crate::detect::agent_product_titles(agent)
-                    .iter()
-                    .any(|product| same_text(product))
-            })
-    }
-
-    fn terminal_title_without_leading_agent(terminal: &TerminalState, title: &str) -> String {
-        let mut segments = title.splitn(2, ['—', '–', '·', '|']);
-        let leading = segments.next().unwrap_or_default().trim();
-        let remainder = segments
-            .next()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if Self::is_agent_identity_segment(terminal, leading) {
-            remainder.unwrap_or(title).to_string()
-        } else {
-            title.to_string()
-        }
-    }
-
     fn pane_is_agent(&self, pane: PaneId, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
         self.terminal_id(pane)
             .and_then(|terminal_id| terminals.get(terminal_id))
@@ -396,15 +394,21 @@ impl Tab {
             .clone()
             .or_else(|| context.session_name.clone())
             .or_else(|| {
-                terminal
-                    .detected_agent
-                    .is_some()
-                    .then(|| terminal.terminal_title_stripped())
-                    .flatten()
-                    .filter(|title| Self::is_informative_terminal_title(terminal, title))
-                    .map(|title| Self::terminal_title_without_leading_agent(terminal, &title))
-            })
-            .or_else(|| context.work_title.clone());
+                let terminal_title = terminal.terminal_title_stripped();
+                let home = std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(PathBuf::from);
+                agent_title_from_terminal_or_work(AgentTitleContext {
+                    terminal_title: terminal_title.as_deref(),
+                    work_title: context.work_title.as_deref(),
+                    cwd: Some(terminal.cwd.as_path()),
+                    home: home.as_deref(),
+                    agent_name: terminal.agent_name.as_deref(),
+                    agent_label: terminal.effective_agent_label(),
+                    display_agent: terminal.effective_display_agent().as_deref(),
+                    detected_agent: terminal.detected_agent,
+                })
+            });
         (agent.is_some() || ticket.is_some() || binding.is_some() || title.is_some()).then_some(
             TabDisplayProjection::Derived {
                 agent,

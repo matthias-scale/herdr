@@ -656,6 +656,7 @@ mod render_scale_benchmark {
                 target: "bench-remote".into(),
                 local: false,
                 session: None,
+                socket: None,
                 state: crate::fleet::HostState::Reachable,
                 version: None,
                 protocol: None,
@@ -757,6 +758,17 @@ mod render_scale_benchmark {
             "background workspaces",
         );
         assert_full_render_avoids_aggregate_input_state(app_with_active_panes(15), "active panes");
+    }
+
+    #[test]
+    fn unchanged_home_composer_renders_identical_consecutive_frames() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+
+        let first = render_virtual(&mut app, AREA, false);
+        let second = render_virtual(&mut app, AREA, false);
+
+        assert_eq!(first, second);
     }
 
     #[tokio::test(flavor = "current_thread")]
