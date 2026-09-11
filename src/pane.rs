@@ -1917,6 +1917,8 @@ impl PaneRuntime {
             initial_history_ansi: None,
             agent_activity: None,
             agent_state: None,
+            stall_nudge: None,
+            human_draft: None,
             pane_seen: None,
             pane_done_for_ms: None,
         }
@@ -2137,6 +2139,8 @@ impl PaneRuntime {
             initial_history_ansi,
             agent_activity: _,
             agent_state: _,
+            stall_nudge: _,
+            human_draft: _,
             pane_seen: _,
             pane_done_for_ms: _,
         } = state;

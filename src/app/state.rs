@@ -3870,6 +3870,14 @@ pub struct AppState {
     pub nudge_resumed_agents: bool,
     /// Prompt submitted by the resume nudge (`session.resume_nudge_message`).
     pub resume_nudge_message: String,
+    /// Nudge stalled agent panes (`session.auto_nudge_stalled_agents`).
+    pub auto_nudge_stalled_agents: bool,
+    /// Initial quiet period before a stalled pane is nudged.
+    pub nudge_after: std::time::Duration,
+    /// Maximum nudges sent during one stale-status episode.
+    pub max_nudges: u32,
+    /// Prompt submitted to a stalled pane (`session.stall_nudge_message`).
+    pub stall_nudge_message: String,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -6258,6 +6266,11 @@ impl AppState {
             settle_stops_agent: true,
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),
+            auto_nudge_stalled_agents: false,
+            nudge_after: std::time::Duration::from_secs(20 * 60),
+            max_nudges: 3,
+            stall_nudge_message:
+                "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.".to_string(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
@@ -6772,6 +6785,18 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn test_state_projects_stalled_agent_nudge_defaults() {
+        let state = AppState::test_new();
+        assert!(!state.auto_nudge_stalled_agents);
+        assert_eq!(state.nudge_after, std::time::Duration::from_secs(20 * 60));
+        assert_eq!(state.max_nudges, 3);
+        assert_eq!(
+            state.stall_nudge_message,
+            "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+        );
     }
 
     fn linear_ownership_ticket(

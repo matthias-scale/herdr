@@ -576,6 +576,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # nudge_resumed_agents = true
 # The prompt sent by nudge_resumed_agents.
 # resume_nudge_message = "continue"
+# Nudge an agent when both its status declaration and pane activity have gone quiet.
+# auto_nudge_stalled_agents = false
+# Initial quiet period and maximum sends in one stale-status episode.
+# nudge_after_minutes = 20
+# max_nudges = 3
+# The plain-text prompt sent to a stalled agent.
+# stall_nudge_message = "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+# Harnesses with the herdr-status skill installed can use this sharper alternative:
+# stall_nudge_message = "/status"
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
@@ -1167,6 +1176,20 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
         assert!(DEFAULT_CONFIG.contains("[source_control]\n# Merge strategy"));
         assert!(DEFAULT_CONFIG.contains("# merge_method = \"merge\""));
+    }
+
+    #[test]
+    fn default_config_documents_stalled_agent_nudge_and_status_alternative() {
+        assert!(DEFAULT_CONFIG.contains("# auto_nudge_stalled_agents = false"));
+        assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 20"));
+        assert!(DEFAULT_CONFIG.contains("# max_nudges = 3"));
+        assert!(DEFAULT_CONFIG.contains(
+            "# stall_nudge_message = \"Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.\""
+        ));
+        assert!(DEFAULT_CONFIG.contains(
+            "Harnesses with the herdr-status skill installed can use this sharper alternative"
+        ));
+        assert!(DEFAULT_CONFIG.contains("# stall_nudge_message = \"/status\""));
     }
 
     #[test]
