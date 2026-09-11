@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -403,6 +403,15 @@ fn capture_workspace(
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
+            .filter(|(pane_id, _)| {
+                ws.tabs.iter().all(|tab| {
+                    tab.panes.get(pane_id).is_none_or(|pane| {
+                        !terminals
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(|terminal| terminal.remote_proxy)
+                    })
+                })
+            })
             .map(|(pane_id, number)| (pane_id.raw(), *number))
             .collect(),
         next_public_pane_number: ws.next_public_pane_number,
@@ -411,16 +420,7 @@ fn capture_workspace(
         tabs: ws
             .tabs
             .iter()
-            // Remote focus proxy panes are ephemeral wire surfaces: a restore
-            // must never respawn them as local shells.
-            .filter(|tab| {
-                !tab.panes.values().any(|pane| {
-                    terminals
-                        .get(&pane.attached_terminal_id)
-                        .is_some_and(|terminal| terminal.remote_proxy)
-                })
-            })
-            .map(|tab| {
+            .filter_map(|tab| {
                 capture_tab(
                     tab,
                     terminals,
@@ -443,9 +443,23 @@ fn capture_tab(
     terminal_runtimes: &TerminalRuntimeRegistry,
     captured_at: Instant,
     captured_at_unix: u64,
-) -> TabSnapshot {
+) -> Option<TabSnapshot> {
+    let excluded_panes = tab
+        .panes
+        .iter()
+        .filter_map(|(pane_id, pane)| {
+            terminals
+                .get(&pane.attached_terminal_id)
+                .is_some_and(|terminal| terminal.remote_proxy)
+                .then_some(*pane_id)
+        })
+        .collect::<HashSet<_>>();
+    let layout = capture_node_without_panes(tab.layout.root(), &excluded_panes)?;
     let mut panes = HashMap::new();
     for id in tab.panes.keys() {
+        if excluded_panes.contains(id) {
+            continue;
+        }
         let cwd = tab
             .cwd_for_pane(*id, terminals, terminal_runtimes)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -525,19 +539,25 @@ fn capture_tab(
             },
         );
     }
-    TabSnapshot {
+    let focused = if excluded_panes.contains(&tab.layout.focused()) {
+        first_pane_id_in_layout(&layout)?
+    } else {
+        tab.layout.focused().raw()
+    };
+    let root_pane = first_pane_id_in_layout(&layout)?;
+    Some(TabSnapshot {
         custom_name: tab.custom_name.clone(),
         name_origin: tab.name_origin,
-        layout: capture_node(tab.layout.root()),
+        layout,
         panes,
         zoomed: tab.zoomed,
         prio: tab.prio,
         pinned: tab.pinned,
         starred: tab.starred,
         subgroup: tab.subgroup.clone(),
-        focused: Some(tab.layout.focused().raw()),
-        root_pane: Some(tab.root_pane.raw()),
-    }
+        focused: Some(focused),
+        root_pane: Some(root_pane),
+    })
 }
 
 /// Capture pane screen history separately from the structural session snapshot.
@@ -599,6 +619,7 @@ fn capture_pane_history(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
     match node {
         Node::Pane(id) => LayoutSnapshot::Pane(id.raw()),
@@ -617,6 +638,38 @@ pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
             ratio: *ratio,
             first: Box::new(capture_node(first)),
             second: Box::new(capture_node(second)),
+        },
+    }
+}
+
+fn capture_node_without_panes(
+    node: &Node,
+    excluded_panes: &HashSet<crate::layout::PaneId>,
+) -> Option<LayoutSnapshot> {
+    match node {
+        Node::Pane(id) => (!excluded_panes.contains(id)).then_some(LayoutSnapshot::Pane(id.raw())),
+        Node::Split {
+            direction,
+            leading,
+            ratio,
+            first,
+            second,
+        } => match (
+            capture_node_without_panes(first, excluded_panes),
+            capture_node_without_panes(second, excluded_panes),
+        ) {
+            (Some(first), Some(second)) => Some(LayoutSnapshot::Split {
+                direction: match direction {
+                    Direction::Horizontal => DirectionSnapshot::Horizontal,
+                    Direction::Vertical => DirectionSnapshot::Vertical,
+                },
+                leading: *leading,
+                ratio: *ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+            (None, None) => None,
         },
     }
 }
@@ -761,15 +814,30 @@ mod tests {
             );
             registry
         };
+        state.workspaces[0].active_tab = 1;
+        let local_pane = state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let proxy_tab = state.workspaces[0].active_tab();
         assert_eq!(state.workspaces[0].tabs.len(), 2);
+        assert!(proxy_tab.is_some_and(|tab| tab.panes.len() == 2));
 
         let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(
             snapshot.workspaces[0].tabs.len(),
-            1,
-            "a proxy tab never persists as a restorable shell"
+            2,
+            "a local sibling remains restorable when its tab also contains a proxy"
         );
+        let mixed_tab = snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .find(|tab| tab.custom_name.as_deref() == Some("buildbox::w1:p3"))
+            .expect("mixed proxy tab remains with its local pane");
+        match &mixed_tab.layout {
+            LayoutSnapshot::Pane(id) => assert_eq!(*id, local_pane.raw()),
+            LayoutSnapshot::Split { .. } => panic!("proxy leaf was not pruned"),
+        }
+        assert!(mixed_tab.panes.contains_key(&local_pane.raw()));
+        assert_eq!(mixed_tab.panes.len(), 1);
         let history = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
         assert!(
             history
