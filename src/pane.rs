@@ -1520,8 +1520,24 @@ impl PaneRuntimeIo {
         }
     }
 
-    fn sync_remote_proxy_resize(&self) {
-        if let PaneRuntimeIo::RemoteProxy { outbound, .. } = self {
+    fn sync_remote_proxy_resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) {
+        if let PaneRuntimeIo::RemoteProxy {
+            outbound,
+            resize_slot,
+            ..
+        } = self
+        {
+            if let Ok(mut slot) = resize_slot.lock() {
+                *slot = (rows, cols, cell_width_px, cell_height_px);
+            }
+            // Latest-wins: when the channel is full, an earlier marker
+            // still delivers the slot value just written.
             let _ = outbound.try_send(ProxyOutbound::SyncResize);
         }
     }
@@ -3495,8 +3511,25 @@ impl PaneRuntime {
         }
     }
 
+    /// Queue a resize marker for a remote proxy only when its geometry
+    /// changed since the last queued marker (or the Hello handshake, which
+    /// carries the spawn geometry). The event loop calls this after every
+    /// draw for every proxy pane, so the steady state must not touch the
+    /// wire at all.
     pub fn sync_remote_proxy_resize(&self) {
-        self.io.sync_remote_proxy_resize();
+        let size = self.current_size.get();
+        if let PaneRuntimeIo::RemoteProxy { resize_slot, .. } = &self.io {
+            let already_queued = resize_slot
+                .lock()
+                .map(|slot| *slot == size)
+                .unwrap_or(false);
+            if already_queued {
+                return;
+            }
+        }
+        let (rows, cols, cell_width_px, cell_height_px) = size;
+        self.io
+            .sync_remote_proxy_resize(rows, cols, cell_width_px, cell_height_px);
     }
 
     #[cfg(unix)]
@@ -4083,6 +4116,48 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    #[test]
+    fn proxy_resize_sync_queues_a_marker_only_when_geometry_changed() {
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("proxy runtime");
+
+        // The Hello handshake carries the spawn geometry, so a sync without
+        // an intervening resize queues nothing.
+        runtime.sync_remote_proxy_resize();
+        assert!(
+            channels.outbound_rx.try_recv().is_err(),
+            "an unchanged proxy geometry must not touch the wire"
+        );
+
+        // A geometry change queues exactly one marker and updates the slot
+        // the writer reads.
+        runtime.resize_remote_proxy_without_wire(30, 100, 9, 18);
+        runtime.sync_remote_proxy_resize();
+        assert_eq!(
+            channels.outbound_rx.try_recv(),
+            Ok(ProxyOutbound::SyncResize)
+        );
+        assert_eq!(
+            *channels.resize_slot.lock().expect("resize slot lock"),
+            (30, 100, 9, 18)
+        );
+
+        // Steady state: the event loop syncs after every draw, and repeated
+        // syncs with unchanged geometry stay silent.
+        runtime.sync_remote_proxy_resize();
+        assert!(
+            channels.outbound_rx.try_recv().is_err(),
+            "post-draw syncs with unchanged geometry must stay off the wire"
+        );
+    }
 
     #[tokio::test]
     async fn suspended_runtime_discards_direct_try_and_delayed_input() {
