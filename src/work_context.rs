@@ -510,6 +510,10 @@ impl PaneWorkContextState {
         &self.effective
     }
 
+    pub(crate) fn git_observed_repo(&self) -> Option<&str> {
+        self.git_observation.repo.as_deref()
+    }
+
     /// The declaration tier, which is the only one a human edit owns.
     pub fn manual(&self) -> &PaneWorkContext {
         &self.manual

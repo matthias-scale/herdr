@@ -251,6 +251,16 @@ pub(crate) fn home_dispatch_completed(pane_id: u32) {
     );
 }
 
+pub(crate) fn home_dispatch_failed(err: &str) {
+    tracing::warn!(
+        event = "home.dispatch.complete",
+        subsystem = "home",
+        outcome = "error",
+        err,
+        "home dispatch failed"
+    );
+}
+
 pub(crate) fn client_first_frame() {
     tracing::info!(
         event = "client.first_frame",
@@ -290,6 +300,34 @@ pub(crate) fn workspace_created(workspace_id: &str, root_pane_id: u32) {
         workspace_id,
         pane_id = root_pane_id,
         "workspace created"
+    );
+}
+
+pub(crate) fn workspace_create_failed(request_id: &str, code: &str, err: &str) {
+    tracing::warn!(
+        event = "workspace.create",
+        subsystem = "workspace",
+        outcome = "error",
+        request_id,
+        code,
+        err,
+        "workspace creation failed"
+    );
+}
+
+pub(crate) fn repo_routing_moved(
+    pane_id: &str,
+    source_workspace_id: &str,
+    target_workspace_id: &str,
+) {
+    tracing::info!(
+        event = "repo_routing.move",
+        subsystem = "repo_routing",
+        outcome = "ok",
+        pane_id,
+        source_workspace_id,
+        target_workspace_id,
+        "repository routing moved pane"
     );
 }
 

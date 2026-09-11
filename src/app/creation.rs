@@ -177,7 +177,7 @@ impl App {
             return;
         }
 
-        self.runtime_workspace_create(
+        let response = self.runtime_workspace_create(
             request_id,
             crate::api::schema::WorkspaceCreateParams {
                 cwd: None,
@@ -187,6 +187,13 @@ impl App {
                 work_context: None,
             },
         );
+        if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) {
+            crate::logging::workspace_create_failed(
+                request_id,
+                &error.error.code,
+                &error.error.message,
+            );
+        }
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
