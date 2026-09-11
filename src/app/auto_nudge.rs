@@ -1004,6 +1004,42 @@ mod tests {
             .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
     }
 
+    #[tokio::test]
+    async fn tui_scheduler_declared_wait_uses_eta_plus_grace() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.state.auto_nudge_stalled_agents = false;
+        app.handle_internal_event_with_prefix_sync(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(1),
+            wait: Some("CI run 4123".into()),
+            eta_s: Some(120),
+            reported_at: None,
+            session_ref: None,
+        });
+        let reported_at = app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("declared wait report timestamp");
+        let stale_at = reported_at
+            .checked_add(Duration::from_secs(120))
+            .and_then(|deadline| deadline.checked_add(crate::terminal::state::DECLARED_WAIT_GRACE))
+            .expect("declared wait watchdog deadline");
+
+        assert_eq!(app.state.next_agent_watchdog_deadline(), Some(stale_at));
+        app.handle_scheduled_tasks(stale_at - Duration::from_secs(1), false);
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        app.handle_scheduled_tasks(stale_at, false);
+
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(app.stall_nudge_episodes.is_empty());
+        assert_eq!(drain(&mut rx), "");
+    }
+
     /// Pins stale detection while the opt-in nudge action remains disabled.
     #[tokio::test]
     async fn tui_scheduler_subagent_claim_uses_configured_budget_when_nudges_are_disabled() {

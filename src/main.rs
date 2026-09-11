@@ -578,8 +578,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resume_nudge_message = "continue"
 # Nudge an agent when both its status declaration and pane activity have gone quiet.
 # auto_nudge_stalled_agents = false
-# Mark a quiet agent status report stale after this many minutes. A pane with an
-# active foreground child process keeps the 20-minute busy budget.
+# Mark a quiet, unattended agent status report stale after this many minutes: a
+# finished report still holding sub-processes, or a pane parked on an unverified
+# subagent claim. An agent reporting itself working keeps the 20-minute budget.
 # agent_stale_after_minutes = 5
 # Initial quiet period and maximum sends in one stale-status episode.
 # nudge_after_minutes = 5

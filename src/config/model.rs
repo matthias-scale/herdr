@@ -334,8 +334,10 @@ pub struct SessionConfig {
     /// Nudge stalled agent panes after both their status declaration and pane
     /// activity have gone quiet. Default: false.
     pub auto_nudge_stalled_agents: bool,
-    /// Mark an agent status report stale after this many quiet minutes.
-    /// Default: 5.
+    /// Mark an unattended agent status report stale after this many quiet
+    /// minutes: a finished report still holding sub-processes, or a pane parked
+    /// on an unverified subagent claim. A working report keeps the 20-minute
+    /// busy budget. Default: 5.
     pub agent_stale_after_minutes: u64,
     /// Initial quiet period before a stalled pane is nudged. Default: 5.
     pub nudge_after_minutes: u64,
