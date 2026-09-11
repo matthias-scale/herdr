@@ -998,6 +998,7 @@ impl App {
                 .as_ref()
                 .and_then(|home| home.dispatch_plan().err())
                 .unwrap_or_else(|| "dispatch failed".into());
+            crate::logging::home_dispatch_failed(&message);
             let previous_toast = self.state.toast.clone();
             self.state.toast = Some(crate::app::state::ToastNotification {
                 kind: crate::app::state::ToastKind::NeedsAttention,

@@ -1073,6 +1073,7 @@ impl App {
             });
         }
         if let Some(closed_workspace_id) = &closed_workspace_id {
+            crate::logging::workspace_closed(closed_workspace_id);
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceClosed,
                 data: EventData::WorkspaceClosed {
