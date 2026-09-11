@@ -3540,6 +3540,9 @@ impl HeadlessServer {
         if let Some(mode) = self.app.state.take_sidebar_group_mode_persistence_request() {
             crate::client::presentation::save_sidebar_group_mode(mode);
         }
+        if let Some((key, mode)) = self.app.state.take_sidebar_group_sort_persistence_request() {
+            crate::client::presentation::save_sidebar_group_sort(&key, mode);
+        }
         if self.app.state.take_sidebar_view_scan_request() {
             self.app.request_sidebar_view_scan(Instant::now());
         }
@@ -3650,6 +3653,8 @@ impl HeadlessServer {
                     client.sidebar_presentation.group_menu_selected = group_mode.view_index();
                     client.sidebar_presentation.work_filter =
                         crate::client::presentation::load_sidebar_work_filter();
+                    client.sidebar_presentation.group_sorts =
+                        crate::client::presentation::load_sidebar_group_sorts();
                 }
                 if !direct_attach_requested {
                     self.foreground_client_id = Some(client_id);

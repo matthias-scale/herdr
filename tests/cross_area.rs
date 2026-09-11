@@ -914,10 +914,11 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
 
     // The attached client must receive a frame that includes the recognizable
     // prefix of the new workspace label. Sidebar disclosure controls may
-    // truncate the suffix at the negotiated client width.
+    // truncate the suffix at the negotiated client width; the group header's
+    // trailing sort control takes another two cells of that budget.
     let saw_workspace_on_client =
         wait_for_frame_matching(&mut client, Duration::from_secs(3), |frame| {
-            frame_contains_text(frame, "api-visible-wor")
+            frame_contains_text(frame, "api-visible")
         })
         .expect("frame decoding should succeed");
     assert!(

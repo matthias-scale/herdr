@@ -56,6 +56,8 @@ Space disclosure is local to each attached UI. Expanding or collapsing a Space i
 
 The visible tree always keeps repository/Space and direct window ownership order. Legacy priority ordering and API-defined Agent views remain accepted for compatibility but do not replace or reorder it; see [UI and sidebar configuration](/docs/configuration/#ui-and-sidebar) and [Agent view queries](/docs/socket-api/#agent-view-queries) for their remaining effects.
 
+Within that tree, each group header (a repository, branch, object, or Space row) carries a sort control (⇅) that reorders only that group's rows: Default (the canonical order), Name A→Z, Status (blocked first, then working, then idle), or Recent (latest state change first). A subgroup inherits its enclosing group's sort until it gets its own, and choices are stored per attached client. A window can also be filed under a user-named subgroup from its context menu ("Move to subgroup…"); a subgroup renders as a collapsible header one level below the window's group and is stored with the session, so it survives a server restart.
+
 Configured `previous_agent` and `next_agent` actions always traverse every detected agent in workspace, tab, and pane order and wrap at both ends. This canonical navigation is independent of sidebar disclosure, priority mode, filters, scrolling, or collapsed presentation. The default `prefix+p` and `prefix+n` bindings traverse every tab, including tabs without agents, in workspace order and then tab order. They wrap at both ends and ignore sidebar and Space collapse state, agent state, and cwd. Use `prefix+ctrl+p` and `prefix+ctrl+n` to move only within the active workspace.
 
 ## Session

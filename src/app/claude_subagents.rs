@@ -1421,6 +1421,42 @@ mod tests {
         (app, terminal_id)
     }
 
+    fn merged_work(url: &str) -> crate::work_index::Snapshot {
+        crate::work_index::Snapshot {
+            items: vec![crate::work_index::WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(21),
+                pr_url: Some(url.into()),
+                pr_title: None,
+                pr_state: Some("merged".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: Default::default(),
+                audience: Default::default(),
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: None,
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: Default::default(),
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        }
+    }
+
     fn observation(
         terminal_id: crate::terminal::TerminalId,
         path: PathBuf,
@@ -1471,29 +1507,41 @@ mod tests {
     }
 
     #[test]
-    fn last_subagent_completion_starts_the_quiet_settle_window() {
+    fn active_subagent_blocks_overdue_inactivity_and_ripe_finished_work() {
         let dir = TestDir::new("settle-after-completion");
         let path = dir.transcript();
         let (mut app, terminal_id) = app_with_claude_target(path.clone());
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let url = "https://github.com/owner/repo/pull/21";
+        let work = merged_work(url);
         let now = Instant::now();
         let old_activity = now - std::time::Duration::from_secs(2 * 60 * 60);
         app.state.active = None;
         app.state.auto_settle_inactive = false;
-        app.state.auto_settle_finished = false;
-        app.state.auto_settle_done = true;
-        app.state.settle_done_after = std::time::Duration::from_secs(30 * 60);
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+        app.state.auto_settle_finished = true;
+        app.state.auto_settle_done = false;
+        app.state.settle_after = std::time::Duration::from_secs(60 * 60);
+        app.state.settle_finished_after = std::time::Duration::from_secs(30 * 60);
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+        terminal
+            .restore_work_context(crate::work_context::PaneWorkContext {
+                pr_urls: vec![url.into()],
+                ..Default::default()
+            })
+            .expect("valid work context");
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
             .unwrap()
             .activity
             .set_last_at(old_activity);
+        let armed_at = now - app.state.settle_finished_after;
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), armed_at, 1_725_000_000),
+            0
+        );
         app.claude_subagent_trackers.insert(
             terminal_id.clone(),
             TranscriptTracker::new(SESSION_ID.into(), path.clone(), 7),
@@ -1508,10 +1556,24 @@ mod tests {
             vec![observation(terminal_id.clone(), path.clone(), 7, AGENT_A)],
             BatchStats::default(),
         ));
-        assert_eq!(
-            app.state.refresh_settled_panes_at(None, now, 1_725_000_000),
-            0
+        app.state.auto_settle_inactive = true;
+        assert!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(now)
+                >= app.state.settle_after
         );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id].finished_since,
+            Some(armed_at)
+        );
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), now, 1_725_000_001),
+            0,
+            "a live sub-agent must outrank both ripe settle triggers"
+        );
+        assert!(!app.state.pane_is_settled(0, pane_id));
 
         app.last_claude_subagent_refresh_generation = 2;
         app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
@@ -1523,24 +1585,26 @@ mod tests {
             vec![completed_observation(terminal_id, path, 7, AGENT_A)],
             BatchStats::default(),
         ));
+        app.state.auto_settle_inactive = false;
         assert_eq!(
-            app.state.refresh_settled_panes_at(None, now, 1_725_000_001),
+            app.state
+                .refresh_settled_panes_at(Some(&work), now, 1_725_000_002),
             0,
-            "clearing the last sub-agent must start, not consume, the quiet window"
+            "clearing the last sub-agent must arm a fresh finished-work window"
         );
         assert_eq!(
             app.state.refresh_settled_panes_at(
-                None,
-                now + app.state.settle_done_after - std::time::Duration::from_nanos(1),
-                1_725_001_799,
+                Some(&work),
+                now + app.state.settle_finished_after - std::time::Duration::from_nanos(1),
+                1_725_001_800,
             ),
             0
         );
         assert_eq!(
             app.state.refresh_settled_panes_at(
-                None,
-                now + app.state.settle_done_after,
-                1_725_001_800,
+                Some(&work),
+                now + app.state.settle_finished_after,
+                1_725_001_801,
             ),
             1
         );
