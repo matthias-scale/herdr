@@ -129,9 +129,11 @@ The optional `session` value adds `--session` when the host opens. Hosts marked
 An empty Hosts surface points back to `[[remote.fleet.hosts]]`.
 
 Fleet agents also appear in the sidebar, grouped under one collapsible header
-per host. Clicking one attaches to that host and focuses the agent you clicked,
-so the session opens on its pane. A host that is already attached is focused
-rather than dialled again, so repeated clicks return to the same pane.
+per host. Clicking one opens that single remote agent in a local pane, using a
+direct terminal attach over SSH rather than a nested Herdr session on the remote
+host. An agent that is already attached is focused rather than dialled again, so
+repeated clicks return to the same pane. The Hosts dock still opens the whole
+remote session.
 
 ## Direct terminal attach
 

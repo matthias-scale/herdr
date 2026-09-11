@@ -15,9 +15,6 @@ use crate::config::{FleetConfig, FleetHostConfig};
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
-/// One focus command is a single request against a server that is already
-/// answering the poller, so it gets the same budget as a default poll.
-const FOCUS_TIMEOUT_MS: u64 = 5_000;
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
@@ -327,6 +324,40 @@ pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, Strin
     Ok(argv)
 }
 
+/// Build the argv that attaches one remote agent's terminal into a local pane.
+///
+/// `herdr --remote <target>` starts a *second* herdr TUI inside the pane and
+/// offers to sync binaries with the remote host, which would stop a server that
+/// is running live agents. Attaching a single agent instead streams that one
+/// remote terminal and touches nothing else on the host.
+pub(crate) fn agent_attach_argv(host: &HostSnapshot, agent: &str) -> Result<Vec<String>, String> {
+    if host.local {
+        return Err(format!("{} is the local host", host.name));
+    }
+    if host.target.trim().is_empty() {
+        return Err(format!("{} has no SSH target", host.name));
+    }
+    if agent.trim().is_empty() {
+        return Err(format!("{} has no agent target", host.name));
+    }
+    Ok(vec![
+        "ssh".to_string(),
+        "-t".to_string(),
+        host.target.clone(),
+        remote_attach_command(host.socket.as_deref(), host.session.as_deref(), agent),
+    ])
+}
+
+fn remote_attach_command(socket: Option<&str>, session: Option<&str>, agent: &str) -> String {
+    let socket = socket
+        .map(|path| format!("HERDR_SOCKET_PATH={} ", shell_quote(path)))
+        .unwrap_or_default();
+    let session = session
+        .map(|name| format!("HERDR_SESSION={} ", shell_quote(name)))
+        .unwrap_or_default();
+    format!("{socket}{session}herdr agent attach {}", shell_quote(agent))
+}
+
 pub(crate) fn start_poller(
     fleet: FleetConfig,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
@@ -632,43 +663,6 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
         .unwrap_or_default();
     format!(
         "set -u\n{socket}{session}herdr agent list || exit $?\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  find \"$HOME/.agents/runs\" -mindepth 2 -maxdepth 2 -type f -name state.json -exec cat {{}} \\; -exec printf '\\n' \\;\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n"
-    )
-}
-
-/// Focus one agent on a remote host so an attach lands on that pane instead of
-/// wherever the remote session was last left.
-///
-/// This runs on its own thread. The click that asks for it is handled on the
-/// render path, and an ssh round trip there would stall every pane on the
-/// screen until the remote answered.
-pub(crate) fn focus_remote_agent(host: &HostSnapshot, agent: &str) {
-    if host.local || host.target.trim().is_empty() || agent.trim().is_empty() {
-        return;
-    }
-    if cfg!(test) {
-        return;
-    }
-    let target = host.target.clone();
-    let name = host.name.clone();
-    let script = remote_focus_script(host.socket.as_deref(), host.session.as_deref(), agent);
-    std::thread::spawn(move || {
-        let timeout = Duration::from_millis(FOCUS_TIMEOUT_MS);
-        if let Err(error) = run_ssh_with_timeout(&target, &script, timeout) {
-            tracing::warn!(host = %name, %error, "could not focus the remote agent");
-        }
-    });
-}
-
-fn remote_focus_script(socket: Option<&str>, session: Option<&str>, agent: &str) -> String {
-    let socket = socket
-        .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
-        .unwrap_or_default();
-    let session = session
-        .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
-        .unwrap_or_default();
-    format!(
-        "set -u\n{socket}{session}herdr agent focus {}\n",
-        shell_quote(agent)
     )
 }
 
@@ -1994,24 +1988,55 @@ mod tests {
     }
 
     #[test]
-    fn remote_focus_script_carries_the_socket_session_and_quoted_target() {
-        let script = remote_focus_script(
-            Some("/home/ubuntu/.config/herdr/herdr.sock"),
-            Some("agents"),
-            "w3K:p11",
-        );
+    fn agent_attach_argv_streams_one_remote_agent_instead_of_a_nested_herdr() {
+        let host = HostSnapshot {
+            name: "workbox".to_string(),
+            target: "you@workbox".to_string(),
+            local: false,
+            session: Some("agents".to_string()),
+            socket: Some("/home/you/.config/herdr/herdr.sock".to_string()),
+            state: HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            entries: Vec::new(),
+        };
 
         assert_eq!(
-            script,
-            "set -u\nexport HERDR_SOCKET_PATH='/home/ubuntu/.config/herdr/herdr.sock'\nexport HERDR_SESSION='agents'\nherdr agent focus 'w3K:p11'\n"
+            agent_attach_argv(&host, "w1:p2").expect("attach argv"),
+            [
+                "ssh",
+                "-t",
+                "you@workbox",
+                "HERDR_SOCKET_PATH='/home/you/.config/herdr/herdr.sock' HERDR_SESSION='agents' herdr agent attach 'w1:p2'"
+            ]
         );
     }
 
     #[test]
-    fn remote_focus_script_quotes_a_target_that_carries_a_quote() {
-        let script = remote_focus_script(None, None, "pane'; rm -rf /");
+    fn agent_attach_command_quotes_a_target_that_carries_a_quote() {
+        assert_eq!(
+            remote_attach_command(None, None, "pane'; rm -rf /"),
+            "herdr agent attach 'pane'\\''; rm -rf /'"
+        );
+    }
 
-        assert_eq!(script, "set -u\nherdr agent focus 'pane'\\''; rm -rf /'\n");
+    #[test]
+    fn agent_attach_argv_rejects_an_empty_agent() {
+        let host = HostSnapshot {
+            name: "workbox".to_string(),
+            target: "you@workbox".to_string(),
+            local: false,
+            session: None,
+            socket: None,
+            state: HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            entries: Vec::new(),
+        };
+
+        assert!(agent_attach_argv(&host, "  ").is_err());
     }
 
     #[test]
