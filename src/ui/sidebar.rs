@@ -2561,22 +2561,37 @@ fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, de
     }));
 }
 
+/// The subgroup a tab is filed under, if any.
+fn sidebar_tab_subgroup<'a>(app: &'a AppState, entry: &AgentPanelEntry) -> Option<&'a str> {
+    app.workspaces
+        .get(entry.ws_idx)
+        .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
+        .and_then(crate::workspace::Tab::subgroup)
+}
+
+/// A group's tab rows split into the unsubgrouped ones and one run per
+/// subgroup, in first-seen order.
+type SidebarSubgroupSplit = (Vec<AgentPanelEntry>, Vec<(String, Vec<AgentPanelEntry>)>);
+
 /// Split a group's rows into the ones with no subgroup and one run per
 /// subgroup, in first-seen order. The assignment lives on the tab, so a
-/// subgroup with no tabs left simply never appears here.
+/// subgroup with no tabs left simply never appears here. Returns `None`
+/// without draining when no tab carries a subgroup, so subgroup-free groups
+/// keep their already-owned entry Vec instead of paying for two fresh ones.
 fn split_sidebar_subgroups(
     app: &AppState,
-    entries: Vec<AgentPanelEntry>,
-) -> (Vec<AgentPanelEntry>, Vec<(String, Vec<AgentPanelEntry>)>) {
+    entries: &mut Vec<AgentPanelEntry>,
+) -> Option<SidebarSubgroupSplit> {
+    if !entries
+        .iter()
+        .any(|entry| sidebar_tab_subgroup(app, entry).is_some())
+    {
+        return None;
+    }
     let mut plain = Vec::new();
     let mut subgroups: Vec<(String, Vec<AgentPanelEntry>)> = Vec::new();
-    for entry in entries {
-        let subgroup = app
-            .workspaces
-            .get(entry.ws_idx)
-            .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
-            .and_then(crate::workspace::Tab::subgroup);
-        match subgroup {
+    for entry in entries.drain(..) {
+        match sidebar_tab_subgroup(app, &entry) {
             Some(name) => match subgroups
                 .iter_mut()
                 .find(|(candidate, _)| candidate == name)
@@ -2587,7 +2602,7 @@ fn split_sidebar_subgroups(
             None => plain.push(entry),
         }
     }
-    (plain, subgroups)
+    Some((plain, subgroups))
 }
 
 /// Emit one group's tab rows: unsubgrouped rows first at `depth`, then one
@@ -2605,7 +2620,14 @@ fn append_subgrouped_tab_rows(
     parent_collapse_key: &str,
     parent_sort: SidebarSortMode,
 ) {
-    let (mut plain, subgroups) = split_sidebar_subgroups(app, entries);
+    // Fast path: no tab is filed under a subgroup, so the owned Vec sorts in
+    // place and goes straight to the rows without any splitting.
+    let mut entries = entries;
+    let Some((mut plain, subgroups)) = split_sidebar_subgroups(app, &mut entries) else {
+        apply_sidebar_group_sort(&mut entries, parent_sort);
+        append_tab_rows(rows, entries, depth);
+        return;
+    };
     apply_sidebar_group_sort(&mut plain, parent_sort);
     append_tab_rows(rows, plain, depth);
     for (name, mut sub_entries) in subgroups {
@@ -5060,6 +5082,13 @@ pub(crate) fn workspace_list_scroll_metrics(
     }
 }
 
+/// Leading sidebar rows hidden by the scroll position. The renderer and the
+/// hit tests pair visible cards against the row list only after skipping this
+/// many entries, so every site must clamp against the same metrics.
+fn workspace_list_scroll_skip(app: &AppState, metrics: &crate::pane::ScrollMetrics) -> usize {
+    app.workspace_scroll.min(metrics.max_offset_from_bottom)
+}
+
 pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
     let metrics = workspace_list_scroll_metrics(app, area);
     let body = workspace_list_body_rect(area, true);
@@ -5551,13 +5580,20 @@ pub(crate) fn sidebar_group_sort_at(app: &AppState, col: u16, row: u16) -> Optio
     // `render_workspace_list` pairs them.
     let area = app.view.sidebar_rect;
     let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
-    let mut sortable = sidebar_rows(app).into_iter().filter_map(|row| match row {
-        SidebarRow::Workspace {
-            sort_key: Some(key),
-            ..
-        } => Some(key),
-        _ => None,
-    });
+    // `compute_workspace_card_areas` hides the scrolled-off leading rows, so
+    // the row list must skip the same entries before the two are zipped.
+    let metrics =
+        workspace_list_scroll_metrics(app, workspace_list_rect_for_app(app, sidebar_area));
+    let mut sortable = sidebar_rows(app)
+        .into_iter()
+        .skip(workspace_list_scroll_skip(app, &metrics))
+        .filter_map(|row| match row {
+            SidebarRow::Workspace {
+                sort_key: Some(key),
+                ..
+            } => Some(key),
+            _ => None,
+        });
     for card in compute_workspace_card_areas(app, sidebar_area) {
         let Some(key) = sortable.next() else {
             break;
@@ -7145,7 +7181,7 @@ fn render_workspace_list(
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let workspace_headers = row_entries
         .iter()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+        .skip(workspace_list_scroll_skip(app, &metrics))
         .filter_map(|row| match row {
             SidebarRow::Workspace {
                 title,
@@ -7343,7 +7379,7 @@ fn render_workspace_list(
     }
     if !app.remote_agent_panel_entries.is_empty() {
         let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
-        let scroll = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+        let scroll = workspace_list_scroll_skip(app, &metrics);
         for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::RemoteAgent { entry, depth }) = row_entries.get(row_area.row_idx)
             else {
@@ -20112,6 +20148,79 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             sidebar_group_sort_at(&app, glyph_col + 1, header.rect.y),
             None,
             "the cell after the glyph is not the control"
+        );
+    }
+
+    #[test]
+    fn scrolled_sidebar_sort_glyph_targets_the_visible_group() {
+        let mut app = sort_app(&[
+            sort_tab("one", "acme/one", AgentState::Working, 1),
+            sort_tab("two", "acme/two", AgentState::Working, 2),
+            sort_tab("three", "acme/three", AgentState::Working, 3),
+            sort_tab("four", "acme/four", AgentState::Working, 4),
+        ]);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 12));
+        app.workspace_scroll = 1;
+        let sidebar_area = Rect::new(
+            app.view.sidebar_rect.x,
+            app.view.sidebar_rect.y,
+            app.view.sidebar_rect.width.saturating_add(1),
+            app.view.sidebar_rect.height,
+        );
+        let card = compute_workspace_card_areas(&app, sidebar_area)
+            .first()
+            .expect("first visible group card")
+            .rect;
+        assert_eq!(
+            sidebar_group_sort_at(&app, card.right() - 1, card.y),
+            Some(("repo:acme/two".to_string(), card.right() - 1)),
+            "with the sidebar scrolled one row, the first visible glyph belongs to group two"
+        );
+    }
+
+    #[test]
+    fn split_sidebar_subgroups_reuses_the_entry_vec_without_subgroups() {
+        let app = sort_app(&[
+            sort_tab("one", "acme/one", AgentState::Working, 1),
+            sort_tab("two", "acme/one", AgentState::Working, 2),
+        ]);
+        let mut entries = sidebar_thread_entries(&app);
+        assert!(
+            split_sidebar_subgroups(&app, &mut entries).is_none(),
+            "no tab carries a subgroup, so no split Vecs are built"
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "the fast path leaves the owned Vec intact for the caller"
+        );
+    }
+
+    #[test]
+    fn split_sidebar_subgroups_drains_into_runs_when_a_tab_has_a_subgroup() {
+        let mut app = sort_app(&[
+            sort_tab("one", "acme/one", AgentState::Working, 1),
+            sort_tab("two", "acme/one", AgentState::Working, 2),
+        ]);
+        app.workspaces[0].tabs[1].set_subgroup(Some("api".to_string()));
+        let mut entries = sidebar_thread_entries(&app);
+        let Some((plain, subgroups)) = split_sidebar_subgroups(&app, &mut entries) else {
+            panic!("a subgrouped tab forces a split");
+        };
+        assert!(entries.is_empty(), "the split drains the entry Vec");
+        assert_eq!(
+            plain.iter().map(|entry| entry.tab_idx).collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(subgroups.len(), 1);
+        assert_eq!(subgroups[0].0, "api");
+        assert_eq!(
+            subgroups[0]
+                .1
+                .iter()
+                .map(|entry| entry.tab_idx)
+                .collect::<Vec<_>>(),
+            vec![1]
         );
     }
 
