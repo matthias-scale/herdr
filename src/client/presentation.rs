@@ -15,6 +15,9 @@ struct ClientPresentationFile {
     sidebar_group_mode: Option<crate::app::state::SidebarGroupMode>,
     #[serde(default)]
     sidebar_work_filter: Option<crate::app::state::SidebarWorkFilter>,
+    #[serde(default)]
+    sidebar_group_sorts:
+        Option<std::collections::HashMap<String, crate::app::state::SidebarSortMode>>,
 }
 
 fn presentation_path() -> PathBuf {
@@ -85,6 +88,42 @@ pub(crate) fn load_sidebar_work_filter() -> crate::app::state::SidebarWorkFilter
 pub(crate) fn save_sidebar_work_filter(filter: crate::app::state::SidebarWorkFilter) {
     let path = presentation_path();
     if let Err(err) = update_path(&path, |state| state.sidebar_work_filter = Some(filter)) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+pub(crate) fn load_sidebar_group_sorts(
+) -> std::collections::HashMap<String, crate::app::state::SidebarSortMode> {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.sidebar_group_sorts.unwrap_or_default(),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// A default sort is the absence of a choice, so it removes the key rather
+/// than writing a value every reader must then treat as missing.
+fn apply_sidebar_group_sort(
+    state: &mut ClientPresentationFile,
+    key: &str,
+    mode: crate::app::state::SidebarSortMode,
+) {
+    let sorts = state
+        .sidebar_group_sorts
+        .get_or_insert_with(Default::default);
+    if mode == crate::app::state::SidebarSortMode::Default {
+        sorts.remove(key);
+    } else {
+        sorts.insert(key.to_string(), mode);
+    }
+}
+
+pub(crate) fn save_sidebar_group_sort(key: &str, mode: crate::app::state::SidebarSortMode) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| apply_sidebar_group_sort(state, key, mode)) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
 }
@@ -266,5 +305,53 @@ mod tests {
             Some(crate::app::state::SidebarGroupMode::RepoPr)
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sidebar_group_sorts_round_trip_and_default_clears_the_key() {
+        let path = temp_path();
+        update_path(&path, |state| {
+            apply_sidebar_group_sort(
+                state,
+                "repo:acme/alpha",
+                crate::app::state::SidebarSortMode::Status,
+            )
+        })
+        .expect("save sidebar group sort");
+        update_path(&path, |state| state.dock_width = Some(31)).expect("save dock width");
+        let state = load_from_path(&path).expect("load client presentation state");
+        assert_eq!(state.dock_width, Some(31));
+        assert_eq!(
+            state
+                .sidebar_group_sorts
+                .as_ref()
+                .and_then(|sorts| sorts.get("repo:acme/alpha")),
+            Some(&crate::app::state::SidebarSortMode::Status),
+            "the sort survives an unrelated presentation write"
+        );
+        // A group set back to Default drops its key instead of accumulating
+        // entries every reader must special-case.
+        update_path(&path, |state| {
+            apply_sidebar_group_sort(
+                state,
+                "repo:acme/alpha",
+                crate::app::state::SidebarSortMode::Default,
+            )
+        })
+        .expect("clear sidebar group sort");
+        let state = load_from_path(&path).expect("load client presentation state");
+        assert!(state
+            .sidebar_group_sorts
+            .as_ref()
+            .is_none_or(|sorts| !sorts.contains_key("repo:acme/alpha")));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn presentation_files_without_group_sorts_load_as_empty() {
+        let state: ClientPresentationFile =
+            serde_json::from_str(r#"{"sidebar_group_mode":"repo_pr"}"#)
+                .expect("legacy presentation state");
+        assert!(state.sidebar_group_sorts.is_none());
     }
 }

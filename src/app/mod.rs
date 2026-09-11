@@ -804,6 +804,10 @@ impl App {
         let sidebar_work_filter = crate::client::presentation::load_sidebar_work_filter();
         #[cfg(test)]
         let sidebar_work_filter = state::SidebarWorkFilter::default();
+        #[cfg(not(test))]
+        let sidebar_group_sorts = crate::client::presentation::load_sidebar_group_sorts();
+        #[cfg(test)]
+        let sidebar_group_sorts = std::collections::HashMap::new();
 
         let mut state = AppState {
             agent_picker: None,
@@ -830,6 +834,9 @@ impl App {
             sidebar_refreshing: false,
             sidebar_selected_work_group: None,
             sidebar_object_menu: None,
+            sidebar_sort_menu: None,
+            sidebar_subgroup_picker: None,
+            sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
@@ -943,6 +950,7 @@ impl App {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_group_sort_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -1967,6 +1975,9 @@ impl App {
             }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);
+            }
+            if let Some((key, mode)) = self.state.take_sidebar_group_sort_persistence_request() {
+                crate::client::presentation::save_sidebar_group_sort(&key, mode);
             }
             if self.state.take_sidebar_view_scan_request() {
                 self.request_sidebar_view_scan(now);

@@ -528,6 +528,66 @@ impl AppState {
             }
             return None;
         }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_subgroup_picker.is_some() {
+            if let Some(index) = self.sidebar_subgroup_picker_item_at(mouse.column, mouse.row) {
+                if let Some(picker) = self.sidebar_subgroup_picker.as_mut() {
+                    picker.filter.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_subgroup_picker.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_subgroup_picker_item_at(mouse.column, mouse.row) {
+                    self.accept_sidebar_subgroup_picker(index);
+                } else {
+                    self.sidebar_subgroup_picker = None;
+                }
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_sort_menu.is_some() {
+            if let Some(index) = self.sidebar_sort_menu_item_at(mouse.column, mouse.row) {
+                if let Some(menu) = self.sidebar_sort_menu.as_mut() {
+                    menu.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_sort_menu.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_sort_menu_item_at(mouse.column, mouse.row) {
+                    self.apply_sidebar_sort_menu_selection(index);
+                } else {
+                    self.sidebar_sort_menu = None;
+                }
+            }
+            return None;
+        }
+        if group_menu_enabled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some((target, col)) =
+                crate::ui::sidebar::sidebar_group_sort_at(self, mouse.column, mouse.row)
+            {
+                let current = crate::ui::sidebar_rows(self)
+                    .into_iter()
+                    .find_map(|row| match row {
+                        crate::ui::SidebarRow::Workspace {
+                            sort_key: Some(key),
+                            sort_mode,
+                            ..
+                        }
+                        | crate::ui::SidebarRow::NestedHeader {
+                            sort_key: Some(key),
+                            sort_mode,
+                            ..
+                        } if key == target => Some(sort_mode),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                self.open_sidebar_sort_menu(target, current, (col, mouse.row));
+                return None;
+            }
+        }
         if group_menu_enabled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             if let Some(target) = crate::ui::sidebar_object_action_at(self, mouse.column, mouse.row)
             {
@@ -2083,6 +2143,11 @@ impl AppState {
                             ws_idx,
                             tab_idx,
                             starred: self.tab_starred(ws_idx, tab_idx),
+                            has_subgroup: self
+                                .workspaces
+                                .get(ws_idx)
+                                .and_then(|workspace| workspace.tabs.get(tab_idx))
+                                .is_some_and(|tab| tab.subgroup().is_some()),
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -2147,6 +2212,11 @@ impl AppState {
                             ws_idx,
                             tab_idx,
                             starred: self.tab_starred(ws_idx, tab_idx),
+                            has_subgroup: self
+                                .workspaces
+                                .get(ws_idx)
+                                .and_then(|workspace| workspace.tabs.get(tab_idx))
+                                .is_some_and(|tab| tab.subgroup().is_some()),
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -4897,6 +4967,7 @@ mod tests {
                 ws_idx: 1,
                 tab_idx: 0,
                 starred: false,
+                has_subgroup: false,
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -8065,6 +8136,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 1,
                 starred: false,
+                has_subgroup: false,
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);

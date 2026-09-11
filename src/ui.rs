@@ -113,6 +113,7 @@ use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
     render_sidebar_object_menu, render_sidebar_project_menu, render_sidebar_settled_menu,
+    render_sidebar_sort_menu, render_sidebar_subgroup_picker,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -1318,6 +1319,8 @@ fn render_with_runtime_registry_inner(
     render_sidebar_project_menu(app, frame);
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
+    render_sidebar_sort_menu(app, frame);
+    render_sidebar_subgroup_picker(app, frame);
     pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
     notepad::render_notepad_caret(app, frame);

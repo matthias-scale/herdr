@@ -15,7 +15,7 @@ use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::state_label_color;
 use super::status::status_report_age_compact_label;
 use super::text::{display_width, display_width_u16, middle_elide, truncate_end};
-use crate::app::state::{Palette, SidebarGroupMode};
+use crate::app::state::{Palette, SidebarGroupMode, SidebarSortMode};
 use crate::app::{AppState, Mode};
 use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
@@ -1809,6 +1809,12 @@ pub(crate) enum SidebarRow {
         indented: bool,
         title: String,
         count: Option<usize>,
+        /// Canonical group key the sort dropdown writes to, when this header
+        /// groups sortable rows. `sort_mode` is the group's effective sort
+        /// (explicit choice or inherited), so the glyph can mark an active
+        /// sort without re-walking the inheritance chain at render time.
+        sort_key: Option<String>,
+        sort_mode: SidebarSortMode,
     },
     Tab {
         entry: Box<AgentPanelEntry>,
@@ -1838,6 +1844,13 @@ pub(crate) enum SidebarRow {
         /// Canonical provider object key for the trailing action menu.
         /// Unlike `key`, this never includes workspace or settled prefixes.
         action_key: Option<String>,
+        /// Canonical group key the sort dropdown writes to. Like `action_key`,
+        /// it never includes workspace or settled prefixes, so a group keeps
+        /// one sort choice across views and across the settled section.
+        sort_key: Option<String>,
+        /// The group's effective sort, inheritance from the enclosing group
+        /// already resolved by the builder.
+        sort_mode: SidebarSortMode,
         title: String,
         count: usize,
         collapsed: bool,
@@ -1907,6 +1920,90 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
     } else {
         app.collapsed_sidebar_groups.contains(&key)
     }
+}
+
+/// Status buckets for the Status group sort: whoever waits on a human first,
+/// then active work, then everything finished or idle.
+fn sidebar_sort_status_rank(entry: &AgentPanelEntry) -> u8 {
+    if entry.state == AgentState::Blocked
+        || entry.gate_count > 0
+        || entry.open_blockers
+        || entry.usage_limited
+    {
+        0
+    } else if entry.state == AgentState::Working {
+        1
+    } else {
+        2
+    }
+}
+
+/// Most recent state change first; a pane that never reported one sinks.
+fn sidebar_sort_recency(entry: &AgentPanelEntry) -> std::cmp::Reverse<Option<u64>> {
+    std::cmp::Reverse(entry.last_agent_state_change_seq)
+}
+
+/// Case-insensitive name order with no per-comparison allocation: the row
+/// builders run on the render path, and a lowercase key per row would be a
+/// per-pane allocation the canonical path does not have.
+fn cmp_sidebar_entry_names(left: &str, right: &str) -> std::cmp::Ordering {
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(right.chars().flat_map(char::to_lowercase))
+        .then_with(|| left.cmp(right))
+}
+
+/// Re-sort one group's rows in place, on the vector the projection already
+/// built. `Default` keeps that canonical order untouched; every other mode is
+/// a stable sort so equal rows never trade places either.
+fn sidebar_entry_cmp(
+    mode: SidebarSortMode,
+) -> Option<fn(&AgentPanelEntry, &AgentPanelEntry) -> std::cmp::Ordering> {
+    match mode {
+        SidebarSortMode::Default => None,
+        SidebarSortMode::Name => Some(|left, right| {
+            cmp_sidebar_entry_names(
+                compact_row_title(left, true),
+                compact_row_title(right, true),
+            )
+        }),
+        SidebarSortMode::Status => Some(|left, right| {
+            sidebar_sort_status_rank(left)
+                .cmp(&sidebar_sort_status_rank(right))
+                .then_with(|| sidebar_sort_recency(left).cmp(&sidebar_sort_recency(right)))
+        }),
+        SidebarSortMode::Recent => {
+            Some(|left, right| sidebar_sort_recency(left).cmp(&sidebar_sort_recency(right)))
+        }
+    }
+}
+
+fn apply_sidebar_group_sort(entries: &mut [AgentPanelEntry], mode: SidebarSortMode) {
+    if let Some(cmp) = sidebar_entry_cmp(mode) {
+        entries.sort_by(cmp);
+    }
+}
+
+/// A group's effective sort: its own explicit choice, or the one the enclosing
+/// group resolved to. Builders walk parent-first and pass the parent's
+/// effective sort as `inherited`, so each link of the chain is resolved once.
+fn effective_sidebar_group_sort(
+    app: &AppState,
+    key: &str,
+    inherited: SidebarSortMode,
+) -> SidebarSortMode {
+    app.sidebar_group_sorts
+        .get(key)
+        .copied()
+        .unwrap_or(inherited)
+}
+
+/// Sort identity of a Space header: the workspace id, which survives row
+/// reorders and restarts, unlike the workspace index the collapse keys use.
+fn space_sort_key_for(app: &AppState, ws_idx: usize) -> Option<String> {
+    app.workspaces
+        .get(ws_idx)
+        .map(|workspace| format!("space:{}", workspace.id))
 }
 
 pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
@@ -2217,9 +2314,16 @@ fn append_remote_rows(app: &AppState, rows: &mut Vec<SidebarRow>, terms: &[&str]
     for (host, entries) in groups {
         let collapse_key = remote_host_collapse_key(host);
         let collapsed = section_is_collapsed(app, &collapse_key);
+        let sort = effective_sidebar_group_sort(app, &collapse_key, SidebarSortMode::Default);
+        let mut entries = entries;
+        if let Some(cmp) = sidebar_entry_cmp(sort) {
+            entries.sort_by(|left, right| cmp(&left.entry, &right.entry));
+        }
         rows.push(SidebarRow::NestedHeader {
-            key: collapse_key,
+            key: collapse_key.clone(),
             action_key: None,
+            sort_key: Some(collapse_key),
+            sort_mode: sort,
             title: host.to_string(),
             count: entries.len(),
             collapsed,
@@ -2314,11 +2418,18 @@ fn append_legacy_space_rows(
         if sidebar_rows_are_filtered(app) && member_entries.is_empty() {
             continue;
         }
+        let space_sort_key = space_sort_key_for(app, ws_idx);
+        let space_sort = space_sort_key
+            .as_deref()
+            .map(|key| effective_sidebar_group_sort(app, key, SidebarSortMode::Default))
+            .unwrap_or_default();
         rows.push(SidebarRow::Workspace {
             ws_idx,
             indented: false,
             title: String::new(),
             count: None,
+            sort_key: space_sort_key,
+            sort_mode: space_sort,
         });
         if !app.workspace_agents_expanded(ws_idx) {
             continue;
@@ -2328,9 +2439,22 @@ fn append_legacy_space_rows(
                 let key = format!("{ws_idx}:{}", group.key);
                 let collapsed = section_is_collapsed(app, &key);
                 mark_redundant_space_labels(&mut group.entries, &group.title);
+                // The collapse key is index-based; the sort key is not, so a
+                // worktree group keeps its sort across workspace reorders and
+                // restarts.
+                let sort_key = app
+                    .workspaces
+                    .get(ws_idx)
+                    .map(|workspace| format!("{}:{}", workspace.id, group.key));
+                let sort = sort_key
+                    .as_deref()
+                    .map(|key| effective_sidebar_group_sort(app, key, space_sort))
+                    .unwrap_or(space_sort);
                 rows.push(SidebarRow::NestedHeader {
-                    key,
+                    key: key.clone(),
                     action_key: None,
+                    sort_key: sort_key.clone(),
+                    sort_mode: sort,
                     title: group.title,
                     count: group.entries.len(),
                     collapsed,
@@ -2339,11 +2463,22 @@ fn append_legacy_space_rows(
                     spawn: false,
                 });
                 if !collapsed {
-                    append_tab_rows(rows, group.entries, 2);
+                    let parent_key = sort_key.as_deref().unwrap_or(key.as_str());
+                    append_subgrouped_tab_rows(app, rows, group.entries, 2, parent_key, &key, sort);
                 }
             }
         } else {
-            append_tab_rows(rows, ordered_tab_entries(&member_entries), 1);
+            let tab_entries = ordered_tab_entries(&member_entries);
+            let parent_key = space_sort_key_for(app, ws_idx);
+            append_subgrouped_tab_rows(
+                app,
+                rows,
+                tab_entries,
+                1,
+                parent_key.as_deref().unwrap_or("space"),
+                parent_key.as_deref().unwrap_or("space"),
+                space_sort,
+            );
         }
     }
 }
@@ -2426,6 +2561,99 @@ fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, de
     }));
 }
 
+/// The subgroup a tab is filed under, if any.
+fn sidebar_tab_subgroup<'a>(app: &'a AppState, entry: &AgentPanelEntry) -> Option<&'a str> {
+    app.workspaces
+        .get(entry.ws_idx)
+        .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
+        .and_then(crate::workspace::Tab::subgroup)
+}
+
+/// A group's tab rows split into the unsubgrouped ones and one run per
+/// subgroup, in first-seen order.
+type SidebarSubgroupSplit = (Vec<AgentPanelEntry>, Vec<(String, Vec<AgentPanelEntry>)>);
+
+/// Split a group's rows into the ones with no subgroup and one run per
+/// subgroup, in first-seen order. The assignment lives on the tab, so a
+/// subgroup with no tabs left simply never appears here. Returns `None`
+/// without draining when no tab carries a subgroup, so subgroup-free groups
+/// keep their already-owned entry Vec instead of paying for two fresh ones.
+fn split_sidebar_subgroups(
+    app: &AppState,
+    entries: &mut Vec<AgentPanelEntry>,
+) -> Option<SidebarSubgroupSplit> {
+    if !entries
+        .iter()
+        .any(|entry| sidebar_tab_subgroup(app, entry).is_some())
+    {
+        return None;
+    }
+    let mut plain = Vec::new();
+    let mut subgroups: Vec<(String, Vec<AgentPanelEntry>)> = Vec::new();
+    for entry in entries.drain(..) {
+        match sidebar_tab_subgroup(app, &entry) {
+            Some(name) => match subgroups
+                .iter_mut()
+                .find(|(candidate, _)| candidate == name)
+            {
+                Some((_, entries)) => entries.push(entry),
+                None => subgroups.push((name.to_string(), vec![entry])),
+            },
+            None => plain.push(entry),
+        }
+    }
+    Some((plain, subgroups))
+}
+
+/// Emit one group's tab rows: unsubgrouped rows first at `depth`, then one
+/// collapsible nested header per subgroup at the same depth with its tabs one
+/// level deeper. `parent_key`/`parent_collapse_key` are the enclosing group's
+/// canonical sort key and its (possibly settled-prefixed) collapse key, and
+/// `parent_sort` is the enclosing group's already-resolved effective sort,
+/// which a subgroup without its own choice inherits.
+fn append_subgrouped_tab_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: Vec<AgentPanelEntry>,
+    depth: u16,
+    parent_key: &str,
+    parent_collapse_key: &str,
+    parent_sort: SidebarSortMode,
+) {
+    // Fast path: no tab is filed under a subgroup, so the owned Vec sorts in
+    // place and goes straight to the rows without any splitting.
+    let mut entries = entries;
+    let Some((mut plain, subgroups)) = split_sidebar_subgroups(app, &mut entries) else {
+        apply_sidebar_group_sort(&mut entries, parent_sort);
+        append_tab_rows(rows, entries, depth);
+        return;
+    };
+    apply_sidebar_group_sort(&mut plain, parent_sort);
+    append_tab_rows(rows, plain, depth);
+    for (name, mut sub_entries) in subgroups {
+        let sort_key = format!("{parent_key}:subgroup:{name}");
+        let collapse_key = format!("{parent_collapse_key}:subgroup:{name}");
+        let collapsed = section_is_collapsed(app, &collapse_key);
+        let sort = effective_sidebar_group_sort(app, &sort_key, parent_sort);
+        apply_sidebar_group_sort(&mut sub_entries, sort);
+        rows.push(SidebarRow::NestedHeader {
+            key: collapse_key,
+            action_key: None,
+            sort_key: Some(sort_key),
+            sort_mode: sort,
+            title: name,
+            count: sub_entries.len(),
+            collapsed,
+            dim: false,
+            status: None,
+            spawn: false,
+        });
+        if !collapsed {
+            append_tab_rows(rows, sub_entries, depth + 1);
+        }
+    }
+}
+
 fn mark_redundant_space_labels(entries: &mut [AgentPanelEntry], group_title: &str) {
     for entry in entries {
         entry.space_label_redundant |= entry.space_label == group_title;
@@ -2440,6 +2668,7 @@ fn append_repo_group_rows(
 ) {
     for mut group in sidebar_repo_groups(app, entries) {
         mark_redundant_space_labels(&mut group.entries, &group.title);
+        let group_sort = effective_sidebar_group_sort(app, &group.key, SidebarSortMode::Default);
         if !group.unlinked {
             let Some(ws_idx) = group.entries.first().map(|entry| entry.ws_idx) else {
                 continue;
@@ -2449,6 +2678,8 @@ fn append_repo_group_rows(
                 indented: false,
                 title: group.title.clone(),
                 count: Some(group.entries.len()),
+                sort_key: Some(group.key.clone()),
+                sort_mode: group_sort,
             });
             if !app.workspace_agents_expanded(ws_idx) {
                 continue;
@@ -2462,9 +2693,11 @@ fn append_repo_group_rows(
         let collapsed = section_is_collapsed(app, &collapse_key);
         if group.unlinked {
             rows.push(SidebarRow::NestedHeader {
-                key: collapse_key,
+                key: collapse_key.clone(),
                 action_key: None,
-                title: group.title,
+                sort_key: Some(group.key.clone()),
+                sort_mode: group_sort,
+                title: group.title.clone(),
                 count: group.entries.len(),
                 collapsed,
                 dim: false,
@@ -2476,7 +2709,15 @@ fn append_repo_group_rows(
             }
         }
         if group.unlinked {
-            append_tab_rows(rows, group.entries, 1);
+            append_subgrouped_tab_rows(
+                app,
+                rows,
+                group.entries,
+                1,
+                &group.key,
+                &collapse_key,
+                group_sort,
+            );
             continue;
         }
         let mut branches = Vec::<(Option<String>, Vec<AgentPanelEntry>)>::new();
@@ -2495,7 +2736,15 @@ fn append_repo_group_rows(
                 .pop()
                 .map(|(_, entries)| entries)
                 .unwrap_or_default();
-            append_tab_rows(rows, entries, 1);
+            append_subgrouped_tab_rows(
+                app,
+                rows,
+                entries,
+                1,
+                &group.key,
+                &collapse_key,
+                group_sort,
+            );
             continue;
         }
         for (branch, entries) in branches {
@@ -2504,15 +2753,18 @@ fn append_repo_group_rows(
             let collapse_key = if settled {
                 format!("settled:{key}")
             } else {
-                key
+                key.clone()
             };
             let collapsed = section_is_collapsed(app, &collapse_key);
             let title = branch.map_or_else(|| "unlinked".into(), |branch| format!("⎇ {branch}"));
             let mut entries = entries;
             mark_redundant_space_labels(&mut entries, &title);
+            let branch_sort = effective_sidebar_group_sort(app, &key, group_sort);
             rows.push(SidebarRow::NestedHeader {
-                key: collapse_key,
+                key: collapse_key.clone(),
                 action_key: None,
+                sort_key: Some(key.clone()),
+                sort_mode: branch_sort,
                 title,
                 count: entries.len(),
                 collapsed,
@@ -2521,7 +2773,7 @@ fn append_repo_group_rows(
                 spawn: false,
             });
             if !collapsed {
-                append_tab_rows(rows, entries, 2);
+                append_subgrouped_tab_rows(app, rows, entries, 2, &key, &collapse_key, branch_sort);
             }
         }
     }
@@ -2551,10 +2803,13 @@ fn append_object_group_rows(
                 .any(|prefix| group.key.starts_with(prefix)))
         .then(|| group.key.clone());
         mark_redundant_space_labels(&mut group.entries, &group.title);
+        let group_sort = effective_sidebar_group_sort(app, &group.key, SidebarSortMode::Default);
         rows.push(SidebarRow::NestedHeader {
-            key: collapse_key,
+            key: collapse_key.clone(),
             action_key,
-            title: group.title,
+            sort_key: Some(group.key.clone()),
+            sort_mode: group_sort,
+            title: group.title.clone(),
             count: group.entries.len(),
             collapsed,
             dim: false,
@@ -2562,7 +2817,15 @@ fn append_object_group_rows(
             spawn: false,
         });
         if !collapsed {
-            append_tab_rows(rows, group.entries, 1);
+            append_subgrouped_tab_rows(
+                app,
+                rows,
+                group.entries,
+                1,
+                &group.key,
+                &collapse_key,
+                group_sort,
+            );
         }
     }
     if settled {
@@ -4000,6 +4263,8 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
                 app.sidebar_group_mode.collapse_namespace()
             ),
             action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
             title: unassigned_empty_text(app),
             count: 0,
             collapsed: false,
@@ -4025,6 +4290,8 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
         rows.push(SidebarRow::NestedHeader {
             key: object.key.clone(),
             action_key,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
             title: object.title.clone(),
             count: 0,
             collapsed: false,
@@ -4038,6 +4305,8 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
         rows.push(SidebarRow::NestedHeader {
             key: sidebar_show_more_key(app.sidebar_group_mode),
             action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
             title: format!("show {remaining} more…"),
             count: 0,
             collapsed: false,
@@ -4813,6 +5082,13 @@ pub(crate) fn workspace_list_scroll_metrics(
     }
 }
 
+/// Leading sidebar rows hidden by the scroll position. The renderer and the
+/// hit tests pair visible cards against the row list only after skipping this
+/// many entries, so every site must clamp against the same metrics.
+fn workspace_list_scroll_skip(app: &AppState, metrics: &crate::pane::ScrollMetrics) -> usize {
+    app.workspace_scroll.min(metrics.max_offset_from_bottom)
+}
+
 pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
     let metrics = workspace_list_scroll_metrics(app, area);
     let body = workspace_list_body_rect(area, true);
@@ -4965,6 +5241,8 @@ pub(crate) struct SectionHeaderArea {
 struct NestedHeaderArea {
     key: String,
     action_key: Option<String>,
+    sort_key: Option<String>,
+    sort_mode: SidebarSortMode,
     title: String,
     count: usize,
     collapsed: bool,
@@ -5001,6 +5279,8 @@ fn nested_header_areas_from_rows(
         if let SidebarRow::NestedHeader {
             key,
             action_key,
+            sort_key,
+            sort_mode,
             title,
             count,
             collapsed,
@@ -5012,6 +5292,8 @@ fn nested_header_areas_from_rows(
             out.push(NestedHeaderArea {
                 key: key.clone(),
                 action_key: action_key.clone(),
+                sort_key: sort_key.clone(),
+                sort_mode: *sort_mode,
                 title: title.clone(),
                 count: *count,
                 collapsed: *collapsed,
@@ -5278,6 +5560,49 @@ pub(crate) fn sidebar_object_action_at(app: &AppState, col: u16, row: u16) -> Op
                 && col == header.rect.right().saturating_sub(1)
         })
         .and_then(|header| header.action_key)
+}
+
+/// The sort control on a sidebar group header: the glyph cell of a nested
+/// group header, or the right-aligned glyph cell of a repo/Space workspace
+/// header. Returns the group's canonical sort key plus the glyph column, so
+/// the dropdown anchors exactly where the operator clicked.
+pub(crate) fn sidebar_group_sort_at(app: &AppState, col: u16, row: u16) -> Option<(String, u16)> {
+    for header in compute_sidebar_nested_header_areas(app, app.view.sidebar_rect) {
+        if row >= header.rect.y
+            && row < header.rect.bottom()
+            && nested_header_sort_col(&header) == Some(col)
+        {
+            return header.sort_key.map(|key| (key, col));
+        }
+    }
+    // Repo and Space headers are workspace cards; their glyph is the card's
+    // last cell on its first row, paired with the row list exactly the way
+    // `render_workspace_list` pairs them.
+    let area = app.view.sidebar_rect;
+    let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
+    // `compute_workspace_card_areas` hides the scrolled-off leading rows, so
+    // the row list must skip the same entries before the two are zipped.
+    let metrics =
+        workspace_list_scroll_metrics(app, workspace_list_rect_for_app(app, sidebar_area));
+    let mut sortable = sidebar_rows(app)
+        .into_iter()
+        .skip(workspace_list_scroll_skip(app, &metrics))
+        .filter_map(|row| match row {
+            SidebarRow::Workspace {
+                sort_key: Some(key),
+                ..
+            } => Some(key),
+            _ => None,
+        });
+    for card in compute_workspace_card_areas(app, sidebar_area) {
+        let Some(key) = sortable.next() else {
+            break;
+        };
+        if row == card.rect.y && card.rect.width > 1 && col == card.rect.right().saturating_sub(1) {
+            return Some((key, col));
+        }
+    }
+    None
 }
 
 /// The dim work-item header at this row, if any. Dim headers do not collapse;
@@ -6692,6 +7017,10 @@ struct NestedHeaderSpans {
     title_truncated: bool,
 }
 
+/// The sort control every sortable group header carries between its count and
+/// its trailing actions.
+const SIDEBAR_SORT_GLYPH: &str = "⇅";
+
 fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
     let count_width = if header.dim {
         0
@@ -6700,6 +7029,7 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
     };
     let action_width = usize::from(header.action_key.is_some()) * 2;
     let spawn_width = usize::from(header.spawn) * 2;
+    let sort_width = usize::from(header.sort_key.is_some()) * 2;
     let prefix_width = display_width(if header.dim { "   " } else { "  ▸ " });
     // The status glyph sits before the id, so it costs the title its width.
     let glyph = header.status.map(WorkGroupStatus::glyph);
@@ -6710,6 +7040,7 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
             .saturating_sub(prefix_width)
             .saturating_sub(glyph_width)
             .saturating_sub(count_width)
+            .saturating_sub(sort_width)
             .saturating_sub(action_width)
             .saturating_sub(spawn_width),
     );
@@ -6720,6 +7051,24 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
         title_truncated: display_width(&title) < display_width(&header.title),
         title,
     }
+}
+
+/// The column the sort glyph occupies on this header's row, matching the span
+/// order `render_nested_header` draws. This is the hit test's only source for
+/// the glyph's position, so the two can never drift apart.
+fn nested_header_sort_col(header: &NestedHeaderArea) -> Option<u16> {
+    header.sort_key.as_ref()?;
+    let spans = nested_header_spans(header);
+    let count_width = if header.dim {
+        0
+    } else {
+        display_width(&format!(" ({})", header.count))
+    };
+    // Prefix, status glyph, title, count, then the space before the glyph.
+    let offset =
+        spans.prefix_width + spans.glyph_width + display_width(&spans.title) + count_width + 1;
+    let col = header.rect.x.checked_add(u16::try_from(offset).ok()?)?;
+    (col < header.rect.right()).then_some(col)
 }
 
 fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
@@ -6767,6 +7116,14 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
             count_label,
             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
         ));
+    }
+    if header.sort_key.is_some() {
+        let style = if header.sort_mode == SidebarSortMode::Default {
+            Style::default().fg(p.overlay0)
+        } else {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(format!(" {SIDEBAR_SORT_GLYPH}"), style));
     }
     if header.spawn {
         spans.push(Span::styled(
@@ -6824,9 +7181,15 @@ fn render_workspace_list(
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let workspace_headers = row_entries
         .iter()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+        .skip(workspace_list_scroll_skip(app, &metrics))
         .filter_map(|row| match row {
-            SidebarRow::Workspace { title, count, .. } => Some((title, *count)),
+            SidebarRow::Workspace {
+                title,
+                count,
+                sort_key,
+                sort_mode,
+                ..
+            } => Some((title, *count, sort_key.as_deref(), *sort_mode)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -6860,7 +7223,7 @@ fn render_workspace_list(
 
         let header = workspace_headers.get(card_index);
         let (display_label, is_derived) =
-            header.filter(|(title, _)| !title.is_empty()).map_or_else(
+            header.filter(|(title, ..)| !title.is_empty()).map_or_else(
                 || {
                     workspace_labels.get(&i).cloned().unwrap_or_else(|| {
                         (
@@ -6869,7 +7232,7 @@ fn render_workspace_list(
                         )
                     })
                 },
-                |(title, _)| ((*title).clone(), false),
+                |(title, ..)| ((*title).clone(), false),
             );
         let name_style = if selected || is_active || is_dragged {
             Style::default()
@@ -6890,11 +7253,16 @@ fn render_workspace_list(
             .into_iter()
             .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
             .count();
-        let count_label = header.and_then(|(_, count)| *count).map_or_else(
+        let count_label = header.and_then(|(_, count, ..)| *count).map_or_else(
             || format!(" ({agent_count}/{window_count})"),
             |count| format!(" ({count})"),
         );
-        let fixed_width = display_width(" ▾ ") + display_width(&count_label);
+        // The sort control is right-aligned on the header row, so the title
+        // gives it its cell up front rather than sliding under it.
+        let sort_width = header
+            .and_then(|(.., sort_key, _)| sort_key.map(|_| 2))
+            .unwrap_or(0);
+        let fixed_width = display_width(" ▾ ") + display_width(&count_label) + sort_width;
         let title = truncate_end(
             &display_label,
             usize::from(card.rect.width).saturating_sub(fixed_width),
@@ -6919,6 +7287,19 @@ fn render_workspace_list(
             ])),
             Rect::new(card.rect.x, row_y, card.rect.width, 1),
         );
+        if let Some((.., Some(_), sort_mode)) = header {
+            let glyph_col = card.rect.right().saturating_sub(1);
+            if glyph_col > card.rect.x {
+                let style = if *sort_mode == SidebarSortMode::Default {
+                    Style::default().fg(p.overlay0)
+                } else {
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+                };
+                frame.buffer_mut()[(glyph_col, row_y)]
+                    .set_symbol(SIDEBAR_SORT_GLYPH)
+                    .set_style(style);
+            }
+        }
     }
 
     let section_headers = compute_sidebar_section_header_areas(app, sidebar_area);
@@ -6998,7 +7379,7 @@ fn render_workspace_list(
     }
     if !app.remote_agent_panel_entries.is_empty() {
         let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
-        let scroll = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+        let scroll = workspace_list_scroll_skip(app, &metrics);
         for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::RemoteAgent { entry, depth }) = row_entries.get(row_area.row_idx)
             else {
@@ -7838,6 +8219,239 @@ pub(super) fn render_sidebar_object_menu(app: &AppState, frame: &mut Frame) {
             };
             Line::from(Span::styled(
                 format!("{} {label}", if selected { "▸" } else { " " }),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
+}
+
+pub(crate) fn sidebar_sort_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let menu = app.sidebar_sort_menu.as_ref()?;
+    let (col, row) = menu.anchor;
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor: Rect::new(col, row, 1, 1),
+            item_count: SidebarSortMode::ALL.len(),
+            selected: menu.selected,
+            has_filter: false,
+            max_rows: SidebarSortMode::ALL.len(),
+            min_width: 12,
+        },
+        area,
+    )
+}
+
+pub(crate) fn sidebar_sort_menu_item_at(
+    app: &AppState,
+    area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let layout = sidebar_sort_menu_layout(app, area)?;
+    super::dropdown::hit_test(&layout, col, row)
+}
+
+pub(super) fn render_sidebar_sort_menu(app: &AppState, frame: &mut Frame) {
+    let Some(menu) = app.sidebar_sort_menu.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_sort_menu_layout(app, frame.area()) else {
+        return;
+    };
+    let rows = SidebarSortMode::ALL
+        .iter()
+        .map(|mode| {
+            // The checkmark names the group's effective sort, inheritance
+            // included: the row that describes what the group does right now.
+            let label = format!(
+                "{} {}",
+                if *mode == menu.current { "✓" } else { " " },
+                mode.label()
+            );
+            super::dropdown::DropdownMenuRow::Item {
+                label,
+                enabled: true,
+            }
+        })
+        .collect::<Vec<_>>();
+    super::dropdown::render_menu(&app.palette, frame, &layout, &rows, menu.selected);
+}
+
+/// One row of the subgroup picker: reuse a name the group already has, or
+/// create the typed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SidebarSubgroupChoice {
+    Create(String),
+    Existing(String),
+}
+
+impl SidebarSubgroupChoice {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Create(name) | Self::Existing(name) => name,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Create(name) => format!("Create \"{name}\""),
+            Self::Existing(name) => name.clone(),
+        }
+    }
+}
+
+/// Subgroup names already in use around this window: its own Space plus the
+/// repo group it renders in, so reusing a name is a pick rather than a retype.
+/// Names are per group, but a group can span Spaces (one repository checked
+/// out twice), which is why this is not just a same-Space scan.
+pub(crate) fn sidebar_subgroup_suggestions(
+    app: &AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+) -> Vec<String> {
+    let entries = sidebar_thread_entries(app);
+    let target_group = entries
+        .iter()
+        .find(|entry| entry.ws_idx == ws_idx && entry.tab_idx == tab_idx)
+        .and_then(|entry| entry_repo_group(app, entry))
+        .map(|(key, _)| key);
+    let mut names = Vec::<String>::new();
+    let mut push = |name: &str| {
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    };
+    if let Some(workspace) = app.workspaces.get(ws_idx) {
+        for tab in &workspace.tabs {
+            if let Some(name) = tab.subgroup() {
+                push(name);
+            }
+        }
+    }
+    for entry in &entries {
+        let in_group = target_group.as_ref().is_some_and(|key| {
+            entry_repo_group(app, entry).is_some_and(|(candidate, _)| &candidate == key)
+        });
+        if !in_group {
+            continue;
+        }
+        let Some(name) = app
+            .workspaces
+            .get(entry.ws_idx)
+            .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
+            .and_then(crate::workspace::Tab::subgroup)
+        else {
+            continue;
+        };
+        push(name);
+    }
+    names.sort_by(|left, right| cmp_sidebar_entry_names(left, right));
+    names
+}
+
+/// The picker's rows: the typed query as a create row first when it names no
+/// existing subgroup, then the matching existing names.
+pub(crate) fn sidebar_subgroup_picker_choices(app: &AppState) -> Vec<SidebarSubgroupChoice> {
+    let Some(picker) = app.sidebar_subgroup_picker.as_ref() else {
+        return Vec::new();
+    };
+    let suggestions = sidebar_subgroup_suggestions(app, picker.ws_idx, picker.tab_idx);
+    let matches = picker.filter.matches(&suggestions);
+    let query = picker.filter.query.trim();
+    let mut choices = Vec::new();
+    if !query.is_empty()
+        && !suggestions
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(query))
+    {
+        choices.push(SidebarSubgroupChoice::Create(query.to_string()));
+    }
+    choices.extend(
+        matches
+            .into_iter()
+            .map(|(_, name)| SidebarSubgroupChoice::Existing(name.to_string())),
+    );
+    choices
+}
+
+pub(crate) fn sidebar_subgroup_picker_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let picker = app.sidebar_subgroup_picker.as_ref()?;
+    let choices = sidebar_subgroup_picker_choices(app);
+    let width = choices
+        .iter()
+        .map(|choice| display_width(&choice.label()).saturating_add(4))
+        .max()
+        .unwrap_or(24)
+        .max(24);
+    let (col, row) = picker.anchor;
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor: Rect::new(col, row, 1, 1),
+            item_count: choices.len(),
+            selected: picker.filter.selected,
+            has_filter: true,
+            max_rows: 9,
+            min_width: u16::try_from(width).unwrap_or(u16::MAX),
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_subgroup_picker(app: &AppState, frame: &mut Frame) {
+    let Some(picker) = app.sidebar_subgroup_picker.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_subgroup_picker_layout(app, frame.area()) else {
+        return;
+    };
+    let choices = sidebar_subgroup_picker_choices(app);
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    if let Some(filter) = layout.filter_rect {
+        frame.render_widget(
+            Paragraph::new(format!(" 🔍 {}▏", picker.filter.query)).style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg),
+            ),
+            filter,
+        );
+    }
+    let lines = choices
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(position, choice)| {
+            let selected = position == picker.filter.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                format!(
+                    "{} {}",
+                    if selected { "▸" } else { " " },
+                    super::dropdown::pad_menu_row(
+                        &choice.label(),
+                        layout.list_rect.width.saturating_sub(2),
+                    )
+                ),
                 style,
             ))
         })
@@ -16503,8 +17117,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             header.rect.y,
             header.rect.width,
         );
-        assert!(rendered.contains("matthias"), "{rendered:?}");
+        // The trailing sort control costs the title its cells, so at minimum
+        // width the elision starts one column earlier.
+        assert!(rendered.contains("matthia"), "{rendered:?}");
         assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(rendered.contains(SIDEBAR_SORT_GLYPH), "{rendered:?}");
         assert!(display_width(&rendered) <= usize::from(header.rect.width));
     }
 
@@ -18292,12 +18909,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ] {
             let mut app = pull_request_state_fixture(state, draft);
             let headers = rendered_nested_headers(&mut app, 120, 40);
+            // The trailing sort control costs the title its cells, so the
+            // identity anchor is the id, not the truncated subject.
             let header = headers
                 .iter()
-                .find(|(line, _)| line.contains("#159 · pric"))
+                .find(|(line, _)| line.contains("#159"))
                 .unwrap_or_else(|| panic!("#159 header in {headers:?}"));
             assert!(
-                header.0.contains(&format!("{glyph} #159 · pric")),
+                header.0.contains(&format!("{glyph} #159")),
                 "{state} draft={draft}: {:?}",
                 header.0
             );
@@ -18315,9 +18934,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let header = headers
             .iter()
-            .find(|(line, _)| line.contains("aaa111 · fix"))
+            .find(|(line, _)| line.contains("aaa111"))
             .unwrap_or_else(|| panic!("conversation header in {headers:?}"));
-        assert!(header.0.contains("○ aaa111 · fix"), "{:?}", header.0);
+        assert!(header.0.contains("○ aaa111"), "{:?}", header.0);
         assert_eq!(header.1, Some(expected));
         // Nothing caches conversation state on this base, so no header may
         // claim a closed or unassigned conversation.
@@ -18395,13 +19014,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let headers = rendered_nested_headers(&mut app, 120, 40);
         let closed = headers
             .iter()
-            .find(|(line, _)| line.contains("aaa111 · Ref"))
+            .find(|(line, _)| line.contains("aaa111"))
             .unwrap_or_else(|| panic!("indexed closed conversation header in {headers:?}"));
         assert!(closed.0.contains("● aaa111"), "{:?}", closed.0);
         assert_eq!(closed.1, Some(app.palette.work_status_done()));
         let open = headers
             .iter()
-            .find(|(line, _)| line.contains("bbb222 · Nee"))
+            .find(|(line, _)| line.contains("bbb222"))
             .expect("indexed open conversation header");
         assert!(open.0.contains("○ bbb222"), "{:?}", open.0);
         assert_eq!(open.1, Some(app.palette.work_status_open()));
@@ -19068,6 +19687,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         NestedHeaderArea {
             key: "key".into(),
             action_key: Some("key".into()),
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
             title: title.into(),
             count: 2,
             collapsed: false,
@@ -19199,6 +19820,611 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             clamp_row_cells(body, 0, 8, 3),
             Some(Rect::new(8, 0, 2, 1)),
             "a span is clipped to the body, never past it"
+        );
+    }
+
+    struct SortTabSpec {
+        name: &'static str,
+        repo: &'static str,
+        branch: Option<&'static str>,
+        state: AgentState,
+        seq: u64,
+    }
+
+    fn sort_tab(
+        name: &'static str,
+        repo: &'static str,
+        state: AgentState,
+        seq: u64,
+    ) -> SortTabSpec {
+        SortTabSpec {
+            name,
+            repo,
+            branch: None,
+            state,
+            seq,
+        }
+    }
+
+    /// One workspace whose tabs each sit in a repo group, with an agent state
+    /// and a state-change sequence per tab, so every sort mode has distinct
+    /// input to order by.
+    fn sort_app(specs: &[SortTabSpec]) -> AppState {
+        let mut workspace = Workspace::test_new("ws");
+        for _ in specs.iter().skip(1) {
+            workspace.test_add_tab(None);
+        }
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for (tab_idx, spec) in specs.iter().enumerate() {
+            app.workspaces[0].tabs[tab_idx].custom_name = Some(spec.name.to_string());
+            let pane_id = app.workspaces[0].tabs[tab_idx].root_pane;
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("fixture terminal");
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext {
+                    repo: Some(spec.repo.into()),
+                    branch: spec.branch.map(str::to_string),
+                    ..Default::default()
+                },
+            );
+            terminal.detected_agent = Some(Agent::Pi);
+            terminal.state = spec.state;
+            terminal.last_agent_state_change_seq = Some(spec.seq);
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    fn sidebar_tab_order(app: &AppState) -> Vec<usize> {
+        sidebar_rows(app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry.tab_idx),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sidebar_signature(app: &AppState) -> Vec<String> {
+        sidebar_rows(app)
+            .into_iter()
+            .map(|row| match row {
+                SidebarRow::Workspace { title, .. } => format!("workspace:{title}"),
+                SidebarRow::Tab { entry, depth } => format!("tab:{}:{depth}", entry.tab_idx),
+                SidebarRow::NestedHeader { key, title, .. } => format!("group:{key}:{title}"),
+                SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
+                SidebarRow::Agent { entry, .. } => format!("pane:{}", entry.pane_id.raw()),
+                SidebarRow::RemoteAgent { entry, .. } => format!("remote:{}", entry.agent_ref),
+                SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
+                SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn name_sort_reorders_only_the_chosen_group() {
+        let app_state = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 1),
+            sort_tab("alpha", "acme/one", AgentState::Working, 2),
+            sort_tab("yankee", "acme/two", AgentState::Working, 3),
+            sort_tab("bravo", "acme/two", AgentState::Working, 4),
+        ]);
+        assert_eq!(
+            sidebar_tab_order(&app_state),
+            vec![0, 1, 2, 3],
+            "canonical order is tab order within each repo group"
+        );
+
+        let mut app_state = app_state;
+        app_state.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
+        assert_eq!(
+            app_state.take_sidebar_group_sort_persistence_request(),
+            Some(("repo:acme/one".to_string(), SidebarSortMode::Name)),
+            "the choice asks the client to persist it"
+        );
+        assert_eq!(
+            sidebar_tab_order(&app_state),
+            vec![1, 0, 2, 3],
+            "the chosen group sorts alphabetically"
+        );
+
+        // The neighbouring group keeps its canonical order, and switching the
+        // view mode away and back does not touch the choice.
+        app_state.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+        app_state.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        assert_eq!(
+            app_state.sidebar_group_sort("repo:acme/one"),
+            SidebarSortMode::Name
+        );
+        assert_eq!(sidebar_tab_order(&app_state), vec![1, 0, 2, 3]);
+        assert_eq!(
+            app_state.take_sidebar_group_sort_persistence_request(),
+            None,
+            "no new choice was made, so nothing asks to persist"
+        );
+    }
+
+    #[test]
+    fn status_sort_ranks_blocked_then_working_then_idle_by_recency() {
+        let mut app = sort_app(&[
+            sort_tab("idle-a", "acme/one", AgentState::Idle, 3),
+            sort_tab("work-b", "acme/one", AgentState::Working, 5),
+            sort_tab("blocked-c", "acme/one", AgentState::Blocked, 1),
+            sort_tab("blocked-d", "acme/one", AgentState::Blocked, 9),
+        ]);
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Status);
+        assert_eq!(
+            sidebar_tab_order(&app),
+            vec![3, 2, 1, 0],
+            "blocked first (newest change leading), then working, then idle"
+        );
+
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Recent);
+        assert_eq!(
+            sidebar_tab_order(&app),
+            vec![3, 1, 0, 2],
+            "recent sorts by the most recent state change alone"
+        );
+    }
+
+    #[test]
+    fn default_sort_restores_the_canonical_order() {
+        let mut app = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 1),
+            sort_tab("alpha", "acme/one", AgentState::Working, 2),
+            sort_tab("mike", "acme/one", AgentState::Working, 3),
+        ]);
+        let canonical = sidebar_signature(&app);
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
+        assert_ne!(sidebar_signature(&app), canonical, "name sort moves rows");
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Default);
+        assert_eq!(
+            sidebar_signature(&app),
+            canonical,
+            "default is exactly the canonical order, and the explicit key is dropped"
+        );
+        assert!(!app.sidebar_group_sorts.contains_key("repo:acme/one"));
+    }
+
+    #[test]
+    fn branch_groups_inherit_the_repo_sort_until_they_choose_their_own() {
+        let specs = vec![
+            SortTabSpec {
+                name: "zeta",
+                repo: "acme/one",
+                branch: Some("main"),
+                state: AgentState::Working,
+                seq: 9,
+            },
+            SortTabSpec {
+                name: "alpha",
+                repo: "acme/one",
+                branch: Some("main"),
+                state: AgentState::Working,
+                seq: 1,
+            },
+            SortTabSpec {
+                name: "yankee",
+                repo: "acme/one",
+                branch: Some("feature"),
+                state: AgentState::Working,
+                seq: 2,
+            },
+            SortTabSpec {
+                name: "bravo",
+                repo: "acme/one",
+                branch: Some("feature"),
+                state: AgentState::Working,
+                seq: 3,
+            },
+        ];
+        let mut app = sort_app(&specs);
+        let branch_modes = |app: &AppState| {
+            sidebar_rows(app)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::NestedHeader {
+                        sort_key: Some(key),
+                        sort_mode,
+                        ..
+                    } => Some((key, sort_mode)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            branch_modes(&app)
+                .iter()
+                .all(|(_, mode)| *mode == SidebarSortMode::Default),
+            "no choice anywhere starts at the canonical order"
+        );
+
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
+        assert_eq!(
+            sidebar_tab_order(&app),
+            vec![1, 0, 3, 2],
+            "both branch groups inherit the repo group's name sort"
+        );
+        assert!(
+            branch_modes(&app)
+                .iter()
+                .all(|(_, mode)| *mode == SidebarSortMode::Name),
+            "branch headers report the inherited sort as their effective one"
+        );
+
+        app.set_sidebar_group_sort(
+            "repo:acme/one:branch:main".to_string(),
+            SidebarSortMode::Recent,
+        );
+        assert_eq!(
+            sidebar_tab_order(&app),
+            vec![0, 1, 3, 2],
+            "main overrides with recent (zeta changed last); feature still inherits name"
+        );
+    }
+
+    #[test]
+    fn every_repo_and_nested_group_header_carries_a_sort_control() {
+        let mut app = sort_app(&[
+            SortTabSpec {
+                name: "zeta",
+                repo: "acme/one",
+                branch: Some("main"),
+                state: AgentState::Working,
+                seq: 1,
+            },
+            SortTabSpec {
+                name: "alpha",
+                repo: "acme/one",
+                branch: Some("feature"),
+                state: AgentState::Working,
+                seq: 2,
+            },
+        ]);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        let rows = sidebar_rows(&app);
+        let workspace_sort = rows.iter().find_map(|row| match row {
+            SidebarRow::Workspace { sort_key, .. } => Some(sort_key.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            workspace_sort,
+            Some(Some("repo:acme/one".to_string())),
+            "the repo group header is sortable"
+        );
+        let nested_sorts = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { sort_key, .. } => Some(sort_key.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nested_sorts,
+            vec![
+                Some("repo:acme/one:branch:main".to_string()),
+                Some("repo:acme/one:branch:feature".to_string()),
+            ],
+            "every branch header is sortable too"
+        );
+
+        // The workspace header's glyph is its card's rightmost cell; a nested
+        // header's glyph sits right after its count.
+        let sidebar_area = Rect::new(
+            app.view.sidebar_rect.x,
+            app.view.sidebar_rect.y,
+            app.view.sidebar_rect.width.saturating_add(1),
+            app.view.sidebar_rect.height,
+        );
+        let card = compute_workspace_card_areas(&app, sidebar_area)
+            .first()
+            .expect("repo group card")
+            .rect;
+        assert_eq!(
+            sidebar_group_sort_at(&app, card.right() - 1, card.y),
+            Some(("repo:acme/one".to_string(), card.right() - 1)),
+            "the repo header's sort glyph is hit-testable"
+        );
+        let header = compute_sidebar_nested_header_areas(&app, app.view.sidebar_rect)
+            .into_iter()
+            .next()
+            .expect("branch header");
+        let glyph_col = nested_header_sort_col(&header).expect("sort glyph column");
+        assert_eq!(
+            sidebar_group_sort_at(&app, glyph_col, header.rect.y),
+            Some(("repo:acme/one:branch:main".to_string(), glyph_col)),
+            "the branch header's sort glyph is hit-testable where it renders"
+        );
+        assert_eq!(
+            sidebar_group_sort_at(&app, glyph_col + 1, header.rect.y),
+            None,
+            "the cell after the glyph is not the control"
+        );
+    }
+
+    #[test]
+    fn scrolled_sidebar_sort_glyph_targets_the_visible_group() {
+        let mut app = sort_app(&[
+            sort_tab("one", "acme/one", AgentState::Working, 1),
+            sort_tab("two", "acme/two", AgentState::Working, 2),
+            sort_tab("three", "acme/three", AgentState::Working, 3),
+            sort_tab("four", "acme/four", AgentState::Working, 4),
+        ]);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 12));
+        app.workspace_scroll = 1;
+        let sidebar_area = Rect::new(
+            app.view.sidebar_rect.x,
+            app.view.sidebar_rect.y,
+            app.view.sidebar_rect.width.saturating_add(1),
+            app.view.sidebar_rect.height,
+        );
+        let card = compute_workspace_card_areas(&app, sidebar_area)
+            .first()
+            .expect("first visible group card")
+            .rect;
+        assert_eq!(
+            sidebar_group_sort_at(&app, card.right() - 1, card.y),
+            Some(("repo:acme/two".to_string(), card.right() - 1)),
+            "with the sidebar scrolled one row, the first visible glyph belongs to group two"
+        );
+    }
+
+    #[test]
+    fn split_sidebar_subgroups_reuses_the_entry_vec_without_subgroups() {
+        let app = sort_app(&[
+            sort_tab("one", "acme/one", AgentState::Working, 1),
+            sort_tab("two", "acme/one", AgentState::Working, 2),
+        ]);
+        let mut entries = sidebar_thread_entries(&app);
+        assert!(
+            split_sidebar_subgroups(&app, &mut entries).is_none(),
+            "no tab carries a subgroup, so no split Vecs are built"
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "the fast path leaves the owned Vec intact for the caller"
+        );
+    }
+
+    #[test]
+    fn split_sidebar_subgroups_drains_into_runs_when_a_tab_has_a_subgroup() {
+        let mut app = sort_app(&[
+            sort_tab("one", "acme/one", AgentState::Working, 1),
+            sort_tab("two", "acme/one", AgentState::Working, 2),
+        ]);
+        app.workspaces[0].tabs[1].set_subgroup(Some("api".to_string()));
+        let mut entries = sidebar_thread_entries(&app);
+        let Some((plain, subgroups)) = split_sidebar_subgroups(&app, &mut entries) else {
+            panic!("a subgrouped tab forces a split");
+        };
+        assert!(entries.is_empty(), "the split drains the entry Vec");
+        assert_eq!(
+            plain.iter().map(|entry| entry.tab_idx).collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(subgroups.len(), 1);
+        assert_eq!(subgroups[0].0, "api");
+        assert_eq!(
+            subgroups[0]
+                .1
+                .iter()
+                .map(|entry| entry.tab_idx)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn subgroup_nests_its_tabs_one_level_below_the_group() {
+        let mut app = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 1),
+            sort_tab("alpha", "acme/one", AgentState::Working, 2),
+            sort_tab("bravo", "acme/one", AgentState::Working, 3),
+        ]);
+        app.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
+        app.workspaces[0].tabs[2].set_subgroup(Some(" api ".to_string()));
+
+        let rows = sidebar_rows(&app);
+        let signature = sidebar_signature(&app);
+        assert_eq!(
+            signature,
+            vec![
+                "workspace:acme/one".to_string(),
+                "tab:1:1".to_string(),
+                "group:repo:acme/one:subgroup:api:api".to_string(),
+                "tab:0:2".to_string(),
+                "tab:2:2".to_string(),
+            ],
+            "unsubgrouped tabs stay at depth 1; subgroup tabs nest at depth 2 \
+             under a header named after the (trimmed) subgroup"
+        );
+        let header = rows.iter().find_map(|row| match row {
+            SidebarRow::NestedHeader {
+                title,
+                count,
+                collapsed,
+                sort_key,
+                ..
+            } if title == "api" => Some((*count, *collapsed, sort_key.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            header,
+            Some((2, false, Some("repo:acme/one:subgroup:api".to_string()))),
+            "the subgroup header carries its count and its own sort control"
+        );
+
+        // Collapsing the subgroup hides its tabs but keeps the header.
+        app.collapsed_sidebar_groups.insert(format!(
+            "{}:repo:acme/one:subgroup:api",
+            app.sidebar_group_mode.collapse_namespace()
+        ));
+        assert_eq!(
+            sidebar_signature(&app),
+            vec![
+                "workspace:acme/one".to_string(),
+                "tab:1:1".to_string(),
+                "group:repo:acme/one:subgroup:api:api".to_string(),
+            ],
+            "a collapsed subgroup keeps only its header"
+        );
+
+        // Removing the last member removes the header: empty subgroups vanish.
+        app.workspaces[0].tabs[0].set_subgroup(None);
+        app.workspaces[0].tabs[2].set_subgroup(None);
+        assert!(
+            !sidebar_rows(&app).iter().any(|row| matches!(
+                row,
+                SidebarRow::NestedHeader { title, .. } if title == "api"
+            )),
+            "an empty subgroup disappears"
+        );
+    }
+
+    #[test]
+    fn a_subgroup_sorts_independently_of_its_group() {
+        let mut app = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 9),
+            sort_tab("alpha", "acme/one", AgentState::Working, 1),
+            sort_tab("mike", "acme/one", AgentState::Working, 2),
+        ]);
+        app.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
+        app.workspaces[0].tabs[1].set_subgroup(Some("api".to_string()));
+
+        app.set_sidebar_group_sort(
+            "repo:acme/one:subgroup:api".to_string(),
+            SidebarSortMode::Name,
+        );
+        assert_eq!(
+            sidebar_tab_order(&app),
+            vec![2, 1, 0],
+            "the subgroup sorts by name; the unsubgrouped row keeps canonical order"
+        );
+
+        // The enclosing group's sort flows into the subgroup only while the
+        // subgroup has no choice of its own.
+        let mut app = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 9),
+            sort_tab("alpha", "acme/one", AgentState::Working, 1),
+        ]);
+        app.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
+        app.workspaces[0].tabs[1].set_subgroup(Some("api".to_string()));
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
+        assert_eq!(
+            sidebar_tab_order(&app),
+            vec![1, 0],
+            "a subgroup without its own choice inherits the group sort"
+        );
+    }
+
+    #[test]
+    fn rendered_sidebar_shows_the_subgroup_and_the_sort_glyphs() {
+        let mut app = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 9),
+            sort_tab("alpha", "acme/one", AgentState::Working, 1),
+            sort_tab("mike", "acme/one", AgentState::Working, 2),
+        ]);
+        app.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
+        app.workspaces[0].tabs[1].set_subgroup(Some("api".to_string()));
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
+        let area = Rect::new(0, 0, 60, 20);
+        let width = area.width;
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines = (0..20)
+            .map(|row| row_text(buffer, row, width))
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("acme/one") && line.contains(SIDEBAR_SORT_GLYPH)),
+            "the repo group header shows its sort glyph:\n{text}"
+        );
+        let subgroup_row = lines
+            .iter()
+            .position(|line| line.contains("api (2)"))
+            .expect("subgroup header with its count");
+        assert!(
+            lines[subgroup_row].contains(SIDEBAR_SORT_GLYPH),
+            "the subgroup header has its own sort glyph:\n{text}"
+        );
+        let alpha_row = lines
+            .iter()
+            .position(|line| line.contains("alpha"))
+            .expect("sorted tab row");
+        let mike_row = lines
+            .iter()
+            .position(|line| line.contains("mike"))
+            .expect("canonical tab row");
+        let zeta_row = lines
+            .iter()
+            .position(|line| line.contains("zeta"))
+            .expect("second subgroup tab row");
+        assert!(
+            alpha_row > subgroup_row && mike_row < subgroup_row,
+            "sorted subgroup rows sit below their header, the unsubgrouped row above it:\n{text}"
+        );
+        assert!(
+            alpha_row < zeta_row,
+            "the inherited name sort puts alpha before zeta; canonical order would not:\n{text}"
+        );
+        let tab_indent = |line: &str| line.len() - line.trim_start().len();
+        assert!(
+            tab_indent(&lines[alpha_row]) > tab_indent(&lines[mike_row]),
+            "the subgroup's tab is indented past the depth-1 tab:\n{text}"
+        );
+    }
+
+    #[test]
+    fn sort_menu_marks_the_groups_current_choice() {
+        let mut app = sort_app(&[
+            sort_tab("zeta", "acme/one", AgentState::Working, 1),
+            sort_tab("alpha", "acme/one", AgentState::Working, 2),
+        ]);
+        app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
+        app.open_sidebar_sort_menu("repo:acme/one".to_string(), SidebarSortMode::Name, (10, 3));
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = sidebar_sort_menu_layout(&app, area).expect("sort dropdown");
+        assert_eq!(layout.rect.y, 4, "the menu opens below the glyph");
+        assert_eq!(layout.visible_rows, SidebarSortMode::ALL.len());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_sort_menu(&app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = (layout.list_rect.y..layout.list_rect.bottom())
+            .map(|row| {
+                (layout.list_rect.x..80)
+                    .map(|x| buffer[(x, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                "    Default".to_string(),
+                "▸ ✓ Name A→Z".to_string(),
+                "    Status".to_string(),
+                "    Recent".to_string(),
+            ],
+            "the current choice is marked and the cursor starts on it"
         );
     }
 }
