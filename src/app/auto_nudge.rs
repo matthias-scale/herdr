@@ -165,7 +165,7 @@ impl App {
         self.state.note_human_text(pane_id, text);
     }
 
-    fn cancel_pending_stall_nudge_for_pane(&mut self, pane_id: crate::layout::PaneId) {
+    pub(super) fn cancel_pending_stall_nudge_for_pane(&mut self, pane_id: crate::layout::PaneId) {
         self.pending_stall_nudge_submissions
             .retain(|_, pending| pending.pane_id != pane_id);
     }
@@ -612,6 +612,7 @@ impl App {
             );
             return false;
         }
+        self.retire_blocked_hook_authority_for_pane(target.pane_id, now);
         self.pending_stall_nudge_submissions.insert(
             target.terminal_id.clone(),
             PendingStallNudgeSubmission {
@@ -625,7 +626,6 @@ impl App {
                     .cloned(),
             },
         );
-        self.retire_blocked_hook_authority_for_pane(target.pane_id, now);
         true
     }
 }
@@ -899,6 +899,20 @@ mod tests {
         assert_eq!(drain(&mut rx), "");
         assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
+    }
+
+    #[tokio::test]
+    async fn foreign_pane_input_cancels_the_delayed_stall_nudge_submission() {
+        let now = Instant::now();
+        let (mut app, pane_id, _terminal_id, mut rx) = app_with_stalled_pane(now);
+
+        assert!(app.tick_auto_nudges(now));
+        assert!(drain(&mut rx).contains("Re-verify what you are working on now"));
+
+        app.retire_blocked_hook_authority_for_pane(pane_id, now);
+
+        assert!(!app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
+        assert_eq!(drain(&mut rx), "");
     }
 
     /// Pins a real runtime status report to reset a stalled nudge episode budget.
