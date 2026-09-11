@@ -9,6 +9,27 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{AgentRef, ErrorBody, RemoteControlContext, RemoteFocusState};
 
+/// The production transport is intentionally inert until the local proxy pane
+/// exists. Step 4 must consume terminal and graphics frames and provide input,
+/// resize, and detach before this default may change.
+#[derive(Debug, Default)]
+pub(crate) struct StubRemoteFocusTransport;
+
+impl RemoteFocusTransport for StubRemoteFocusTransport {
+    fn start(
+        &mut self,
+        _operation_id: &str,
+        _agent_ref: &AgentRef,
+        _proxy_pane_id: &str,
+        _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Result<(), ErrorBody> {
+        Err(ErrorBody {
+            code: "host_unreachable".to_owned(),
+            message: "remote focus proxy pane is not available yet".to_owned(),
+        })
+    }
+}
+
 pub(crate) fn configured_remote_hosts(
     fleet: &crate::config::FleetConfig,
 ) -> std::collections::HashSet<String> {
@@ -47,26 +68,6 @@ pub(crate) trait RemoteFocusTransport: Send {
         proxy_pane_id: &str,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Result<(), ErrorBody>;
-}
-
-/// Step 3 has not added a wire transport yet. This implementation performs no
-/// I/O and makes the missing capability visible as an honest operation failure.
-#[derive(Debug, Default)]
-pub(crate) struct StubRemoteFocusTransport;
-
-impl RemoteFocusTransport for StubRemoteFocusTransport {
-    fn start(
-        &mut self,
-        _operation_id: &str,
-        _agent_ref: &AgentRef,
-        _proxy_pane_id: &str,
-        _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-    ) -> Result<(), ErrorBody> {
-        Err(ErrorBody {
-            code: "host_unreachable".into(),
-            message: "remote focus transport is not implemented".into(),
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +270,224 @@ impl RemoteFocusOperations {
 }
 
 impl crate::app::App {
+    #[cfg(unix)]
+    pub(crate) fn remote_control_context(
+        &self,
+        agent_ref: &AgentRef,
+    ) -> Result<RemoteControlContext, ErrorBody> {
+        self.remote_control_context_unix(agent_ref)
+    }
+
+    #[cfg(unix)]
+    fn remote_control_context_unix(
+        &self,
+        agent_ref: &AgentRef,
+    ) -> Result<RemoteControlContext, ErrorBody> {
+        if agent_ref.host != self.state.agent_host_name {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "agent reference host does not match this server".into(),
+            });
+        }
+        if self.state.fleet_snapshot.hosts.iter().any(|host| {
+            host.entries.iter().any(|entry| {
+                entry.agent_ref == *agent_ref
+                    && entry.source == crate::fleet::EvidenceSource::RunState
+            })
+        }) {
+            return Err(ErrorBody {
+                code: "agent_not_attachable".into(),
+                message: format!("agent {} is a windowless run", agent_ref),
+            });
+        }
+        let resolved = self
+            .resolve_agent_target(&agent_ref.agent)
+            .map_err(|_| ErrorBody {
+                code: "unknown_agent".into(),
+                message: format!("agent {} no longer resolves to a pane", agent_ref),
+            })?;
+        let Some(workspace) = self.state.workspaces.get(resolved.ws_idx) else {
+            return Err(ErrorBody {
+                code: "unknown_agent".into(),
+                message: format!("agent {} workspace no longer exists", agent_ref),
+            });
+        };
+        let Some(tab_idx) = workspace.find_tab_index_for_pane(resolved.pane_id) else {
+            return Err(ErrorBody {
+                code: "unknown_agent".into(),
+                message: format!("agent {} tab no longer exists", agent_ref),
+            });
+        };
+        let Some(pane) = workspace.pane_state(resolved.pane_id) else {
+            return Err(ErrorBody {
+                code: "unknown_agent".into(),
+                message: format!("agent {} pane no longer exists", agent_ref),
+            });
+        };
+        let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id) else {
+            return Err(ErrorBody {
+                code: "agent_not_attachable".into(),
+                message: format!("agent {} has no terminal runtime", agent_ref),
+            });
+        };
+        let Some(runtime) = self.terminal_runtimes.get(&pane.attached_terminal_id) else {
+            return Err(ErrorBody {
+                code: "agent_not_attachable".into(),
+                message: format!("agent {} is windowless", agent_ref),
+            });
+        };
+        let Some(known_agent) = terminal.effective_known_agent() else {
+            return Err(ErrorBody {
+                code: "unknown_agent".into(),
+                message: format!("agent {} is not detected in its pane", agent_ref),
+            });
+        };
+        if terminal.managed_agent_launch_pending() && !terminal.managed_agent_control_ready() {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "agent launch is still pending".into(),
+            });
+        }
+        if !terminal.managed_agent_control_ready() {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "agent is not interactive_ready".into(),
+            });
+        }
+        let Some(user) = crate::platform::effective_user_name() else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "effective remote user is unavailable".into(),
+            });
+        };
+        let Some(tty) = runtime
+            .tty_name()
+            .and_then(|tty| tty.to_str().map(str::to_owned))
+            .filter(|tty| !tty.trim().is_empty())
+        else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "terminal tty is unavailable".into(),
+            });
+        };
+        let Some(shell_pid) = runtime.child_pid() else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "terminal shell process is unavailable".into(),
+            });
+        };
+        let Some(cwd) = crate::platform::process_cwd(shell_pid)
+            .and_then(|cwd| cwd.to_str().map(str::to_owned))
+            .filter(|cwd| !cwd.trim().is_empty())
+        else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "terminal cwd is unavailable".into(),
+            });
+        };
+        let Some(job) = crate::detect::foreground_job(shell_pid) else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "foreground process is unavailable".into(),
+            });
+        };
+        let Some(process) = job
+            .processes
+            .iter()
+            .find(|process| process.pid == job.process_group_id)
+            .or_else(|| job.processes.first())
+        else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "foreground process identity is unavailable".into(),
+            });
+        };
+        if !crate::app::agents::runtime_hosts_agent_in_job(&job, known_agent) {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: format!(
+                    "agent {} is no longer the live foreground process",
+                    agent_ref
+                ),
+            });
+        }
+        let Some(foreground_cwd) = crate::platform::process_cwd(process.pid)
+            .and_then(|cwd| cwd.to_str().map(str::to_owned))
+            .filter(|cwd| !cwd.trim().is_empty())
+        else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "foreground cwd is unavailable".into(),
+            });
+        };
+        let process_cwd = foreground_cwd.clone();
+        let Some(argv) = process.argv.clone() else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "foreground process argv is unavailable".into(),
+            });
+        };
+        if argv.is_empty() || process.name.trim().is_empty() {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "foreground process identity is incomplete".into(),
+            });
+        }
+        let workspace_id = self.public_workspace_id(resolved.ws_idx);
+        let Some(tab_id) = self.public_tab_id(resolved.ws_idx, tab_idx) else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "tab identity is unavailable".into(),
+            });
+        };
+        let Some(pane_id) = self.public_pane_id(resolved.ws_idx, resolved.pane_id) else {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "pane identity is unavailable".into(),
+            });
+        };
+        let state_change_seq = terminal
+            .last_agent_state_change_seq
+            .ok_or_else(|| ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "agent state epoch is unavailable".into(),
+            })?;
+        let human_draft = self
+            .state
+            .pending_human_drafts
+            .contains_key(&resolved.pane_id);
+        if human_draft {
+            return Err(ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "a human input draft is pending".into(),
+            });
+        }
+        Ok(RemoteControlContext {
+            host: self.state.agent_host_name.clone(),
+            user,
+            workspace_id,
+            tab_id,
+            pane_id,
+            terminal_id: terminal.id.to_string(),
+            cwd: cwd.to_owned(),
+            foreground_cwd,
+            tty,
+            foreground_process: crate::api::schema::RemoteForegroundProcess {
+                pid: process.pid,
+                process_group_id: job.process_group_id,
+                name: process.name.clone(),
+                argv,
+                cwd: process_cwd,
+            },
+            detected_agent: crate::detect::agent_label(known_agent).to_owned(),
+            interactive_ready: true,
+            human_draft: false,
+            state_change_seq,
+            revision: terminal.revision,
+            context_epoch: terminal.revision,
+        })
+    }
+
     pub(crate) fn start_remote_focus_operation(
         &mut self,
         agent_ref: AgentRef,
@@ -306,6 +525,16 @@ impl crate::app::App {
     ) {
         self.remote_focus_operations
             .transition(operation_id, transition, Instant::now());
+    }
+}
+
+#[cfg(unix)]
+impl crate::server::remote_control::RemoteControlContextProvider for crate::app::App {
+    fn fresh_remote_control_context(
+        &self,
+        agent_ref: &AgentRef,
+    ) -> Result<RemoteControlContext, ErrorBody> {
+        self.remote_control_context(agent_ref)
     }
 }
 
@@ -362,6 +591,7 @@ mod tests {
                 argv: vec!["agent".into(), "run".into()],
                 cwd: "/work/repo".into(),
             },
+            detected_agent: "claude".into(),
             interactive_ready: true,
             human_draft: false,
             state_change_seq: 9,

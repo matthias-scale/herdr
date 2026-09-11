@@ -3283,6 +3283,8 @@ impl AppState {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::RemoteControlGatePoisoned { .. } => Vec::new(),
             AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::ScratchpadChanged => Vec::new(),
             AppEvent::NotepadChanged => Vec::new(),

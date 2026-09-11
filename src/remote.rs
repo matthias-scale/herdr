@@ -1,13 +1,29 @@
 mod attach;
+mod control;
 #[cfg(unix)]
 mod host_unix;
 
 pub(crate) use attach::*;
+// SSH remote focus remains compiled and testable, but production wiring is
+// intentionally stubbed until the step-4 proxy pane consumes its streams.
+#[allow(unused_imports)]
+pub(crate) use control::SshRemoteFocusTransport;
 #[cfg(unix)]
-pub(crate) use host_unix::run_remote_client_bridge;
+// Test-only transport seams are re-exported for the real socket handshake harness.
+#[allow(unused_imports)]
+pub(crate) use control::{ControlStream, SshRunner};
+#[cfg(unix)]
+pub(crate) use host_unix::{run_remote_client_bridge, run_remote_control_bridge};
 
 #[cfg(windows)]
 pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "remote Windows hosts are not supported yet",
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn run_remote_control_bridge() -> std::io::Result<()> {
     Err(std::io::Error::other(
         "remote Windows hosts are not supported yet",
     ))

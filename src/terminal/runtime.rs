@@ -493,6 +493,36 @@ impl TerminalRuntime {
         self.0.try_send_bytes(bytes)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn try_acquire_remote_owner(
+        &self,
+        owner_id: u64,
+    ) -> crate::pty::actor::RemoteOwnerAcquireResult {
+        self.0.try_acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(all(unix, test))]
+    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.0.acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn release_remote_owner(&self, owner_id: u64) {
+        self.0.release_remote_owner(owner_id);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_send_controlled_bytes(
+        &self,
+        owner_id: u64,
+        bytes: &[u8],
+    ) -> crate::pty::actor::ControlledWriteResult {
+        if self.is_suspended() {
+            return crate::pty::actor::ControlledWriteResult::Refused;
+        }
+        self.0.try_send_controlled_bytes(owner_id, bytes)
+    }
+
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
         self.0.send_bytes_after(bytes, delay);
     }

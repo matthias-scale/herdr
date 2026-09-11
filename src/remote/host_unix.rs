@@ -32,6 +32,31 @@ pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
     copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ())
 }
 
+/// Connects an already-running remote server without starting, stopping, or
+/// replacing it. This command is used only by the guarded control transport.
+pub(crate) fn run_remote_control_bridge() -> io::Result<()> {
+    let socket_path = crate::server::socket_paths::client_socket_path();
+    let stream = UnixStream::connect(&socket_path).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to connect to remote Herdr control socket {}: {err}",
+                socket_path.display()
+            ),
+        )
+    })?;
+
+    let mut stdout = io::stdout().lock();
+    let mut socket_to_stdout = stream.try_clone()?;
+    let mut stdin_to_socket = stream;
+    let _upload = thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let _ = copy_flush(&mut stdin, &mut stdin_to_socket);
+        let _ = stdin_to_socket.shutdown(std::net::Shutdown::Write);
+    });
+    copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ())
+}
+
 fn copy_flush<R: io::Read, W: io::Write>(reader: &mut R, writer: &mut W) -> io::Result<u64> {
     let mut buffer = [0_u8; 16 * 1024];
     let mut total = 0;

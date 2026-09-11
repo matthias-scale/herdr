@@ -3316,6 +3316,21 @@ impl TerminalState {
             .is_some_and(|managed| matches!(managed.phase, ManagedAgentPhase::Active))
     }
 
+    /// Remote control may answer a managed agent while it is blocked. This is
+    /// separate from ordinary prompt readiness so other API paths keep their
+    /// stricter active-only behavior.
+    // Windows keeps the state helper for cross-platform test fixtures; only
+    // Unix can use it to authorize a PTY control lease.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn managed_agent_control_ready(&self) -> bool {
+        self.managed_agent.is_some_and(|managed| {
+            matches!(
+                managed.phase,
+                ManagedAgentPhase::Active | ManagedAgentPhase::Blocked
+            )
+        })
+    }
+
     pub fn managed_agent_kind(&self) -> Option<Agent> {
         self.managed_agent.map(|managed| managed.kind)
     }
@@ -4526,7 +4541,8 @@ mod tests {
     }
 
     #[test]
-    fn managed_agent_readiness_tracks_detection_state() {
+    // AC8: constructed Blocked and Active managed-agent states are both control-admissible.
+    fn managed_agent_control_admits_constructed_blocked_and_active_states() {
         let mut terminal = test_terminal();
         let now = Instant::now();
         terminal.begin_managed_agent(
@@ -4540,6 +4556,7 @@ mod tests {
 
         assert!(terminal.managed_agent_launch_pending());
         assert!(!terminal.managed_agent_interactive_ready());
+        assert!(!terminal.managed_agent_control_ready());
         assert!(terminal.reconcile_managed_agent_at(now + Duration::from_millis(100), false));
         assert!(terminal.managed_agent_launch_pending());
 
@@ -4550,6 +4567,7 @@ mod tests {
         assert!(terminal.reconcile_managed_agent_at(now + Duration::from_millis(102), false));
         assert!(terminal.managed_agent_launch_pending());
         assert!(!terminal.managed_agent_interactive_ready());
+        assert!(terminal.managed_agent_control_ready());
         assert_eq!(terminal.next_managed_agent_deadline(), None);
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
         assert!(!terminal.reconcile_managed_agent_at(now + Duration::from_secs(2), false));
@@ -4559,6 +4577,7 @@ mod tests {
         assert!(terminal.reconcile_managed_agent_at(now + Duration::from_secs(2), false));
         assert!(!terminal.managed_agent_launch_pending());
         assert!(terminal.managed_agent_interactive_ready());
+        assert!(terminal.managed_agent_control_ready());
 
         terminal.set_detected_state(None, AgentState::Unknown);
         assert!(terminal.managed_agent_interactive_ready());

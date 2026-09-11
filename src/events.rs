@@ -64,6 +64,10 @@ pub enum AppEvent {
         operation_id: String,
         transition: Box<crate::app::remote_focus::RemoteFocusTransition>,
     },
+    /// A PTY user-write gate was poisoned. Remote control must be disabled,
+    /// but the pane and its child process remain alive.
+    #[cfg(unix)]
+    RemoteControlGatePoisoned { pane_id: PaneId },
     /// A read-only Symphony Temporal workflow poll completed.
     SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
     /// The focused repository's scratchpad file changed on disk; reload it.

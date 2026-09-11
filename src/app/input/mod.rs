@@ -4369,7 +4369,17 @@ impl App {
         self.state.mode = Mode::Terminal;
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
+        self.handle_text_commit_headless_with_hook(text, &mut |_| {}, None);
+    }
+
+    pub(crate) fn handle_text_commit_headless_with_hook(
+        &mut self,
+        text: &str,
+        before_terminal_input: &mut impl FnMut(&super::TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
+    ) {
         if text.is_empty()
             || self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
@@ -4403,10 +4413,31 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            let target_terminal_id = pane_id.and_then(|pane_id| {
+                self.state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.terminal_id(pane_id).cloned())
+            });
             let sent = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
                 .is_some_and(|runtime| {
+                    if let Some(terminal_id) =
+                        target_terminal_id.as_ref().filter(|_| !text.is_empty())
+                    {
+                        #[cfg(unix)]
+                        if let Some(owner_id) =
+                            controlled_owners.and_then(|owners| owners.get(terminal_id))
+                        {
+                            runtime.release_remote_owner(*owner_id);
+                        }
+                        #[cfg(not(unix))]
+                        let _ = controlled_owners;
+                        before_terminal_input(&super::TerminalInputTarget::new(
+                            terminal_id.clone(),
+                        ));
+                    }
                     runtime
                         .try_send_bytes(Bytes::copy_from_slice(text.as_bytes()))
                         .is_ok()

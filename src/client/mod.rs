@@ -1167,6 +1167,7 @@ fn do_handshake(
     // Send Hello.
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
+        build_version: crate::build_info::version(),
         cols,
         rows,
         cell_width_px,
@@ -1199,6 +1200,7 @@ fn do_handshake(
     match welcome {
         ServerMessage::Welcome {
             version,
+            build_version,
             encoding,
             error,
         } => {
@@ -1207,7 +1209,13 @@ fn do_handshake(
             }
             write_to_server(stream, &ClientMessage::SetDockWidth { width: dock_width })
                 .map_err(ClientError::ConnectionFailed)?;
-            info!(version, ?encoding, "handshake succeeded");
+            if build_version.is_empty() {
+                return Err(ClientError::HandshakeRejected {
+                    version,
+                    error: "server did not report a build identity".to_owned(),
+                });
+            }
+            info!(version, %build_version, ?encoding, "handshake succeeded");
             Ok(encoding)
         }
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(
@@ -1302,7 +1310,12 @@ pub fn run_terminal_session_control(
     )?;
     write_to_server(
         &mut stream,
-        &ClientMessage::ControlTerminal { target, takeover },
+        &ClientMessage::ControlTerminal {
+            target,
+            agent_ref: None,
+            expected_context: None,
+            takeover,
+        },
     )?;
 
     let mut write_stream = stream.try_clone()?;
@@ -2348,6 +2361,14 @@ async fn run_client_loop(
                 }
                 ServerMessage::Welcome { .. } => {
                     debug!("received unexpected Welcome in main loop");
+                }
+                ServerMessage::ControlReady { .. } => {
+                    debug!("received unexpected ControlReady in main loop");
+                }
+                ServerMessage::ControlError { code, message } => {
+                    return Err(ClientError::ServerShutdown {
+                        reason: Some(format!("remote control {code}: {message}")),
+                    });
                 }
             },
             ClientLoopEvent::ServerDisconnected => {
