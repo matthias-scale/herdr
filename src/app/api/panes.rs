@@ -2409,6 +2409,171 @@ mod tests {
         }
     }
 
+    fn merged_work(url: &str) -> crate::work_index::Snapshot {
+        crate::work_index::Snapshot {
+            items: vec![crate::work_index::WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(23),
+                pr_url: Some(url.into()),
+                pr_title: None,
+                pr_state: Some("merged".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: Default::default(),
+                audience: Default::default(),
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: None,
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: Default::default(),
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        }
+    }
+
+    fn assert_guard_blocks_overdue_inactivity_and_ripe_finished_work(guard: &str) {
+        let now = std::time::Instant::now();
+        let url = "https://github.com/owner/repo/pull/23";
+        let work = merged_work(url);
+        let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        app.state.auto_settle_done = false;
+        app.state.auto_settle_finished = true;
+        app.state.auto_settle_inactive = false;
+        app.state.settle_after = std::time::Duration::from_secs(60);
+        app.state.settle_finished_after = std::time::Duration::from_secs(30);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .restore_work_context(crate::work_context::PaneWorkContext {
+                pr_urls: vec![url.into()],
+                ..Default::default()
+            })
+            .expect("valid work context");
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .activity
+            .set_last_at(now - std::time::Duration::from_secs(120));
+        let armed_at = now - app.state.settle_finished_after;
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), armed_at, 1_725_000_200),
+            0
+        );
+
+        match guard {
+            "closing gate" => {
+                let mut report = closing_block_report(&public_pane_id, 1, vec![test_gate()]);
+                report.state = crate::api::schema::PaneAgentState::Working;
+                let response = app.handle_pane_report_agent("working-gate".into(), report);
+                let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+            }
+            "usage limit" => {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent: Some(Agent::Codex),
+                    state: AgentState::Blocked,
+                    visible_blocker: false,
+                    visible_working: false,
+                    usage_limited: true,
+                    process_exited: false,
+                    observed_at: now,
+                });
+            }
+            _ => unreachable!(),
+        }
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .activity
+            .set_last_at(now - std::time::Duration::from_secs(120));
+        app.state.auto_settle_inactive = true;
+        assert!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(now)
+                >= app.state.settle_after
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id].finished_since,
+            Some(armed_at)
+        );
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), now, 1_725_000_201),
+            0,
+            "{guard} must outrank both ripe settle triggers"
+        );
+        assert!(!app.state.pane_is_settled(0, pane_id));
+
+        match guard {
+            "closing gate" => {
+                let response = app.handle_pane_report_agent(
+                    "clear-working-gate".into(),
+                    closing_block_report(&public_pane_id, 2, Vec::new()),
+                );
+                let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+            }
+            "usage limit" => {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent: Some(Agent::Codex),
+                    state: AgentState::Idle,
+                    visible_blocker: false,
+                    visible_working: false,
+                    usage_limited: false,
+                    process_exited: false,
+                    observed_at: now,
+                });
+            }
+            _ => unreachable!(),
+        }
+        app.state.auto_settle_inactive = false;
+        let cleared_at = std::time::Instant::now();
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), cleared_at, 1_725_000_202),
+            0,
+            "clearing {guard} must arm a fresh finished-work window"
+        );
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                Some(&work),
+                cleared_at + app.state.settle_finished_after,
+                1_725_000_203,
+            ),
+            1
+        );
+        assert!(app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn working_closing_gate_blocks_overdue_inactivity_and_ripe_finished_work() {
+        assert_guard_blocks_overdue_inactivity_and_ripe_finished_work("closing gate");
+    }
+
+    #[test]
+    fn usage_limit_blocks_overdue_inactivity_and_ripe_finished_work() {
+        assert_guard_blocks_overdue_inactivity_and_ripe_finished_work("usage limit");
+    }
+
     fn assert_blocker_clear_starts_quiet_window(blocker: &str) {
         let now = std::time::Instant::now();
         let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();

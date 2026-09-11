@@ -246,12 +246,15 @@ impl AppState {
                         state,
                         open_blockers,
                         terminal.usage_limited,
-                    ) {
+                    ) || open_blockers
+                        || terminal.declares_running_subagents()
+                        || terminal.holds_shell
+                    {
                         // Settling suspends the agent and would bury an
-                        // unanswered question. A blocking pane is never a
-                        // settle candidate, no matter how old the work reads.
-                        if quiet_observation_changed {
-                            arm_writes.push((ws_idx, *pane_id, pane.finished_since, quiet));
+                        // unanswered question or stop work below the parent.
+                        // Do not age the finished-work grace behind a guard.
+                        if pane.finished_since.is_some() || quiet_observation_changed {
+                            arm_writes.push((ws_idx, *pane_id, None, quiet));
                         }
                         continue;
                     }
@@ -1487,6 +1490,103 @@ mod tests {
 
         assert!(state.observe_pane_detection_snapshot_at(pane_id, 2, None, "after", now));
         assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn inactivity_still_settles_a_stale_working_pane() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let now = Instant::now();
+        state.settle_after = Duration::from_secs(3 * 24 * 60 * 60);
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - state.settle_after);
+
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_003), 1);
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn held_shell_blocks_overdue_inactivity_and_ripe_finished_work() {
+        let url = "https://github.com/owner/repo/pull/17";
+        let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec![url.into()],
+            ..Default::default()
+        });
+        let mut merged_item = item();
+        merged_item.pr_url = Some(url.into());
+        merged_item.pr_state = Some("merged".into());
+        let work = snapshot(merged_item);
+        let now = Instant::now();
+        state.auto_settle_done = false;
+        state.auto_settle_inactive = false;
+        state.settle_after = Duration::from_secs(60);
+        state.settle_finished_after = Duration::from_secs(30);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - Duration::from_secs(120));
+        let armed_at = now - state.settle_finished_after;
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&work), armed_at, 1_725_000_010),
+            0
+        );
+
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: true,
+            stale_resolution: None,
+        });
+        state.auto_settle_inactive = true;
+        assert!(
+            state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(now)
+                >= state.settle_after
+        );
+        assert_eq!(
+            state.workspaces[0].tabs[0].panes[&pane_id].finished_since,
+            Some(armed_at)
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&work), now, 1_725_000_011),
+            0,
+            "a held shell must outrank both ripe settle triggers"
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
+
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: false,
+            stale_resolution: None,
+        });
+        state.auto_settle_inactive = false;
+        assert_eq!(
+            state.refresh_settled_panes_at(Some(&work), now, 1_725_000_012),
+            0,
+            "clearing the shell must arm a fresh finished-work window"
+        );
+        assert_eq!(
+            state.refresh_settled_panes_at(
+                Some(&work),
+                now + state.settle_finished_after,
+                1_725_000_013,
+            ),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
     }
 
     #[test]
