@@ -72,6 +72,7 @@ impl InputLeaseTable {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_press(
         &mut self,
         lease_key: InputLeaseKey,
@@ -79,6 +80,25 @@ impl InputLeaseTable {
         initial_context: Option<&TerminalInputContext>,
         resulting_context: Option<&TerminalInputContext>,
         target: Option<TerminalInputTarget>,
+    ) -> RepeatPlan {
+        self.complete_press_with_reprocess(
+            lease_key,
+            key,
+            initial_context,
+            resulting_context,
+            target,
+            true,
+        )
+    }
+
+    pub(crate) fn complete_press_with_reprocess(
+        &mut self,
+        lease_key: InputLeaseKey,
+        key: &TerminalKey,
+        initial_context: Option<&TerminalInputContext>,
+        resulting_context: Option<&TerminalInputContext>,
+        target: Option<TerminalInputTarget>,
+        allow_reprocess: bool,
     ) -> RepeatPlan {
         if key.generated_text.is_some() && !key.has_physical_identity() {
             return RepeatPlan::Ignore;
@@ -88,8 +108,8 @@ impl InputLeaseTable {
             return RepeatPlan::Ignore;
         }
         if !self.leases.contains_key(&lease_key) {
-            let disposition = match (initial_context, resulting_context) {
-                (Some(initial), Some(resulting)) if initial == resulting => {
+            let disposition = match (initial_context, resulting_context, allow_reprocess) {
+                (Some(initial), Some(resulting), true) if initial == resulting => {
                     ConsumedInputLease::ReprocessRepeats(initial.clone())
                 }
                 _ => ConsumedInputLease::SuppressRepeats,

@@ -860,6 +860,12 @@ pub enum ServerMessage {
         context: Box<crate::api::schema::RemoteControlContext>,
     },
 
+    /// The remote server's authoritative terminal context changed while the
+    /// control lease remained active.
+    ControlContext {
+        context: Box<crate::api::schema::RemoteControlContext>,
+    },
+
     /// The remote server refused guarded terminal control.
     ControlError { code: String, message: String },
 }

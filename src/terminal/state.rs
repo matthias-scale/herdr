@@ -542,6 +542,10 @@ pub struct TerminalState {
     pub(super) recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+    /// This terminal is the local surface of a remote focus proxy pane. It
+    /// has no local process, is excluded from session persistence and live
+    /// handoff, and its screen is fed by the wire transport.
+    pub(crate) remote_proxy: bool,
 }
 
 fn normalize_declared_wait(
@@ -621,6 +625,7 @@ impl TerminalState {
             recent_agent_process_exit: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
+            remote_proxy: false,
         }
     }
 

@@ -677,6 +677,47 @@ mod render_scale_benchmark {
         app
     }
 
+    fn proxy_runtime(pane_id: crate::layout::PaneId, history: &str) -> TerminalRuntime {
+        let (runtime, _channels) = TerminalRuntime::spawn_remote_proxy(
+            pane_id,
+            AREA.height,
+            AREA.width,
+            1024 * 1024,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+        )
+        .expect("proxy runtime");
+        runtime.process_remote_frame(history.as_bytes());
+        runtime
+    }
+
+    fn app_with_proxy_panes(pane_count: usize) -> AppState {
+        let history = history();
+        let mut workspace = Workspace::test_new("bench");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0]
+            .runtimes
+            .insert(root_pane, proxy_runtime(root_pane, &history));
+        let mut pane_ids = vec![root_pane];
+
+        for index in 1..pane_count {
+            let target = pane_ids[(index - 1) / 2];
+            workspace.tabs[0].layout.focus_pane(target);
+            let direction = if index % 2 == 0 {
+                Direction::Vertical
+            } else {
+                Direction::Horizontal
+            };
+            let pane_id = workspace.test_split(direction);
+            workspace.tabs[0]
+                .runtimes
+                .insert(pane_id, proxy_runtime(pane_id, &history));
+            pane_ids.push(pane_id);
+        }
+
+        app_with(vec![workspace])
+    }
+
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
         app.mode = Mode::Terminal;
@@ -714,6 +755,10 @@ mod render_scale_benchmark {
 
     fn profile_remote_cardinalities() -> [(usize, RenderStats); 3] {
         [0, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
+    }
+
+    fn profile_proxy_cardinalities() -> [(usize, RenderStats); 3] {
+        [1, 15, 50].map(|count| (count, profile(app_with_proxy_panes(count))))
     }
 
     fn print_profiles(label: &str, profiles: [(usize, RenderStats); 3]) {
@@ -758,6 +803,10 @@ mod render_scale_benchmark {
             "background workspaces",
         );
         assert_full_render_avoids_aggregate_input_state(app_with_active_panes(15), "active panes");
+        assert_full_render_avoids_aggregate_input_state(
+            app_with_proxy_panes(15),
+            "remote focus proxy panes",
+        );
     }
 
     #[test]
@@ -785,6 +834,10 @@ mod render_scale_benchmark {
         print_profiles(
             "remote agents (one local pane)",
             profile_remote_cardinalities(),
+        );
+        print_profiles(
+            "remote focus proxy panes (one workspace)",
+            profile_proxy_cardinalities(),
         );
     }
 }

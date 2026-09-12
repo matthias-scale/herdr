@@ -1448,15 +1448,12 @@ mod tests {
 
     #[test]
     fn release_discards_local_write_for_later_remote_lease() {
-        let (handle, _peer, _read_rx) = actor_with_socket_pair(true);
+        let (handle, _peer, _read_rx) = actor_with_socket_pair(false);
+        // Larger than the socket buffer and never read by the peer, so part
+        // of the write is still pending when release discards it.
+        let payload = vec![b'l'; 4 * 1024 * 1024];
         handle
-            .user_writes
-            .lock()
-            .expect("user-write gate lock")
-            .accepting = true;
-
-        handle
-            .try_write_user_input(Bytes::from_static(b"released-local"))
+            .try_write_user_input(Bytes::from(payload))
             .expect("local input is accepted before release");
         assert_eq!(
             handle.try_acquire_remote_owner(7),
@@ -1477,9 +1474,11 @@ mod tests {
     #[test]
     fn actor_exit_discards_local_write_for_later_remote_lease() {
         let (handle, _peer, _read_rx) = actor_with_socket_pair(false);
-
+        // Larger than the socket buffer and never read by the peer, so part
+        // of the write is still pending when the actor exit discards it.
+        let payload = vec![b'l'; 4 * 1024 * 1024];
         handle
-            .try_write_user_input(Bytes::from_static(b"exited-local"))
+            .try_write_user_input(Bytes::from(payload))
             .expect("local input is accepted before actor exit");
         assert_eq!(
             handle.try_acquire_remote_owner(7),
@@ -2164,6 +2163,10 @@ mod tests {
     fn handoff_drains_local_write_for_later_remote_lease() {
         let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
         let local = Bytes::from_static(b"handoff-local");
+        let write_guard = handle
+            .pty_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         handle
             .try_write_user_input(local.clone())
@@ -2172,6 +2175,7 @@ mod tests {
             handle.try_acquire_remote_owner(7),
             RemoteOwnerAcquireResult::RefusedForSafety
         );
+        drop(write_guard);
 
         handle
             .begin_handoff(Duration::from_secs(1))
