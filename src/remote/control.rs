@@ -476,20 +476,29 @@ impl Drop for ControlSessionTeardown {
     }
 }
 
-/// Forwards proxy outbound messages to the wire. Input preserves order
-/// relative to resizes; a resize marker reads the latest dimensions from the
-/// shared slot. Ends on detach, on a closed channel (best-effort detach so
-/// the remote lease is still released), or on a write failure (the reader
-/// reports the loss).
+#[cfg(unix)]
+fn read_resize_slot(resize_slot: &Mutex<(u16, u16, u32, u32)>) -> (u16, u16, u32, u32) {
+    match resize_slot.lock() {
+        Ok(slot) => *slot,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+/// Forwards proxy outbound messages to the wire. After handling each item, the
+/// writer compares the latest slot with the last geometry it wrote and emits a
+/// resize when they differ. A resize marker only wakes this check. Ends on
+/// detach, on a closed channel (best-effort detach so the remote lease is
+/// still released), or on a write failure (the reader reports the loss).
 #[cfg(unix)]
 fn run_control_writer(
     mut writer: Box<dyn Write + Send>,
     mut outbound_rx: tokio::sync::mpsc::Receiver<ProxyOutbound>,
     resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
-    resize_state: Arc<Mutex<crate::pane::RemoteProxyResizeState>>,
+    initial_resize: Option<(u16, u16, u32, u32)>,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
 ) {
+    let mut last_sent_resize = initial_resize;
     while let Some(message) = outbound_rx.blocking_recv() {
         if detach_requested.load(Ordering::Acquire) {
             let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
@@ -500,34 +509,32 @@ fn run_control_writer(
         }
         let is_detach = matches!(message, ProxyOutbound::Detach);
         let wire = match message {
-            ProxyOutbound::Input(bytes) => ClientMessage::Input {
+            ProxyOutbound::Input(bytes) => Some(ClientMessage::Input {
                 data: bytes.to_vec(),
-            },
-            ProxyOutbound::SyncResize => {
-                let (rows, cols, cell_width_px, cell_height_px) = {
-                    let mut state = resize_state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.marker_queued = false;
-                    state.retry_needed = false;
-                    *resize_slot
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                };
-                ClientMessage::Resize {
-                    cols,
-                    rows,
-                    cell_width_px,
-                    cell_height_px,
-                }
-            }
-            ProxyOutbound::Detach => ClientMessage::Detach,
+            }),
+            ProxyOutbound::SyncResize => None,
+            ProxyOutbound::Detach => Some(ClientMessage::Detach),
         };
-        if protocol::write_message(&mut writer, &wire).is_err() {
-            return;
+        if let Some(wire) = wire {
+            if protocol::write_message(&mut writer, &wire).is_err() {
+                return;
+            }
         }
         if is_detach {
             return;
+        }
+        let resize = read_resize_slot(&resize_slot);
+        if last_sent_resize != Some(resize) {
+            let resize_message = ClientMessage::Resize {
+                cols: resize.1,
+                rows: resize.0,
+                cell_width_px: resize.2,
+                cell_height_px: resize.3,
+            };
+            if protocol::write_message(&mut writer, &resize_message).is_err() {
+                return;
+            }
+            last_sent_resize = Some(resize);
         }
     }
     if detach_requested.load(Ordering::Acquire) || !detached.load(Ordering::Acquire) {
@@ -554,7 +561,6 @@ fn run_control_session(
     let RemoteProxyChannels {
         outbound_rx,
         resize_slot,
-        resize_state,
         ..
     } = channels;
     let mut stream = match runner.connect(&target) {
@@ -569,15 +575,13 @@ fn run_control_session(
             return;
         }
     };
-    let (hello_rows, hello_cols, hello_cell_width_px, hello_cell_height_px) = resize_slot
-        .lock()
-        .map(|slot| *slot)
-        .unwrap_or((40, 120, 0, 0));
+    let (hello_rows, hello_cols, hello_cell_width_px, hello_cell_height_px) =
+        read_resize_slot(&resize_slot);
     let hello = ClientMessage::Hello {
         version,
         build_version,
-        cols: hello_cols.max(2),
-        rows: hello_rows.max(1),
+        cols: hello_cols,
+        rows: hello_rows,
         cell_width_px: hello_cell_width_px,
         cell_height_px: hello_cell_height_px,
         requested_encoding: RenderEncoding::TerminalAnsi,
@@ -667,7 +671,12 @@ fn run_control_session(
     let writer_detached = Arc::clone(&detached);
     let writer_detach_requested = Arc::clone(&detach_requested);
     let writer_resize_slot = Arc::clone(&resize_slot);
-    let writer_resize_state = Arc::clone(&resize_state);
+    let writer_initial_resize = Some((
+        hello_rows,
+        hello_cols,
+        hello_cell_width_px,
+        hello_cell_height_px,
+    ));
     let writer_thread = std::thread::Builder::new()
         .name(format!("herdr-remote-focus-writer-{operation_id}"))
         .spawn(move || {
@@ -679,7 +688,7 @@ fn run_control_session(
                 writer,
                 outbound_rx,
                 writer_resize_slot,
-                writer_resize_state,
+                writer_initial_resize,
                 writer_detached,
                 writer_detach_requested,
             )
@@ -952,7 +961,6 @@ mod tests {
                 outbound_rx,
                 detach_tx: outbound_tx.clone(),
                 resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
-                resize_state: Arc::new(Mutex::new(crate::pane::RemoteProxyResizeState::default())),
             },
             outbound_tx,
         )
@@ -1398,7 +1406,7 @@ mod tests {
             }),
             outbound_rx,
             resize_slot,
-            Arc::new(Mutex::new(crate::pane::RemoteProxyResizeState::default())),
+            None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
@@ -1415,6 +1423,91 @@ mod tests {
                 },
                 ClientMessage::Detach,
             ]
+        ));
+    }
+
+    #[test]
+    fn dropped_resize_marker_converges_while_writer_drains_queued_output() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        let resize_slot = Arc::new(Mutex::new((24, 80, 0, 0)));
+        outbound_tx
+            .try_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"ahead")))
+            .expect("unrelated output queued");
+        *resize_slot.lock().expect("resize slot lock") = (30, 100, 9, 18);
+        assert!(matches!(
+            outbound_tx.try_send(ProxyOutbound::SyncResize),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(
+                ProxyOutbound::SyncResize
+            ))
+        ));
+        drop(outbound_tx);
+
+        run_control_writer(
+            Box::new(FakeWriter {
+                output: Arc::clone(&output),
+            }),
+            outbound_rx,
+            resize_slot,
+            Some((24, 80, 0, 0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0], ClientMessage::Input { .. }));
+        assert!(matches!(
+            &messages[0],
+            ClientMessage::Input { data } if data == b"ahead"
+        ));
+        assert!(matches!(
+            messages[1],
+            ClientMessage::Resize {
+                cols: 100,
+                rows: 30,
+                cell_width_px: 9,
+                cell_height_px: 18,
+            }
+        ));
+        assert!(matches!(messages[2], ClientMessage::Detach));
+    }
+
+    #[test]
+    fn poisoned_resize_slot_keeps_real_geometry_in_hello() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let resize_slot = Arc::new(Mutex::new((30, 100, 9, 18)));
+        let poison_slot = Arc::clone(&resize_slot);
+        assert!(std::thread::spawn(move || {
+            let _guard = poison_slot.lock().expect("resize slot starts healthy");
+            panic!("poison resize slot");
+        })
+        .join()
+        .is_err());
+
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(2);
+        let channels = RemoteProxyChannels {
+            outbound_rx,
+            detach_tx: outbound_tx,
+            resize_slot,
+        };
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        let mut transport = transport_with(welcome_bytes(), Arc::clone(&output), None);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let _ = event_rx.blocking_recv();
+
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(
+            messages.first(),
+            Some(ClientMessage::Hello {
+                cols: 100,
+                rows: 30,
+                cell_width_px: 9,
+                cell_height_px: 18,
+                ..
+            })
         ));
     }
 
@@ -1536,7 +1629,6 @@ mod tests {
             outbound_rx,
             detach_tx: outbound_tx.clone(),
             resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
-            resize_state: Arc::new(Mutex::new(crate::pane::RemoteProxyResizeState::default())),
         };
         outbound_tx
             .try_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"stale")))

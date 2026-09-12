@@ -334,21 +334,6 @@ impl TerminalRuntime {
         self.0.resize(rows, cols, cell_width_px, cell_height_px);
     }
 
-    pub(crate) fn resize_remote_proxy_without_wire(
-        &self,
-        rows: u16,
-        cols: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-    ) {
-        self.0
-            .resize_remote_proxy_without_wire(rows, cols, cell_width_px, cell_height_px);
-    }
-
-    pub(crate) fn sync_remote_proxy_resize(&self) {
-        self.0.sync_remote_proxy_resize();
-    }
-
     #[cfg(unix)]
     pub fn nudge_child_redraw_after_handoff(&self) {
         self.0.nudge_child_redraw_after_handoff();

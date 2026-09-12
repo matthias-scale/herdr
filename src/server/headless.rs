@@ -1328,7 +1328,6 @@ impl HeadlessServer {
                 area,
             );
         }
-        self.app.sync_remote_proxy_resizes();
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
         // even if the next rendered buffer compares equal to its cached frame.
@@ -9605,9 +9604,6 @@ next_tab = ""
             outbound_rx,
             detach_tx: outbound_tx,
             resize_slot: Arc::new(std::sync::Mutex::new((24, 80, 0, 0))),
-            resize_state: Arc::new(std::sync::Mutex::new(
-                crate::pane::RemoteProxyResizeState::default(),
-            )),
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
         transport
