@@ -835,6 +835,7 @@ type SpawnedDetectionTask = (
 /// Grouped because they are only ever read together: the hook owns the pane
 /// until it goes stale, and staleness is what hands authority back to the
 /// process probe.
+#[cfg(unix)]
 #[derive(Clone)]
 struct DetectionAuthorityMirrors {
     full_lifecycle_active: Arc<AtomicBool>,
