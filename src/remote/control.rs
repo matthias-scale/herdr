@@ -192,6 +192,8 @@ pub(crate) struct SshRemoteFocusTransport {
     runner: Arc<dyn SshRunner>,
     #[cfg(unix)]
     sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
+    #[cfg(all(test, unix))]
+    writer_start_gate: Option<Arc<std::sync::Barrier>>,
     targets: std::collections::HashMap<String, String>,
 }
 
@@ -208,6 +210,8 @@ impl SshRemoteFocusTransport {
             runner: Arc::new(OpenSshRunner),
             #[cfg(unix)]
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            #[cfg(all(test, unix))]
+            writer_start_gate: None,
             targets,
         }
     }
@@ -245,6 +249,8 @@ impl SshRemoteFocusTransport {
         let runner = Arc::clone(&self.runner);
         let detached = Arc::new(AtomicBool::new(false));
         let detach_requested = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let writer_start_gate = self.writer_start_gate.clone();
         self.sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -280,6 +286,8 @@ impl SshRemoteFocusTransport {
                         channels,
                         cleanup_detached,
                         detach_requested,
+                        #[cfg(test)]
+                        writer_start_gate,
                         event_tx,
                     )
                 }));
@@ -538,6 +546,7 @@ fn run_control_session(
     channels: RemoteProxyChannels,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
+    #[cfg(test)] writer_start_gate: Option<Arc<std::sync::Barrier>>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) {
     let RemoteProxyChannels {
@@ -660,6 +669,10 @@ fn run_control_session(
     let writer_thread = std::thread::Builder::new()
         .name(format!("herdr-remote-focus-writer-{operation_id}"))
         .spawn(move || {
+            #[cfg(test)]
+            if let Some(gate) = writer_start_gate {
+                gate.wait();
+            }
             run_control_writer(
                 writer,
                 outbound_rx,
@@ -1461,6 +1474,9 @@ mod tests {
             None,
             Some(Arc::clone(&read_gate)),
         );
+        // Keep the stale input queued until detach has raised its urgent flag.
+        let writer_start_gate = Arc::new(std::sync::Barrier::new(2));
+        transport.writer_start_gate = Some(Arc::clone(&writer_start_gate));
         let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
         let channels = RemoteProxyChannels {
             outbound_rx,
@@ -1476,6 +1492,7 @@ mod tests {
             .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
         transport.detach("operation");
+        writer_start_gate.wait();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
