@@ -76,8 +76,11 @@ pub fn unregister_runtime_dir(path: &Path) {
 pub fn herdr_server_pids_for_runtime_dir(runtime_dir: &Path) -> std::io::Result<Vec<u32>> {
     let mut pids = Vec::new();
     for pid in iter_worktree_server_pids()? {
-        let Some(process_runtime_dir) = process_runtime_dir(pid)? else {
-            continue;
+        // A server can exit between the process scan and its environ read;
+        // that unrelated race must not hide live servers in this runtime.
+        let process_runtime_dir = match process_runtime_dir(pid) {
+            Ok(Some(process_runtime_dir)) => process_runtime_dir,
+            Ok(None) | Err(_) => continue,
         };
         if process_runtime_dir == runtime_dir {
             pids.push(pid);
