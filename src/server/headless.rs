@@ -9601,6 +9601,9 @@ next_tab = ""
             outbound_rx,
             detach_tx: outbound_tx,
             resize_slot: Arc::new(std::sync::Mutex::new((24, 80, 0, 0))),
+            resize_state: Arc::new(std::sync::Mutex::new(
+                crate::pane::RemoteProxyResizeState::default(),
+            )),
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
         transport

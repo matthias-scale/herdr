@@ -257,15 +257,16 @@ impl SshRemoteFocusTransport {
                 },
             );
         let sessions = Arc::clone(&self.sessions);
-        std::thread::Builder::new()
+        let cleanup =
+            ControlSessionTeardown::new(sessions, operation_id.clone(), Arc::clone(&detached));
+        let spawn_result = std::thread::Builder::new()
             .name(format!("herdr-remote-focus-{operation_id}"))
             .spawn(move || {
-                // A panic anywhere in the session must not bypass teardown:
-                // the registration, the detach flag, and the app-side proxy
-                // operation would otherwise stay leased forever.
-                let cleanup_sessions = Arc::clone(&sessions);
-                let cleanup_detached = Arc::clone(&detached);
-                let cleanup_operation_id = operation_id.clone();
+                // The guard owns the only teardown path. It is constructed
+                // before spawn so dropping a failed spawn also unregisters
+                // the session; closure unwinding covers panic/cancellation.
+                let cleanup_detached = Arc::clone(&cleanup.detached);
+                let panic_operation_id = cleanup.operation_id.clone();
                 let cleanup_event_tx = event_tx.clone();
                 let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_control_session(
@@ -277,31 +278,28 @@ impl SshRemoteFocusTransport {
                         build_version,
                         expected_context,
                         channels,
-                        sessions,
-                        detached,
+                        cleanup_detached,
                         detach_requested,
                         event_tx,
                     )
                 }));
                 if let Err(payload) = panicked {
+                    drop(cleanup);
                     SshRemoteFocusTransport::fail(
                         &cleanup_event_tx,
-                        &cleanup_operation_id,
+                        &panic_operation_id,
                         "connection_lost",
                         "remote control session panicked; delivery of the last accepted batch is unknown",
                     );
-                    finish_control_session(
-                        &cleanup_sessions,
-                        &cleanup_operation_id,
-                        &cleanup_detached,
-                    );
                     std::panic::resume_unwind(payload);
                 }
-            })
-            .map_err(|error| ErrorBody {
+            });
+        if let Err(error) = spawn_result {
+            return Err(ErrorBody {
                 code: "host_unreachable".to_owned(),
                 message: format!("failed to start remote focus connection: {error}"),
-            })?;
+            });
+        }
         Ok(())
     }
 
@@ -427,13 +425,47 @@ fn read_initial_welcome(
 fn finish_control_session(
     sessions: &Mutex<std::collections::HashMap<String, SessionHandle>>,
     operation_id: &str,
-    detached: &AtomicBool,
+    detached: &Arc<AtomicBool>,
 ) {
     detached.store(true, Ordering::Release);
-    sessions
+    let mut sessions = sessions
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(operation_id);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if sessions
+        .get(operation_id)
+        .is_some_and(|handle| Arc::ptr_eq(&handle.detached, detached))
+    {
+        sessions.remove(operation_id);
+    }
+}
+
+#[cfg(unix)]
+struct ControlSessionTeardown {
+    sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
+    operation_id: String,
+    detached: Arc<AtomicBool>,
+}
+
+#[cfg(unix)]
+impl ControlSessionTeardown {
+    fn new(
+        sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
+        operation_id: String,
+        detached: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            sessions,
+            operation_id,
+            detached,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ControlSessionTeardown {
+    fn drop(&mut self) {
+        finish_control_session(&self.sessions, &self.operation_id, &self.detached);
+    }
 }
 
 /// Forwards proxy outbound messages to the wire. Input preserves order
@@ -446,6 +478,7 @@ fn run_control_writer(
     mut writer: Box<dyn Write + Send>,
     mut outbound_rx: tokio::sync::mpsc::Receiver<ProxyOutbound>,
     resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+    resize_state: Arc<Mutex<crate::pane::RemoteProxyResizeState>>,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
 ) {
@@ -463,8 +496,14 @@ fn run_control_writer(
                 data: bytes.to_vec(),
             },
             ProxyOutbound::SyncResize => {
-                let (rows, cols, cell_width_px, cell_height_px) =
-                    resize_slot.lock().map(|slot| *slot).unwrap_or((0, 0, 0, 0));
+                let (rows, cols, cell_width_px, cell_height_px) = {
+                    let mut state = resize_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.marker_queued = false;
+                    state.retry_needed = false;
+                    resize_slot.lock().map(|slot| *slot).unwrap_or((0, 0, 0, 0))
+                };
                 ClientMessage::Resize {
                     cols,
                     rows,
@@ -497,7 +536,6 @@ fn run_control_session(
     build_version: String,
     expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
     channels: RemoteProxyChannels,
-    sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
@@ -505,6 +543,7 @@ fn run_control_session(
     let RemoteProxyChannels {
         outbound_rx,
         resize_slot,
+        resize_state,
         ..
     } = channels;
     let mut stream = match runner.connect(&target) {
@@ -516,7 +555,6 @@ fn run_control_session(
                 "host_unreachable"
             };
             SshRemoteFocusTransport::fail(&event_tx, &operation_id, code, error.to_string());
-            finish_control_session(&sessions, &operation_id, &detached);
             return;
         }
     };
@@ -542,7 +580,6 @@ fn run_control_session(
             "host_unreachable",
             format!("remote control handshake write failed: {error}"),
         );
-        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     let welcome: ServerMessage = match read_initial_welcome(&mut *stream) {
@@ -554,7 +591,6 @@ fn run_control_session(
                 "host_unreachable",
                 format!("remote control handshake read failed: {error}"),
             );
-            finish_control_session(&sessions, &operation_id, &detached);
             return;
         }
     };
@@ -571,7 +607,6 @@ fn run_control_session(
             "version_skew",
             "remote control did not receive a Welcome message",
         );
-        finish_control_session(&sessions, &operation_id, &detached);
         return;
     };
     if error.is_some()
@@ -598,7 +633,6 @@ fn run_control_session(
                     .map_or(String::new(), |error| format!(" ({error})")),
             ),
         );
-        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     if let Err(error) = protocol::write_message(
@@ -616,13 +650,13 @@ fn run_control_session(
             "host_unreachable",
             format!("remote control request write failed: {error}"),
         );
-        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     let (mut reader, writer) = stream.split();
     let writer_detached = Arc::clone(&detached);
     let writer_detach_requested = Arc::clone(&detach_requested);
     let writer_resize_slot = Arc::clone(&resize_slot);
+    let writer_resize_state = Arc::clone(&resize_state);
     let writer_thread = std::thread::Builder::new()
         .name(format!("herdr-remote-focus-writer-{operation_id}"))
         .spawn(move || {
@@ -630,6 +664,7 @@ fn run_control_session(
                 writer,
                 outbound_rx,
                 writer_resize_slot,
+                writer_resize_state,
                 writer_detached,
                 writer_detach_requested,
             )
@@ -641,7 +676,6 @@ fn run_control_session(
             "host_unreachable",
             format!("failed to start remote focus writer: {error}"),
         );
-        finish_control_session(&sessions, &operation_id, &detached);
         return;
     }
     let mut active = false;
@@ -743,7 +777,6 @@ fn run_control_session(
             _ => {}
         }
     }
-    finish_control_session(&sessions, &operation_id, &detached);
 }
 
 #[cfg(all(test, unix))]
@@ -904,6 +937,7 @@ mod tests {
                 outbound_rx,
                 detach_tx: outbound_tx.clone(),
                 resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
+                resize_state: Arc::new(Mutex::new(crate::pane::RemoteProxyResizeState::default())),
             },
             outbound_tx,
         )
@@ -1407,6 +1441,10 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        assert!(
+            transport.sessions.lock().expect("sessions lock").is_empty(),
+            "detach must unregister the session"
+        );
     }
 
     #[test]
@@ -1428,6 +1466,7 @@ mod tests {
             outbound_rx,
             detach_tx: outbound_tx.clone(),
             resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
+            resize_state: Arc::new(Mutex::new(crate::pane::RemoteProxyResizeState::default())),
         };
         outbound_tx
             .try_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"stale")))
@@ -1514,6 +1553,10 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        assert!(
+            transport.sessions.lock().expect("sessions lock").is_empty(),
+            "detach must unregister the session"
+        );
     }
 
     #[test]

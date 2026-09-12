@@ -1301,6 +1301,13 @@ pub(crate) struct RemoteProxyChannels {
     /// (and its own sender) is gone.
     pub detach_tx: mpsc::Sender<ProxyOutbound>,
     pub resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+    pub resize_state: Arc<Mutex<RemoteProxyResizeState>>,
+}
+
+#[derive(Default)]
+pub(crate) struct RemoteProxyResizeState {
+    pub(crate) marker_queued: bool,
+    pub(crate) retry_needed: bool,
 }
 
 /// Keystroke bursts (including pastes) queue briefly; a stuck transport drops
@@ -1317,6 +1324,7 @@ enum PaneRuntimeIo {
         /// complete frame and `ControlReady` have both arrived.
         input_enabled: Arc<AtomicBool>,
         resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+        resize_state: Arc<Mutex<RemoteProxyResizeState>>,
         /// Terminal responses to queries in the frame stream are discarded:
         /// the remote server already answered them for its own terminal.
         response_sink: mpsc::Sender<Bytes>,
@@ -1504,14 +1512,15 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::RemoteProxy {
                 outbound,
                 resize_slot,
+                resize_state,
                 ..
             } => {
-                if let Ok(mut slot) = resize_slot.lock() {
-                    *slot = (rows, cols, cell_width_px, cell_height_px);
-                }
-                // Latest-wins: when the channel is full, an earlier marker
-                // still delivers the slot value just written.
-                let _ = outbound.try_send(ProxyOutbound::SyncResize);
+                Self::queue_remote_proxy_resize(
+                    outbound,
+                    resize_slot,
+                    resize_state,
+                    (rows, cols, cell_width_px, cell_height_px),
+                );
             }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { resize_tx, .. } => {
@@ -1530,15 +1539,55 @@ impl PaneRuntimeIo {
         if let PaneRuntimeIo::RemoteProxy {
             outbound,
             resize_slot,
+            resize_state,
             ..
         } = self
         {
-            if let Ok(mut slot) = resize_slot.lock() {
-                *slot = (rows, cols, cell_width_px, cell_height_px);
+            Self::queue_remote_proxy_resize(
+                outbound,
+                resize_slot,
+                resize_state,
+                (rows, cols, cell_width_px, cell_height_px),
+            );
+        }
+    }
+
+    fn queue_remote_proxy_resize(
+        outbound: &mpsc::Sender<ProxyOutbound>,
+        resize_slot: &Mutex<(u16, u16, u32, u32)>,
+        resize_state: &Mutex<RemoteProxyResizeState>,
+        size: (u16, u16, u32, u32),
+    ) {
+        let mut state = resize_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut slot = resize_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *slot == size && !state.retry_needed {
+            return;
+        }
+        if state.marker_queued {
+            // The queued marker reads the slot when the writer consumes it,
+            // so updating the slot is enough and avoids another marker.
+            *slot = size;
+            state.retry_needed = false;
+            return;
+        }
+        *slot = size;
+        match outbound.try_send(ProxyOutbound::SyncResize) {
+            Ok(()) => {
+                state.marker_queued = true;
+                state.retry_needed = false;
             }
-            // Latest-wins: when the channel is full, an earlier marker
-            // still delivers the slot value just written.
-            let _ = outbound.try_send(ProxyOutbound::SyncResize);
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Keep retry_needed set so a later post-draw reconciliation
+                // retries the marker instead of suppressing this resize.
+                state.retry_needed = true;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                state.retry_needed = false;
+            }
         }
     }
 
@@ -2102,6 +2151,7 @@ impl PaneRuntime {
         let (outbound_tx, outbound_rx) = mpsc::channel(REMOTE_PROXY_OUTBOUND_CAPACITY);
         let detach_tx = outbound_tx.clone();
         let resize_slot = Arc::new(Mutex::new((rows, cols, 0, 0)));
+        let resize_state = Arc::new(Mutex::new(RemoteProxyResizeState::default()));
         let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let (response_tx, _response_rx) = mpsc::channel(1);
@@ -2115,6 +2165,7 @@ impl PaneRuntime {
                     outbound: outbound_tx,
                     input_enabled: Arc::new(AtomicBool::new(false)),
                     resize_slot: Arc::clone(&resize_slot),
+                    resize_state: Arc::clone(&resize_state),
                     response_sink,
                     render_notify,
                     render_dirty,
@@ -2144,6 +2195,7 @@ impl PaneRuntime {
                 outbound_rx,
                 detach_tx,
                 resize_slot,
+                resize_state,
             },
         ))
     }
@@ -4156,6 +4208,40 @@ mod tests {
         assert!(
             channels.outbound_rx.try_recv().is_err(),
             "post-draw syncs with unchanged geometry must stay off the wire"
+        );
+    }
+
+    #[test]
+    fn proxy_resize_sync_retries_after_a_full_outbound_queue() {
+        let (outbound, mut outbound_rx) = mpsc::channel(1);
+        let resize_slot = Mutex::new((24, 80, 0, 0));
+        let resize_state = Mutex::new(RemoteProxyResizeState::default());
+        outbound
+            .try_send(ProxyOutbound::Input(Bytes::from_static(b"busy")))
+            .expect("queue has capacity");
+
+        PaneRuntimeIo::queue_remote_proxy_resize(
+            &outbound,
+            &resize_slot,
+            &resize_state,
+            (30, 100, 9, 18),
+        );
+        assert!(resize_state.lock().expect("resize state lock").retry_needed);
+        assert_eq!(
+            outbound_rx.try_recv(),
+            Ok(ProxyOutbound::Input(Bytes::from_static(b"busy")))
+        );
+
+        PaneRuntimeIo::queue_remote_proxy_resize(
+            &outbound,
+            &resize_slot,
+            &resize_state,
+            (30, 100, 9, 18),
+        );
+        assert_eq!(outbound_rx.try_recv(), Ok(ProxyOutbound::SyncResize));
+        assert_eq!(
+            *resize_slot.lock().expect("resize slot lock"),
+            (30, 100, 9, 18)
         );
     }
 
