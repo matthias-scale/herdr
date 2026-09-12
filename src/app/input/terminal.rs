@@ -2085,7 +2085,7 @@ mod tests {
             Some(1),
         );
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Blocked
         );
 
@@ -2096,7 +2096,7 @@ mod tests {
 
         assert_eq!(rx.try_recv().unwrap().as_ref(), b"x");
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -2110,7 +2110,7 @@ mod tests {
                 crate::detect::AgentState::Working,
             );
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Working
         );
     }

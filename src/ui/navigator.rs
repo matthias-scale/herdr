@@ -203,6 +203,7 @@ fn render_row(
     };
     let (status_icon, status_style) =
         state_icon_with_stale(row.status, row.seen, row.stale, app.status_indicators, p);
+    let status_style = status_style.fg(navigator_row_status_color(row, p));
     let status_style = if selected {
         base_style.add_modifier(Modifier::BOLD)
     } else if context_only {
@@ -262,15 +263,26 @@ fn render_row(
             Style::default().fg(p.overlay0).bg(p.panel_bg)
         } else {
             Style::default()
-                .fg(state_label_color_with_stale(
-                    row.status, row.seen, row.stale, p,
-                ))
+                .fg(navigator_row_status_color(row, p))
                 .bg(p.panel_bg)
         };
         frame.render_widget(
             Paragraph::new(format!(" {meta}")).style(meta_style),
             meta_rect,
         );
+    }
+}
+
+fn navigator_row_status_color(
+    row: &NavigatorRow,
+    p: &crate::app::state::Palette,
+) -> ratatui::style::Color {
+    match row.attention_tier {
+        crate::terminal::state::AttentionTier::Blocked => p.red,
+        crate::terminal::state::AttentionTier::Attention => p.peach,
+        crate::terminal::state::AttentionTier::None => {
+            state_label_color_with_stale(row.status, row.seen, row.stale, p)
+        }
     }
 }
 
@@ -490,23 +502,26 @@ fn pane_detail(
                     .or_else(|| terminal.effective_agent_label())
             }) {
                 parts.push(agent.to_string());
-                let seen = tab
+                let pane = tab
                     .panes
                     .get(&pane_id)
-                    .map(|pane| pane.seen)
-                    .unwrap_or(true);
-                let state = row_state(app, ws_idx, tab_idx, pane_id);
-                let stale = terminal.supervisor_stale;
+                    .expect("navigator pane belongs to its tab");
+                let projection = pane.agent_projection(terminal);
+                let status_key = projection.status_key();
                 let status = presentation
                     .state_labels
-                    .get(display_state_with_stale(state, seen, stale))
+                    .get(status_key)
                     .cloned()
-                    .unwrap_or_else(|| display_state_with_stale(state, seen, stale).to_string());
+                    .unwrap_or_else(|| status_key.to_string());
                 parts.push(status);
             } else {
                 parts.push("shell".to_string());
             }
-            if terminal.state == crate::detect::AgentState::Blocked {
+            if tab
+                .panes
+                .get(&pane_id)
+                .is_some_and(|pane| pane.agent_projection(terminal).counts_as_blocked())
+            {
                 for gate in &terminal.closing_gates {
                     parts.push(format!("gate: {}", gate.text));
                 }
@@ -526,43 +541,6 @@ fn rowless_workspace_activity(
         .find(|row| matches!(row.target, NavigatorTarget::Workspace { ws_idx: row_ws_idx } if row_ws_idx == ws_idx))
         .map(|row| row.meta)
         .unwrap_or_default()
-}
-
-fn row_state(
-    app: &AppState,
-    ws_idx: usize,
-    tab_idx: usize,
-    pane_id: crate::layout::PaneId,
-) -> crate::detect::AgentState {
-    app.workspaces
-        .get(ws_idx)
-        .and_then(|ws| ws.tabs.get(tab_idx))
-        .and_then(|tab| tab.terminal_id(pane_id))
-        .and_then(|terminal_id| app.terminals.get(terminal_id))
-        .map(|terminal| terminal.state)
-        .unwrap_or(crate::detect::AgentState::Unknown)
-}
-
-fn display_state(state: crate::detect::AgentState, seen: bool) -> &'static str {
-    match (state, seen) {
-        (crate::detect::AgentState::Blocked, _) => "blocked",
-        (crate::detect::AgentState::Working, _) => "working",
-        (crate::detect::AgentState::Idle, false) => "done",
-        (crate::detect::AgentState::Idle, true) => "idle",
-        (crate::detect::AgentState::Unknown, _) => "unknown",
-    }
-}
-
-fn display_state_with_stale(
-    state: crate::detect::AgentState,
-    seen: bool,
-    stale: bool,
-) -> &'static str {
-    if stale {
-        "stale"
-    } else {
-        display_state(state, seen)
-    }
 }
 
 fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -612,6 +590,7 @@ mod tests {
             label: String::new(),
             meta: String::new(),
             status: AgentState::Idle,
+            attention_tier: crate::terminal::state::AttentionTier::None,
             seen: true,
             stale: false,
             is_current: false,
@@ -643,6 +622,26 @@ mod tests {
         let mut collapsed = rows.clone();
         collapsed[0].expanded = false;
         assert_eq!(tree_prefix(&collapsed, 0), "▸");
+    }
+
+    #[test]
+    fn navigator_row_color_uses_attention_projection() {
+        let app = AppState::test_new();
+        let mut attention = row(1, false);
+        attention.status = AgentState::Blocked;
+        attention.attention_tier = crate::terminal::state::AttentionTier::Attention;
+        assert_eq!(
+            navigator_row_status_color(&attention, &app.palette),
+            app.palette.peach
+        );
+
+        let mut settled = attention;
+        settled.status = AgentState::Unknown;
+        settled.attention_tier = crate::terminal::state::AttentionTier::None;
+        assert_eq!(
+            navigator_row_status_color(&settled, &app.palette),
+            app.palette.overlay0
+        );
     }
 
     #[test]
@@ -712,7 +711,7 @@ mod tests {
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).cloned().unwrap();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.state = crate::detect::AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         terminal
             .closing_gates
             .push(crate::api::schema::ClosingBlockItem {

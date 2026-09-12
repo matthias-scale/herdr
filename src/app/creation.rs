@@ -649,7 +649,7 @@ impl App {
                 self.state
                     .terminals
                     .get(&pane.attached_terminal_id)
-                    .map(|terminal| (terminal.state, pane.seen))
+                    .map(|terminal| (terminal.raw_agent_state(), pane.seen))
             })
             .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
             .unwrap_or((crate::detect::AgentState::Unknown, true));
@@ -790,7 +790,7 @@ impl App {
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status_with_stale(
-                terminal.state,
+                terminal.raw_agent_state(),
                 pane.seen,
                 terminal.supervisor_stale,
             ),

@@ -190,7 +190,7 @@ impl App {
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
             agent_status: crate::app::api_helpers::pane_agent_status_with_stale(
-                terminal.state,
+                terminal.raw_agent_state(),
                 pane.seen,
                 terminal.supervisor_stale,
             ),

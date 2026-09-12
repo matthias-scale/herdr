@@ -2884,7 +2884,7 @@ impl HeadlessServer {
                         .state
                         .terminals
                         .get(&pane.attached_terminal_id)
-                        .map(|terminal| terminal.state)
+                        .map(|terminal| terminal.raw_agent_state())
                 })
             })
             .unwrap_or(crate::detect::AgentState::Unknown)
@@ -4803,7 +4803,7 @@ impl HeadlessServer {
             .values()
             .find(|terminal| terminal.id.as_str() == target.terminal_id)?;
         if terminal.effective_known_agent().is_none()
-            || terminal.state == crate::detect::AgentState::Idle
+            || terminal.raw_agent_state() == crate::detect::AgentState::Idle
         {
             return None;
         }
@@ -4814,7 +4814,7 @@ impl HeadlessServer {
         {
             return None;
         }
-        let status = crate::detect::manifest::agent_state_label(terminal.state);
+        let status = crate::detect::manifest::agent_state_label(terminal.raw_agent_state());
         Some(api::schema::ErrorBody {
             code: "agent_not_idle".into(),
             message: format!(
@@ -4866,7 +4866,7 @@ impl HeadlessServer {
             .values()
             .find(|terminal| terminal.id.as_str() == target.terminal_id)?;
         if terminal.effective_known_agent().is_none()
-            || terminal.state != crate::detect::AgentState::Idle
+            || terminal.raw_agent_state() != crate::detect::AgentState::Idle
         {
             return None;
         }
@@ -4892,12 +4892,14 @@ impl HeadlessServer {
         for read in pending {
             let terminal_id = read.terminal_id.clone();
             let runtime = self.app.terminal_runtimes.get(&read.terminal_id);
-            let remains_idle = self
-                .app
-                .state
-                .terminals
-                .get(&read.terminal_id)
-                .is_some_and(|terminal| terminal.state == crate::detect::AgentState::Idle);
+            let remains_idle =
+                self.app
+                    .state
+                    .terminals
+                    .get(&read.terminal_id)
+                    .is_some_and(|terminal| {
+                        terminal.raw_agent_state() == crate::detect::AgentState::Idle
+                    });
             let attached = self
                 .terminal_attach_owners
                 .contains_key(read.terminal_id.as_str());
@@ -5199,7 +5201,7 @@ impl HeadlessServer {
                                 (
                                     ws_idx,
                                     pane_id,
-                                    terminal.state,
+                                    terminal.raw_agent_state(),
                                     terminal.effective_agent_label().map(str::to_string),
                                 )
                             })
@@ -5335,7 +5337,7 @@ impl HeadlessServer {
                 continue;
             };
 
-            let new_state = terminal_after.state;
+            let new_state = terminal_after.raw_agent_state();
             if new_state == *prev_state {
                 continue;
             }
@@ -6412,6 +6414,8 @@ impl HeadlessServer {
                 self.app.emit_pane_state_update(&update);
                 changed = true;
             }
+            // The mark is what re-enables the process probe under a hook.
+            self.app.sync_detection_authority_mirrors();
         }
 
         if has_app_client && self.app.state.done_hide_transition_due(now) {
@@ -6436,7 +6440,7 @@ impl HeadlessServer {
                 .app
                 .state
                 .expire_due_full_lifecycle_hook_authority_at(now);
-            self.app.sync_full_lifecycle_authority_detection_pauses();
+            self.app.sync_detection_authority_mirrors();
             for update in &updates {
                 self.app.emit_pane_state_update(update);
             }
@@ -10466,7 +10470,7 @@ next_tab = ""
                     .get_mut(&terminal_id)
                     .expect("terminal");
                 terminal.detected_agent = Some(crate::detect::Agent::Claude);
-                terminal.state = crate::detect::AgentState::Working;
+                terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Working);
                 server.app.terminal_runtimes.insert(
                     terminal_id,
                     crate::terminal::TerminalRuntime::test_with_screen_bytes(
@@ -11195,6 +11199,188 @@ next_tab = ""
         );
     }
 
+    #[tokio::test]
+    async fn headless_scheduler_working_report_uses_the_busy_budget() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-working-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server.app.handle_internal_event_with_prefix_sync(
+            crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                session_ref: None,
+            },
+        );
+        let reported_at = server.app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("working report timestamp");
+        server.handle_scheduled_tasks_headless(
+            reported_at + server.app.state.agent_stale_after,
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + crate::terminal::state::AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+            false,
+        );
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_declared_wait_uses_eta_plus_grace() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-declared-wait-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server.app.handle_internal_event_with_prefix_sync(
+            crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                seq: Some(1),
+                wait: Some("CI run 4123".into()),
+                eta_s: Some(120),
+                reported_at: None,
+                session_ref: None,
+            },
+        );
+        let reported_at = server.app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("declared wait report timestamp");
+        let stale_at = reported_at
+            .checked_add(Duration::from_secs(120))
+            .and_then(|deadline| deadline.checked_add(crate::terminal::state::DECLARED_WAIT_GRACE))
+            .expect("declared wait watchdog deadline");
+
+        assert_eq!(
+            server.app.state.next_agent_watchdog_deadline(),
+            Some(stale_at)
+        );
+        server.handle_scheduled_tasks_headless(stale_at - Duration::from_secs(1), false);
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(stale_at, false);
+
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_subprocess_held_report_uses_configured_budget() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-subprocess-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_foreground_process(Some("cargo".into()), true, now);
+
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_subagent_claim_uses_configured_budget() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-subagent-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_active_subagents(Some(1));
+
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
     /// AC6: terminal-attach draft bytes suppress a stalled-agent auto-nudge.
     #[tokio::test]
     async fn headless_attach_human_bytes_suppress_a_stalled_agent_auto_nudge() {
@@ -11789,7 +11975,7 @@ next_tab = ""
             Bytes::from_static(b"continue")
         );
         assert_eq!(
-            server.app.state.terminals[&terminal_id].state,
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!server.app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -12082,7 +12268,7 @@ next_tab = ""
             terminal_id.clone(),
             crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
         );
-        server.app.sync_full_lifecycle_authority_detection_pauses();
+        server.app.sync_detection_authority_mirrors();
         assert_eq!(
             server
                 .app
@@ -12101,7 +12287,7 @@ next_tab = ""
 
         assert!(server.handle_scheduled_tasks_headless(deadline, false));
         assert_eq!(
-            server.app.state.terminals[&terminal_id].state,
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!server.app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -17127,7 +17313,13 @@ next_tab = ""
         assert!(changed);
         assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
         assert_eq!(
-            server.app.state.terminals.get(&terminal_id).unwrap().state,
+            server
+                .app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .raw_agent_state(),
             crate::detect::AgentState::Working
         );
         assert!(

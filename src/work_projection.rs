@@ -501,7 +501,7 @@ pub(crate) struct DockHomeTicketRow {
     pub(crate) jump_target: Option<(usize, crate::layout::PaneId)>,
 }
 
-/// One closing-block gate awaiting a human answer, with the pane that raised
+/// One closing-block item awaiting a human answer, with the pane that raised
 /// it. `key` reuses `WorkItemKey` so the tab strip, hit testing and selection
 /// plumbing stay shared; it carries no `pr_number`, which is what keeps poll
 /// rows out of the pull request detail prefetcher.
@@ -511,6 +511,7 @@ pub(crate) struct DockHomePollRow {
     pub(crate) agent_label: String,
     pub(crate) workspace_label: String,
     pub(crate) item: crate::api::schema::ClosingBlockItem,
+    pub(crate) attention_tier: crate::terminal::state::AttentionTier,
     pub(crate) jump_target: (usize, crate::layout::PaneId),
 }
 
@@ -896,8 +897,8 @@ impl crate::app::state::AppState {
         projection
     }
 
-    /// Every closing-block gate currently raised, ordered by workspace and then
-    /// by the gate's own number so the list is stable across refreshes.
+    /// Every closing-block item currently raised, ordered by workspace and then
+    /// by the item's own number so the list is stable across refreshes.
     fn dock_home_poll_rows(&self) -> Vec<DockHomePollRow> {
         let mut rows = Vec::new();
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
@@ -906,7 +907,8 @@ impl crate::app::state::AppState {
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
-                    if terminal.closing_gates.is_empty() {
+                    let attention_tier = pane.agent_projection(terminal).attention_tier;
+                    if attention_tier == crate::terminal::state::AttentionTier::None {
                         continue;
                     }
                     let agent_label = terminal
@@ -916,20 +918,26 @@ impl crate::app::state::AppState {
                         .or_else(|| terminal.effective_agent_label().map(str::to_string))
                         .unwrap_or_else(|| "agent".to_string());
                     let workspace_label = workspace.display_name_from_terminals(&self.terminals);
-                    for item in &terminal.closing_gates {
+                    for (kind, item) in terminal
+                        .closing_gates
+                        .iter()
+                        .map(|item| ("gate", item))
+                        .chain(terminal.closing_items.iter().map(|item| ("item", item)))
+                    {
                         rows.push(DockHomePollRow {
                             key: WorkItemKey {
                                 repo: pane.attached_terminal_id.to_string(),
                                 pr_number: None,
                                 pr_url: None,
                                 ticket_id: Some(format!(
-                                    "{}#{}",
+                                    "{}#{kind}#{}",
                                     pane.attached_terminal_id, item.n
                                 )),
                             },
                             agent_label: agent_label.clone(),
                             workspace_label: workspace_label.clone(),
                             item: item.clone(),
+                            attention_tier,
                             jump_target: (ws_idx, *pane_id),
                         });
                     }
@@ -1624,9 +1632,39 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_without_gates_contributes_no_polls() {
-        let state = state_with_gates(&[("quiet", Vec::new())]);
-        assert!(state.dock_home_projection().poll_rows.is_empty());
+    fn answer_only_pane_contributes_a_yellow_poll() {
+        let mut state = state_with_gates(&[("question", Vec::new())]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+
+        let projection = state.dock_home_projection();
+        assert_eq!(projection.poll_rows.len(), 1);
+        assert_eq!(
+            projection.poll_rows[0].attention_tier,
+            crate::terminal::state::AttentionTier::Attention
+        );
+
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .settled_at = Some(1);
+        assert!(
+            state.dock_home_projection().poll_rows.is_empty(),
+            "settled panes leave the attention projection"
+        );
     }
 
     #[test]

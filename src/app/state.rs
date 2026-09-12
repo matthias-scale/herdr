@@ -2361,6 +2361,7 @@ pub(crate) enum StatusButtonAction {
     Home,
     Work,
     BlockedFilter,
+    Attention,
     Dock,
     /// Expand or collapse the usage detail in the status row.
     StatusDetail,
@@ -2600,6 +2601,7 @@ pub(crate) struct NavigatorRow {
     pub label: String,
     pub meta: String,
     pub status: AgentState,
+    pub attention_tier: crate::terminal::state::AttentionTier,
     pub seen: bool,
     pub stale: bool,
     pub is_current: bool,
@@ -3977,6 +3979,8 @@ pub struct AppState {
     pub resume_nudge_message: String,
     /// Nudge stalled agent panes (`session.auto_nudge_stalled_agents`).
     pub auto_nudge_stalled_agents: bool,
+    /// Quiet period before an agent status report becomes stale.
+    pub agent_stale_after: std::time::Duration,
     /// Initial quiet period before a stalled pane is nudged.
     pub nudge_after: std::time::Duration,
     /// Maximum nudges sent during one stale-status episode.
@@ -6410,7 +6414,8 @@ impl AppState {
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
-            nudge_after: std::time::Duration::from_secs(20 * 60),
+            agent_stale_after: std::time::Duration::from_secs(5 * 60),
+            nudge_after: std::time::Duration::from_secs(5 * 60),
             max_nudges: 3,
             stall_nudge_message:
                 "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.".to_string(),
@@ -6938,7 +6943,11 @@ mod tests {
     fn test_state_projects_stalled_agent_nudge_defaults() {
         let state = AppState::test_new();
         assert!(!state.auto_nudge_stalled_agents);
-        assert_eq!(state.nudge_after, std::time::Duration::from_secs(20 * 60));
+        assert_eq!(
+            state.agent_stale_after,
+            std::time::Duration::from_secs(5 * 60)
+        );
+        assert_eq!(state.nudge_after, std::time::Duration::from_secs(5 * 60));
         assert_eq!(state.max_nudges, 3);
         assert_eq!(
             state.stall_nudge_message,
@@ -7133,6 +7142,7 @@ mod tests {
             label: String::new(),
             meta: String::new(),
             status: crate::detect::AgentState::Idle,
+            attention_tier: crate::terminal::state::AttentionTier::None,
             seen: true,
             stale: false,
             is_current: false,

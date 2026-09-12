@@ -3,9 +3,25 @@ use std::time::Instant;
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
+use crate::terminal::state::AttentionTier;
 use crate::terminal::{TerminalId, TerminalState};
 
 use super::{Tab, Workspace};
+
+#[cfg(test)]
+thread_local! {
+    static AGGREGATE_PANE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_aggregate_pane_visit() {
+    AGGREGATE_PANE_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn take_aggregate_pane_visits() -> usize {
+    AGGREGATE_PANE_VISITS.with(|visits| visits.replace(0))
+}
 
 /// Detail info for a single pane, used by the agent detail panel.
 pub struct PaneDetail {
@@ -21,6 +37,7 @@ pub struct PaneDetail {
     pub agent_context: Option<Agent>,
     pub has_agent: bool,
     pub state: AgentState,
+    pub attention_tier: AttentionTier,
     /// The last closing-block report still names at least one gate. Outlives
     /// the blocked lifecycle state: output retirement may flip the pane back
     /// to working while the human decision is still open.
@@ -46,19 +63,18 @@ pub struct PaneDetail {
 }
 
 impl Tab {
-    pub(crate) fn aggregate_state(
+    pub(crate) fn aggregate_state_and_attention(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> (AgentState, bool) {
-        self.panes
-            .values()
-            .filter_map(|pane| {
-                terminals
-                    .get(&pane.attached_terminal_id)
-                    .map(|terminal| (terminal.state, pane.seen))
+    ) -> (AgentState, bool, AttentionTier) {
+        aggregate_projections(self.panes.values().filter_map(|pane| {
+            #[cfg(test)]
+            record_aggregate_pane_visit();
+            terminals.get(&pane.attached_terminal_id).map(|terminal| {
+                let projection = pane.agent_projection(terminal);
+                (projection.state, projection.seen, projection.attention_tier)
             })
-            .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
-            .unwrap_or((AgentState::Unknown, true))
+        }))
     }
 
     fn pane_details(
@@ -85,7 +101,9 @@ impl Tab {
                     .or(fallback_agent_label)
                     .unwrap_or_else(|| ">_".to_string());
                 let presentation = terminal.effective_presentation();
-                let (state, seen) = terminal.sidebar_projection(pane.seen);
+                let projection = pane.agent_projection(terminal);
+                let state = projection.state;
+                let seen = projection.seen;
                 let (pane_label, pane_label_is_agent_identity) = if let Some(label) =
                     terminal.manual_label.clone()
                 {
@@ -120,18 +138,19 @@ impl Tab {
                     agent_context: terminal.agent_lifecycle_context(),
                     has_agent: terminal.agent_lifecycle_context().is_some(),
                     state,
-                    open_blockers: !terminal.closing_gates.is_empty(),
-                    gate_count: terminal.closing_gates.len(),
+                    attention_tier: projection.attention_tier,
+                    open_blockers: projection.open_blockers,
+                    gate_count: projection.gate_count,
                     closing_idle: terminal.closing_idle,
                     closing_contract: terminal.closing_contract.clone(),
                     closing_contract_met: terminal.closing_contract_met,
-                    usage_limited: terminal.usage_limited,
+                    usage_limited: projection.usage_limited,
                     holds_shell: terminal.holds_shell,
                     active_subagents: terminal.active_subagents,
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen,
                     done_since: pane.done_since,
-                    stale: terminal.supervisor_stale,
+                    stale: projection.stale,
                     reported_at: terminal.status_reported_at(),
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     activity_at: terminal.agent_activity_at(),
@@ -153,16 +172,43 @@ fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
+fn aggregate_projections(
+    projections: impl IntoIterator<Item = (AgentState, bool, AttentionTier)>,
+) -> (AgentState, bool, AttentionTier) {
+    projections.into_iter().fold(
+        (AgentState::Unknown, true, AttentionTier::None),
+        |aggregate, candidate| {
+            let state = if pane_attention_priority(candidate.0, candidate.1)
+                >= pane_attention_priority(aggregate.0, aggregate.1)
+            {
+                (candidate.0, candidate.1)
+            } else {
+                (aggregate.0, aggregate.1)
+            };
+            (state.0, state.1, aggregate.2.max(candidate.2))
+        },
+    )
+}
+
 impl Workspace {
     pub fn aggregate_state(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
     ) -> (AgentState, bool) {
-        self.tabs
-            .iter()
-            .map(|tab| tab.aggregate_state(terminals))
-            .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
-            .unwrap_or((AgentState::Unknown, true))
+        let (state, seen, _) = self.aggregate_state_and_attention(terminals);
+        (state, seen)
+    }
+
+    /// Project lifecycle state and human-attention severity in one pane pass.
+    pub(crate) fn aggregate_state_and_attention(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> (AgentState, bool, AttentionTier) {
+        aggregate_projections(
+            self.tabs
+                .iter()
+                .map(|tab| tab.aggregate_state_and_attention(terminals)),
+        )
     }
 
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
@@ -198,6 +244,25 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_state_and_attention_preserves_missing_tab_unknown_seen_tie() {
+        let mut ws = Workspace::test_new("test");
+        let root = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root).unwrap().seen = false;
+        ws.test_add_tab(None);
+
+        let mut terminals = HashMap::new();
+        let terminal = terminal_for_pane(&ws, root);
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let expected = ws.aggregate_state(&terminals);
+        let (state, seen, attention) = ws.aggregate_state_and_attention(&terminals);
+
+        assert_eq!(expected, (AgentState::Unknown, true));
+        assert_eq!((state, seen), expected);
+        assert_eq!(attention, AttentionTier::None);
+    }
+
+    #[test]
     fn aggregate_state_priority() {
         let mut ws = Workspace::test_new("test");
         let id2 = ws.test_split(Direction::Horizontal);
@@ -209,16 +274,38 @@ mod tests {
             .unwrap();
         let mut terminals = HashMap::new();
         let mut root_terminal = terminal_for_pane(&ws, root_id);
-        root_terminal.state = AgentState::Idle;
+        root_terminal.set_raw_agent_state_for_test(AgentState::Idle);
         terminals.insert(root_terminal.id.clone(), root_terminal);
         let mut second_terminal = terminal_for_pane(&ws, id2);
-        second_terminal.state = AgentState::Working;
+        second_terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminals.insert(second_terminal.id.clone(), second_terminal);
 
         let (state, seen) = ws.aggregate_state(&terminals);
 
         assert_eq!(state, AgentState::Working);
         assert!(seen);
+    }
+
+    #[test]
+    fn aggregate_methods_each_reduce_every_pane_once() {
+        let mut ws = Workspace::test_new("test");
+        ws.test_split(Direction::Horizontal);
+        let terminals = ws.tabs[0]
+            .panes
+            .values()
+            .map(|pane| {
+                let terminal = TerminalState::new(pane.attached_terminal_id.clone(), "/tmp".into());
+                (terminal.id.clone(), terminal)
+            })
+            .collect::<HashMap<_, _>>();
+        let pane_count = ws.tabs[0].panes.len();
+
+        take_aggregate_pane_visits();
+        ws.aggregate_state(&terminals);
+        assert_eq!(take_aggregate_pane_visits(), pane_count);
+
+        ws.aggregate_state_and_attention(&terminals);
+        assert_eq!(take_aggregate_pane_visits(), pane_count);
     }
 
     #[test]
@@ -233,10 +320,10 @@ mod tests {
             .unwrap();
         let mut terminals = HashMap::new();
         let mut root_terminal = terminal_for_pane(&ws, root_id);
-        root_terminal.state = AgentState::Idle;
+        root_terminal.set_raw_agent_state_for_test(AgentState::Idle);
         terminals.insert(root_terminal.id.clone(), root_terminal);
         let mut second_terminal = terminal_for_pane(&ws, id2);
-        second_terminal.state = AgentState::Working;
+        second_terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminals.insert(second_terminal.id.clone(), second_terminal);
         let root = ws.tabs[0].panes.get_mut(&root_id).unwrap();
         root.seen = false;
@@ -347,6 +434,45 @@ mod tests {
         assert_eq!(details[1].pane_id, second);
         assert_eq!(details[0].pane_label.as_deref(), Some("Pane 1"));
         assert_eq!(details[1].pane_label.as_deref(), Some("Pane 2"));
+    }
+
+    #[test]
+    fn settled_pane_projects_as_neutral_seen_and_without_attention() {
+        let mut ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, pane);
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose one".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        terminals.insert(terminal.id.clone(), terminal);
+
+        assert_eq!(
+            ws.pane_details(&terminals)[0].attention_tier,
+            AttentionTier::Attention
+        );
+
+        ws.tabs[0].panes.get_mut(&pane).unwrap().settled_at = Some(1);
+        let detail = &ws.pane_details(&terminals)[0];
+        assert_eq!(detail.state, AgentState::Unknown);
+        assert!(detail.seen);
+        assert_eq!(detail.attention_tier, AttentionTier::None);
+        assert_eq!(
+            ws.aggregate_state_and_attention(&terminals),
+            (AgentState::Unknown, true, AttentionTier::None)
+        );
     }
 
     #[test]

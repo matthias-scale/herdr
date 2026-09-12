@@ -16,6 +16,13 @@ pub(crate) struct StallNudgeEpisode {
     declaration_kind: &'static str,
     last_drop_reason: Option<&'static str>,
     schedule_failed: bool,
+    /// Set while a fresh status report has cleared the stale mark.
+    ///
+    /// The episode stays dormant rather than disappearing, because answering a
+    /// nudge is not the same as making progress: an agent that is merely stuck
+    /// answers every nudge and goes stale again, which used to restore the
+    /// budget to zero and turn a three-nudge escalation into an endless one.
+    dormant_since: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -35,7 +42,7 @@ struct AutoNudgeFacts {
     quiet_for: Duration,
     nudge_after: Duration,
     blocked: bool,
-    has_closing_gates: bool,
+    has_closing_block_items: bool,
     human_draft: bool,
     resume_pending: bool,
     launch_pending: bool,
@@ -75,8 +82,8 @@ fn auto_nudge_decision(facts: &AutoNudgeFacts) -> AutoNudgeDecision {
     if facts.blocked {
         return AutoNudgeDecision::Drop("the agent is blocked");
     }
-    if facts.has_closing_gates {
-        return AutoNudgeDecision::Drop("the pane declares a closing gate");
+    if facts.has_closing_block_items {
+        return AutoNudgeDecision::Drop("the pane declares a closing item");
     }
     if facts.human_draft {
         return AutoNudgeDecision::Drop("the pane holds a draft the human typed");
@@ -134,6 +141,19 @@ fn next_stall_nudge_at(
     now.checked_add(delay).map(Some).ok_or(())
 }
 
+/// How long a pane has to stay off the stale list before its nudge budget resets.
+///
+/// One full escalation cycle, floored at twice the watchdog's own silence
+/// budget. Without that floor a short `nudge_after` makes the recovery window
+/// no longer than the staleness budget itself, so every answered nudge would
+/// count as a recovery and the budget would never run out.
+fn stall_nudge_recovery_window(nudge_after: Duration, max_nudges: u32) -> Duration {
+    nudge_after
+        .checked_mul(max_nudges.saturating_add(1))
+        .unwrap_or(Duration::MAX)
+        .max(crate::terminal::state::AGENT_BUSY_STALE_SILENCE.saturating_mul(2))
+}
+
 pub(crate) fn nudge_after_duration(minutes: u64) -> Duration {
     let bounded_minutes = minutes.min(crate::config::MAX_NUDGE_AFTER_MINUTES);
     let Some(seconds) = bounded_minutes.checked_mul(60) else {
@@ -157,22 +177,32 @@ impl App {
         key: &crate::input::TerminalKey,
     ) {
         self.cancel_pending_stall_nudge_for_pane(pane_id);
+        self.retire_stall_nudge_episode_for_pane(pane_id);
         self.state.note_human_key(pane_id, key);
     }
 
     pub(crate) fn note_human_text(&mut self, pane_id: crate::layout::PaneId, text: &str) {
         self.cancel_pending_stall_nudge_for_pane(pane_id);
+        self.retire_stall_nudge_episode_for_pane(pane_id);
         self.state.note_human_text(pane_id, text);
     }
 
     pub(crate) fn note_human_bytes(&mut self, pane_id: crate::layout::PaneId, bytes: &[u8]) {
         self.cancel_pending_stall_nudge_for_pane(pane_id);
+        self.retire_stall_nudge_episode_for_pane(pane_id);
         self.state.note_human_bytes(pane_id, bytes);
     }
 
     pub(super) fn cancel_pending_stall_nudge_for_pane(&mut self, pane_id: crate::layout::PaneId) {
         self.pending_stall_nudge_submissions
             .retain(|_, pending| pending.pane_id != pane_id);
+    }
+
+    /// A human typing into the pane is the one unambiguous sign the stall is
+    /// being handled, so the escalation budget starts over.
+    fn retire_stall_nudge_episode_for_pane(&mut self, pane_id: crate::layout::PaneId) {
+        self.stall_nudge_episodes
+            .retain(|_, episode| episode.pane_id != pane_id);
     }
 
     pub(crate) fn next_auto_nudge_deadline(&self, now: Instant) -> Option<Instant> {
@@ -273,6 +303,7 @@ impl App {
                     declaration_kind,
                     last_drop_reason: schedule_failed.then_some(STALL_NUDGE_SCHEDULE_FAILED),
                     schedule_failed,
+                    dormant_since: None,
                 },
             );
         }
@@ -318,12 +349,17 @@ impl App {
         for target in targets {
             match target.decision {
                 AutoNudgeDecision::Reset(reason) => {
-                    self.drop_stall_nudge_episode(
+                    // `prune_stall_nudge_episodes` already parked this episode and
+                    // owns retiring it once the pane has recovered for a full
+                    // cycle. Dropping it here would hand the budget back on the
+                    // first answered nudge.
+                    self.note_stall_nudge_episode_dormant(
                         &target.terminal_id,
                         target.pane_id,
                         target.declaration_kind,
                         target.quiet_for,
                         reason,
+                        now,
                     );
                 }
                 AutoNudgeDecision::Drop(reason) => {
@@ -337,6 +373,7 @@ impl App {
                             declaration_kind: target.declaration_kind,
                             last_drop_reason: None,
                             schedule_failed: false,
+                            dormant_since: None,
                         });
                     episode.pane_id = target.pane_id;
                     episode.declaration_kind = target.declaration_kind;
@@ -363,6 +400,7 @@ impl App {
                             declaration_kind: target.declaration_kind,
                             last_drop_reason: None,
                             schedule_failed: false,
+                            dormant_since: None,
                         });
                     episode.pane_id = target.pane_id;
                     episode.declaration_kind = target.declaration_kind;
@@ -382,6 +420,7 @@ impl App {
                     declaration_kind: target.declaration_kind,
                     last_drop_reason: None,
                     schedule_failed: false,
+                    dormant_since: None,
                 });
             if !self.send_stall_nudge(&target, now) {
                 if let Some(episode) = self.stall_nudge_episodes.get_mut(&target.terminal_id) {
@@ -510,8 +549,9 @@ impl App {
                         supervisor_stale: terminal.supervisor_stale,
                         quiet_for,
                         nudge_after: self.state.nudge_after,
-                        blocked: terminal.state == crate::detect::AgentState::Blocked,
-                        has_closing_gates: !terminal.closing_gates.is_empty(),
+                        blocked: terminal.raw_agent_state() == crate::detect::AgentState::Blocked,
+                        has_closing_block_items: !terminal.closing_gates.is_empty()
+                            || !terminal.closing_items.is_empty(),
                         human_draft: self
                             .state
                             .pending_human_drafts
@@ -552,18 +592,26 @@ impl App {
     }
 
     fn prune_stall_nudge_episodes(&mut self, now: Instant) {
-        let drop_ids = self
-            .stall_nudge_episodes
-            .keys()
-            .filter_map(|terminal_id| match self.state.terminals.get(terminal_id) {
-                None => Some((terminal_id.clone(), "the terminal is gone")),
-                Some(terminal) if !terminal.supervisor_stale => Some((
-                    terminal_id.clone(),
-                    "a fresh status report cleared the stale mark",
-                )),
-                Some(_) => None,
-            })
-            .collect::<Vec<_>>();
+        let recovery = stall_nudge_recovery_window(self.state.nudge_after, self.state.max_nudges);
+        let mut drop_ids = Vec::new();
+        for (terminal_id, episode) in &mut self.stall_nudge_episodes {
+            match self.state.terminals.get(terminal_id) {
+                None => drop_ids.push((terminal_id.clone(), "the terminal is gone")),
+                Some(terminal) if !terminal.supervisor_stale => {
+                    let dormant_since = *episode.dormant_since.get_or_insert(now);
+                    episode.next_nudge_at = None;
+                    if now.saturating_duration_since(dormant_since) >= recovery {
+                        drop_ids.push((
+                            terminal_id.clone(),
+                            "the pane recovered for a full nudge cycle",
+                        ));
+                    }
+                }
+                // Stale again. The episode picks up where it left off rather
+                // than restarting, so the budget can actually run out.
+                Some(_) => episode.dormant_since = None,
+            }
+        }
         for (terminal_id, reason) in drop_ids {
             let Some(episode) = self.stall_nudge_episodes.remove(&terminal_id) else {
                 continue;
@@ -599,17 +647,23 @@ impl App {
         }
     }
 
-    fn drop_stall_nudge_episode(
+    fn note_stall_nudge_episode_dormant(
         &mut self,
         terminal_id: &crate::terminal::TerminalId,
         pane_id: crate::layout::PaneId,
         declaration_kind: &'static str,
         quiet_for: Duration,
         reason: &'static str,
+        now: Instant,
     ) {
-        if self.stall_nudge_episodes.remove(terminal_id).is_none() {
+        let Some(episode) = self.stall_nudge_episodes.get_mut(terminal_id) else {
+            return;
+        };
+        episode.next_nudge_at = None;
+        if episode.dormant_since.is_some() {
             return;
         }
+        episode.dormant_since = Some(now);
         tracing::debug!(
             pane = pane_id.raw(),
             terminal = %terminal_id,
@@ -683,7 +737,7 @@ mod tests {
             quiet_for: Duration::from_secs(20 * 60),
             nudge_after: Duration::from_secs(20 * 60),
             blocked: false,
-            has_closing_gates: false,
+            has_closing_block_items: false,
             human_draft: false,
             resume_pending: false,
             launch_pending: false,
@@ -727,7 +781,7 @@ mod tests {
                 ..ready_facts(now)
             },
             AutoNudgeFacts {
-                has_closing_gates: true,
+                has_closing_block_items: true,
                 ..ready_facts(now)
             },
             AutoNudgeFacts {
@@ -904,22 +958,106 @@ mod tests {
         assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
 
-        assert!(!app.tick_auto_nudges(now + Duration::from_secs(39 * 60)));
+        assert!(!app.tick_auto_nudges(now + Duration::from_secs(9 * 60)));
         assert_eq!(drain(&mut rx), "");
-        assert!(app.tick_auto_nudges(now + Duration::from_secs(40 * 60)));
+        assert!(app.tick_auto_nudges(now + Duration::from_secs(10 * 60)));
         assert!(drain(&mut rx)
             .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
 
-        assert!(app.tick_auto_nudges(now + Duration::from_secs(120 * 60)));
+        assert!(app.tick_auto_nudges(now + Duration::from_secs(30 * 60)));
         assert!(drain(&mut rx)
             .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
-        assert!(
-            app.tick_auto_nudges(now + Duration::from_secs(120 * 60) + STALL_NUDGE_SUBMIT_DELAY)
-        );
+        assert!(app.tick_auto_nudges(now + Duration::from_secs(30 * 60) + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(1_000 * 60)));
         assert_eq!(drain(&mut rx), "");
         assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 3);
+    }
+
+    /// The loop this guards against: the nudge lands, the agent answers, the
+    /// answer clears the stale mark, and the pane goes stale again unchanged.
+    /// The episode used to be deleted on that fresh report, so every nudge in
+    /// twelve hours of production logs was `nudge=1` and the cap never applied.
+    #[tokio::test]
+    async fn answering_a_nudge_does_not_hand_the_budget_back() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        let nudge_after = app.state.nudge_after;
+
+        let mut sent = 0;
+        let mut at = now;
+        for _ in 0..6 {
+            if app.tick_auto_nudges(at) && drain(&mut rx).contains("Re-verify") {
+                sent += 1;
+            }
+            // The agent answers: a fresh status report clears the stale mark.
+            at += STALL_NUDGE_SUBMIT_DELAY;
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .supervisor_stale = false;
+            app.tick_auto_nudges(at);
+            let _ = drain(&mut rx);
+            // Nothing about the pane changed, so the watchdog marks it again.
+            at += nudge_after;
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .supervisor_stale = true;
+            app.state
+                .workspaces
+                .iter_mut()
+                .flat_map(|workspace| workspace.tabs.iter_mut())
+                .filter_map(|tab| tab.panes.get_mut(&pane_id))
+                .for_each(|pane| pane.activity.set_last_at(at - nudge_after));
+        }
+
+        assert_eq!(sent, app.state.max_nudges);
+        assert_eq!(
+            app.stall_nudge_episodes[&terminal_id].nudges_sent,
+            app.state.max_nudges
+        );
+    }
+
+    /// A pane that actually recovers has to get its budget back, or one bad
+    /// stretch would mute its nudges for the life of the session.
+    #[tokio::test]
+    async fn a_full_recovery_window_restores_the_budget() {
+        let now = Instant::now();
+        let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        let recovery = stall_nudge_recovery_window(app.state.nudge_after, app.state.max_nudges);
+
+        assert!(app.tick_auto_nudges(now));
+        assert!(drain(&mut rx).contains("Re-verify"));
+        assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 1);
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .supervisor_stale = false;
+        app.tick_auto_nudges(now + Duration::from_secs(1));
+        assert!(app.stall_nudge_episodes.contains_key(&terminal_id));
+
+        app.tick_auto_nudges(now + recovery + Duration::from_secs(1));
+        assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
+    }
+
+    /// Typing into the pane is the human taking over, which is the one signal
+    /// that unambiguously ends the stall.
+    #[tokio::test]
+    async fn human_input_retires_the_episode() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+
+        assert!(app.tick_auto_nudges(now));
+        assert!(drain(&mut rx).contains("Re-verify"));
+        assert!(app.stall_nudge_episodes.contains_key(&terminal_id));
+
+        app.note_human_text(pane_id, "picking this up myself");
+        assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
     }
 
     #[tokio::test]
@@ -975,7 +1113,7 @@ mod tests {
 
     /// Pins a real runtime status report to reset a stalled nudge episode budget.
     #[tokio::test]
-    async fn fresh_status_report_resets_the_runtime_stall_episode() {
+    async fn fresh_working_report_parks_the_stall_episode_and_uses_the_busy_budget() {
         let now = Instant::now();
         let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
         assert!(app.tick_auto_nudges(now));
@@ -1004,22 +1142,76 @@ mod tests {
             .expect("runtime status report timestamp");
         assert!(!app.state.terminals[&terminal_id].supervisor_stale);
 
+        // The report parks the episode instead of deleting it. Answering a nudge
+        // is not progress, so the budget it already spent has to survive.
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(1)));
-        assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
+        assert!(app.stall_nudge_episodes[&terminal_id]
+            .dormant_since
+            .is_some());
+
+        app.handle_scheduled_tasks(report_at + app.state.agent_stale_after, false);
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(app.stall_nudge_episodes[&terminal_id]
+            .dormant_since
+            .is_some());
+        assert_eq!(drain(&mut rx), "");
 
         let stale_at = report_at
-            .checked_add(crate::terminal::state::AGENT_STALE_SILENCE)
+            .checked_add(crate::terminal::state::AGENT_BUSY_STALE_SILENCE)
             .expect("watchdog deadline");
+        app.handle_scheduled_tasks(stale_at - Duration::from_secs(1), false);
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(app.stall_nudge_episodes[&terminal_id]
+            .dormant_since
+            .is_some());
+        assert_eq!(drain(&mut rx), "");
+
         app.handle_scheduled_tasks(stale_at, false);
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
-        assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 1);
+        assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 2);
         assert!(drain(&mut rx)
             .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
     }
 
+    #[tokio::test]
+    async fn tui_scheduler_declared_wait_uses_eta_plus_grace() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.state.auto_nudge_stalled_agents = false;
+        app.handle_internal_event_with_prefix_sync(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(1),
+            wait: Some("CI run 4123".into()),
+            eta_s: Some(120),
+            reported_at: None,
+            session_ref: None,
+        });
+        let reported_at = app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("declared wait report timestamp");
+        let stale_at = reported_at
+            .checked_add(Duration::from_secs(120))
+            .and_then(|deadline| deadline.checked_add(crate::terminal::state::DECLARED_WAIT_GRACE))
+            .expect("declared wait watchdog deadline");
+
+        assert_eq!(app.state.next_agent_watchdog_deadline(), Some(stale_at));
+        app.handle_scheduled_tasks(stale_at - Duration::from_secs(1), false);
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        app.handle_scheduled_tasks(stale_at, false);
+
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(app.stall_nudge_episodes.is_empty());
+        assert_eq!(drain(&mut rx), "");
+    }
+
     /// Pins stale detection while the opt-in nudge action remains disabled.
     #[tokio::test]
-    async fn disabled_auto_nudge_keeps_stall_detection_active() {
+    async fn tui_scheduler_subagent_claim_uses_configured_budget_when_nudges_are_disabled() {
         let now = Instant::now();
         let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
         app.state.auto_nudge_stalled_agents = false;
@@ -1044,11 +1236,56 @@ mod tests {
 
         assert_eq!(
             app.state.next_agent_watchdog_deadline(),
-            now.checked_add(crate::terminal::state::AGENT_STALE_SILENCE)
+            now.checked_add(app.state.agent_stale_after)
         );
         assert!(!app.state.terminals[&terminal_id].supervisor_stale);
 
-        app.handle_scheduled_tasks(now + crate::terminal::state::AGENT_STALE_SILENCE, false);
+        app.handle_scheduled_tasks(
+            now + app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        app.handle_scheduled_tasks(now + app.state.agent_stale_after, false);
+
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
+        assert!(app.stall_nudge_episodes.is_empty());
+        assert_eq!(drain(&mut rx), "");
+    }
+
+    #[tokio::test]
+    async fn tui_scheduler_subprocess_held_report_uses_configured_budget() {
+        let now = Instant::now();
+        let (mut app, _pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
+        app.state.auto_nudge_stalled_agents = false;
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.supervisor_stale = false;
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_foreground_process(Some("cargo".into()), true, now);
+
+        assert_eq!(
+            app.state.next_agent_watchdog_deadline(),
+            now.checked_add(app.state.agent_stale_after)
+        );
+        app.handle_scheduled_tasks(
+            now + app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        app.handle_scheduled_tasks(now + app.state.agent_stale_after, false);
 
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
         assert!(app.stall_nudge_episodes.is_empty());
@@ -1097,6 +1334,7 @@ mod tests {
                 declaration_kind: "agent_status",
                 last_drop_reason: None,
                 schedule_failed: false,
+                dormant_since: None,
             },
         );
 
@@ -1138,6 +1376,7 @@ mod tests {
                 declaration_kind: "agent_status",
                 last_drop_reason: None,
                 schedule_failed: false,
+                dormant_since: None,
             },
         );
         let persisted = app
@@ -1190,27 +1429,36 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut config = crate::config::Config::default();
         config.session.auto_nudge_stalled_agents = true;
+        config.session.agent_stale_after_minutes = 9;
         config.session.nudge_after_minutes = 12;
         config.session.max_nudges = 5;
         config.session.stall_nudge_message = "report".into();
         let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
         assert!(app.state.auto_nudge_stalled_agents);
+        assert_eq!(app.state.agent_stale_after, Duration::from_secs(9 * 60));
         assert_eq!(app.state.nudge_after, Duration::from_secs(12 * 60));
         assert_eq!(app.state.max_nudges, 5);
         assert_eq!(app.state.stall_nudge_message, "report");
 
         config.session.auto_nudge_stalled_agents = false;
+        config.session.agent_stale_after_minutes = 4;
         config.session.nudge_after_minutes = 7;
         config.session.max_nudges = 2;
         config.session.stall_nudge_message = "still working?".into();
         app.apply_live_config(&config, &[], &[], false);
         assert!(!app.state.auto_nudge_stalled_agents);
+        assert_eq!(app.state.agent_stale_after, Duration::from_secs(4 * 60));
         assert_eq!(app.state.nudge_after, Duration::from_secs(7 * 60));
         assert_eq!(app.state.max_nudges, 2);
         assert_eq!(app.state.stall_nudge_message, "still working?");
 
+        config.session.agent_stale_after_minutes = u64::MAX;
         config.session.nudge_after_minutes = u64::MAX;
         app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.agent_stale_after,
+            Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)
+        );
         assert_eq!(
             app.state.nudge_after,
             Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)

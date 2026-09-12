@@ -3390,7 +3390,10 @@ mod tests {
                 None,
                 Some(1),
             );
-            assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Blocked);
+            assert_eq!(
+                app.state.terminals[&terminal_id].raw_agent_state(),
+                AgentState::Blocked
+            );
 
             match &mut method {
                 crate::api::schema::Method::PaneSendText(params) => {
@@ -3412,7 +3415,10 @@ mod tests {
 
             assert_eq!(success.result, ResponseResult::Ok {});
             assert!(rx.try_recv().is_ok());
-            assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+            assert_eq!(
+                app.state.terminals[&terminal_id].raw_agent_state(),
+                AgentState::Idle
+            );
             assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
         }
     }
@@ -5115,7 +5121,11 @@ mod tests {
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
-        app.state.terminals.get_mut(&terminal_id).unwrap().state = crate::detect::AgentState::Idle;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
@@ -5390,7 +5400,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn adapter_answer_payload_blocks_every_idle_pane_consumer_and_clears_next_turn() {
+    async fn adapter_answer_payload_needs_attention_and_clears_next_turn() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -5430,18 +5440,18 @@ mod tests {
             .pane_state(internal_pane_id)
             .expect("reported pane");
         let terminal = &app.state.terminals[&terminal_id];
-        let projected = terminal.sidebar_projection(pane.seen).0;
-        assert_eq!(projected, AgentState::Blocked);
+        let projection = pane.agent_projection(terminal);
+        assert_eq!(projection.state, AgentState::Blocked);
         assert_eq!(terminal.closing_items[0].text, "Choose the release lane");
         let pane_info = app
             .pane_info(0, internal_pane_id)
             .expect("reported pane info");
         assert_eq!(pane_info.items[0].text, "Choose the release lane");
-        assert!(crate::terminal::counts_as_blocked(
-            projected,
-            !terminal.closing_gates.is_empty(),
-            terminal.usage_limited
-        ));
+        assert!(!projection.counts_as_blocked());
+        assert_eq!(
+            projection.attention_tier,
+            crate::terminal::state::AttentionTier::Attention
+        );
         assert!(!crate::app::pane_lifecycle::pane_is_done(pane, terminal));
 
         app.state.auto_settle_inactive = true;
@@ -5480,7 +5490,7 @@ mod tests {
         });
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
         let terminal = &app.state.terminals[&terminal_id];
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.closing_gates.is_empty());
         assert!(terminal.closing_items.is_empty());
     }
@@ -5578,9 +5588,9 @@ mod tests {
             )
             .expect("working report accepted");
 
-        let updates = app
-            .state
-            .mark_due_agent_status_stale_at(started + crate::terminal::state::AGENT_STALE_SILENCE);
+        let updates = app.state.mark_due_agent_status_stale_at(
+            started + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+        );
         assert_eq!(updates.len(), 1);
         for update in &updates {
             app.emit_pane_state_update(update);
@@ -7389,7 +7399,7 @@ mod tests {
             bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
         let process_state = (
             app.state.terminals[&terminal_id].detected_agent,
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
         );
 
         let params = guarded_work_title_params(
@@ -7407,7 +7417,7 @@ mod tests {
         assert_eq!(
             (
                 app.state.terminals[&terminal_id].detected_agent,
-                app.state.terminals[&terminal_id].state,
+                app.state.terminals[&terminal_id].raw_agent_state(),
             ),
             process_state
         );

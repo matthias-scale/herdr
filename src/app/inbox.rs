@@ -27,6 +27,7 @@ pub(crate) struct BlockedAgent {
     pub agent_label: String,
     pub blocked_since: Option<Instant>,
     pub seq: Option<u64>,
+    pub attention_tier: crate::terminal::state::AttentionTier,
 }
 
 /// Longest wait first.
@@ -113,13 +114,10 @@ impl crate::app::AppState {
                     if terminal.detected_agent.is_none() {
                         continue;
                     }
-                    if crate::terminal::counts_as_blocked(
-                        terminal.state,
-                        !terminal.closing_gates.is_empty(),
-                        terminal.usage_limited,
-                    ) {
+                    let projection = pane.agent_projection(terminal);
+                    if projection.counts_as_blocked() {
                         blocked = blocked.saturating_add(1);
-                    } else if terminal.state == crate::detect::AgentState::Working {
+                    } else if projection.state == crate::detect::AgentState::Working {
                         working = working.saturating_add(1);
                     }
                 }
@@ -128,7 +126,7 @@ impl crate::app::AppState {
         (working.saturating_add(blocked), blocked)
     }
 
-    pub(crate) fn blocked_agents(&self) -> Vec<BlockedAgent> {
+    fn human_attention_agents(&self, include_yellow: bool) -> Vec<BlockedAgent> {
         let mut queue: Vec<BlockedAgent> = Vec::new();
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
@@ -136,11 +134,12 @@ impl crate::app::AppState {
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
-                    if !crate::terminal::counts_as_blocked(
-                        terminal.state,
-                        !terminal.closing_gates.is_empty(),
-                        terminal.usage_limited,
-                    ) {
+                    let projection = pane.agent_projection(terminal);
+                    let attention_tier = projection.attention_tier;
+                    let included = projection.needs_human_attention()
+                        && (include_yellow
+                            || attention_tier == crate::terminal::state::AttentionTier::Blocked);
+                    if !included {
                         continue;
                     }
                     queue.push(BlockedAgent {
@@ -156,12 +155,21 @@ impl crate::app::AppState {
                             .unwrap_or_else(|| "agent".to_string()),
                         blocked_since: terminal.blocked_since,
                         seq: terminal.last_agent_state_change_seq,
+                        attention_tier,
                     });
                 }
             }
         }
         queue.sort_by(by_longest_wait);
         queue
+    }
+
+    pub(crate) fn blocked_agents(&self) -> Vec<BlockedAgent> {
+        self.human_attention_agents(false)
+    }
+
+    pub(crate) fn home_attention_agents(&self) -> Vec<BlockedAgent> {
+        self.human_attention_agents(true)
     }
 
     pub(crate) fn toggle_inbox(&mut self) {
@@ -192,6 +200,7 @@ mod tests {
             agent_label: "agent".to_string(),
             blocked_since,
             seq,
+            attention_tier: crate::terminal::state::AttentionTier::Blocked,
         }
     }
 
@@ -213,7 +222,7 @@ mod tests {
         let stamped = Instant::now();
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Blocked;
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
             terminal.blocked_since = Some(stamped);
         }
 
@@ -221,6 +230,77 @@ mod tests {
         assert_eq!(queue.len(), 1, "queue: {queue:?}");
         assert_eq!(queue[0].pane_id, pane_id);
         assert_eq!(queue[0].blocked_since, Some(stamped));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn answer_only_waits_stay_out_of_inbox_and_clear_with_the_runtime() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("attention")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal")
+            .clone();
+        let item = crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose the release lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        };
+
+        {
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+            terminal.closing_items = vec![item.clone()];
+        }
+        assert!(
+            app.blocked_agents().is_empty(),
+            "yellow is not inbox-blocked"
+        );
+        assert_eq!(
+            app.home_attention_agents()[0].attention_tier,
+            crate::terminal::state::AttentionTier::Attention
+        );
+
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
+        assert!(
+            app.home_attention_agents().is_empty(),
+            "working clears yellow"
+        );
+
+        {
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_raw_agent_state_for_test(AgentState::Idle);
+            terminal.closing_items.clear();
+        }
+        assert!(
+            app.home_attention_agents().is_empty(),
+            "an empty next turn clears yellow"
+        );
+
+        {
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+            terminal.closing_items = vec![item];
+        }
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .settled_at = Some(1);
+        assert!(
+            app.home_attention_agents().is_empty(),
+            "settling clears yellow"
+        );
     }
 
     /// Owner correction to #77: a latched gate becomes blocking only when the
@@ -250,7 +330,7 @@ mod tests {
                 default: None,
                 default_at: None,
             }];
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
 
         assert!(
@@ -261,7 +341,7 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("terminal state")
-            .state = AgentState::Idle;
+            .set_raw_agent_state_for_test(AgentState::Idle);
 
         let queue = app.blocked_agents();
         assert_eq!(queue.len(), 1, "the unchanged gate blocks after work stops");
@@ -283,7 +363,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
             terminal.closing_gates.clear();
         }
 
@@ -306,7 +386,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
             terminal.usage_limited = true;
         }
 
@@ -339,7 +419,7 @@ mod tests {
 
                     {
                         let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-                        terminal.state = state;
+                        terminal.set_raw_agent_state_for_test(state);
                         if latched_gate {
                             terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
                                 n: 1,

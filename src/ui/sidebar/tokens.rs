@@ -244,6 +244,7 @@ mod tests {
             prio: false,
             starred: false,
             state: AgentState::Working,
+            attention_tier: None,
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,

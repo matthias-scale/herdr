@@ -582,7 +582,7 @@ impl App {
             }
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
-                self.sync_full_lifecycle_authority_detection_pauses();
+                self.sync_detection_authority_mirrors();
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
                 if update.hook_work_context_changed {
                     self.schedule_session_save();
@@ -697,7 +697,7 @@ impl App {
                 }
             }
         }
-        self.sync_full_lifecycle_authority_detection_pauses();
+        self.sync_detection_authority_mirrors();
         if hook_state_report_accepted == Some(true) {
             if let Some((pane_id, closing_non_gate)) = hook_report {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
@@ -854,7 +854,11 @@ impl App {
         }
     }
 
-    pub(crate) fn sync_full_lifecycle_authority_detection_pauses(&self) {
+    /// Mirror the two terminal facts the detection task cannot read itself:
+    /// whether a full-lifecycle hook owns the pane, and whether that hook has
+    /// gone stale. The second one re-enables the process probe the first one
+    /// suppresses, which is how a finished agent still gets resolved to idle.
+    pub(crate) fn sync_detection_authority_mirrors(&self) {
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 for pane in tab.panes.values() {
@@ -870,6 +874,7 @@ impl App {
                         terminal.full_lifecycle_hook_authority_active(),
                         terminal.hook_authority_output_retirement_eligible(),
                     );
+                    runtime.set_supervisor_stale(terminal.supervisor_stale);
                 }
             }
         }
@@ -932,7 +937,7 @@ impl App {
             })
             .filter(|count| *count > 0);
         let tier = crate::terminal::state::derive_completion_tier(
-            terminal.state,
+            terminal.raw_agent_state(),
             terminal.closing_contract.as_deref(),
             terminal.closing_contract_met,
             terminal.closing_idle,
@@ -3254,7 +3259,7 @@ mod tests {
         });
 
         let terminal = &app.state.terminals[&terminal_id];
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.agent_name.is_none());
         assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
             event.data,

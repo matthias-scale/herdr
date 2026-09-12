@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalId;
 
-pub(crate) const AGENT_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
+pub(crate) const AGENT_BUSY_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
 pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,23 +72,42 @@ fn parse_binary_token(value: &str) -> Option<bool> {
     }
 }
 
-/// One blocking rule for the sidebar worklist and inbox.
+/// Severity of a pane's outstanding demand on the human.
 ///
-/// A latched human gate does not block while the agent is still working. The
-/// action already in flight may resolve or refine that gate. Once work stops,
-/// the unanswered gate becomes blocking. A usage limit stays blocking because
-/// the pane cannot proceed until its reset window.
-pub(crate) fn counts_as_blocked(
-    state: AgentState,
-    open_blockers: bool,
-    usage_limited: bool,
-) -> bool {
-    state == AgentState::Blocked || usage_limited || (open_blockers && state != AgentState::Working)
+/// This is shared runtime meaning. The TUI decides how each tier looks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AttentionTier {
+    #[default]
+    None,
+    Attention,
+    Blocked,
 }
 
-#[path = "metadata.rs"]
-mod metadata;
-pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
+/// Derive human-attention severity from the lifecycle and closing-block facts.
+///
+/// Gates and usage limits are blockers. Answer and Verify items are the lower
+/// attention tier once the agent has stopped. A plain blocked lifecycle still
+/// means blocked when no structured closing-block detail accompanied it.
+pub(crate) fn attention_tier(
+    state: AgentState,
+    has_closing_gates: bool,
+    has_closing_items: bool,
+    usage_limited: bool,
+) -> AttentionTier {
+    if usage_limited || has_closing_gates {
+        AttentionTier::Blocked
+    } else if has_closing_items && state != AgentState::Working {
+        AttentionTier::Attention
+    } else if state == AgentState::Blocked {
+        AttentionTier::Blocked
+    } else {
+        AttentionTier::None
+    }
+}
+
+#[cfg(test)]
+use super::metadata::AgentMetadataReport;
+use super::metadata::{AgentMetadata, EffectivePresentation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
@@ -228,7 +247,7 @@ pub(crate) struct TerminalAgentHandoffState {
     recent_agent_process_exit: Option<RecentAgentProcessExitHandoffState>,
     hook_authority: Option<HookAuthorityHandoffState>,
     supervisor_stale: bool,
-    metadata: Vec<metadata::AgentMetadataHandoffState>,
+    metadata: Vec<super::metadata::AgentMetadataHandoffState>,
     closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -432,8 +451,8 @@ impl AgentActivityOwner {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RecentAgentProcessExit {
-    agent: Agent,
+pub(super) struct RecentAgentProcessExit {
+    pub(super) agent: Agent,
     observed_at: Instant,
 }
 
@@ -492,10 +511,10 @@ pub struct TerminalState {
     hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
-    metadata_report_sequences: HashMap<String, u64>,
-    metadata_report_agents: HashMap<String, Agent>,
-    metadata_token_sequence_sources: std::collections::HashSet<String>,
-    pub state: AgentState,
+    pub(super) metadata_report_sequences: HashMap<String, u64>,
+    pub(super) metadata_report_agents: HashMap<String, Agent>,
+    pub(super) metadata_token_sequence_sources: std::collections::HashSet<String>,
+    state: AgentState,
     /// A live child process remains below the pane shell or agent process.
     pub holds_shell: bool,
     /// Process evidence used to project stale hook state in the sidebar.
@@ -520,7 +539,7 @@ pub struct TerminalState {
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
-    recent_agent_process_exit: Option<RecentAgentProcessExit>,
+    pub(super) recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     /// This terminal is the local surface of a remote focus proxy pane. It
@@ -608,6 +627,17 @@ impl TerminalState {
             pending_agent_resume_plan: None,
             remote_proxy: false,
         }
+    }
+
+    /// Effective lifecycle before pane settlement and attention policy.
+    /// Most callers need `PaneState::agent_projection` instead.
+    pub(crate) fn raw_agent_state(&self) -> AgentState {
+        self.state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_raw_agent_state_for_test(&mut self, state: AgentState) {
+        self.state = state;
     }
 
     pub fn set_detected_agent_process_at(
@@ -1602,7 +1632,7 @@ impl TerminalState {
             .is_some_and(|count| count > 0)
     }
 
-    pub fn agent_status_watchdog_deadline(&self) -> Option<Instant> {
+    pub fn agent_status_watchdog_deadline(&self, stale_after: Duration) -> Option<Instant> {
         let authority = self.hook_authority.as_ref()?;
         if self.supervisor_stale {
             return None;
@@ -1613,24 +1643,28 @@ impl TerminalState {
                 .as_ref()
                 .and(authority.eta_s)
                 .map(|eta_s| Duration::from_secs(eta_s).saturating_add(DECLARED_WAIT_GRACE))
-                .unwrap_or(AGENT_STALE_SILENCE),
+                .unwrap_or(AGENT_BUSY_STALE_SILENCE),
             // A declared wait belongs to a working report; a finished report that
             // is still holding sub-processes gets the plain silence budget.
-            _ if self.subprocess_held_working() => AGENT_STALE_SILENCE,
+            _ if self.subprocess_held_working() => stale_after,
             // A parent parked on subagents has ended its own turn, so it reports idle
             // with an idle screen and neither branch above can see it. The claim is
             // still a declaration nobody has re-verified, and it earns the same silence
             // budget as any other.
-            _ if self.declares_running_subagents() => AGENT_STALE_SILENCE,
+            _ if self.declares_running_subagents() => stale_after,
             _ => return None,
         };
         authority.reported_at.checked_add(age)
     }
 
-    pub fn mark_agent_status_stale_at(&mut self, now: Instant) -> Option<TerminalStateMutation> {
+    pub fn mark_agent_status_stale_at(
+        &mut self,
+        now: Instant,
+        stale_after: Duration,
+    ) -> Option<TerminalStateMutation> {
         if self.supervisor_stale
             || self
-                .agent_status_watchdog_deadline()
+                .agent_status_watchdog_deadline(stale_after)
                 .is_none_or(|deadline| now < deadline)
         {
             return None;
@@ -3539,7 +3573,7 @@ impl TerminalState {
         })
     }
 
-    fn recompute_effective_state(
+    pub(super) fn recompute_effective_state(
         &mut self,
         previous_agent_label: Option<String>,
         previous_known_agent: Option<Agent>,
@@ -3611,6 +3645,28 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 mod tests {
     use super::*;
     use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
+
+    #[test]
+    fn closing_block_attention_tier_distinguishes_gates_from_other_items() {
+        assert_eq!(
+            attention_tier(AgentState::Blocked, true, false, false),
+            AttentionTier::Blocked
+        );
+        assert_eq!(
+            attention_tier(AgentState::Blocked, false, true, false),
+            AttentionTier::Attention
+        );
+        assert_eq!(
+            attention_tier(AgentState::Blocked, true, true, false),
+            AttentionTier::Blocked
+        );
+        assert_eq!(
+            attention_tier(AgentState::Working, false, true, false),
+            AttentionTier::None
+        );
+    }
+
+    const TEST_AGENT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
@@ -3858,10 +3914,10 @@ mod tests {
             )
         );
         assert!(terminal
-            .mark_agent_status_stale_at(started + Duration::from_secs(149))
+            .mark_agent_status_stale_at(started + Duration::from_secs(149), TEST_AGENT_STALE_AFTER,)
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(started + Duration::from_secs(150))
+            .mark_agent_status_stale_at(started + Duration::from_secs(150), TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.status_report_snapshot().3);
 
@@ -3904,7 +3960,7 @@ mod tests {
             )
             .expect("working report accepted");
         terminal
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the report stale");
 
         terminal.set_detected_state_with_screen_signals_at(
@@ -3915,7 +3971,7 @@ mod tests {
             false,
             false,
             true,
-            started + AGENT_STALE_SILENCE + Duration::from_secs(1),
+            started + AGENT_BUSY_STALE_SILENCE + Duration::from_secs(1),
         );
 
         assert!(terminal.hook_authority.is_none());
@@ -3943,10 +3999,13 @@ mod tests {
             )
             .expect("working report accepted");
         assert!(terminal
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                started + AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER,)
             .is_some());
 
         let mut waiting = test_terminal();
@@ -3966,8 +4025,37 @@ mod tests {
             )
             .expect("waiting report accepted");
         assert!(waiting
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(started + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_none());
+    }
+
+    #[test]
+    fn working_report_uses_the_busy_budget() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1),
+            started,
+        );
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            started.checked_add(AGENT_BUSY_STALE_SILENCE),
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at(
+                started + AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER,)
+            .is_some());
     }
 
     #[test]
@@ -3991,7 +4079,9 @@ mod tests {
             .expect("blocked report accepted");
         assert_eq!(terminal.status_report_snapshot().0, None);
         assert_eq!(terminal.status_report_snapshot().1, None);
-        assert!(terminal.agent_status_watchdog_deadline().is_none());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
     }
 
     #[test]
@@ -5484,8 +5574,8 @@ mod tests {
         let terminal = subprocess_held_terminal(now);
 
         assert_eq!(
-            terminal.agent_status_watchdog_deadline(),
-            now.checked_add(AGENT_STALE_SILENCE),
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            now.checked_add(TEST_AGENT_STALE_AFTER),
             "work nobody is reporting on must still be watched"
         );
 
@@ -5501,7 +5591,9 @@ mod tests {
             now,
         );
         assert!(
-            quiet.agent_status_watchdog_deadline().is_none(),
+            quiet
+                .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+                .is_none(),
             "a pane that is genuinely finished has nothing to wait for"
         );
     }
@@ -5512,16 +5604,19 @@ mod tests {
         let mut terminal = subprocess_held_terminal(now);
 
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
 
         // The mark outlives the sub-process tree, so the pane does not quietly
         // settle into done as if the agent had signed off on it.
-        terminal.set_foreground_process(None, false, now + AGENT_STALE_SILENCE);
+        terminal.set_foreground_process(None, false, now + TEST_AGENT_STALE_AFTER);
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(terminal.status_report_snapshot().3);
     }
@@ -5531,7 +5626,7 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subprocess_held_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the silence stale");
         assert!(terminal.supervisor_stale);
 
@@ -5542,10 +5637,12 @@ mod tests {
             None,
             None,
             Some(1001),
-            now + AGENT_STALE_SILENCE + Duration::from_secs(1),
+            now + TEST_AGENT_STALE_AFTER + Duration::from_secs(1),
         );
         assert!(!terminal.supervisor_stale);
-        assert!(terminal.agent_status_watchdog_deadline().is_some());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_some());
     }
 
     /// Builds a pane whose parent has ended its turn while declaring that
@@ -5598,14 +5695,17 @@ mod tests {
         assert!(active.metadata_tokens.get("closing_agents").is_none());
         assert!(active.declares_running_subagents());
         assert_eq!(
-            active.agent_status_watchdog_deadline(),
-            now.checked_add(AGENT_STALE_SILENCE)
+            active.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            now.checked_add(TEST_AGENT_STALE_AFTER)
         );
         assert!(active
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(active
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(active.supervisor_stale);
 
@@ -5623,9 +5723,11 @@ mod tests {
         zero.set_active_subagents(Some(0));
 
         assert!(!zero.declares_running_subagents());
-        assert!(zero.agent_status_watchdog_deadline().is_none());
         assert!(zero
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
+        assert!(zero
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_none());
         assert!(!zero.supervisor_stale);
     }
@@ -5636,10 +5738,13 @@ mod tests {
         let mut terminal = subagent_claim_terminal(now);
 
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
     }
@@ -5650,7 +5755,7 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the subagent claim stale");
         assert!(terminal.supervisor_stale);
         assert!(crate::app::settled::pane_has_resume_plan(&terminal));
@@ -5709,10 +5814,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the subagent claim stale");
 
-        let refreshed_at = now + AGENT_STALE_SILENCE + Duration::from_secs(1);
+        let refreshed_at = now + TEST_AGENT_STALE_AFTER + Duration::from_secs(1);
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5725,8 +5830,8 @@ mod tests {
 
         assert!(!terminal.supervisor_stale);
         assert_eq!(
-            terminal.agent_status_watchdog_deadline(),
-            refreshed_at.checked_add(AGENT_STALE_SILENCE)
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            refreshed_at.checked_add(TEST_AGENT_STALE_AFTER)
         );
     }
 
@@ -5740,7 +5845,9 @@ mod tests {
             now,
         ));
 
-        assert!(terminal.agent_status_watchdog_deadline().is_none());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
     }
 
     #[test]
