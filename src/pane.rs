@@ -1353,6 +1353,7 @@ enum PaneRuntimeIo {
         input_enabled: Arc<AtomicBool>,
         resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
         resize_state: Arc<Mutex<RemoteProxyResizeState>>,
+        resize_sync_needed: AtomicBool,
         /// Terminal responses to queries in the frame stream are discarded:
         /// the remote server already answered them for its own terminal.
         response_sink: mpsc::Sender<Bytes>,
@@ -1541,6 +1542,7 @@ impl PaneRuntimeIo {
                 outbound,
                 resize_slot,
                 resize_state,
+                resize_sync_needed,
                 render_notify,
                 render_dirty,
                 ..
@@ -1549,6 +1551,7 @@ impl PaneRuntimeIo {
                     outbound,
                     resize_slot,
                     resize_state,
+                    resize_sync_needed,
                     render_notify,
                     render_dirty,
                     (rows, cols, cell_width_px, cell_height_px),
@@ -1572,6 +1575,7 @@ impl PaneRuntimeIo {
             outbound,
             resize_slot,
             resize_state,
+            resize_sync_needed,
             render_notify,
             render_dirty,
             ..
@@ -1581,6 +1585,7 @@ impl PaneRuntimeIo {
                 outbound,
                 resize_slot,
                 resize_state,
+                resize_sync_needed,
                 render_notify,
                 render_dirty,
                 (rows, cols, cell_width_px, cell_height_px),
@@ -1592,6 +1597,7 @@ impl PaneRuntimeIo {
         outbound: &mpsc::Sender<ProxyOutbound>,
         resize_slot: &Mutex<(u16, u16, u32, u32)>,
         resize_state: &Mutex<RemoteProxyResizeState>,
+        resize_sync_needed: &AtomicBool,
         render_notify: &Notify,
         render_dirty: &RenderSignal,
         size: (u16, u16, u32, u32),
@@ -1603,6 +1609,7 @@ impl PaneRuntimeIo {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if *slot == size && !state.retry_needed {
+            resize_sync_needed.store(false, Ordering::Release);
             return;
         }
         if state.marker_queued {
@@ -1610,6 +1617,7 @@ impl PaneRuntimeIo {
             // so updating the slot is enough and avoids another marker.
             *slot = size;
             state.retry_needed = false;
+            resize_sync_needed.store(false, Ordering::Release);
             return;
         }
         *slot = size;
@@ -1617,9 +1625,11 @@ impl PaneRuntimeIo {
             Ok(()) => {
                 state.marker_queued = true;
                 state.retry_needed = false;
+                resize_sync_needed.store(false, Ordering::Release);
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 state.retry_needed = true;
+                resize_sync_needed.store(true, Ordering::Release);
                 drop(slot);
                 drop(state);
                 render_dirty.request_generic();
@@ -1627,7 +1637,17 @@ impl PaneRuntimeIo {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 state.retry_needed = false;
+                resize_sync_needed.store(false, Ordering::Release);
             }
+        }
+    }
+
+    fn mark_remote_proxy_resize_needed(&self) {
+        if let PaneRuntimeIo::RemoteProxy {
+            resize_sync_needed, ..
+        } = self
+        {
+            resize_sync_needed.store(true, Ordering::Release);
         }
     }
 
@@ -2206,6 +2226,7 @@ impl PaneRuntime {
                     input_enabled: Arc::new(AtomicBool::new(false)),
                     resize_slot: Arc::clone(&resize_slot),
                     resize_state: Arc::clone(&resize_state),
+                    resize_sync_needed: AtomicBool::new(false),
                     response_sink,
                     render_notify,
                     render_dirty,
@@ -3620,6 +3641,8 @@ impl PaneRuntime {
                 cell_height_px,
                 terminal_responses,
             );
+        } else {
+            self.io.mark_remote_proxy_resize_needed();
         }
     }
 
@@ -3629,24 +3652,17 @@ impl PaneRuntime {
     /// after every draw for every proxy pane, so the steady state must not
     /// touch the wire at all.
     pub fn sync_remote_proxy_resize(&self) {
-        let size = self.current_size.get();
         if let PaneRuntimeIo::RemoteProxy {
-            resize_slot,
-            resize_state,
-            ..
+            resize_sync_needed, ..
         } = &self.io
         {
-            let state = resize_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let slot = resize_slot
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let already_queued = *slot == size && !state.retry_needed;
-            if already_queued {
+            if !resize_sync_needed.load(Ordering::Acquire) {
                 return;
             }
+        } else {
+            return;
         }
+        let size = self.current_size.get();
         let (rows, cols, cell_width_px, cell_height_px) = size;
         self.io
             .sync_remote_proxy_resize(rows, cols, cell_width_px, cell_height_px);
@@ -4281,6 +4297,45 @@ mod tests {
         assert!(
             channels.outbound_rx.try_recv().is_err(),
             "post-draw syncs with unchanged geometry must stay off the wire"
+        );
+    }
+
+    #[test]
+    fn unchanged_proxy_resize_sync_does_not_wait_for_reconciliation_locks() {
+        let (runtime, channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("proxy runtime");
+        let resize_state = channels.resize_state.lock().expect("resize state lock");
+        let resize_slot = channels.resize_slot.lock().expect("resize slot lock");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                started_tx.send(()).expect("started receiver");
+                runtime.sync_remote_proxy_resize();
+                finished_tx.send(()).expect("finished receiver");
+            });
+            started_rx.recv().expect("sync thread started");
+            let finished_without_locks =
+                finished_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+            drop(resize_slot);
+            drop(resize_state);
+            assert!(
+                finished_without_locks,
+                "unchanged resize sync must not take reconciliation locks"
+            );
+        });
+
+        assert!(
+            channels.outbound_rx.is_empty(),
+            "unchanged geometry must not queue a resize"
         );
     }
 
