@@ -1541,12 +1541,16 @@ impl PaneRuntimeIo {
                 outbound,
                 resize_slot,
                 resize_state,
+                render_notify,
+                render_dirty,
                 ..
             } => {
                 Self::queue_remote_proxy_resize(
                     outbound,
                     resize_slot,
                     resize_state,
+                    render_notify,
+                    render_dirty,
                     (rows, cols, cell_width_px, cell_height_px),
                 );
             }
@@ -1568,6 +1572,8 @@ impl PaneRuntimeIo {
             outbound,
             resize_slot,
             resize_state,
+            render_notify,
+            render_dirty,
             ..
         } = self
         {
@@ -1575,6 +1581,8 @@ impl PaneRuntimeIo {
                 outbound,
                 resize_slot,
                 resize_state,
+                render_notify,
+                render_dirty,
                 (rows, cols, cell_width_px, cell_height_px),
             );
         }
@@ -1584,6 +1592,8 @@ impl PaneRuntimeIo {
         outbound: &mpsc::Sender<ProxyOutbound>,
         resize_slot: &Mutex<(u16, u16, u32, u32)>,
         resize_state: &Mutex<RemoteProxyResizeState>,
+        render_notify: &Notify,
+        render_dirty: &RenderSignal,
         size: (u16, u16, u32, u32),
     ) {
         let mut state = resize_state
@@ -1609,9 +1619,11 @@ impl PaneRuntimeIo {
                 state.retry_needed = false;
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                // Keep retry_needed set so a later post-draw reconciliation
-                // retries the marker instead of suppressing this resize.
                 state.retry_needed = true;
+                drop(slot);
+                drop(state);
+                render_dirty.request_generic();
+                render_notify.notify_one();
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 state.retry_needed = false;
@@ -4228,6 +4240,7 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn proxy_resize_sync_queues_a_marker_only_when_geometry_changed() {
@@ -4271,15 +4284,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn proxy_resize_sync_retries_after_a_full_outbound_queue() {
+    #[tokio::test]
+    async fn proxy_resize_sync_retries_after_a_full_outbound_queue() {
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(RenderSignal::new());
         let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
             PaneId::alloc(),
             24,
             80,
             0,
-            Arc::new(Notify::new()),
-            Arc::new(RenderSignal::new()),
+            Arc::clone(&render_notify),
+            Arc::clone(&render_dirty),
         )
         .expect("proxy runtime");
         for _ in 0..REMOTE_PROXY_OUTBOUND_CAPACITY {
@@ -4305,6 +4320,13 @@ mod tests {
             );
         }
 
+        tokio::time::timeout(Duration::from_millis(100), render_notify.notified())
+            .await
+            .expect("a full resize queue must wake the event loop for a retry");
+        assert!(
+            render_dirty.take().generic,
+            "the retry wakeup must schedule a generic render"
+        );
         runtime.sync_remote_proxy_resize();
         assert_eq!(
             channels.outbound_rx.try_recv(),
