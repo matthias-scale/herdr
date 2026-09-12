@@ -2215,6 +2215,7 @@ impl PaneRuntime {
                 detect_screen_rescan_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 suspended: false,
+                supervisor_stale: Arc::new(AtomicBool::new(false)),
                 suppress_pane_died: Arc::new(AtomicBool::new(true)),
                 preserve_processes_on_drop: true,
                 detect_handle: None,
