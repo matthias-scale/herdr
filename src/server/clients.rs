@@ -8,8 +8,13 @@ use crate::server::render_stream::ClientRenderState;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientConnectionMode {
     App,
-    TerminalAttach { terminal_id: String },
-    TerminalObserve { terminal_id: String },
+    TerminalAttach {
+        terminal_id: String,
+        control: Option<Box<crate::server::remote_control::RemoteControlLease>>,
+    },
+    TerminalObserve {
+        terminal_id: String,
+    },
 }
 
 pub(crate) type RenderTarget = (
@@ -324,6 +329,7 @@ pub(crate) fn terminal_stream_client_ids(
         .filter_map(|(&client_id, client)| match &client.mode {
             ClientConnectionMode::TerminalAttach {
                 terminal_id: attached,
+                ..
             }
             | ClientConnectionMode::TerminalObserve {
                 terminal_id: attached,

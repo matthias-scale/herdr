@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 21,
+  "protocol": 22,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -10769,6 +10769,9 @@
             "cwd": {
               "type": "string"
             },
+            "detected_agent": {
+              "type": "string"
+            },
             "foreground_cwd": {
               "type": "string"
             },
@@ -10824,6 +10827,7 @@
             "foreground_cwd",
             "tty",
             "foreground_process",
+            "detected_agent",
             "interactive_ready",
             "human_draft",
             "state_change_seq",

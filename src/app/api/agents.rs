@@ -463,6 +463,7 @@ mod tests {
                 argv: vec!["agent".into(), "run".into()],
                 cwd: "/work/repo".into(),
             },
+            detected_agent: "claude".into(),
             interactive_ready: true,
             human_draft: false,
             state_change_seq: 9,
@@ -1707,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_focus_default_stub_reports_failure_without_activation() {
+    fn production_remote_focus_default_never_reaches_active() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
         configure_remote_host(&mut app, "buildbox");
@@ -1737,7 +1738,7 @@ mod tests {
         assert_eq!(status["result"]["error"]["code"], "host_unreachable");
         assert!(status["result"]["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("not implemented")));
+            .is_some_and(|message| message.contains("proxy pane is not available")));
         assert!(status["result"].get("context").is_none());
     }
 

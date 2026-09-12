@@ -87,7 +87,7 @@ impl GeneralRow {
             Self::AutoSettleDone => "Auto-settle quiet threads",
             Self::SettleDoneAfterMinutes => "Quiet minutes before auto-settle",
             Self::NudgeResumedAgents => "Continue resumed agents",
-            Self::AutoNudgeStalledAgents => "Nudge stalled agents",
+            Self::AutoNudgeStalledAgents => "Nudge agents after the stale timer",
             Self::HideWhitespace => "Hide whitespace changes in diff",
             Self::NewThreadWorkspace => "New threads default workspace",
             Self::AddProjectStartDir => "Add project starts in",

@@ -5588,9 +5588,9 @@ mod tests {
             )
             .expect("working report accepted");
 
-        let updates = app
-            .state
-            .mark_due_agent_status_stale_at(started + crate::terminal::state::AGENT_STALE_SILENCE);
+        let updates = app.state.mark_due_agent_status_stale_at(
+            started + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+        );
         assert_eq!(updates.len(), 1);
         for update in &updates {
             app.emit_pane_state_update(update);

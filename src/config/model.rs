@@ -334,7 +334,12 @@ pub struct SessionConfig {
     /// Nudge stalled agent panes after both their status declaration and pane
     /// activity have gone quiet. Default: false.
     pub auto_nudge_stalled_agents: bool,
-    /// Initial quiet period before a stalled pane is nudged. Default: 20.
+    /// Mark an unattended agent status report stale after this many quiet
+    /// minutes: a finished report still holding sub-processes, or a pane parked
+    /// on an unverified subagent claim. A working report keeps the 20-minute
+    /// busy budget. Default: 5.
+    pub agent_stale_after_minutes: u64,
+    /// Initial quiet period before a stalled pane is nudged. Default: 5.
     pub nudge_after_minutes: u64,
     /// Maximum nudges sent during one stale-status episode. Default: 3.
     pub max_nudges: u32,
@@ -359,7 +364,8 @@ impl Default for SessionConfig {
             nudge_resumed_agents: true,
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
-            nudge_after_minutes: 20,
+            agent_stale_after_minutes: 5,
+            nudge_after_minutes: 5,
             max_nudges: 3,
             stall_nudge_message:
                 "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.".to_string(),
@@ -426,6 +432,10 @@ pub struct Config {
 
 impl Config {
     pub(crate) fn clamp_safety_bounds(&mut self) {
+        self.session.agent_stale_after_minutes = self
+            .session
+            .agent_stale_after_minutes
+            .min(MAX_NUDGE_AFTER_MINUTES);
         self.session.nudge_after_minutes = self
             .session
             .nudge_after_minutes
@@ -2279,7 +2289,8 @@ mod tests {
     fn stalled_agent_nudge_config_defaults_are_opt_in_and_bounded() {
         let session = SessionConfig::default();
         assert!(!session.auto_nudge_stalled_agents);
-        assert_eq!(session.nudge_after_minutes, 20);
+        assert_eq!(session.agent_stale_after_minutes, 5);
+        assert_eq!(session.nudge_after_minutes, 5);
         assert_eq!(session.max_nudges, 3);
         assert_eq!(
             session.stall_nudge_message,

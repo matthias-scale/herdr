@@ -236,6 +236,7 @@ pub struct RemoteControlContext {
     pub foreground_cwd: String,
     pub tty: String,
     pub foreground_process: RemoteForegroundProcess,
+    pub detected_agent: String,
     pub interactive_ready: bool,
     pub human_draft: bool,
     pub state_change_seq: u64,

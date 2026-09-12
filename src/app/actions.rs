@@ -3257,6 +3257,8 @@ impl AppState {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::RemoteControlGatePoisoned { .. } => Vec::new(),
             AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::ScratchpadChanged => Vec::new(),
             AppEvent::NotepadChanged => Vec::new(),
@@ -3764,9 +3766,10 @@ impl AppState {
     }
 
     pub(crate) fn next_agent_watchdog_deadline(&self) -> Option<Instant> {
+        let stale_after = self.agent_stale_after;
         self.terminals
             .values()
-            .filter_map(crate::terminal::TerminalState::agent_status_watchdog_deadline)
+            .filter_map(|terminal| terminal.agent_status_watchdog_deadline(stale_after))
             .min()
     }
 
@@ -3812,6 +3815,7 @@ impl AppState {
     }
 
     pub(crate) fn mark_due_agent_status_stale_at(&mut self, now: Instant) -> Vec<PaneStateUpdate> {
+        let stale_after = self.agent_stale_after;
         let pane_ids = self
             .workspaces
             .iter()
@@ -3820,7 +3824,7 @@ impl AppState {
             .filter_map(|(pane_id, pane)| {
                 self.terminals
                     .get(&pane.attached_terminal_id)
-                    .and_then(|terminal| terminal.agent_status_watchdog_deadline())
+                    .and_then(|terminal| terminal.agent_status_watchdog_deadline(stale_after))
                     .filter(|deadline| now >= *deadline)
                     .map(|_| *pane_id)
             })
@@ -3829,7 +3833,7 @@ impl AppState {
             .into_iter()
             .filter_map(|pane_id| {
                 self.update_terminal_state_at(pane_id, now, |terminal| {
-                    terminal.mark_agent_status_stale_at(now)
+                    terminal.mark_agent_status_stale_at(now, stale_after)
                 })
             })
             .collect()

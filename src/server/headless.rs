@@ -1894,6 +1894,26 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        let controlled_terminal = self.clients.get(&client_id).and_then(|client| {
+            let ClientConnectionMode::TerminalAttach {
+                terminal_id: _,
+                control: Some(control),
+            } = &client.mode
+            else {
+                return None;
+            };
+            Some((control.context.terminal_id.clone(), control.clone()))
+        });
+        if let Some((real_terminal_id, _lease)) = controlled_terminal {
+            #[cfg(unix)]
+            if let Some(real_terminal_id) = self.terminal_id_by_string(&real_terminal_id) {
+                if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
+                    runtime.release_remote_owner(client_id);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = real_terminal_id;
+        }
         self.retire_direct_graphics_for_client(client_id);
         let was_foreground = self.foreground_client_id == Some(client_id);
         self.app.clear_input_source(client_id);
@@ -1901,7 +1921,7 @@ impl HeadlessServer {
         let removed = self.clients.remove(&client_id);
         if let Some(removed) = removed {
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
-            if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
+            if let ClientConnectionMode::TerminalAttach { terminal_id, .. } = removed.mode {
                 self.terminal_attach_owners.remove(&terminal_id);
                 if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
                     self.app
@@ -2128,6 +2148,219 @@ impl HeadlessServer {
         Some(result)
     }
 
+    /// Revalidate the authoritative remote context and write one input batch
+    /// directly to the PTY master during this server event-loop turn.
+    #[cfg(unix)]
+    fn controlled_write_target(
+        &self,
+        client_id: u64,
+    ) -> Result<
+        Option<(
+            crate::server::remote_control::RemoteControlLease,
+            crate::terminal::TerminalId,
+        )>,
+        crate::api::schema::ErrorBody,
+    > {
+        let Some(lease) = self
+            .clients
+            .get(&client_id)
+            .and_then(|client| match &client.mode {
+                ClientConnectionMode::TerminalAttach {
+                    control: Some(control),
+                    ..
+                } => Some((**control).clone()),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        crate::server::remote_control::validate_input_owner(
+            self.terminal_attach_owners
+                .get(&lease.context.terminal_id)
+                .copied(),
+            client_id,
+        )?;
+        let real_terminal_id = self
+            .terminal_id_by_string(&lease.context.terminal_id)
+            .ok_or_else(|| crate::api::schema::ErrorBody {
+                code: "connection_lost".to_owned(),
+                message: "controlled terminal no longer exists; delivery is unknown".to_owned(),
+            })?;
+        if self.app.terminal_runtimes.get(&real_terminal_id).is_none() {
+            return Err(crate::api::schema::ErrorBody {
+                code: "connection_lost".to_owned(),
+                message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+            });
+        }
+        Ok(Some((lease, real_terminal_id)))
+    }
+
+    #[cfg(unix)]
+    fn forward_control_bytes(&mut self, client_id: u64, data: Vec<u8>) -> bool {
+        let target = match self.controlled_write_target(client_id) {
+            Ok(Some(target)) => target,
+            Ok(None) => return false,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        let (lease, real_terminal_id) = target;
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "connection_lost".to_owned(),
+                    message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+                },
+            );
+        };
+        runtime.scroll_reset();
+        let provider: &dyn crate::server::remote_control::RemoteControlContextProvider = &self.app;
+        let current = match provider.fresh_remote_control_context(&lease.agent_ref) {
+            Ok(context) => context,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        self.forward_control_bytes_with_current_context(
+            client_id,
+            data,
+            lease,
+            real_terminal_id,
+            current,
+        )
+    }
+
+    #[cfg(unix)]
+    fn forward_control_bytes_with_current_context(
+        &mut self,
+        client_id: u64,
+        data: Vec<u8>,
+        lease: crate::server::remote_control::RemoteControlLease,
+        real_terminal_id: crate::terminal::TerminalId,
+        current: api::schema::RemoteControlContext,
+    ) -> bool {
+        if let Err(error) = crate::server::remote_control::validate_context(
+            &self.app.state.agent_host_name,
+            &lease.context.user,
+            &lease.context,
+            &current,
+        ) {
+            self.reject_remote_control(client_id, error);
+            return false;
+        }
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "connection_lost".to_owned(),
+                    message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+                },
+            );
+        };
+        let has_bytes = !data.is_empty();
+        let result = runtime.try_send_controlled_bytes(client_id, &data);
+        self.finish_controlled_write(client_id, &real_terminal_id, has_bytes, result)
+    }
+
+    #[cfg(unix)]
+    fn finish_controlled_write(
+        &mut self,
+        client_id: u64,
+        real_terminal_id: &crate::terminal::TerminalId,
+        has_bytes: bool,
+        result: crate::pty::actor::ControlledWriteResult,
+    ) -> bool {
+        match result {
+            crate::pty::actor::ControlledWriteResult::Written => {
+                if has_bytes {
+                    self.app.retire_blocked_hook_authority_for_terminal(
+                        real_terminal_id,
+                        std::time::Instant::now(),
+                    );
+                }
+                true
+            }
+            crate::pty::actor::ControlledWriteResult::Refused => {
+                self.reject_remote_control(
+                    client_id,
+                    crate::api::schema::ErrorBody {
+                        code: "refused_for_safety".to_owned(),
+                        message: "controlled PTY write gate refused the batch".to_owned(),
+                    },
+                );
+                false
+            }
+            crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written } => {
+                self.reject_remote_control(
+                    client_id,
+                    crate::api::schema::ErrorBody {
+                        code: "connection_lost".to_owned(),
+                        message: format!(
+                            "controlled PTY delivery became unknown after {written} bytes; no retry",
+                        ),
+                    },
+                );
+                false
+            }
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn forward_control_bytes_with_provider_for_test(
+        &mut self,
+        client_id: u64,
+        data: Vec<u8>,
+        provider: &dyn crate::server::remote_control::RemoteControlContextProvider,
+    ) -> bool {
+        let target = match self.controlled_write_target(client_id) {
+            Ok(Some(target)) => target,
+            Ok(None) => return false,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        let (lease, real_terminal_id) = target;
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "connection_lost".to_owned(),
+                    message: "controlled terminal runtime is gone; delivery is unknown".to_owned(),
+                },
+            );
+        };
+        runtime.scroll_reset();
+        let current = match provider.fresh_remote_control_context(&lease.agent_ref) {
+            Ok(context) => context,
+            Err(error) => {
+                self.reject_remote_control(client_id, error);
+                return false;
+            }
+        };
+        self.forward_control_bytes_with_current_context(
+            client_id,
+            data,
+            lease,
+            real_terminal_id,
+            current,
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn forward_control_bytes(&mut self, client_id: u64, _data: Vec<u8>) -> bool {
+        self.reject_remote_control(
+            client_id,
+            crate::api::schema::ErrorBody {
+                code: "agent_not_attachable".to_owned(),
+                message: "remote control is supported only on Unix runtimes".to_owned(),
+            },
+        )
+    }
+
     fn resolve_terminal_target_id_string(&self, target: &str) -> Option<String> {
         if self.terminal_id_by_string(target).is_some() {
             return Some(target.to_owned());
@@ -2154,7 +2387,7 @@ impl HeadlessServer {
 
     fn paste_client_clipboard_image_path(&mut self, client_id: u64, path: String) -> bool {
         let attached_terminal_id = self.clients.get(&client_id).and_then(|client| {
-            if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
+            if let ClientConnectionMode::TerminalAttach { terminal_id, .. } = &client.mode {
                 Some(terminal_id.clone())
             } else {
                 None
@@ -2163,6 +2396,18 @@ impl HeadlessServer {
         if let Some(terminal_id) = attached_terminal_id {
             if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                 let payload = paste_payload_for_runtime(runtime, &path);
+                let guarded = self.clients.get(&client_id).is_some_and(|client| {
+                    matches!(
+                        client.mode,
+                        ClientConnectionMode::TerminalAttach {
+                            control: Some(_),
+                            ..
+                        }
+                    )
+                });
+                if guarded {
+                    return self.forward_control_bytes(client_id, payload.into_bytes());
+                }
                 if let Some(Err(err)) =
                     self.forward_terminal_attach_bytes(&terminal_id, payload.into_bytes(), false)
                 {
@@ -2179,7 +2424,8 @@ impl HeadlessServer {
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.request_semantic_redraw_after_input();
         }
-        self.app.route_client_events(
+        self.route_full_app_human_events(
+            client_id,
             vec![crate::raw_input::RawInputEvent::Paste(path)],
             self.foreground_client_id == Some(client_id),
         );
@@ -2249,7 +2495,199 @@ impl HeadlessServer {
         true
     }
 
-    fn control_terminal_client(&mut self, client_id: u64, target: String, takeover: bool) -> bool {
+    fn reject_remote_control(
+        &mut self,
+        client_id: u64,
+        error: crate::api::schema::ErrorBody,
+    ) -> bool {
+        self.send_to_client(
+            client_id,
+            ServerMessage::ControlError {
+                code: error.code,
+                message: error.message,
+            },
+        );
+        self.remove_client_and_resize_if_needed(client_id);
+        false
+    }
+
+    fn control_terminal_client(
+        &mut self,
+        client_id: u64,
+        target: String,
+        agent_ref: Option<crate::api::schema::AgentRef>,
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+        takeover: bool,
+    ) -> bool {
+        let Some(agent_ref) = agent_ref else {
+            return self.control_terminal_client_legacy(client_id, target, takeover);
+        };
+
+        #[cfg(not(unix))]
+        {
+            let _ = (agent_ref, expected_context);
+            self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "remote control is supported only on Unix runtimes".to_owned(),
+                },
+            )
+        }
+        #[cfg(unix)]
+        {
+            self.control_terminal_client_guarded(client_id, agent_ref, expected_context, takeover)
+        }
+    }
+
+    #[cfg(unix)]
+    fn control_terminal_client_guarded(
+        &mut self,
+        client_id: u64,
+        agent_ref: crate::api::schema::AgentRef,
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
+        takeover: bool,
+    ) -> bool {
+        if takeover {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "already_controlled".to_owned(),
+                    message: "remote control takeover is not supported".to_owned(),
+                },
+            );
+        }
+        if !self.client_is_pending_terminal_mode(client_id) {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "connection is not pending terminal control".to_owned(),
+                },
+            );
+        }
+
+        let provider: &dyn crate::server::remote_control::RemoteControlContextProvider = &self.app;
+        let current = match provider.fresh_remote_control_context(&agent_ref) {
+            Ok(context) => context,
+            Err(error) => return self.reject_remote_control(client_id, error),
+        };
+        let expected = expected_context
+            .map(|context| *context)
+            .unwrap_or_else(|| current.clone());
+        let Some(effective_user) = crate::platform::effective_user_name() else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "refused_for_safety".to_owned(),
+                    message: "effective remote user is unavailable".to_owned(),
+                },
+            );
+        };
+        if let Err(error) = crate::server::remote_control::validate_context(
+            &self.app.state.agent_host_name,
+            &effective_user,
+            &expected,
+            &current,
+        ) {
+            return self.reject_remote_control(client_id, error);
+        }
+        let Some(real_terminal_id) = self.terminal_id_by_string(&current.terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "controlled terminal no longer exists".to_owned(),
+                },
+            );
+        };
+        if self
+            .pending_alt_screen_reads
+            .iter()
+            .any(|pending| pending.terminal_id == real_terminal_id)
+        {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "refused_for_safety".to_owned(),
+                    message: "terminal has a read in progress".to_owned(),
+                },
+            );
+        }
+        if self
+            .terminal_attach_owners
+            .get(&current.terminal_id)
+            .is_some_and(|owner| *owner != client_id)
+        {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "already_controlled".to_owned(),
+                    message: "terminal already has a writable controller".to_owned(),
+                },
+            );
+        }
+        let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) else {
+            return self.reject_remote_control(
+                client_id,
+                crate::api::schema::ErrorBody {
+                    code: "agent_not_attachable".to_owned(),
+                    message: "controlled terminal runtime is gone".to_owned(),
+                },
+            );
+        };
+        match runtime.try_acquire_remote_owner(client_id) {
+            crate::pty::actor::RemoteOwnerAcquireResult::Acquired => {}
+            crate::pty::actor::RemoteOwnerAcquireResult::AlreadyControlled => {
+                return self.reject_remote_control(
+                    client_id,
+                    crate::api::schema::ErrorBody {
+                        code: "already_controlled".to_owned(),
+                        message: "controlled terminal runtime already has a writer".to_owned(),
+                    },
+                );
+            }
+            crate::pty::actor::RemoteOwnerAcquireResult::RefusedForSafety => {
+                return self.reject_remote_control(
+                    client_id,
+                    crate::api::schema::ErrorBody {
+                        code: "refused_for_safety".to_owned(),
+                        message: "local terminal input is still in flight".to_owned(),
+                    },
+                );
+            }
+        }
+        let lease = crate::server::remote_control::RemoteControlLease {
+            agent_ref,
+            context: current.clone(),
+        };
+        let lease_for_attach = lease.clone();
+        if !self.attach_terminal_client_with_control(
+            client_id,
+            current.terminal_id.clone(),
+            false,
+            Some(Box::new(lease_for_attach)),
+        ) {
+            if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
+                runtime.release_remote_owner(client_id);
+            }
+            return false;
+        }
+        self.send_to_client(
+            client_id,
+            ServerMessage::ControlReady {
+                context: Box::new(current),
+            },
+        );
+        true
+    }
+
+    fn control_terminal_client_legacy(
+        &mut self,
+        client_id: u64,
+        target: String,
+        takeover: bool,
+    ) -> bool {
         let Some(terminal_id) = self.resolve_terminal_session_target(client_id, &target, "control")
         else {
             return false;
@@ -2270,7 +2708,11 @@ impl HeadlessServer {
     ) -> bool {
         self.app.begin_contract_false_positive_input_burst();
         let Some(ClientConnection {
-            mode: ClientConnectionMode::TerminalAttach { terminal_id },
+            mode:
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id,
+                    control: None,
+                },
             ..
         }) = self.clients.get(&client_id)
         else {
@@ -2667,6 +3109,42 @@ impl HeadlessServer {
     /// Returns true if the event changed visual state (requiring a re-render).
     fn handle_internal_event_with_forwarding(&mut self, ev: AppEvent) -> bool {
         match &ev {
+            #[cfg(unix)]
+            AppEvent::RemoteControlGatePoisoned { pane_id } => {
+                let controlled_clients: Vec<u64> = self
+                    .clients
+                    .iter()
+                    .filter_map(|(client_id, client)| {
+                        let ClientConnectionMode::TerminalAttach {
+                            control: Some(control),
+                            ..
+                        } = &client.mode
+                        else {
+                            return None;
+                        };
+                        (self
+                            .terminal_id_by_string(&control.context.terminal_id)
+                            .is_some_and(|terminal_id| {
+                                self.app.state.workspaces.iter().any(|workspace| {
+                                    workspace
+                                        .terminal_id(*pane_id)
+                                        .is_some_and(|candidate| candidate == &terminal_id)
+                                })
+                            }))
+                        .then_some(*client_id)
+                    })
+                    .collect();
+                for client_id in controlled_clients {
+                    self.reject_remote_control(
+                        client_id,
+                        crate::api::schema::ErrorBody {
+                            code: "refused_for_safety".to_owned(),
+                            message: "PTY user-write gate is poisoned; remote control is disabled while the pane remains alive".to_owned(),
+                        },
+                    );
+                }
+                false
+            }
             AppEvent::TerminalBell { pane_id, count } => {
                 if !self.send_to_foreground_client(ServerMessage::TerminalBell { count: *count }) {
                     debug!(
@@ -3254,6 +3732,16 @@ impl HeadlessServer {
         terminal_id: String,
         takeover: bool,
     ) -> bool {
+        self.attach_terminal_client_with_control(client_id, terminal_id, takeover, None)
+    }
+
+    fn attach_terminal_client_with_control(
+        &mut self,
+        client_id: u64,
+        terminal_id: String,
+        takeover: bool,
+        control: Option<Box<crate::server::remote_control::RemoteControlLease>>,
+    ) -> bool {
         if !self.client_is_pending_terminal_mode(client_id) {
             self.send_to_client(
                 client_id,
@@ -3330,6 +3818,7 @@ impl HeadlessServer {
         let cell_size = client.cell_size;
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id.clone(),
+            control,
         };
         client.pending_terminal_attach = false;
         client.render_state.reset_baseline();
@@ -3358,6 +3847,63 @@ impl HeadlessServer {
         self.clients.get(&client_id).is_some_and(|client| {
             client.pending_terminal_attach && matches!(client.mode, ClientConnectionMode::App)
         })
+    }
+
+    #[cfg(unix)]
+    fn controlled_remote_owners(
+        &self,
+    ) -> std::collections::HashMap<crate::terminal::TerminalId, u64> {
+        self.clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                let ClientConnectionMode::TerminalAttach {
+                    control: Some(control),
+                    ..
+                } = &client.mode
+                else {
+                    return None;
+                };
+                self.terminal_id_by_string(&control.context.terminal_id)
+                    .map(|terminal_id| (terminal_id, *client_id))
+            })
+            .collect()
+    }
+
+    fn route_full_app_human_events(
+        &mut self,
+        source_id: u64,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        apply_host_terminal_theme: bool,
+    ) {
+        #[cfg(unix)]
+        {
+            let controlled_owners = self.controlled_remote_owners();
+            let mut human_controlled_owner = None;
+            let mut before_terminal_input = |target: &crate::app::TerminalInputTarget| {
+                if human_controlled_owner.is_none() {
+                    human_controlled_owner = controlled_owners.get(target.terminal_id()).copied();
+                }
+            };
+            self.app.route_client_events_from_with_human_input_hook(
+                source_id,
+                events,
+                apply_host_terminal_theme,
+                &mut before_terminal_input,
+                Some(&controlled_owners),
+            );
+            if let Some(owner_id) = human_controlled_owner {
+                self.reject_remote_control(
+                    owner_id,
+                    crate::api::schema::ErrorBody {
+                        code: "already_controlled".to_owned(),
+                        message: "remote control ended by human input".to_owned(),
+                    },
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        self.app
+            .route_client_events_from(source_id, events, apply_host_terminal_theme);
     }
 
     /// Handles a server event. Returns true if the event requires a re-render.
@@ -3481,7 +4027,7 @@ impl HeadlessServer {
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
         }
-        self.app.route_client_events_from(client_id, events, false);
+        self.route_full_app_human_events(client_id, events, false);
         self.app.start_usage_scan_if_requested();
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
@@ -3581,6 +4127,29 @@ impl HeadlessServer {
 
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
+            return false;
+        }
+
+        let stale_client_id = match &ev {
+            ServerEvent::ClientConnected { .. } | ServerEvent::QuitSignal => None,
+            ServerEvent::ClientInput { client_id, .. }
+            | ServerEvent::GraphicsTransmissionResult { client_id, .. }
+            | ServerEvent::GraphicsTransmissionStarted { client_id, .. }
+            | ServerEvent::ClientInputPixels { client_id, .. }
+            | ServerEvent::ClientInputEvents { client_id, .. }
+            | ServerEvent::ClientDockWidth { client_id, .. }
+            | ServerEvent::ClientPasteRejected { client_id, .. }
+            | ServerEvent::ClientClipboardImage { client_id, .. }
+            | ServerEvent::ClientAttachTerminal { client_id, .. }
+            | ServerEvent::ClientObserveTerminal { client_id, .. }
+            | ServerEvent::ClientControlTerminal { client_id, .. }
+            | ServerEvent::ClientAttachScroll { client_id, .. }
+            | ServerEvent::ClientResize { client_id, .. }
+            | ServerEvent::ClientDetach { client_id }
+            | ServerEvent::ClientDisconnected { client_id }
+            | ServerEvent::ClientWriterDrained { client_id } => Some(*client_id),
+        };
+        if stale_client_id.is_some_and(|client_id| !self.clients.contains_key(&client_id)) {
             return false;
         }
 
@@ -3691,8 +4260,16 @@ impl HeadlessServer {
             ServerEvent::ClientControlTerminal {
                 client_id,
                 target,
+                agent_ref,
+                expected_context,
                 takeover,
-            } => self.control_terminal_client(client_id, target, takeover),
+            } => self.control_terminal_client(
+                client_id,
+                target,
+                agent_ref,
+                expected_context,
+                takeover,
+            ),
             ServerEvent::ClientAttachScroll {
                 client_id,
                 source,
@@ -3709,6 +4286,9 @@ impl HeadlessServer {
                 data,
                 geometry,
             } => {
+                if !self.clients.contains_key(&client_id) {
+                    return false;
+                }
                 let coordinates_valid = crate::input::mouse::parse_report(&data)
                     .and_then(|(x, y)| geometry.cell(x, y))
                     .is_some();
@@ -3734,6 +4314,9 @@ impl HeadlessServer {
                     || foreground_changed
             }
             ServerEvent::ClientInput { client_id, data } => {
+                if !self.clients.contains_key(&client_id) {
+                    return false;
+                }
                 if self.handoff_in_progress {
                     debug!(
                         client_id,
@@ -3742,15 +4325,34 @@ impl HeadlessServer {
                     );
                     return false;
                 }
+                if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.pending_terminal_attach)
+                {
+                    debug!(
+                        client_id,
+                        len = data.len(),
+                        "ignored client input while terminal control is connecting"
+                    );
+                    return false;
+                }
                 debug!(client_id, len = data.len(), "client input received");
-                let attached_terminal_id = self.clients.get(&client_id).and_then(|client| {
-                    if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
-                        Some(terminal_id.clone())
+                let attached_terminal = self.clients.get(&client_id).and_then(|client| {
+                    if let ClientConnectionMode::TerminalAttach {
+                        terminal_id,
+                        control,
+                    } = &client.mode
+                    {
+                        Some((terminal_id.clone(), control.is_some()))
                     } else {
                         None
                     }
                 });
-                if let Some(terminal_id) = attached_terminal_id {
+                if let Some((_terminal_id, true)) = attached_terminal {
+                    return self.forward_control_bytes(client_id, data);
+                }
+                if let Some((terminal_id, false)) = attached_terminal {
                     if let Some(Err(err)) =
                         self.forward_terminal_attach_bytes(&terminal_id, data, true)
                     {
@@ -3777,11 +4379,26 @@ impl HeadlessServer {
                 self.handle_client_input_events(client_id, events)
             }
             ServerEvent::ClientInputEvents { client_id, events } => {
+                if !self.clients.contains_key(&client_id) {
+                    return false;
+                }
                 if self.handoff_in_progress {
                     debug!(
                         client_id,
                         len = events.len(),
                         "ignored client input events during handoff"
+                    );
+                    return false;
+                }
+                if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.pending_terminal_attach)
+                {
+                    debug!(
+                        client_id,
+                        len = events.len(),
+                        "ignored structured input while terminal control is connecting"
                     );
                     return false;
                 }
@@ -3793,6 +4410,15 @@ impl HeadlessServer {
                 if matches!(
                     self.clients.get(&client_id).map(|client| &client.mode),
                     Some(ClientConnectionMode::TerminalObserve { .. })
+                ) {
+                    return false;
+                }
+                if matches!(
+                    self.clients.get(&client_id).map(|client| &client.mode),
+                    Some(ClientConnectionMode::TerminalAttach {
+                        control: Some(_),
+                        ..
+                    })
                 ) {
                     return false;
                 }
@@ -3835,12 +4461,26 @@ impl HeadlessServer {
                 extension,
                 data,
             } => {
+                if !self.clients.contains_key(&client_id) {
+                    return false;
+                }
                 debug!(
                     client_id,
                     len = data.len(),
                     extension = %extension,
                     "client clipboard image received"
                 );
+                if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.pending_terminal_attach)
+                {
+                    debug!(
+                        client_id,
+                        "ignored clipboard input while terminal control is connecting"
+                    );
+                    return false;
+                }
                 if matches!(
                     self.clients.get(&client_id).map(|client| &client.mode),
                     Some(ClientConnectionMode::TerminalObserve { .. })
@@ -3866,8 +4506,43 @@ impl HeadlessServer {
                     client_id,
                     cols, rows, cell_width_px, cell_height_px, "client resize"
                 );
+                let controlled_terminal_id = if let Some(ClientConnection {
+                    mode:
+                        ClientConnectionMode::TerminalAttach {
+                            terminal_id,
+                            control: Some(_),
+                        },
+                    terminal_size,
+                    cell_size,
+                    render_state,
+                    ..
+                }) = self.clients.get_mut(&client_id)
+                {
+                    *terminal_size = (cols, rows);
+                    let observed = crate::kitty_graphics::HostCellSize {
+                        width_px: cell_width_px,
+                        height_px: cell_height_px,
+                    };
+                    if observed.is_known() {
+                        *cell_size = observed;
+                    }
+                    render_state.request_repaint();
+                    Some((terminal_id.clone(), *cell_size))
+                } else {
+                    None
+                };
+                if let Some((terminal_id, cell_size)) = controlled_terminal_id {
+                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
+                        runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+                    }
+                    return true;
+                }
                 let direct_terminal_id = if let Some(ClientConnection {
-                    mode: ClientConnectionMode::TerminalAttach { terminal_id },
+                    mode:
+                        ClientConnectionMode::TerminalAttach {
+                            terminal_id,
+                            control: None,
+                        },
                     terminal_size,
                     cell_size,
                     render_state,
@@ -4793,7 +5468,7 @@ impl HeadlessServer {
                 ClientConnectionMode::App if client.is_full_app_client() => {
                     has_app_target = true;
                 }
-                ClientConnectionMode::TerminalAttach { terminal_id }
+                ClientConnectionMode::TerminalAttach { terminal_id, .. }
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     direct_terminal_targets.insert(terminal_id.as_str());
                 }
@@ -5303,7 +5978,7 @@ impl HeadlessServer {
                     }
                     frame
                 }
-                ClientConnectionMode::TerminalAttach { terminal_id }
+                ClientConnectionMode::TerminalAttach { terminal_id, .. }
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) else {
                         self.send_to_client(
@@ -6249,7 +6924,7 @@ mod tests {
     use super::*;
 
     use crate::app::AppState;
-    use crate::protocol::{CellData, CursorState};
+    use crate::protocol::{CellData, CursorState, PROTOCOL_VERSION};
     use unicode_width::UnicodeWidthStr;
 
     #[path = "pane_graphics.rs"]
@@ -7637,6 +8312,7 @@ esac
             ClientConnection::new_with_mode(
                 ClientConnectionMode::TerminalAttach {
                     terminal_id: agent_terminal_id.to_string(),
+                    control: None,
                 },
                 None,
                 (80, 24),
@@ -8281,6 +8957,975 @@ next_tab = ""
         control_rx
     }
 
+    #[cfg(unix)]
+    fn test_remote_control_context(
+        terminal_id: &str,
+        workspace_id: &str,
+        pane_id: &str,
+    ) -> api::schema::RemoteControlContext {
+        api::schema::RemoteControlContext {
+            host: "buildbox".into(),
+            user: "operator".into(),
+            workspace_id: workspace_id.into(),
+            tab_id: format!("{workspace_id}:t1"),
+            pane_id: pane_id.into(),
+            terminal_id: terminal_id.into(),
+            cwd: "/work".into(),
+            foreground_cwd: "/work".into(),
+            tty: "/dev/pts/test".into(),
+            foreground_process: api::schema::RemoteForegroundProcess {
+                pid: 1234,
+                process_group_id: 1234,
+                name: "agent".into(),
+                argv: vec!["agent".into()],
+                cwd: "/work".into(),
+            },
+            detected_agent: "claude".into(),
+            interactive_ready: true,
+            human_draft: false,
+            state_change_seq: 1,
+            revision: 1,
+            context_epoch: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    struct MutableSequencedContextProvider {
+        contexts: std::sync::Mutex<std::collections::VecDeque<api::schema::RemoteControlContext>>,
+    }
+
+    #[cfg(unix)]
+    impl crate::server::remote_control::RemoteControlContextProvider
+        for MutableSequencedContextProvider
+    {
+        fn fresh_remote_control_context(
+            &self,
+            _agent_ref: &api::schema::AgentRef,
+        ) -> Result<api::schema::RemoteControlContext, api::schema::ErrorBody> {
+            self.contexts
+                .lock()
+                .expect("context provider lock")
+                .pop_front()
+                .ok_or_else(|| api::schema::ErrorBody {
+                    code: "test_context_exhausted".into(),
+                    message: "test context provider exhausted".into(),
+                })
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_controlled_test_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Bytes>,
+    ) {
+        let workspace = crate::workspace::Workspace::test_new("controlled-test");
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        let (terminal_id_string, control_rx) =
+            install_controlled_runtime_client(server, client_id, workspace, runtime);
+        (terminal_id_string, control_rx, input_rx)
+    }
+
+    #[cfg(unix)]
+    fn install_controlled_runtime_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+        workspace: crate::workspace::Workspace,
+        runtime: crate::terminal::TerminalRuntime,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.agent_host_name = "buildbox".into();
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        let terminal_id_string = terminal_id.to_string();
+        let workspace_id = server.app.state.workspaces[0].id.clone();
+        let pane_id_string = format!(
+            "{workspace_id}:p{}",
+            server.app.state.workspaces[0]
+                .public_pane_number(pane_id)
+                .expect("public pane number")
+        );
+        let context =
+            test_remote_control_context(&terminal_id_string, &workspace_id, &pane_id_string);
+        let lease = crate::server::remote_control::RemoteControlLease::new(
+            api::schema::AgentRef::new("buildbox", &pane_id_string).expect("agent ref"),
+            context,
+        );
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), client_id);
+        client.writer = Some(writer);
+        client.mode = ClientConnectionMode::TerminalAttach {
+            terminal_id: terminal_id_string.clone(),
+            control: Some(Box::new(lease)),
+        };
+        server.clients.insert(client_id, client);
+        server
+            .terminal_attach_owners
+            .insert(terminal_id_string.clone(), client_id);
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("controlled runtime")
+            .acquire_remote_owner(client_id));
+        (terminal_id_string, control_rx)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn install_controlled_live_test_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let workspace = crate::workspace::Workspace::test_new("controlled-live-test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "stty -echo -icanon min 1 time 0; printf __herdr_control_ready__; exec sleep 30"
+                    .to_owned(),
+            ],
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            server.app.event_tx.clone(),
+            server.app.render_notify.clone(),
+            server.app.render_dirty.clone(),
+        )
+        .expect("spawn live controlled test runtime");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !runtime.visible_text().contains("__herdr_control_ready__") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "live controlled test runtime did not become ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        install_controlled_runtime_client(server, client_id, workspace, runtime)
+    }
+
+    #[cfg(unix)]
+    struct LocalSocketControlStream(crate::ipc::LocalStream);
+
+    #[cfg(unix)]
+    impl std::io::Read for LocalSocketControlStream {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
+    impl std::io::Write for LocalSocketControlStream {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            std::io::Write::write(&mut self.0, buffer)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            std::io::Write::flush(&mut self.0)
+        }
+    }
+
+    #[cfg(unix)]
+    impl crate::remote::ControlStream for LocalSocketControlStream {}
+
+    #[cfg(unix)]
+    struct LocalSocketControlRunner {
+        socket_path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl crate::remote::SshRunner for LocalSocketControlRunner {
+        fn connect(&self, _target: &str) -> io::Result<Box<dyn crate::remote::ControlStream>> {
+            Ok(Box::new(LocalSocketControlStream(
+                crate::ipc::connect_local_stream(&self.socket_path)?,
+            )))
+        }
+    }
+
+    #[cfg(unix)]
+    fn guarded_control_handshake_test_server() -> (
+        HeadlessServer,
+        api::schema::AgentRef,
+        api::schema::RemoteControlContext,
+    ) {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("guarded-control-handshake");
+        let pane_id = workspace.tabs[0].root_pane;
+        let workspace_id = workspace.id.clone();
+        let pane_id_string = format!("{workspace_id}:p1");
+        let agent_ref = api::schema::AgentRef::new("buildbox", &pane_id_string)
+            .expect("valid guarded handshake agent reference");
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "exec sleep 30".to_owned(),
+            ],
+            &crate::pane::PaneLaunchEnv::from_extra(vec![(
+                "HERDR_AGENT".to_owned(),
+                "claude".to_owned(),
+            )]),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            server.app.event_tx.clone(),
+            server.app.render_notify.clone(),
+            server.app.render_dirty.clone(),
+        )
+        .expect("spawn guarded handshake runtime");
+
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.agent_host_name = "buildbox".to_owned();
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("guarded handshake terminal")
+            .clone();
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("guarded handshake terminal state");
+        let now = Instant::now();
+        terminal.begin_managed_agent(
+            "claude".to_owned(),
+            crate::detect::Agent::Claude,
+            now,
+            Duration::ZERO,
+            Duration::from_secs(30),
+        );
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        assert!(terminal.reconcile_managed_agent_at(now + Duration::from_millis(1), false));
+        terminal.last_agent_state_change_seq = Some(1);
+        assert!(terminal.managed_agent_control_ready());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let context = loop {
+            match server.app.remote_control_context(&agent_ref) {
+                Ok(context) => break context,
+                Err(_error) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    let terminal_id = server.app.state.workspaces[0]
+                        .terminal_id(pane_id)
+                        .expect("guarded handshake terminal")
+                        .clone();
+                    let runtime = server
+                        .app
+                        .terminal_runtimes
+                        .get(&terminal_id)
+                        .expect("guarded handshake runtime");
+                    let child_pid = runtime.child_pid().unwrap_or_default();
+                    panic!(
+                        "guarded handshake runtime did not expose a valid context: {}: {}; pid={child_pid}, job={:?}, hint={:?}",
+                        error.code,
+                        error.message,
+                        crate::detect::foreground_job(child_pid),
+                        crate::platform::process_agent_hint(child_pid),
+                    );
+                }
+            }
+        };
+        (server, agent_ref, context)
+    }
+
+    #[cfg(unix)]
+    fn run_real_guarded_control_handshake(
+        server: &mut HeadlessServer,
+        agent_ref: &api::schema::AgentRef,
+        expected_context: Option<api::schema::RemoteControlContext>,
+        version: u32,
+    ) -> crate::app::remote_focus::RemoteFocusTransition {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: agent_ref.host.clone(),
+                target: "local-test-control-socket".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = crate::remote::SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(LocalSocketControlRunner {
+                socket_path: server.client_socket_path.clone(),
+            }),
+        );
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start_with_expected_context_and_version_for_test(
+                "guarded-control-handshake",
+                agent_ref,
+                expected_context,
+                version,
+                event_tx,
+            )
+            .expect("control client thread starts");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            server
+                .accept_client_connections()
+                .expect("accept control client connection");
+            while let Ok(event) = server.server_event_rx.try_recv() {
+                match event {
+                    ServerEvent::ClientConnected { .. }
+                    | ServerEvent::ClientControlTerminal { .. } => {
+                        server.handle_server_event(event);
+                    }
+                    ServerEvent::ClientDisconnected { .. }
+                    | ServerEvent::ClientWriterDrained { .. } => {
+                        server.handle_server_event(event);
+                    }
+                    other => panic!("unexpected server event in control handshake: {other:?}"),
+                }
+            }
+            match event_rx.try_recv() {
+                Ok(AppEvent::RemoteFocusTransition { transition, .. }) => {
+                    let transition = *transition;
+                    if matches!(
+                        transition,
+                        crate::app::remote_focus::RemoteFocusTransition::Active(_)
+                    ) {
+                        let client_id = server
+                            .clients
+                            .keys()
+                            .next()
+                            .copied()
+                            .expect("active control client remains registered");
+                        server.remove_client(client_id);
+                        assert!(!server.clients.contains_key(&client_id));
+                    }
+                    return transition;
+                }
+                Ok(other) => panic!("unexpected client event in control handshake: {other:?}"),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("control handshake did not complete: {error}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: the real client/server control handshake returns ControlReady for a matching context.
+    async fn real_control_handshake_returns_control_ready_to_matching_client() {
+        let (mut server, agent_ref, expected_context) = guarded_control_handshake_test_server();
+        let transition =
+            run_real_guarded_control_handshake(&mut server, &agent_ref, None, PROTOCOL_VERSION);
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Active(context) => {
+                assert_eq!(context.host, "buildbox");
+                assert_eq!(context.terminal_id, expected_context.terminal_id);
+            }
+            other => panic!("expected client-classified ControlReady, got {other:?}"),
+        }
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: the real guarded server emits ControlError for a context mismatch and the client classifies it.
+    async fn real_control_handshake_classifies_context_mismatch_as_typed_error() {
+        let (mut server, agent_ref, mut expected) = guarded_control_handshake_test_server();
+        expected.revision = expected.revision.saturating_add(1);
+        let transition = run_real_guarded_control_handshake(
+            &mut server,
+            &agent_ref,
+            Some(expected),
+            PROTOCOL_VERSION,
+        );
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Failed(error) => {
+                assert_eq!(error.code, "refused_for_safety");
+                assert!(error.message.contains("context"));
+            }
+            other => panic!("expected client-classified ControlError, got {other:?}"),
+        }
+        assert!(server.clients.is_empty());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: a real client/server protocol version mismatch is classified as version_skew.
+    async fn real_control_handshake_classifies_version_mismatch_as_version_skew() {
+        let (mut server, agent_ref, _) = guarded_control_handshake_test_server();
+        let transition = run_real_guarded_control_handshake(
+            &mut server,
+            &agent_ref,
+            None,
+            PROTOCOL_VERSION.saturating_sub(1),
+        );
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Failed(error) => {
+                assert_eq!(error.code, "version_skew");
+            }
+            other => panic!("expected client-classified version_skew, got {other:?}"),
+        }
+        assert!(server.clients.is_empty());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: a real client/server handshake with a higher client version is classified as version_skew.
+    async fn real_control_handshake_classifies_higher_version_as_version_skew() {
+        let (mut server, agent_ref, _) = guarded_control_handshake_test_server();
+        let transition =
+            run_real_guarded_control_handshake(&mut server, &agent_ref, None, PROTOCOL_VERSION + 1);
+        match transition {
+            crate::app::remote_focus::RemoteFocusTransition::Failed(error) => {
+                assert_eq!(error.code, "version_skew");
+            }
+            other => panic!("expected client-classified version_skew, got {other:?}"),
+        }
+        assert!(server.clients.is_empty());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC2: a context change between control batches prevents the second PTY write.
+    async fn forward_control_bytes_refreshes_context_for_each_batch() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, mut input_rx) =
+            install_controlled_test_client(&mut server, 7);
+        let expected = match &server.clients[&7].mode {
+            ClientConnectionMode::TerminalAttach {
+                control: Some(lease),
+                ..
+            } => lease.context.clone(),
+            _ => panic!("controlled test client has no lease"),
+        };
+        let mut changed = expected.clone();
+        changed.revision += 1;
+        let provider = MutableSequencedContextProvider {
+            contexts: std::sync::Mutex::new(
+                [expected.clone(), changed]
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<_>>(),
+            ),
+        };
+
+        assert!(server.forward_control_bytes_with_provider_for_test(
+            7,
+            b"first".to_vec(),
+            &provider,
+        ));
+        assert_eq!(
+            input_rx.try_recv().expect("first batch written"),
+            Bytes::from("first")
+        );
+        assert!(!server.forward_control_bytes_with_provider_for_test(
+            7,
+            b"second".to_vec(),
+            &provider,
+        ));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "second batch must not be written"
+        );
+        assert!(!server.clients.contains_key(&7));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, .. } if code == "refused_for_safety"
+        ));
+        assert!(provider
+            .contexts
+            .lock()
+            .expect("context provider lock")
+            .is_empty());
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: a partial controlled PTY write ends the lease without retrying the remainder.
+    async fn partial_controlled_write_ends_server_lease() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, _input_rx) = install_controlled_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal");
+
+        assert!(!server.finish_controlled_write(
+            7,
+            &real_terminal_id,
+            true,
+            crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written: 17 },
+        ));
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.terminal_attach_owners.contains_key(&terminal_id));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "connection_lost" && message.contains("17 bytes")
+        ));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: a real partial controlled PTY result ends the server lease without retrying.
+    async fn partial_real_controlled_write_ends_server_lease_without_retry() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx) = install_controlled_live_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal")
+            .clone();
+        let expected = match &server.clients[&7].mode {
+            ClientConnectionMode::TerminalAttach {
+                control: Some(lease),
+                ..
+            } => lease.context.clone(),
+            _ => panic!("controlled test client has no lease"),
+        };
+        let provider = MutableSequencedContextProvider {
+            contexts: std::sync::Mutex::new(
+                [expected]
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<_>>(),
+            ),
+        };
+        let payload = vec![b'x'; 1024 * 1024];
+
+        assert!(!server.forward_control_bytes_with_provider_for_test(
+            7,
+            payload.clone(),
+            &provider,
+        ));
+        let ServerMessage::ControlError { code, message } =
+            read_server_message(control_rx.recv().expect("partial-write control error"))
+        else {
+            panic!("expected partial-write control error");
+        };
+        assert_eq!(code, "connection_lost");
+        let written = message
+            .strip_prefix("controlled PTY delivery became unknown after ")
+            .and_then(|message| message.strip_suffix(" bytes; no retry"))
+            .and_then(|written| written.parse::<usize>().ok())
+            .expect("partial byte count in control error");
+        assert!(written > 0 && written < payload.len(), "written={written}");
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"retry-must-not-arrive".to_vec(),
+        }));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .expect("live runtime")
+            .acquire_remote_owner(99));
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: a real EAGAIN controlled PTY result ends the server lease without retrying.
+    async fn eagain_real_controlled_write_ends_server_lease_without_retry() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx) = install_controlled_live_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal")
+            .clone();
+        let runtime = server
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .expect("live runtime");
+        // Fill the kernel input queue one byte at a time so the server payload
+        // below observes a stable, real zero-byte EAGAIN result.
+        let mut reached_eagain = false;
+        for _ in 0..131_072 {
+            match runtime.try_send_controlled_bytes(7, b"f") {
+                crate::pty::actor::ControlledWriteResult::Written => {}
+                crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written: 0 } => {
+                    reached_eagain = true;
+                    break;
+                }
+                crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written } => {
+                    panic!("one-byte EAGAIN setup partially wrote {written} bytes")
+                }
+                crate::pty::actor::ControlledWriteResult::Refused => {
+                    panic!("controlled owner unexpectedly refused during EAGAIN setup")
+                }
+            }
+        }
+        assert!(reached_eagain, "real PTY input buffer did not reach EAGAIN");
+
+        let expected = match &server.clients[&7].mode {
+            ClientConnectionMode::TerminalAttach {
+                control: Some(lease),
+                ..
+            } => lease.context.clone(),
+            _ => panic!("controlled test client has no lease"),
+        };
+        let provider = MutableSequencedContextProvider {
+            contexts: std::sync::Mutex::new(
+                [expected]
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<_>>(),
+            ),
+        };
+        assert!(!server.forward_control_bytes_with_provider_for_test(
+            7,
+            b"eagain-payload-must-not-arrive".to_vec(),
+            &provider,
+        ));
+        let ServerMessage::ControlError { code, message } =
+            read_server_message(control_rx.recv().expect("EAGAIN control error"))
+        else {
+            panic!("expected EAGAIN control error");
+        };
+        assert_eq!(code, "connection_lost");
+        assert!(message.contains("after 0 bytes; no retry"), "{message}");
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"retry-must-not-arrive".to_vec(),
+        }));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .expect("live runtime")
+            .acquire_remote_owner(99));
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC3: an EAGAIN result is delivery-unknown and ends the lease automatically.
+    async fn eagain_controlled_write_ends_server_lease() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, _input_rx) = install_controlled_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("terminal");
+
+        assert!(!server.finish_controlled_write(
+            7,
+            &real_terminal_id,
+            true,
+            crate::pty::actor::ControlledWriteResult::DeliveryUnknown { written: 0 },
+        ));
+        assert!(!server.clients.contains_key(&7));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "connection_lost" && message.contains("0 bytes")
+        ));
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC6: the server emits a typed ControlError instead of an untyped shutdown.
+    async fn server_emits_typed_control_error_for_remote_rejection() {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), 7);
+        client.writer = Some(writer);
+        server.clients.insert(7, client);
+
+        assert!(!server.reject_remote_control(
+            7,
+            api::schema::ErrorBody {
+                code: "refused_for_safety".into(),
+                message: "test refusal".into(),
+            },
+        ));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("typed control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "refused_for_safety" && message == "test refusal"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC1: a clipboard-image paste uses the human-input lease termination path before pane write.
+    async fn clipboard_image_paste_ends_human_control_before_forwarding() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, mut input_rx) =
+            install_controlled_test_client(&mut server, 7);
+        let mut app_client = test_app_client(Some(true), 1);
+        app_client.pending_terminal_attach = false;
+        server.clients.insert(1, app_client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .try_send_paste("blocked-before-human-input".into())
+            .is_err());
+        assert!(
+            server.handle_server_event(ServerEvent::ClientClipboardImage {
+                client_id: 1,
+                extension: "png".into(),
+                data: b"not-a-real-image".to_vec(),
+            })
+        );
+        assert!(!server.clients.contains_key(&7));
+        let forwarded = input_rx.try_recv().expect("clipboard image path forwarded");
+        let forwarded = String::from_utf8_lossy(&forwarded);
+        assert!(forwarded.contains("herdr-clipboard-images"), "{forwarded}");
+        assert!(!server.forward_control_bytes(7, b"controlled-after-clipboard".to_vec()));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"controlled-after-clipboard".to_vec(),
+        }));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "controlled write must not retry"
+        );
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("clipboard control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "already_controlled" && message.contains("human input")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    // AC1: a server-routed human keystroke ends the remote lease before a later controlled write.
+    async fn human_keystroke_ends_server_remote_lease_before_following_controlled_write() {
+        let mut server = test_headless_server();
+        let (terminal_id, control_rx, mut input_rx) =
+            install_controlled_test_client(&mut server, 7);
+        let mut app_client = test_app_client(Some(true), 1);
+        app_client.pending_terminal_attach = false;
+        server.clients.insert(1, app_client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('x'),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }],
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("human key forwarded"),
+            Bytes::from("x")
+        );
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.forward_control_bytes(7, b"controlled-after-key".to_vec()));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 7,
+            data: b"controlled-after-key".to_vec(),
+        }));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "controlled write must not retry"
+        );
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(
+                &server
+                    .terminal_id_by_string(&terminal_id)
+                    .expect("terminal")
+            )
+            .expect("runtime")
+            .acquire_remote_owner(99));
+        assert!(matches!(
+            read_server_message(control_rx.recv().expect("human-key control error")),
+            ServerMessage::ControlError { code, message }
+                if code == "already_controlled" && message.contains("human input")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn unrelated_pane_api_mutation_preserves_remote_lease() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("remote-control-api");
+        let controlled_pane = workspace.tabs[0].root_pane;
+        let unrelated_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let workspace_id = workspace.id.clone();
+        let controlled_terminal = workspace
+            .terminal_id(controlled_pane)
+            .expect("controlled terminal")
+            .clone();
+        let controlled_terminal_string = controlled_terminal.to_string();
+        let unrelated_pane_id = format!(
+            "{workspace_id}:p{}",
+            workspace
+                .public_pane_number(unrelated_pane)
+                .expect("unrelated public pane")
+        );
+        let controlled_pane_id = format!(
+            "{workspace_id}:p{}",
+            workspace
+                .public_pane_number(controlled_pane)
+                .expect("controlled public pane")
+        );
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.terminal_runtimes.insert(
+            controlled_terminal.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+
+        let context = test_remote_control_context(
+            &controlled_terminal_string,
+            &workspace_id,
+            &controlled_pane_id,
+        );
+        let lease = crate::server::remote_control::RemoteControlLease::new(
+            api::schema::AgentRef::new("buildbox", &controlled_pane_id).expect("agent ref"),
+            context,
+        );
+        let mut client = test_app_client(Some(true), 1);
+        client.mode = ClientConnectionMode::TerminalAttach {
+            terminal_id: controlled_terminal_string.clone(),
+            control: Some(Box::new(lease)),
+        };
+        server.clients.insert(7, client);
+        server
+            .terminal_attach_owners
+            .insert(controlled_terminal_string.clone(), 7);
+        assert!(server
+            .app
+            .terminal_runtimes
+            .get(&controlled_terminal)
+            .expect("controlled runtime")
+            .acquire_remote_owner(7));
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "rename-unrelated".into(),
+                    method: api::schema::Method::PaneRename(api::schema::PaneRenameParams {
+                        pane_id: unrelated_pane_id,
+                        label: Some("unrelated".into()),
+                    }),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            })
+        );
+        assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
+        assert!(matches!(
+            server.clients.get(&7).map(|client| &client.mode),
+            Some(ClientConnectionMode::TerminalAttach {
+                control: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            server
+                .terminal_attach_owners
+                .get(&controlled_terminal_string),
+            Some(&7)
+        );
+        assert!(!server
+            .app
+            .terminal_runtimes
+            .get(&controlled_terminal)
+            .expect("controlled runtime")
+            .acquire_remote_owner(99));
+    }
+
     #[test]
     fn explicit_agent_history_read_requires_idle_on_alternate_screen() {
         with_terminal_session_test_server(
@@ -8409,13 +10054,18 @@ next_tab = ""
                     server.handle_server_event(ServerEvent::ClientControlTerminal {
                         client_id: 7,
                         target: public_pane_id,
+                        agent_ref: None,
+                        expected_context: None,
                         takeover: false,
                     })
                 );
 
                 assert!(matches!(
                     server.clients.get(&7).map(|client| &client.mode),
-                    Some(ClientConnectionMode::TerminalAttach { terminal_id: attached })
+                    Some(ClientConnectionMode::TerminalAttach {
+                        terminal_id: attached,
+                        ..
+                    })
                         if attached == &terminal_id_string
                 ));
                 assert_eq!(
@@ -8466,6 +10116,8 @@ next_tab = ""
                 !server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8598,6 +10250,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8607,6 +10261,8 @@ next_tab = ""
                 !server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 8,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8628,6 +10284,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8637,6 +10295,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 8,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: true,
                 })
             );
@@ -8658,6 +10318,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -8694,6 +10356,8 @@ next_tab = ""
                 server.handle_server_event(ServerEvent::ClientControlTerminal {
                     client_id: 7,
                     target: terminal_id_string.clone(),
+                    agent_ref: None,
+                    expected_context: None,
                     takeover: false,
                 })
             );
@@ -9000,6 +10664,188 @@ next_tab = ""
             sent.contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."),
             "expected the auto-nudge to reach the pane, got {sent:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_working_report_uses_the_busy_budget() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-working-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server.app.handle_internal_event_with_prefix_sync(
+            crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                session_ref: None,
+            },
+        );
+        let reported_at = server.app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("working report timestamp");
+        server.handle_scheduled_tasks_headless(
+            reported_at + server.app.state.agent_stale_after,
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + crate::terminal::state::AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(
+            reported_at + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+            false,
+        );
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_declared_wait_uses_eta_plus_grace() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-declared-wait-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server.app.handle_internal_event_with_prefix_sync(
+            crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                seq: Some(1),
+                wait: Some("CI run 4123".into()),
+                eta_s: Some(120),
+                reported_at: None,
+                session_ref: None,
+            },
+        );
+        let reported_at = server.app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("declared wait report timestamp");
+        let stale_at = reported_at
+            .checked_add(Duration::from_secs(120))
+            .and_then(|deadline| deadline.checked_add(crate::terminal::state::DECLARED_WAIT_GRACE))
+            .expect("declared wait watchdog deadline");
+
+        assert_eq!(
+            server.app.state.next_agent_watchdog_deadline(),
+            Some(stale_at)
+        );
+        server.handle_scheduled_tasks_headless(stale_at - Duration::from_secs(1), false);
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(stale_at, false);
+
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_subprocess_held_report_uses_configured_budget() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-subprocess-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_foreground_process(Some("cargo".into()), true, now);
+
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[tokio::test]
+    async fn headless_scheduler_subagent_claim_uses_configured_budget() {
+        let now = Instant::now();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-subagent-watchdog");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("root pane terminal");
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_active_subagents(Some(1));
+
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            false,
+        );
+        assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
+
+        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
     }
 
     /// AC6: terminal-attach draft bytes suppress a stalled-agent auto-nudge.
@@ -9582,6 +11428,7 @@ next_tab = ""
         let mut client = test_app_client(Some(true), 1);
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id_string,
+            control: None,
         };
         server.clients.insert(1, client);
 
@@ -11317,7 +13164,7 @@ next_tab = ""
     }
 
     #[tokio::test]
-    async fn structured_non_app_focus_is_ignored_without_suppressing_keys() {
+    async fn pending_terminal_control_drops_structured_input() {
         let mut server = test_headless_server();
         let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1004h");
         server.clients.insert(1, test_app_client(Some(true), 1));
@@ -11325,6 +13172,7 @@ next_tab = ""
         let mut attached = test_app_client(Some(false), 2);
         attached.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: "attached".to_owned(),
+            control: None,
         };
         server.clients.insert(2, attached);
 
@@ -11349,7 +13197,7 @@ next_tab = ""
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
-        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
             client_id: 3,
             events: vec![crate::protocol::ClientInputEvent::Key {
                 code: crate::protocol::ClientKeyCode::Char('x'),
@@ -11361,7 +13209,115 @@ next_tab = ""
                 source: crate::protocol::ClientKeySource::Synthesized,
             }],
         }));
-        assert_eq!(server.foreground_client_id, Some(3));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 3,
+            data: b"x".to_vec(),
+        }));
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refused_remote_client_events_cannot_fall_through_to_local_focus_or_draft() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        let draft = "human draft bytes stay exact: λ🙂".to_owned();
+        server
+            .app
+            .state
+            .pending_human_drafts
+            .insert(pane_id, draft.clone());
+        server.clients.insert(1, test_app_client(Some(true), 1));
+
+        let mut pending = test_app_client(Some(false), 3);
+        pending.pending_terminal_attach = true;
+        server.clients.insert(3, pending);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(!server.reject_remote_control(
+            3,
+            api::schema::ErrorBody {
+                code: "refused_for_safety".to_owned(),
+                message: "test refusal".to_owned(),
+            },
+        ));
+        assert!(!server.clients.contains_key(&3));
+
+        assert!(!server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 3,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('x'),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }],
+        }));
+        assert!(!server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 3,
+            data: b"x".to_vec(),
+        }));
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientClipboardImage {
+                client_id: 3,
+                extension: "png".to_owned(),
+                data: b"not-a-local-paste".to_vec(),
+            })
+        );
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            server
+                .app
+                .state
+                .pending_human_drafts
+                .get(&pane_id)
+                .map(String::as_bytes),
+            Some(draft.as_bytes())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_owner_excludes_runtime_writers_and_releases_cleanly() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("test runtime");
+
+        assert!(runtime.acquire_remote_owner(7));
+        assert!(runtime
+            .try_send_bytes(Bytes::from_static(b"api-writer"))
+            .is_err());
+        assert!(runtime
+            .send_bytes(Bytes::from_static(b"async-api-writer"))
+            .await
+            .is_err());
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        runtime.release_remote_owner(7);
+        runtime
+            .try_send_bytes(Bytes::from_static(b"after-release"))
+            .expect("runtime writes resume after lease release");
+        assert_eq!(
+            input_rx.recv().await.expect("released runtime write"),
+            Bytes::from_static(b"after-release")
+        );
     }
 
     #[test]
@@ -11381,6 +13337,7 @@ next_tab = ""
             );
             client.mode = ClientConnectionMode::TerminalAttach {
                 terminal_id: terminal_id.clone(),
+                control: None,
             };
             server.clients.insert(1, client);
 
@@ -11406,6 +13363,70 @@ next_tab = ""
                     height_px: 20,
                 }
             );
+        });
+    }
+
+    #[test]
+    fn controlled_resize_updates_the_controlled_runtime_not_shared_layout() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id, _pane_id| {
+            let context = api::schema::RemoteControlContext {
+                host: "buildbox".to_owned(),
+                user: "operator".to_owned(),
+                workspace_id: "w1".to_owned(),
+                tab_id: "w1:t1".to_owned(),
+                pane_id: "w1:p1".to_owned(),
+                terminal_id: terminal_id.clone(),
+                cwd: "/work".to_owned(),
+                foreground_cwd: "/work".to_owned(),
+                tty: "/dev/pts/4".to_owned(),
+                foreground_process: api::schema::RemoteForegroundProcess {
+                    pid: 1234,
+                    process_group_id: 1234,
+                    name: "agent".to_owned(),
+                    argv: vec!["agent".to_owned()],
+                    cwd: "/work".to_owned(),
+                },
+                detected_agent: "claude".to_owned(),
+                interactive_ready: true,
+                human_draft: false,
+                state_change_seq: 1,
+                revision: 1,
+                context_epoch: 1,
+            };
+            let lease = crate::server::remote_control::RemoteControlLease::new(
+                api::schema::AgentRef::new("buildbox", "w1:p1").expect("agent ref"),
+                context,
+            );
+            let mut client = test_app_client(Some(false), 7);
+            client.mode = ClientConnectionMode::TerminalAttach {
+                terminal_id: terminal_id.clone(),
+                control: Some(Box::new(lease)),
+            };
+            server.clients.insert(7, client);
+            server.terminal_attach_owners.insert(terminal_id.clone(), 7);
+
+            assert!(server.handle_server_event(ServerEvent::ClientResize {
+                client_id: 7,
+                cols: 101,
+                rows: 31,
+                cell_width_px: 10,
+                cell_height_px: 20,
+            }));
+            assert_eq!(
+                server
+                    .runtime_for_terminal_id_string(&terminal_id)
+                    .expect("controlled runtime")
+                    .current_size(),
+                (31, 101)
+            );
+            assert_eq!(
+                server
+                    .runtime_for_terminal_id_string(&terminal_id)
+                    .expect("controlled runtime")
+                    .pixel_size(),
+                Some((1_010, 620))
+            );
+            assert_eq!(server.clients[&7].terminal_size, (101, 31));
         });
     }
 

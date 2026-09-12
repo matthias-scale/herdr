@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalId;
 
-pub(crate) const AGENT_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
+pub(crate) const AGENT_BUSY_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
 pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1627,7 +1627,7 @@ impl TerminalState {
             .is_some_and(|count| count > 0)
     }
 
-    pub fn agent_status_watchdog_deadline(&self) -> Option<Instant> {
+    pub fn agent_status_watchdog_deadline(&self, stale_after: Duration) -> Option<Instant> {
         let authority = self.hook_authority.as_ref()?;
         if self.supervisor_stale {
             return None;
@@ -1638,24 +1638,28 @@ impl TerminalState {
                 .as_ref()
                 .and(authority.eta_s)
                 .map(|eta_s| Duration::from_secs(eta_s).saturating_add(DECLARED_WAIT_GRACE))
-                .unwrap_or(AGENT_STALE_SILENCE),
+                .unwrap_or(AGENT_BUSY_STALE_SILENCE),
             // A declared wait belongs to a working report; a finished report that
             // is still holding sub-processes gets the plain silence budget.
-            _ if self.subprocess_held_working() => AGENT_STALE_SILENCE,
+            _ if self.subprocess_held_working() => stale_after,
             // A parent parked on subagents has ended its own turn, so it reports idle
             // with an idle screen and neither branch above can see it. The claim is
             // still a declaration nobody has re-verified, and it earns the same silence
             // budget as any other.
-            _ if self.declares_running_subagents() => AGENT_STALE_SILENCE,
+            _ if self.declares_running_subagents() => stale_after,
             _ => return None,
         };
         authority.reported_at.checked_add(age)
     }
 
-    pub fn mark_agent_status_stale_at(&mut self, now: Instant) -> Option<TerminalStateMutation> {
+    pub fn mark_agent_status_stale_at(
+        &mut self,
+        now: Instant,
+        stale_after: Duration,
+    ) -> Option<TerminalStateMutation> {
         if self.supervisor_stale
             || self
-                .agent_status_watchdog_deadline()
+                .agent_status_watchdog_deadline(stale_after)
                 .is_none_or(|deadline| now < deadline)
         {
             return None;
@@ -3346,6 +3350,21 @@ impl TerminalState {
             .is_some_and(|managed| matches!(managed.phase, ManagedAgentPhase::Active))
     }
 
+    /// Remote control may answer a managed agent while it is blocked. This is
+    /// separate from ordinary prompt readiness so other API paths keep their
+    /// stricter active-only behavior.
+    // Windows keeps the state helper for cross-platform test fixtures; only
+    // Unix can use it to authorize a PTY control lease.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn managed_agent_control_ready(&self) -> bool {
+        self.managed_agent.is_some_and(|managed| {
+            matches!(
+                managed.phase,
+                ManagedAgentPhase::Active | ManagedAgentPhase::Blocked
+            )
+        })
+    }
+
     pub fn managed_agent_kind(&self) -> Option<Agent> {
         self.managed_agent.map(|managed| managed.kind)
     }
@@ -3642,6 +3661,8 @@ mod tests {
         );
     }
 
+    const TEST_AGENT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
+
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
     }
@@ -3888,10 +3909,10 @@ mod tests {
             )
         );
         assert!(terminal
-            .mark_agent_status_stale_at(started + Duration::from_secs(149))
+            .mark_agent_status_stale_at(started + Duration::from_secs(149), TEST_AGENT_STALE_AFTER,)
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(started + Duration::from_secs(150))
+            .mark_agent_status_stale_at(started + Duration::from_secs(150), TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.status_report_snapshot().3);
 
@@ -3934,7 +3955,7 @@ mod tests {
             )
             .expect("working report accepted");
         terminal
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the report stale");
 
         terminal.set_detected_state_with_screen_signals_at(
@@ -3945,7 +3966,7 @@ mod tests {
             false,
             false,
             true,
-            started + AGENT_STALE_SILENCE + Duration::from_secs(1),
+            started + AGENT_BUSY_STALE_SILENCE + Duration::from_secs(1),
         );
 
         assert!(terminal.hook_authority.is_none());
@@ -3973,10 +3994,13 @@ mod tests {
             )
             .expect("working report accepted");
         assert!(terminal
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                started + AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER,)
             .is_some());
 
         let mut waiting = test_terminal();
@@ -3996,8 +4020,37 @@ mod tests {
             )
             .expect("waiting report accepted");
         assert!(waiting
-            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(started + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_none());
+    }
+
+    #[test]
+    fn working_report_uses_the_busy_budget() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1),
+            started,
+        );
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            started.checked_add(AGENT_BUSY_STALE_SILENCE),
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at(
+                started + AGENT_BUSY_STALE_SILENCE - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(started + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER,)
+            .is_some());
     }
 
     #[test]
@@ -4021,7 +4074,9 @@ mod tests {
             .expect("blocked report accepted");
         assert_eq!(terminal.status_report_snapshot().0, None);
         assert_eq!(terminal.status_report_snapshot().1, None);
-        assert!(terminal.agent_status_watchdog_deadline().is_none());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
     }
 
     #[test]
@@ -4576,7 +4631,8 @@ mod tests {
     }
 
     #[test]
-    fn managed_agent_readiness_tracks_detection_state() {
+    // AC8: constructed Blocked and Active managed-agent states are both control-admissible.
+    fn managed_agent_control_admits_constructed_blocked_and_active_states() {
         let mut terminal = test_terminal();
         let now = Instant::now();
         terminal.begin_managed_agent(
@@ -4590,6 +4646,7 @@ mod tests {
 
         assert!(terminal.managed_agent_launch_pending());
         assert!(!terminal.managed_agent_interactive_ready());
+        assert!(!terminal.managed_agent_control_ready());
         assert!(terminal.reconcile_managed_agent_at(now + Duration::from_millis(100), false));
         assert!(terminal.managed_agent_launch_pending());
 
@@ -4600,6 +4657,7 @@ mod tests {
         assert!(terminal.reconcile_managed_agent_at(now + Duration::from_millis(102), false));
         assert!(terminal.managed_agent_launch_pending());
         assert!(!terminal.managed_agent_interactive_ready());
+        assert!(terminal.managed_agent_control_ready());
         assert_eq!(terminal.next_managed_agent_deadline(), None);
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
         assert!(!terminal.reconcile_managed_agent_at(now + Duration::from_secs(2), false));
@@ -4609,6 +4667,7 @@ mod tests {
         assert!(terminal.reconcile_managed_agent_at(now + Duration::from_secs(2), false));
         assert!(!terminal.managed_agent_launch_pending());
         assert!(terminal.managed_agent_interactive_ready());
+        assert!(terminal.managed_agent_control_ready());
 
         terminal.set_detected_state(None, AgentState::Unknown);
         assert!(terminal.managed_agent_interactive_ready());
@@ -5510,8 +5569,8 @@ mod tests {
         let terminal = subprocess_held_terminal(now);
 
         assert_eq!(
-            terminal.agent_status_watchdog_deadline(),
-            now.checked_add(AGENT_STALE_SILENCE),
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            now.checked_add(TEST_AGENT_STALE_AFTER),
             "work nobody is reporting on must still be watched"
         );
 
@@ -5527,7 +5586,9 @@ mod tests {
             now,
         );
         assert!(
-            quiet.agent_status_watchdog_deadline().is_none(),
+            quiet
+                .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+                .is_none(),
             "a pane that is genuinely finished has nothing to wait for"
         );
     }
@@ -5538,16 +5599,19 @@ mod tests {
         let mut terminal = subprocess_held_terminal(now);
 
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
 
         // The mark outlives the sub-process tree, so the pane does not quietly
         // settle into done as if the agent had signed off on it.
-        terminal.set_foreground_process(None, false, now + AGENT_STALE_SILENCE);
+        terminal.set_foreground_process(None, false, now + TEST_AGENT_STALE_AFTER);
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(terminal.status_report_snapshot().3);
     }
@@ -5557,7 +5621,7 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subprocess_held_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the silence stale");
         assert!(terminal.supervisor_stale);
 
@@ -5568,10 +5632,12 @@ mod tests {
             None,
             None,
             Some(1001),
-            now + AGENT_STALE_SILENCE + Duration::from_secs(1),
+            now + TEST_AGENT_STALE_AFTER + Duration::from_secs(1),
         );
         assert!(!terminal.supervisor_stale);
-        assert!(terminal.agent_status_watchdog_deadline().is_some());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_some());
     }
 
     /// Builds a pane whose parent has ended its turn while declaring that
@@ -5624,14 +5690,17 @@ mod tests {
         assert!(active.metadata_tokens.get("closing_agents").is_none());
         assert!(active.declares_running_subagents());
         assert_eq!(
-            active.agent_status_watchdog_deadline(),
-            now.checked_add(AGENT_STALE_SILENCE)
+            active.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            now.checked_add(TEST_AGENT_STALE_AFTER)
         );
         assert!(active
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(active
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(active.supervisor_stale);
 
@@ -5649,9 +5718,11 @@ mod tests {
         zero.set_active_subagents(Some(0));
 
         assert!(!zero.declares_running_subagents());
-        assert!(zero.agent_status_watchdog_deadline().is_none());
         assert!(zero
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
+        assert!(zero
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_none());
         assert!(!zero.supervisor_stale);
     }
@@ -5662,10 +5733,13 @@ mod tests {
         let mut terminal = subagent_claim_terminal(now);
 
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .mark_agent_status_stale_at(
+                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
     }
@@ -5676,7 +5750,7 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the subagent claim stale");
         assert!(terminal.supervisor_stale);
         assert!(crate::app::settled::pane_has_resume_plan(&terminal));
@@ -5735,10 +5809,10 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the subagent claim stale");
 
-        let refreshed_at = now + AGENT_STALE_SILENCE + Duration::from_secs(1);
+        let refreshed_at = now + TEST_AGENT_STALE_AFTER + Duration::from_secs(1);
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5751,8 +5825,8 @@ mod tests {
 
         assert!(!terminal.supervisor_stale);
         assert_eq!(
-            terminal.agent_status_watchdog_deadline(),
-            refreshed_at.checked_add(AGENT_STALE_SILENCE)
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            refreshed_at.checked_add(TEST_AGENT_STALE_AFTER)
         );
     }
 
@@ -5766,7 +5840,9 @@ mod tests {
             now,
         ));
 
-        assert!(terminal.agent_status_watchdog_deadline().is_none());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
     }
 
     #[test]
