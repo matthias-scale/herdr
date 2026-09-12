@@ -510,7 +510,9 @@ fn run_control_writer(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.marker_queued = false;
                     state.retry_needed = false;
-                    resize_slot.lock().map(|slot| *slot).unwrap_or((0, 0, 0, 0))
+                    *resize_slot
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                 };
                 ClientMessage::Resize {
                     cols,
@@ -1369,6 +1371,51 @@ mod tests {
         };
         assert_eq!(operation_id, "operation");
         assert_eq!(*received, frame);
+    }
+
+    #[test]
+    fn poisoned_resize_slot_sends_the_recovered_geometry() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(2);
+        let resize_slot = Arc::new(Mutex::new((30, 100, 9, 18)));
+        let poison_slot = Arc::clone(&resize_slot);
+        assert!(std::thread::spawn(move || {
+            let _guard = poison_slot.lock().expect("resize slot starts healthy");
+            panic!("poison resize slot");
+        })
+        .join()
+        .is_err());
+        outbound_tx
+            .blocking_send(ProxyOutbound::SyncResize)
+            .expect("resize queued");
+        outbound_tx
+            .blocking_send(ProxyOutbound::Detach)
+            .expect("detach queued");
+
+        run_control_writer(
+            Box::new(FakeWriter {
+                output: Arc::clone(&output),
+            }),
+            outbound_rx,
+            resize_slot,
+            Arc::new(Mutex::new(crate::pane::RemoteProxyResizeState::default())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                ClientMessage::Resize {
+                    cols: 100,
+                    rows: 30,
+                    cell_width_px: 9,
+                    cell_height_px: 18,
+                },
+                ClientMessage::Detach,
+            ]
+        ));
     }
 
     #[test]
