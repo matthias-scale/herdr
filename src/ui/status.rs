@@ -359,15 +359,10 @@ fn fit_focused_pane_title(repo: &str, thread: &str, width: usize) -> Option<Stri
 ///
 /// The blocked button carries its count so the filter state is readable without
 /// opening another surface.
-pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
-    if area.width == 0 || area.height == 0 {
-        return Vec::new();
-    }
-    let blocked = crate::ui::sidebar::all_agent_panel_entries(app)
-        .into_iter()
-        .filter(crate::ui::sidebar::entry_has_red_dot)
-        .count();
-    let specs = [
+type StatusButtonSpec = (StatusButtonAction, String, bool);
+
+fn status_button_specs(app: &AppState, blocked: usize, attention: usize) -> [StatusButtonSpec; 6] {
+    [
         (
             StatusButtonAction::Home,
             " home ".to_string(),
@@ -388,6 +383,15 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             app.blocked_filter,
         ),
         (
+            StatusButtonAction::Attention,
+            if attention > 0 {
+                format!(" attention {attention} ")
+            } else {
+                " attention ".to_string()
+            },
+            app.home.is_some() && attention > 0,
+        ),
+        (
             StatusButtonAction::Dock,
             " dock ".to_string(),
             !app.dock_collapsed,
@@ -404,23 +408,63 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             },
             app.status_bar_expanded,
         ),
-    ];
+    ]
+}
+
+pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
+        .into_iter()
+        .fold((0usize, 0usize), |(blocked, attention), entry| {
+            match crate::ui::sidebar::entry_attention_tier(&entry) {
+                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
+                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
+                crate::terminal::state::AttentionTier::None => (blocked, attention),
+            }
+        });
+    let specs = status_button_specs(app, blocked, attention);
 
     // The right-aligned segments are load-bearing; buttons yield to them rather
     // than overlapping, and drop whole rather than truncating to an unreadable stub.
     let title_reserve = focused_pane_title_parts(app)
         .map(|(repo, _)| display_width(&repo))
         .unwrap_or(0);
+    let content_width = area
+        .width
+        .saturating_sub(super::tabs::tab_action_status_bar_reserved_width(app, area));
     let reserved = segment_width(&fitted_segments(
         status_segments(app, metrics_or_unavailable(app), &app.palette),
-        area.width as usize,
+        usize::from(content_width),
     )) + title_reserve;
-    let budget = (area.width as usize).saturating_sub(reserved);
+    let budget = usize::from(content_width).saturating_sub(reserved);
+    let full_width = specs
+        .iter()
+        .map(|(_, label, _)| display_width(label))
+        .sum::<usize>();
+    let width_without_attention = specs
+        .iter()
+        .filter(|(action, _, _)| *action != StatusButtonAction::Attention)
+        .map(|(_, label, _)| display_width(label))
+        .sum::<usize>();
+    let attention_crosses_sidebar =
+        focused_pane_title_parts(app).is_some() && !app.sidebar_collapsed && {
+            let sidebar_width = usize::from(
+                app.sidebar_width
+                    .clamp(app.sidebar_min_width, app.sidebar_max_width),
+            );
+            width_without_attention <= sidebar_width && full_width > sidebar_width
+        };
+    let omit_attention = full_width > budget || attention_crosses_sidebar;
 
     let mut buttons = Vec::new();
     let mut x = area.x;
     let mut used = 0usize;
     for (action, label, active) in specs {
+        if omit_attention && action == StatusButtonAction::Attention {
+            continue;
+        }
         let width = display_width(&label);
         if used + width > budget {
             break;
@@ -1804,7 +1848,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
 
         let working = status_segments(&app, &StatusMetrics::default(), &app.palette);
@@ -1815,7 +1859,10 @@ mod tests {
         assert_eq!(dot.text.trim(), format!("{DOT} 1"));
         assert_eq!(dot.style.fg, Some(app.palette.accent));
 
-        app.terminals.get_mut(&terminal_id).expect("terminal").state = AgentState::Blocked;
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_raw_agent_state_for_test(AgentState::Blocked);
         let blocked = status_segments(&app, &StatusMetrics::default(), &app.palette);
         let dot = blocked
             .iter()
@@ -1921,6 +1968,7 @@ mod tests {
                 StatusButtonAction::Home,
                 StatusButtonAction::Work,
                 StatusButtonAction::BlockedFilter,
+                StatusButtonAction::Attention,
                 StatusButtonAction::Dock,
                 StatusButtonAction::StatusDetail
             ]
@@ -1930,6 +1978,34 @@ mod tests {
         for pair in buttons.windows(2) {
             assert_eq!(pair[0].rect.x + pair[0].rect.width, pair[1].rect.x);
         }
+    }
+
+    #[test]
+    fn status_button_specs_are_a_fixed_array() {
+        let app = AppState::test_new();
+        let [home, work, blocked, attention, dock, detail] = status_button_specs(&app, 2, 3);
+
+        assert_eq!(home.0, StatusButtonAction::Home);
+        assert_eq!(work.0, StatusButtonAction::Work);
+        assert_eq!(blocked.1.trim(), "blocked 2");
+        assert_eq!(attention.1.trim(), "attention 3");
+        assert_eq!(dock.0, StatusButtonAction::Dock);
+        assert_eq!(detail.0, StatusButtonAction::StatusDetail);
+    }
+
+    #[test]
+    fn quick_button_counts_classify_each_agent_entry_once() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("quick")];
+        app.ensure_test_terminals();
+        crate::ui::sidebar::take_entry_attention_tier_visits();
+
+        status_buttons(&app, Rect::new(0, 0, 120, 1));
+
+        assert_eq!(
+            crate::ui::sidebar::take_entry_attention_tier_visits(),
+            crate::ui::all_agent_panel_entries(&app).len()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1952,12 +2028,55 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("terminal state")
-            .state = AgentState::Blocked;
+            .set_raw_agent_state_for_test(AgentState::Blocked);
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let blocked = button_for(&blocked, StatusButtonAction::BlockedFilter);
         assert_eq!(blocked.label.trim(), "blocked 1");
         assert!(!blocked.active);
+
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose one".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        let attention = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert_eq!(
+            button_for(&attention, StatusButtonAction::BlockedFilter)
+                .label
+                .trim(),
+            "blocked"
+        );
+        assert_eq!(
+            button_for(&attention, StatusButtonAction::Attention)
+                .label
+                .trim(),
+            "attention 1"
+        );
+
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .settled_at = Some(1);
+        let settled = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert_eq!(
+            button_for(&settled, StatusButtonAction::Attention)
+                .label
+                .trim(),
+            "attention"
+        );
+
         app.blocked_filter = true;
         let filtered = status_buttons(&app, Rect::new(0, 0, 120, 1));
         assert!(button_for(&filtered, StatusButtonAction::BlockedFilter).active);

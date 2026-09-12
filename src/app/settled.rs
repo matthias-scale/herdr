@@ -232,8 +232,7 @@ impl AppState {
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
-                    let state = terminal.sidebar_projection(pane.seen).0;
-                    let open_blockers = !terminal.closing_gates.is_empty();
+                    let projection = pane.agent_projection(terminal);
                     let quiet = crate::app::pane_lifecycle::pane_is_quiet(pane, terminal);
                     let quiet_observation_changed = pane.activity.quiet_observation_changes(quiet);
                     if pane.settled_at.is_some() {
@@ -242,17 +241,16 @@ impl AppState {
                         }
                         continue;
                     }
-                    if crate::terminal::counts_as_blocked(
-                        state,
-                        open_blockers,
-                        terminal.usage_limited,
-                    ) || open_blockers
+                    if projection.needs_human_attention()
+                        || projection.open_blockers
                         || terminal.declares_running_subagents()
                         || terminal.holds_shell
                     {
                         // Settling suspends the agent and would bury an
                         // unanswered question or stop work below the parent.
-                        // Do not age the finished-work grace behind a guard.
+                        // A pane waiting on the human is never a settle
+                        // candidate, no matter its severity. Do not age the
+                        // finished-work grace behind a guard.
                         if pane.finished_since.is_some() || quiet_observation_changed {
                             arm_writes.push((ws_idx, *pane_id, None, quiet));
                         }
@@ -1099,7 +1097,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("root terminal");
         terminal.detected_agent = Some(crate::detect::Agent::Codex);
-        terminal.state = crate::detect::AgentState::Idle;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         if resumable {
             terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
                 source: "herdr:codex".into(),
@@ -1150,7 +1148,7 @@ mod tests {
             .expect("working report should become stale");
         assert!(terminal.supervisor_stale);
         if screen_state.is_none() {
-            terminal.state = AgentState::Idle;
+            terminal.set_raw_agent_state_for_test(AgentState::Idle);
         }
         state.note_pane_activity_at(pane_id, quiet_since);
         state.auto_settle_inactive = false;
@@ -1430,7 +1428,7 @@ mod tests {
             .terminals
             .get_mut(&blocked_terminal_id)
             .expect("blocked terminal")
-            .state = AgentState::Blocked;
+            .set_raw_agent_state_for_test(AgentState::Blocked);
         assert_eq!(
             blocked.refresh_settled_panes_at(None, now, 1_725_000_039),
             0

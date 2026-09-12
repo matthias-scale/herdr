@@ -388,7 +388,8 @@ impl crate::app::App {
                             .get(terminal_id)
                             .is_some_and(|terminal| {
                                 terminal.effective_agent_label().is_some()
-                                    && (terminal.state == crate::detect::AgentState::Idle
+                                    && (terminal.raw_agent_state()
+                                        == crate::detect::AgentState::Idle
                                         || terminal.foreground_process_active())
                             });
                     if scope == ForegroundProcessRefreshScope::IdleAgents && !idle_agent_context {
@@ -1020,7 +1021,7 @@ mod tests {
             }],
         ));
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Working
         );
 
@@ -1035,7 +1036,7 @@ mod tests {
             }],
         ));
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
     }

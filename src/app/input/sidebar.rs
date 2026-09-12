@@ -1777,7 +1777,7 @@ mod tests {
                 },
             );
             terminal.detected_agent = Some(Agent::Pi);
-            terminal.state = AgentState::Working;
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
             terminal.last_agent_state_change_seq = Some(tab_idx as u64 + 1);
         }
         app.state.active = Some(0);
@@ -3061,7 +3061,7 @@ mod tests {
                 .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         };
         set_state(&mut app, 0, first_pane, AgentState::Working);
         set_state(&mut app, 1, second_pane, AgentState::Blocked);
@@ -3173,7 +3173,7 @@ mod tests {
             .clone();
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(Agent::Claude);
-        terminal.state = crate::detect::AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
 
         let header = crate::ui::compute_sidebar_section_header_areas(
@@ -3220,7 +3220,7 @@ mod tests {
                 .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         }
         app.state.active = Some(0);
         app.state.selected = 0;

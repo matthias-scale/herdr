@@ -453,6 +453,7 @@ impl App {
             gates: pane.gates,
             items: pane.items,
             decisions: pane.decisions,
+            settled_at: pane.settled_at,
             agent_session: pane.agent_session,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,

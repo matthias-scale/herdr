@@ -148,7 +148,7 @@ impl App {
         let closing_block_hook = terminal.hook_authority.as_ref().is_some_and(|authority| {
             crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         });
-        if terminal.state == crate::detect::AgentState::Blocked && !closing_block_hook {
+        if terminal.raw_agent_state() == crate::detect::AgentState::Blocked && !closing_block_hook {
             return encode_error(
                 id,
                 "agent_blocked",
@@ -286,7 +286,7 @@ impl App {
         let mut value = crate::detect::manifest::explain_to_json_value(&explain);
         if let Some(object) = value.as_object_mut() {
             let screen_state = crate::detect::manifest::agent_state_label(explain.state);
-            let effective_state = terminal.state;
+            let effective_state = terminal.raw_agent_state();
             let arbitration = terminal.effective_state_arbitration();
             object.insert("screen_state".into(), serde_json::json!(screen_state));
             object.insert(
@@ -843,7 +843,10 @@ mod tests {
         assert_eq!(explain["screen_state"], "blocked");
         assert_eq!(explain["effective_state"], "working");
         assert_eq!(explain["arbitration"], "closing_block_report");
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Working);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Working
+        );
         assert_eq!(
             app.agent_info(0, pane_id).unwrap().agent_status,
             AgentStatus::Working
@@ -1463,7 +1466,10 @@ mod tests {
             ResponseResult::AgentPrompted { .. }
         ));
         assert!(rx.try_recv().is_ok());
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
@@ -1498,7 +1504,10 @@ mod tests {
 
         assert!(matches!(success.result, ResponseResult::Ok {}));
         assert!(rx.try_recv().is_ok());
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 

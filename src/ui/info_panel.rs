@@ -182,15 +182,26 @@ pub(crate) fn compute_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLink
         .collect()
 }
 
-fn state_label(terminal: &TerminalState) -> String {
+fn state_label(app: &AppState, terminal: &TerminalState) -> String {
     let agent = terminal
         .effective_display_agent()
         .or_else(|| terminal.effective_agent_label().map(str::to_string))
         .unwrap_or_else(|| "terminal".to_string());
-    format!(
-        "{agent} · {}",
-        super::status::state_label(terminal.state, true)
-    )
+    let projection = app
+        .active
+        .and_then(|ws_idx| app.workspaces.get(ws_idx))
+        .and_then(|workspace| {
+            workspace
+                .focused_pane_id()
+                .map(|pane_id| (workspace, pane_id))
+        })
+        .and_then(|(workspace, pane_id)| workspace.pane_state(pane_id))
+        .map(|pane| pane.agent_projection(terminal));
+    let state = projection.map_or_else(
+        || super::status::state_label(terminal.raw_agent_state(), true),
+        |projection| projection.status_key(),
+    );
+    format!("{agent} · {state}")
 }
 
 fn field_line(label: &str, value: &str, p: &crate::app::state::Palette) -> Line<'static> {
@@ -1266,7 +1277,11 @@ pub(super) fn render_info_panel(
     }
     if layout.agent.height > 0 {
         frame.render_widget(
-            Paragraph::new(field_line("agent", &state_label(terminal), &app.palette)),
+            Paragraph::new(field_line(
+                "agent",
+                &state_label(app, terminal),
+                &app.palette,
+            )),
             layout.agent,
         );
     }

@@ -41,8 +41,8 @@ pub(crate) mod sidebar;
 pub(crate) use dock::symphony::dashboard_link_rect as dock_symphony_dashboard_link_rect;
 pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// Exposed so the inbox tests can assert the queue and the sidebar answer the
-/// blocked question identically. Both production paths use
-/// `terminal::counts_as_blocked`.
+/// blocked question identically. Both production paths consume the pane's
+/// canonical agent projection.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
 pub(crate) mod status;
@@ -700,13 +700,13 @@ fn compute_view_internal(
     };
 
     let home_row_hit_areas = if app.home.is_some() {
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         home::row_hit_areas(app, &queue, terminal_area)
     } else {
         Vec::new()
     };
     let home_hit_areas = if app.home.is_some() {
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         home::home_hit_areas(app, &queue, terminal_area)
     } else {
         Vec::new()
@@ -807,11 +807,7 @@ fn compute_view_internal(
             }
             rows
         },
-        status_buttons: if status_bar_is_renderable(app, area) {
-            status::status_buttons(app, status_bar_rect)
-        } else {
-            Vec::new()
-        },
+        status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
         scratchpad_link_rows: if !app.dock_collapsed
@@ -860,9 +856,11 @@ fn compute_view_internal(
     // The row is fitted once here: the status segments, the title, and the
     // links share one layout pass, and render draws what this stored.
     if status_bar_is_renderable(app, area) {
+        app.view.status_buttons = status::status_buttons(app, status_bar_rect);
         app.view.status_segments = status::fitted_status_segments(app, status_bar_rect);
         app.view.status_work_links = status::status_work_links(app, status_bar_rect);
     } else {
+        app.view.status_buttons = Vec::new();
         app.view.status_segments = Vec::new();
         app.view.status_work_links = Vec::new();
     }
@@ -1042,13 +1040,13 @@ fn compute_mobile_view(
         .unwrap_or_default();
 
     let home_row_hit_areas = if app.home.is_some() {
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         home::row_hit_areas(app, &queue, terminal_area)
     } else {
         Vec::new()
     };
     let home_hit_areas = if app.home.is_some() {
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         home::home_hit_areas(app, &queue, terminal_area)
     } else {
         Vec::new()
@@ -1227,7 +1225,7 @@ fn render_with_runtime_registry_inner(
             dock::render_object_preview(app, frame, terminal_area);
         }
         crate::app::state::TerminalAreaSurface::Home => {
-            let queue = app.blocked_agents();
+            let queue = app.home_attention_agents();
             let counts = app.home_counts(&queue);
             home::render_home(app, terminal_runtimes, &queue, counts, terminal_area, frame);
         }

@@ -2361,6 +2361,7 @@ pub(crate) enum StatusButtonAction {
     Home,
     Work,
     BlockedFilter,
+    Attention,
     Dock,
     /// Expand or collapse the usage detail in the status row.
     StatusDetail,
@@ -2600,6 +2601,7 @@ pub(crate) struct NavigatorRow {
     pub label: String,
     pub meta: String,
     pub status: AgentState,
+    pub attention_tier: crate::terminal::state::AttentionTier,
     pub seen: bool,
     pub stale: bool,
     pub is_current: bool,
@@ -7140,6 +7142,7 @@ mod tests {
             label: String::new(),
             meta: String::new(),
             status: crate::detect::AgentState::Idle,
+            attention_tier: crate::terminal::state::AttentionTier::None,
             seen: true,
             stale: false,
             is_current: false,

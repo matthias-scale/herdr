@@ -3851,7 +3851,10 @@ mod tests {
             };
             assert_eq!(*state, fallback, "expiry must not synthesize Idle");
             app.handle_internal_event(event);
-            assert_eq!(app.state.terminals[&terminal_id].state, fallback);
+            assert_eq!(
+                app.state.terminals[&terminal_id].raw_agent_state(),
+                fallback
+            );
             assert_ne!(
                 app.agent_info(0, pane_id).unwrap().agent_status,
                 crate::api::schema::AgentStatus::Done,
@@ -6159,7 +6162,7 @@ mod tests {
             .terminals
             .get_mut(&root_terminal_id)
             .unwrap()
-            .state = AgentState::Idle;
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&root_pane)
@@ -6172,7 +6175,7 @@ mod tests {
             .terminals
             .get_mut(&split_terminal_id)
             .unwrap()
-            .state = AgentState::Idle;
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&split_pane)
@@ -6181,7 +6184,11 @@ mod tests {
         let bg_terminal_id = app.state.workspaces[0].tabs[background_tab].panes[&background_pane]
             .attached_terminal_id
             .clone();
-        app.state.terminals.get_mut(&bg_terminal_id).unwrap().state = AgentState::Idle;
+        app.state
+            .terminals
+            .get_mut(&bg_terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Idle);
         app.state.workspaces[0].tabs[background_tab]
             .panes
             .get_mut(&background_pane)
@@ -7823,7 +7830,11 @@ mod tests {
             observed_at: std::time::Instant::now(),
         });
         assert_eq!(
-            app.state.terminals.get(&terminal_id).unwrap().state,
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .raw_agent_state(),
             AgentState::Working
         );
 
@@ -7865,14 +7876,25 @@ mod tests {
 
         let max_drains = (APP_EVENT_CHANNEL_CAPACITY / APP_EVENT_DRAIN_LIMIT) + 2;
         for _ in 0..max_drains {
-            if app.state.terminals.get(&terminal_id).unwrap().state == AgentState::Idle {
+            if app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .raw_agent_state()
+                == AgentState::Idle
+            {
                 break;
             }
             app.drain_internal_events();
         }
 
         assert_eq!(
-            app.state.terminals.get(&terminal_id).unwrap().state,
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .raw_agent_state(),
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
@@ -9154,7 +9176,10 @@ last_pane = "prefix+tab"
         );
 
         assert!(rx.try_recv().is_ok());
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 

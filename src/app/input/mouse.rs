@@ -314,7 +314,7 @@ impl AppState {
                 if let Some(target) = self.home_hit_at(mouse.column, mouse.row) {
                     match target {
                         HomeHitTarget::QueueRow(index) => {
-                            let queue = self.blocked_agents();
+                            let queue = self.home_attention_agents();
                             if let Some(home) = self.home.as_mut() {
                                 home.select(index);
                             }
@@ -345,7 +345,7 @@ impl AppState {
                             self.home_focus_reply();
                         }
                         HomeHitTarget::Detach => {
-                            let queue = self.blocked_agents();
+                            let queue = self.home_attention_agents();
                             self.jump_to_selected_home_agent(&queue);
                         }
                         target => {
@@ -7223,7 +7223,7 @@ mod tests {
             .terminals
             .get_mut(&target_terminal_id)
             .unwrap()
-            .state = AgentState::Working;
+            .set_raw_agent_state_for_test(AgentState::Working);
 
         app.state
             .handle_app_event(crate::events::AppEvent::StateChanged {
