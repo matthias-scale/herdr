@@ -378,6 +378,8 @@ pub(crate) fn remote_proxy_identity_line(context: &RemoteControlContext) -> Stri
     )
 }
 
+const REMOTE_PROXY_PENDING_LABEL: &str = "Remote focus (connecting)";
+
 impl crate::app::App {
     #[cfg(unix)]
     pub(crate) fn remote_control_context(
@@ -685,6 +687,10 @@ impl crate::app::App {
         let cwd = self.state.workspaces[ws_idx].identity_cwd.clone();
         let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), cwd);
         terminal.remote_proxy = true;
+        // Until ControlReady, the client-supplied agent_ref is not an
+        // identity claim. Keep the tab visibly provisional instead of
+        // allowing chrome to fall back to an unlabeled numeric tab.
+        terminal.manual_label = Some(REMOTE_PROXY_PENDING_LABEL.to_owned());
         self.state.terminals.insert(terminal_id.clone(), terminal);
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         let workspace = &mut self.state.workspaces[ws_idx];
@@ -966,8 +972,18 @@ mod tests {
             .expect("proxy terminal state");
         assert!(terminal.remote_proxy);
         assert!(
-            terminal.manual_label.is_none(),
-            "the connecting proxy must not present client-supplied identity"
+            terminal.manual_label.as_deref() == Some(REMOTE_PROXY_PENDING_LABEL),
+            "the connecting proxy must show a provisional label"
+        );
+        assert!(!terminal
+            .manual_label
+            .as_deref()
+            .is_some_and(|label| label.contains("buildbox::w1:p3")));
+        assert_eq!(
+            workspace
+                .active_tab_display_name_from(&app.state.terminals)
+                .as_deref(),
+            Some(REMOTE_PROXY_PENDING_LABEL)
         );
         assert_eq!(
             started.proxy_pane_id,
@@ -1183,7 +1199,21 @@ mod tests {
         let started = app
             .start_remote_focus_operation(agent_ref())
             .expect("operation starts");
-        let terminal_id = proxy_terminal_id(&app, &started.operation_id);
+        let (pane_id, terminal_id) = app
+            .remote_focus_operations
+            .proxy_location(&started.operation_id)
+            .expect("proxy location");
+        let (workspace_idx, tab_idx) = app
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(workspace_idx, workspace)| {
+                workspace
+                    .find_tab_index_for_pane(pane_id)
+                    .map(|tab_idx| (workspace_idx, tab_idx))
+            })
+            .expect("proxy tab");
         let initial = context();
 
         app.apply_remote_focus_transition(
@@ -1212,6 +1242,12 @@ mod tests {
             .expect("proxy terminal");
         assert_eq!(
             terminal.manual_label.as_deref(),
+            Some("buildbox::w1:p3 · operator · /work/other · /dev/pts/4 · other-agent")
+        );
+        assert_eq!(
+            app.state.workspaces[workspace_idx]
+                .tab_display_name_from(&app.state.terminals, tab_idx)
+                .as_deref(),
             Some("buildbox::w1:p3 · operator · /work/other · /dev/pts/4 · other-agent")
         );
         assert_eq!(
