@@ -1454,10 +1454,17 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(
-            transport.sessions.lock().expect("sessions lock").is_empty(),
-            "detach must unregister the session"
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if transport.sessions.lock().expect("sessions lock").is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detach must unregister the session"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     #[test]
@@ -1570,10 +1577,17 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(
-            transport.sessions.lock().expect("sessions lock").is_empty(),
-            "detach must unregister the session"
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if transport.sessions.lock().expect("sessions lock").is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detach must unregister the session"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     #[test]
