@@ -415,6 +415,8 @@ impl App {
                 self.emit_pane_state_update(&update);
                 changed = true;
             }
+            // The mark is what re-enables the process probe under a hook.
+            self.sync_detection_authority_mirrors();
         }
 
         if self.state.done_hide_transition_due(now) {
@@ -434,7 +436,7 @@ impl App {
             .is_some_and(|deadline| now >= deadline)
         {
             let (updates, due) = self.state.expire_due_full_lifecycle_hook_authority_at(now);
-            self.sync_full_lifecycle_authority_detection_pauses();
+            self.sync_detection_authority_mirrors();
             for update in &updates {
                 self.emit_pane_state_update(update);
             }

@@ -3829,7 +3829,7 @@ mod tests {
                     screen,
                 );
             app.terminal_runtimes.insert(terminal_id.clone(), runtime);
-            app.sync_full_lifecycle_authority_detection_pauses();
+            app.sync_detection_authority_mirrors();
             let deadline = app
                 .state
                 .next_full_lifecycle_hook_authority_deadline()
