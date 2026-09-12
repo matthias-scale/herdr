@@ -2027,7 +2027,7 @@
           "key": "session.max_nudges",
           "type": "integer",
           "default": "3",
-          "description": "Maximum prompts Herdr sends during one stale-status episode. A fresh status report resets the budget."
+          "description": "Maximum prompts Herdr sends during one stale-status episode. Answering a nudge parks the episode rather than refilling it; the budget resets once the pane stays healthy for a full escalation cycle, or as soon as you type into it."
         },
         {
           "key": "session.stall_nudge_message",

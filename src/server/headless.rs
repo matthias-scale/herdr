@@ -6279,6 +6279,8 @@ impl HeadlessServer {
                 self.app.emit_pane_state_update(&update);
                 changed = true;
             }
+            // The mark is what re-enables the process probe under a hook.
+            self.app.sync_detection_authority_mirrors();
         }
 
         if has_app_client && self.app.state.done_hide_transition_due(now) {
@@ -6303,7 +6305,7 @@ impl HeadlessServer {
                 .app
                 .state
                 .expire_due_full_lifecycle_hook_authority_at(now);
-            self.app.sync_full_lifecycle_authority_detection_pauses();
+            self.app.sync_detection_authority_mirrors();
             for update in &updates {
                 self.app.emit_pane_state_update(update);
             }
@@ -11735,7 +11737,7 @@ next_tab = ""
             terminal_id.clone(),
             crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
         );
-        server.app.sync_full_lifecycle_authority_detection_pauses();
+        server.app.sync_detection_authority_mirrors();
         assert_eq!(
             server
                 .app

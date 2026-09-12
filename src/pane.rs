@@ -445,6 +445,9 @@ struct ProcessProbeInput {
     pending_foreground_shell_clear: bool,
     pending_restore_probe: bool,
     elapsed_since_process_check: std::time::Duration,
+    /// The supervisor hook has gone silent past its budget, so its authority is
+    /// the one source we can no longer trust.
+    supervisor_stale: bool,
 }
 
 fn foreground_group_changed(
@@ -486,7 +489,12 @@ fn should_skip_process_probe_for_lifecycle_authority(
     full_lifecycle_authority_active: bool,
     input: ProcessProbeInput,
 ) -> bool {
+    // A stale supervisor is precisely the case the probe exists for. Skipping it
+    // here leaves `stale_resolution` empty, and an empty resolution keeps a
+    // finished pane from ever reading quiet, so it never settles and the
+    // stalled-agent nudge fires against an agent that is already done.
     full_lifecycle_authority_active
+        && !input.supervisor_stale
         && input.foreground_pgid.is_some()
         && !input.pending_foreground_shell_clear
         && input.suppressed_agent.is_none()
@@ -822,6 +830,19 @@ type SpawnedDetectionTask = (
     Arc<Mutex<Option<PendingAgentRelease>>>,
 );
 
+/// The terminal facts a detection task cannot read for itself.
+///
+/// Grouped because they are only ever read together: the hook owns the pane
+/// until it goes stale, and staleness is what hands authority back to the
+/// process probe.
+#[cfg(unix)]
+#[derive(Clone)]
+struct DetectionAuthorityMirrors {
+    full_lifecycle_active: Arc<AtomicBool>,
+    full_lifecycle_blocked: Arc<AtomicBool>,
+    supervisor_stale: Arc<AtomicBool>,
+}
+
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
@@ -830,12 +851,16 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     agent_output_seq: Arc<AtomicU64>,
-    full_lifecycle_authority_active: Arc<AtomicBool>,
-    full_lifecycle_hook_blocked: Arc<AtomicBool>,
+    authority: DetectionAuthorityMirrors,
     state_events: mpsc::Sender<AppEvent>,
     initial_agent: Option<Agent>,
     initial_publish: DetectionPublishState,
 ) -> SpawnedDetectionTask {
+    let DetectionAuthorityMirrors {
+        full_lifecycle_active: full_lifecycle_authority_active,
+        full_lifecycle_blocked: full_lifecycle_hook_blocked,
+        supervisor_stale,
+    } = authority;
     let detect_reset_notify = Arc::new(Notify::new());
     let detect_reset = detect_reset_notify.clone();
     let detect_screen_rescan_notify = Arc::new(Notify::new());
@@ -917,6 +942,7 @@ fn spawn_basic_detection_task(
             let mut agent = agent_presence.current_agent();
             let mut lifecycle_authority_active =
                 full_lifecycle_authority_active.load(Ordering::Acquire);
+            let supervisor_is_stale = supervisor_stale.load(Ordering::Acquire);
             let foreground_pgid = (pid > 0)
                 .then(|| crate::detect::foreground_process_group_id(pid))
                 .flatten();
@@ -934,6 +960,7 @@ fn spawn_basic_detection_task(
                     pending_foreground_shell_clear,
                     pending_restore_probe: false,
                     elapsed_since_process_check: now.duration_since(last_process_check),
+                    supervisor_stale: supervisor_is_stale,
                 };
                 !should_skip_process_probe_for_lifecycle_authority(
                     lifecycle_authority_active,
@@ -1266,6 +1293,7 @@ pub struct PaneRuntime {
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     full_lifecycle_hook_blocked: Arc<AtomicBool>,
+    supervisor_stale: Arc<AtomicBool>,
     detect_reset_notify: Arc<Notify>,
     detect_screen_rescan_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
@@ -2370,6 +2398,7 @@ impl PaneRuntime {
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
+        let supervisor_stale = Arc::new(AtomicBool::new(false));
         let (detect_handle, detect_reset_notify, detect_screen_rescan_notify, pending_release) =
             spawn_basic_detection_task(
                 pane_id,
@@ -2378,8 +2407,11 @@ impl PaneRuntime {
                 detection_content_seq.clone(),
                 full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq.clone(),
-                full_lifecycle_authority_active.clone(),
-                full_lifecycle_hook_blocked.clone(),
+                DetectionAuthorityMirrors {
+                    full_lifecycle_active: full_lifecycle_authority_active.clone(),
+                    full_lifecycle_blocked: full_lifecycle_hook_blocked.clone(),
+                    supervisor_stale: supervisor_stale.clone(),
+                },
                 events,
                 initial_agent,
                 DetectionPublishState {
@@ -2407,6 +2439,7 @@ impl PaneRuntime {
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
             full_lifecycle_hook_blocked,
+            supervisor_stale,
             detect_reset_notify,
             detect_screen_rescan_notify,
             pending_release,
@@ -2477,6 +2510,7 @@ impl PaneRuntime {
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
+        let supervisor_stale = Arc::new(AtomicBool::new(false));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
@@ -2607,6 +2641,7 @@ impl PaneRuntime {
                 full_lifecycle_hook_baseline_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
+            let supervisor_stale_for_task = supervisor_stale.clone();
             let full_lifecycle_hook_blocked_for_task = full_lifecycle_hook_blocked.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
@@ -2704,6 +2739,7 @@ impl PaneRuntime {
                     let mut agent = agent_presence.current_agent();
                     let mut lifecycle_authority_active =
                         full_lifecycle_authority_active_for_task.load(Ordering::Acquire);
+                    let supervisor_is_stale = supervisor_stale_for_task.load(Ordering::Acquire);
                     let process_probe_input = ProcessProbeInput {
                         current_agent: agent,
                         suppressed_agent,
@@ -2715,6 +2751,7 @@ impl PaneRuntime {
                         pending_foreground_shell_clear,
                         pending_restore_probe,
                         elapsed_since_process_check: now.duration_since(last_process_check),
+                        supervisor_stale: supervisor_is_stale,
                     };
                     #[cfg(windows)]
                     let content_seq = detection_content_seq.load(Ordering::Relaxed);
@@ -3078,6 +3115,7 @@ impl PaneRuntime {
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
             full_lifecycle_hook_blocked,
+            supervisor_stale,
             detect_reset_notify,
             detect_screen_rescan_notify,
             pending_release,
@@ -3141,6 +3179,15 @@ impl PaneRuntime {
         if previous && !active {
             self.request_agent_screen_rescan();
         }
+    }
+
+    /// Mirror the supervisor-stale mark into the detection task.
+    ///
+    /// While the mark is set the process probe has to keep running even under a
+    /// full-lifecycle hook: the hook is the source that went silent, and the
+    /// probe is what tells a finished agent apart from a wedged one.
+    pub fn set_supervisor_stale(&self, stale: bool) {
+        self.supervisor_stale.store(stale, Ordering::Release);
     }
 
     pub fn rebaseline_hook_authority_output(&self) {
@@ -3699,8 +3746,11 @@ impl PaneRuntime {
                 runtime.detection_content_seq.clone(),
                 runtime.full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq,
-                runtime.full_lifecycle_authority_active.clone(),
-                runtime.full_lifecycle_hook_blocked.clone(),
+                DetectionAuthorityMirrors {
+                    full_lifecycle_active: runtime.full_lifecycle_authority_active.clone(),
+                    full_lifecycle_blocked: runtime.full_lifecycle_hook_blocked.clone(),
+                    supervisor_stale: runtime.supervisor_stale.clone(),
+                },
                 state_events,
                 Some(agent),
                 DetectionPublishState {
@@ -3772,6 +3822,7 @@ impl PaneRuntime {
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                supervisor_stale: Arc::new(AtomicBool::new(false)),
                 full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 detect_screen_rescan_notify: Arc::new(Notify::new()),
@@ -4559,6 +4610,7 @@ mod tests {
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            supervisor_stale: Arc::new(AtomicBool::new(false)),
             full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             detect_screen_rescan_notify: Arc::new(Notify::new()),
@@ -4599,6 +4651,7 @@ mod tests {
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            supervisor_stale: Arc::new(AtomicBool::new(false)),
             full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             detect_screen_rescan_notify: Arc::new(Notify::new()),
@@ -4822,6 +4875,7 @@ mod tests {
             pending_foreground_shell_clear: false,
             pending_restore_probe: false,
             elapsed_since_process_check: std::time::Duration::from_secs(1),
+            supervisor_stale: false,
         }
     }
 
@@ -4984,6 +5038,28 @@ mod tests {
                 current_agent: Some(Agent::Pi),
                 elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
                 ..process_probe_input()
+            }
+        ));
+    }
+
+    /// A stale supervisor is the case the probe exists to answer. Skipping it
+    /// leaves `stale_resolution` empty, which keeps a finished pane from ever
+    /// reading quiet, so it never settles and gets nudged forever.
+    #[test]
+    fn a_stale_supervisor_keeps_the_probe_running_under_lifecycle_authority() {
+        let stable = ProcessProbeInput {
+            current_agent: Some(Agent::Pi),
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
+            ..process_probe_input()
+        };
+        assert!(should_skip_process_probe_for_lifecycle_authority(
+            true, stable
+        ));
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            true,
+            ProcessProbeInput {
+                supervisor_stale: true,
+                ..stable
             }
         ));
     }

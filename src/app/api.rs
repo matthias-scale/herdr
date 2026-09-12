@@ -571,7 +571,7 @@ impl App {
             }
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
-                self.sync_full_lifecycle_authority_detection_pauses();
+                self.sync_detection_authority_mirrors();
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
                 if update.hook_work_context_changed {
                     self.schedule_session_save();
@@ -686,7 +686,7 @@ impl App {
                 }
             }
         }
-        self.sync_full_lifecycle_authority_detection_pauses();
+        self.sync_detection_authority_mirrors();
         if hook_state_report_accepted == Some(true) {
             if let Some((pane_id, closing_non_gate)) = hook_report {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
@@ -843,7 +843,11 @@ impl App {
         }
     }
 
-    pub(crate) fn sync_full_lifecycle_authority_detection_pauses(&self) {
+    /// Mirror the two terminal facts the detection task cannot read itself:
+    /// whether a full-lifecycle hook owns the pane, and whether that hook has
+    /// gone stale. The second one re-enables the process probe the first one
+    /// suppresses, which is how a finished agent still gets resolved to idle.
+    pub(crate) fn sync_detection_authority_mirrors(&self) {
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 for pane in tab.panes.values() {
@@ -859,6 +863,7 @@ impl App {
                         terminal.full_lifecycle_hook_authority_active(),
                         terminal.hook_authority_output_retirement_eligible(),
                     );
+                    runtime.set_supervisor_stale(terminal.supervisor_stale);
                 }
             }
         }

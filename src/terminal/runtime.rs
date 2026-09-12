@@ -271,6 +271,10 @@ impl TerminalRuntime {
             .set_full_lifecycle_authority_state(active, output_retirement_eligible);
     }
 
+    pub fn set_supervisor_stale(&self, stale: bool) {
+        self.0.set_supervisor_stale(stale);
+    }
+
     pub fn rebaseline_hook_authority_output(&self) {
         self.0.rebaseline_hook_authority_output();
     }
