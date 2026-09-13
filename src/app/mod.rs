@@ -167,7 +167,6 @@ pub struct App {
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
-    pub(crate) configured_remote_focus_hosts: HashSet<String>,
     /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -1381,9 +1380,6 @@ impl App {
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
             )),
-            configured_remote_focus_hosts: remote_focus::configured_remote_hosts(
-                &config.remote.fleet,
-            ),
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
@@ -2447,8 +2443,15 @@ impl App {
         }
 
         if !invalid_section("remote") {
-            self.configured_remote_focus_hosts =
-                remote_focus::configured_remote_hosts(&config.remote.fleet);
+            let revoked_operations = self
+                .remote_focus_transport
+                .reload_fleet(&config.remote.fleet);
+            for operation_id in revoked_operations {
+                self.apply_remote_focus_transition(
+                    &operation_id,
+                    remote_focus::RemoteFocusTransition::Closed,
+                );
+            }
             let agent_host_name = config.remote.fleet.resolved_self_name();
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;

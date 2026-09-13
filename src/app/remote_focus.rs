@@ -36,17 +36,6 @@ impl RemoteFocusTransport for StubRemoteFocusTransport {
     }
 }
 
-pub(crate) fn configured_remote_hosts(
-    fleet: &crate::config::FleetConfig,
-) -> std::collections::HashSet<String> {
-    fleet
-        .hosts
-        .iter()
-        .filter(|host| !host.local && !host.target.trim().is_empty())
-        .map(|host| host.name.clone())
-        .collect()
-}
-
 /// Terminal operation records remain queryable for five minutes.
 pub(crate) const REMOTE_FOCUS_TERMINAL_TTL: Duration = Duration::from_secs(5 * 60);
 /// At most sixteen operations may be connecting or active at once.
@@ -77,6 +66,18 @@ pub(crate) enum RemoteFocusTransition {
 /// in the resize slot), and detach. `detach` must not block; it releases the
 /// remote lease on a live session and is a no-op otherwise.
 pub(crate) trait RemoteFocusTransport: Send {
+    /// Resolve admission and connection details from the same live snapshot.
+    /// Implementations that do not support remote focus reject every alias.
+    fn accepts_remote_host(&self, _host: &str) -> bool {
+        false
+    }
+
+    /// Replace the connection snapshot. Returned operation IDs are sessions
+    /// revoked because their configured connection changed or disappeared.
+    fn reload_fleet(&mut self, _fleet: &crate::config::FleetConfig) -> Vec<String> {
+        Vec::new()
+    }
+
     fn start(
         &mut self,
         operation_id: &str,
@@ -1360,33 +1361,6 @@ mod tests {
         assert_eq!(error.code, "agent_not_attachable");
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert!(recording.lock().expect("lock").started.is_empty());
-    }
-
-    #[test]
-    fn configured_remote_hosts_excludes_local_and_incomplete_entries() {
-        let fleet = crate::config::FleetConfig {
-            hosts: vec![
-                crate::config::FleetHostConfig {
-                    name: "buildbox".into(),
-                    target: "buildbox".into(),
-                    ..Default::default()
-                },
-                crate::config::FleetHostConfig {
-                    name: "laptop".into(),
-                    local: true,
-                    ..Default::default()
-                },
-                crate::config::FleetHostConfig {
-                    name: "incomplete".into(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            configured_remote_hosts(&fleet),
-            std::iter::once("buildbox".to_string()).collect()
-        );
     }
 
     fn agent_ref() -> AgentRef {

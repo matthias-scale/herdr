@@ -1328,6 +1328,9 @@ pub(crate) struct RemoteProxyChannels {
     /// (and its own sender) is gone.
     pub detach_tx: mpsc::Sender<ProxyOutbound>,
     pub resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+    /// Shared with the transport so a failed wire write closes the local
+    /// input gate before the proxy pane is torn down.
+    pub input_enabled: Arc<AtomicBool>,
 }
 
 /// Keystroke bursts (including pastes) queue briefly; a stuck transport drops
@@ -2120,6 +2123,7 @@ impl PaneRuntime {
         let (outbound_tx, outbound_rx) = mpsc::channel(REMOTE_PROXY_OUTBOUND_CAPACITY);
         let detach_tx = outbound_tx.clone();
         let resize_slot = Arc::new(Mutex::new((rows, cols, 0, 0)));
+        let input_enabled = Arc::new(AtomicBool::new(false));
         let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let (response_tx, _response_rx) = mpsc::channel(1);
@@ -2131,7 +2135,7 @@ impl PaneRuntime {
                 terminal: Arc::new(PaneTerminal::new(ghostty)),
                 io: PaneRuntimeIo::RemoteProxy {
                     outbound: outbound_tx,
-                    input_enabled: Arc::new(AtomicBool::new(false)),
+                    input_enabled: Arc::clone(&input_enabled),
                     resize_slot: Arc::clone(&resize_slot),
                     response_sink,
                     render_notify,
@@ -2163,6 +2167,7 @@ impl PaneRuntime {
                 outbound_rx,
                 detach_tx,
                 resize_slot,
+                input_enabled,
             },
         ))
     }

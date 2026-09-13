@@ -9399,6 +9399,17 @@ next_tab = ""
     }
 
     #[cfg(unix)]
+    impl crate::remote::TimedRead for LocalSocketControlStream {
+        fn read_with_timeout(
+            &mut self,
+            buffer: &mut [u8],
+            _timeout: std::time::Duration,
+        ) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
     impl std::io::Write for LocalSocketControlStream {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
             std::io::Write::write(&mut self.0, buffer)
@@ -9437,6 +9448,17 @@ next_tab = ""
     }
 
     #[cfg(unix)]
+    impl crate::remote::TimedRead for LocalSocketControlReader {
+        fn read_with_timeout(
+            &mut self,
+            buffer: &mut [u8],
+            _timeout: std::time::Duration,
+        ) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
     impl crate::remote::ControlReadHalf for LocalSocketControlReader {}
 
     #[cfg(unix)]
@@ -9460,7 +9482,10 @@ next_tab = ""
 
     #[cfg(unix)]
     impl crate::remote::SshRunner for LocalSocketControlRunner {
-        fn connect(&self, _target: &str) -> io::Result<Box<dyn crate::remote::ControlStream>> {
+        fn connect(
+            &self,
+            _host: &crate::config::FleetHostConfig,
+        ) -> io::Result<Box<dyn crate::remote::ControlStream>> {
             Ok(Box::new(LocalSocketControlStream(
                 crate::ipc::connect_local_stream(&self.socket_path)?,
             )))
@@ -9604,6 +9629,7 @@ next_tab = ""
             outbound_rx,
             detach_tx: outbound_tx,
             resize_slot: Arc::new(std::sync::Mutex::new((24, 80, 0, 0))),
+            input_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
         transport
