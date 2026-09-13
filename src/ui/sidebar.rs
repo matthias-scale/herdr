@@ -2291,10 +2291,13 @@ fn compact_sidebar_rows_inner(
             expand_worktrees,
             terminal_runtimes,
         );
-        append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-        if has_remote_rows {
-            append_remote_rows(app, &mut rows, &remote_terms);
-        }
+        append_tail_sections(
+            app,
+            &mut rows,
+            settled_entries,
+            expand_worktrees,
+            has_remote_rows.then_some(remote_terms.as_slice()),
+        );
         return rows;
     }
     match app.sidebar_group_mode {
@@ -2307,10 +2310,13 @@ fn compact_sidebar_rows_inner(
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
     }
-    append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-    if has_remote_rows {
-        append_remote_rows(app, &mut rows, &remote_terms);
-    }
+    append_tail_sections(
+        app,
+        &mut rows,
+        settled_entries,
+        expand_worktrees,
+        has_remote_rows.then_some(remote_terms.as_slice()),
+    );
     rows
 }
 
@@ -2890,15 +2896,20 @@ fn append_object_group_rows(
     }
 }
 
-/// The two sections that close the list, in order: Symphony first so open
-/// workflows sit directly under the spaces they relate to, then Settled, which
-/// is history and always sinks to the bottom.
+/// The sections that close the list, in order: the external machine groups
+/// sit under the local spaces, Symphony follows because its workflows run on
+/// no pane of either, then Settled, which is history and always sinks to the
+/// bottom.
 fn append_tail_sections(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     settled_entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
+    remote_terms: Option<&[&str]>,
 ) {
+    if let Some(terms) = remote_terms {
+        append_remote_rows(app, rows, terms);
+    }
     append_symphony_rows(app, rows);
     append_settled_rows(app, rows, settled_entries, expand_worktrees);
 }
@@ -8877,6 +8888,29 @@ pub(crate) mod tests {
 
     fn expand_remote_host(app: &mut AppState, host: &str) {
         app.toggle_sidebar_group(&remote_host_collapse_key(host));
+    }
+
+    #[test]
+    fn symphony_section_follows_the_external_machine_groups() {
+        let mut app = app_with_two_remote_hosts();
+        app.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: vec![symphony_workflow("job")],
+            unavailable: None,
+            polled: true,
+        };
+        let rows = sidebar_rows(&app);
+        let last_host = rows
+            .iter()
+            .rposition(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("host:")))
+            .expect("host group header");
+        let symphony = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == SYMPHONY_SECTION_TITLE))
+            .expect("symphony header");
+        assert!(
+            last_host < symphony,
+            "symphony must sit below the machine groups"
+        );
     }
 
     #[test]
