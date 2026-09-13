@@ -1,7 +1,7 @@
 //! Non-interactive OpenSSH control transport for remote focus.
 //
-// This transport is intentionally retained as compiled/tested code while the
-// production default remains the proxy-pane stub.
+// This transport opens one lazy SSH-backed wire session per active remote
+// focus. It never installs, restarts, upgrades, or hands off a remote server.
 #![allow(dead_code)]
 
 #[cfg(unix)]

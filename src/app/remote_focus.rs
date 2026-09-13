@@ -14,9 +14,9 @@ use crate::layout::PaneId;
 use crate::pane::RemoteProxyChannels;
 use crate::terminal::TerminalId;
 
-/// The production transport is intentionally inert until the proxy pane is
-/// proven against a real remote server. `SshRemoteFocusTransport` stays
-/// compiled and tested; this stub remains the default.
+/// A deterministic failure transport for tests that need to exercise the app
+/// operation lifecycle without opening an SSH connection.
+#[allow(dead_code)] // Keep the stub available to tests that inject a failing transport.
 #[derive(Debug, Default)]
 pub(crate) struct StubRemoteFocusTransport;
 

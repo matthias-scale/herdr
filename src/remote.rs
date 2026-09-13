@@ -4,9 +4,6 @@ mod control;
 mod host_unix;
 
 pub(crate) use attach::*;
-// SSH remote focus remains compiled and testable, but production wiring is
-// intentionally stubbed until the step-4 proxy pane consumes its streams.
-#[allow(unused_imports)]
 pub(crate) use control::SshRemoteFocusTransport;
 #[cfg(unix)]
 // Test-only transport seams are re-exported for the real socket handshake harness.

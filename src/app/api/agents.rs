@@ -1709,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn production_remote_focus_default_never_reaches_active() {
+    fn production_remote_focus_uses_ssh_transport_and_reports_missing_target() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
         configure_remote_host(&mut app, "buildbox");
@@ -1737,9 +1737,9 @@ mod tests {
         let status: serde_json::Value = serde_json::from_str(&status).expect("status response");
         assert_eq!(status["result"]["state"], "failed");
         assert_eq!(status["result"]["error"]["code"], "host_unreachable");
-        assert!(status["result"]["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("transport is not available")));
+        assert!(status["result"]["error"]["message"].as_str().is_some_and(
+            |message| message.contains("remote host alias buildbox is not configured")
+        ));
         assert!(status["result"].get("context").is_none());
         assert_eq!(
             app.state.workspaces[0].tabs.len(),
