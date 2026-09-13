@@ -95,6 +95,7 @@ impl App {
         &mut self,
         appearance: crate::config::HostAppearanceOverride,
     ) -> bool {
+        self.state.theme_runtime.runtime_host_appearance = Some(appearance);
         if self.state.theme_runtime.host_appearance == appearance {
             return false;
         }
