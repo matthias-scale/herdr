@@ -673,22 +673,6 @@ impl Read for CancellableReader<'_> {
     }
 }
 
-#[cfg(unix)]
-fn classify_pre_activation_failure(detail: &str) -> &'static str {
-    let auth_evidence = detail.lines().any(|line| {
-        let line = line.trim();
-        line.contains("Permission denied")
-            && ["(publickey", "(keyboard-interactive", "(password"]
-                .iter()
-                .any(|marker| line.contains(marker))
-    });
-    if auth_evidence {
-        "auth_failed"
-    } else {
-        "host_unreachable"
-    }
-}
-
 /// Ends the session: marks it detached so a late local detach is a no-op and
 /// unregisters it. The writer exits on its own: a queued detach, a write
 /// failure, or the channel closing once the app and this handle drop their
@@ -882,7 +866,7 @@ fn run_control_session(
                 &failure_reported,
                 &event_tx,
                 &operation_id,
-                classify_pre_activation_failure(&error.to_string()),
+                "host_unreachable",
                 error.to_string(),
             );
             return;
@@ -911,7 +895,7 @@ fn run_control_session(
             &failure_reported,
             &event_tx,
             &operation_id,
-            classify_pre_activation_failure(&detail),
+            "host_unreachable",
             format!("remote control handshake write failed: {detail}"),
         );
         return;
@@ -929,7 +913,7 @@ fn run_control_session(
                     &failure_reported,
                     &event_tx,
                     &operation_id,
-                    classify_pre_activation_failure(&detail),
+                    "host_unreachable",
                     format!("remote control handshake read failed: {detail}"),
                 );
                 return;
@@ -1077,7 +1061,7 @@ fn run_control_session(
                     if active {
                         "connection_lost"
                     } else {
-                        classify_pre_activation_failure(&detail)
+                        "host_unreachable"
                     },
                     if active {
                         format!("remote control connection lost; delivery of the last accepted batch is unknown: {detail}")
@@ -1620,18 +1604,18 @@ mod tests {
     }
 
     #[test]
-    fn ssh_auth_failure_is_not_forwarded_to_the_remote_agent() {
+    fn ssh_permission_failure_without_provenance_is_host_unreachable() {
         let mut transport = transport_with_connect_error("Permission denied (publickey)");
         let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
             .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
-        assert_eq!(receive_failure(&mut event_rx).code, "auth_failed");
+        assert_eq!(receive_failure(&mut event_rx).code, "host_unreachable");
     }
 
     #[test]
-    fn ssh_auth_diagnostic_after_spawn_is_classified_without_control() {
+    fn ssh_auth_diagnostic_without_provenance_is_host_unreachable() {
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
                 name: "buildbox".into(),
@@ -1658,7 +1642,7 @@ mod tests {
         transport
             .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
-        assert_eq!(receive_failure(&mut event_rx).code, "auth_failed");
+        assert_eq!(receive_failure(&mut event_rx).code, "host_unreachable");
     }
 
     #[test]
