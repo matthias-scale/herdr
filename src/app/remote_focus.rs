@@ -253,6 +253,9 @@ impl RemoteFocusOperations {
     /// Failure events still carry the detailed error and drive normal UI
     /// updates, but delivery of one is not required for lifecycle correctness.
     pub(crate) fn reconcile_terminal_operations(&mut self, now: Instant) -> Vec<String> {
+        if self.operations.is_empty() {
+            return Vec::new();
+        }
         let mut reconciled = Vec::new();
         for (operation_id, operation) in &mut self.operations {
             if operation.operation_state.is_terminal()

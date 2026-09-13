@@ -752,6 +752,12 @@ impl HeadlessServer {
                 needs_graphics_render = false;
                 crate::render_prof::event("full_render_cause.internal_events");
             }
+            if self.app.reconcile_remote_focus_lifecycle() {
+                needs_render = true;
+                needs_full_render = true;
+                needs_graphics_render = false;
+                crate::render_prof::event("full_render_cause.remote_focus_lifecycle");
+            }
             if self.should_quit.load(Ordering::Acquire) {
                 continue;
             }
@@ -7238,6 +7244,24 @@ mod tests {
         terminal_id: &crate::terminal::TerminalId,
         detached: &Arc<std::sync::Mutex<Vec<String>>>,
     ) {
+        assert_remote_focus_proxy_torn_down_with_state(
+            server,
+            operation_id,
+            pane_id,
+            terminal_id,
+            detached,
+            api::schema::RemoteFocusState::Closed,
+        );
+    }
+
+    fn assert_remote_focus_proxy_torn_down_with_state(
+        server: &mut HeadlessServer,
+        operation_id: &str,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        detached: &Arc<std::sync::Mutex<Vec<String>>>,
+        expected_state: api::schema::RemoteFocusState,
+    ) {
         assert!(!server
             .app
             .state
@@ -7256,7 +7280,7 @@ mod tests {
                 .remote_focus_status(operation_id)
                 .expect("proxy operation status")
                 .state,
-            api::schema::RemoteFocusState::Closed
+            expected_state
         );
     }
 
@@ -7291,6 +7315,52 @@ mod tests {
             pane_id,
             &terminal_id,
             &detached,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_loop_reconciles_remote_focus_transport_termination_without_event() {
+        let (mut server, operation_id, pane_id, terminal_id, detached) =
+            server_with_remote_focus_proxy();
+        let operation_state = server
+            .app
+            .remote_focus_operations
+            .operation_state(&operation_id)
+            .expect("remote focus operation state");
+        assert!(operation_state.terminate());
+
+        // Let the test server stop only after the reconciliation path has
+        // detached the proxy. A shutdown-triggered teardown cannot make this
+        // test pass when the headless loop misses reconciliation.
+        let should_quit = Arc::clone(&server.should_quit);
+        let detached_for_watcher = Arc::clone(&detached);
+        let watcher = tokio::spawn(async move {
+            loop {
+                if !detached_for_watcher
+                    .lock()
+                    .expect("detach recording lock")
+                    .is_empty()
+                {
+                    should_quit.store(true, Ordering::Release);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), server.run())
+            .await
+            .expect("headless server reconciles and exits")
+            .expect("headless server run");
+        watcher.await.expect("detach watcher");
+
+        assert_remote_focus_proxy_torn_down_with_state(
+            &mut server,
+            &operation_id,
+            pane_id,
+            &terminal_id,
+            &detached,
+            api::schema::RemoteFocusState::Failed,
         );
     }
 
