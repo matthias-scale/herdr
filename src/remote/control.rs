@@ -793,6 +793,7 @@ fn run_control_writer(
         if detached.load(Ordering::Acquire) {
             return;
         }
+        let is_input = matches!(message, ProxyOutbound::Input(_));
         let is_detach = matches!(message, ProxyOutbound::Detach);
         let wire = match message {
             ProxyOutbound::Input(bytes) => Some(ClientMessage::Input {
@@ -802,7 +803,17 @@ fn run_control_writer(
             ProxyOutbound::Detach => Some(ClientMessage::Detach),
         };
         if let Some(wire) = wire {
-            if protocol::write_message(&mut writer, &wire).is_err() {
+            let write_result = if is_input {
+                termination.operation_state.before_input_send();
+                let _admission = termination.operation_state.lock_input_admission();
+                if termination.operation_state.is_terminal() {
+                    return;
+                }
+                protocol::write_message(&mut writer, &wire)
+            } else {
+                protocol::write_message(&mut writer, &wire)
+            };
+            if write_result.is_err() {
                 termination.terminate();
                 if !is_detach {
                     SshRemoteFocusTransport::fail_once(
@@ -1406,13 +1417,25 @@ mod tests {
         detached: Arc<AtomicBool>,
         input_enabled: Arc<AtomicBool>,
     ) -> Arc<ControlSessionTermination> {
+        test_termination_with_state(
+            detached,
+            input_enabled,
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+    }
+
+    fn test_termination_with_state(
+        detached: Arc<AtomicBool>,
+        input_enabled: Arc<AtomicBool>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+    ) -> Arc<ControlSessionTermination> {
         let sessions = Arc::new(Mutex::new(std::collections::HashMap::new()));
         Arc::new(ControlSessionTermination {
             sessions: Arc::downgrade(&sessions),
             operation_id: "writer-test".into(),
             detached,
             input_enabled,
-            operation_state: crate::remote::RemoteFocusOperationState::new(),
+            operation_state,
         })
     }
 
@@ -2230,6 +2253,50 @@ mod tests {
         };
         assert_eq!(error.code, "connection_lost");
         assert!(error.message.contains("delivery"));
+    }
+
+    #[test]
+    fn writer_drops_input_when_loss_wins_before_wire_admission() {
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(
+                b"late input",
+            )))
+            .expect("input queued");
+        drop(outbound_tx);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let input_enabled = Arc::new(AtomicBool::new(true));
+        let detached = Arc::new(AtomicBool::new(false));
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+        let termination = test_termination_with_state(
+            Arc::clone(&detached),
+            Arc::clone(&input_enabled),
+            operation_state,
+        );
+
+        run_control_writer(
+            Box::new(FakeWriter {
+                output: Arc::clone(&output),
+            }),
+            outbound_rx,
+            Arc::new(Mutex::new((24, 80, 0, 0))),
+            None,
+            detached,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            tokio::sync::mpsc::channel(1).0,
+            "operation".into(),
+            termination,
+        );
+
+        assert!(wire_messages(&output.lock().expect("fake output lock")).is_empty());
     }
 
     #[test]

@@ -1597,12 +1597,24 @@ impl PaneRuntimeIo {
                 if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                     return Err(mpsc::error::SendError(bytes));
                 }
-                outbound.send(ProxyOutbound::Input(bytes)).await.map_err(
-                    |mpsc::error::SendError(message)| match message {
-                        ProxyOutbound::Input(bytes) => mpsc::error::SendError(bytes),
-                        _ => unreachable!("only input is sent as bytes"),
-                    },
-                )
+                let terminal_notification = operation_state.terminal_notification().notified();
+                tokio::pin!(terminal_notification);
+                terminal_notification.as_mut().enable();
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                operation_state.before_input_send();
+                let permit = tokio::select! {
+                    permit = outbound.clone().reserve_owned() => permit
+                        .map_err(|_| mpsc::error::SendError(bytes.clone()))?,
+                    _ = &mut terminal_notification => return Err(mpsc::error::SendError(bytes)),
+                };
+                let _admission = operation_state.lock_input_admission();
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                permit.send(ProxyOutbound::Input(bytes));
+                Ok(())
             }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel {
@@ -1631,6 +1643,11 @@ impl PaneRuntimeIo {
                 operation_state,
                 ..
             } => {
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                operation_state.before_input_send();
+                let _admission = operation_state.lock_input_admission();
                 if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                     return Err(mpsc::error::TrySendError::Closed(bytes));
                 }
@@ -1718,7 +1735,25 @@ impl PaneRuntimeIo {
                     if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                         return;
                     }
-                    let _ = outbound.send(ProxyOutbound::Input(bytes)).await;
+                    let terminal_notification = operation_state.terminal_notification().notified();
+                    tokio::pin!(terminal_notification);
+                    terminal_notification.as_mut().enable();
+                    if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    operation_state.before_input_send();
+                    let permit = match tokio::select! {
+                        permit = outbound.reserve_owned() => permit,
+                        _ = &mut terminal_notification => return,
+                    } {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    let _admission = operation_state.lock_input_admission();
+                    if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    permit.send(ProxyOutbound::Input(bytes));
                 });
             }
             #[cfg(test)]
@@ -4256,6 +4291,146 @@ mod tests {
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn remote_proxy_try_send_does_not_cross_terminal_loss() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+
+        assert!(runtime
+            .try_send_bytes(Bytes::from_static(b"racing try"))
+            .is_err());
+        assert!(channels.outbound_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_async_send_does_not_cross_terminal_loss() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+
+        assert!(runtime
+            .send_bytes(Bytes::from_static(b"racing async"))
+            .await
+            .is_err());
+        assert!(channels.outbound_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_async_send_wakes_if_loss_occurs_while_queue_is_full() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        for _ in 0..REMOTE_PROXY_OUTBOUND_CAPACITY {
+            runtime
+                .try_send_bytes(Bytes::from_static(b"queued"))
+                .expect("queue has capacity");
+        }
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+        operation_state.set_input_send_hook(Arc::new(move || {
+            if let Some(ready_tx) = ready_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = ready_tx.send(());
+            }
+        }));
+
+        let send = runtime.send_bytes(Bytes::from_static(b"blocked"));
+        tokio::pin!(send);
+        tokio::select! {
+            result = &mut send => assert!(result.is_err(), "input is rejected after loss"),
+            _ = ready_rx => {
+                assert!(operation_state.terminate(), "loss terminates the operation");
+                let result = tokio::time::timeout(Duration::from_secs(1), &mut send)
+                    .await
+                    .expect("terminal loss wakes a blocked send");
+                assert!(result.is_err(), "blocked input is rejected after loss");
+            }
+        }
+        assert_eq!(
+            (0..)
+                .take_while(|_| channels.outbound_rx.try_recv().is_ok())
+                .count(),
+            REMOTE_PROXY_OUTBOUND_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_delayed_send_does_not_cross_terminal_loss() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+
+        runtime.send_bytes_after(
+            Bytes::from_static(b"racing delayed"),
+            Duration::from_millis(1),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(operation_state.is_terminal());
+        assert!(channels.outbound_rx.try_recv().is_err());
     }
 
     #[tokio::test]

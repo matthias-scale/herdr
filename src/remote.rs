@@ -5,8 +5,20 @@ mod host_unix;
 
 use std::sync::{
     atomic::{AtomicU8, Ordering},
-    Arc,
+    Arc, Mutex, MutexGuard,
 };
+use tokio::sync::Notify;
+
+#[cfg(test)]
+#[derive(Clone)]
+struct InputSendHook(Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for InputSendHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InputSendHook(..)")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -23,24 +35,72 @@ enum RemoteFocusOperationPhase {
 #[derive(Debug)]
 pub(crate) struct RemoteFocusOperationState {
     phase: AtomicU8,
+    input_admission: Mutex<()>,
+    terminal_notify: Notify,
+    #[cfg(test)]
+    input_send_hook: Mutex<Option<InputSendHook>>,
 }
 
 impl RemoteFocusOperationState {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             phase: AtomicU8::new(RemoteFocusOperationPhase::Live as u8),
+            input_admission: Mutex::new(()),
+            terminal_notify: Notify::new(),
+            #[cfg(test)]
+            input_send_hook: Mutex::new(None),
         })
     }
 
     pub(crate) fn terminate(&self) -> bool {
-        self.phase
+        let _admission = self
+            .input_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let terminated = self
+            .phase
             .compare_exchange(
                 RemoteFocusOperationPhase::Live as u8,
                 RemoteFocusOperationPhase::Terminal as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok()
+            .is_ok();
+        drop(_admission);
+        if terminated {
+            self.terminal_notify.notify_waiters();
+        }
+        terminated
+    }
+
+    pub(crate) fn lock_input_admission(&self) -> MutexGuard<'_, ()> {
+        self.input_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn terminal_notification(&self) -> &Notify {
+        &self.terminal_notify
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_input_send_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .input_send_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(InputSendHook(hook));
+    }
+
+    pub(crate) fn before_input_send(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .input_send_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            (hook.0)();
+        }
     }
 
     pub(crate) fn is_terminal(&self) -> bool {
