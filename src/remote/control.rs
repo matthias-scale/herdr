@@ -392,12 +392,16 @@ impl SshRemoteFocusTransport {
                     outbound_tx: channels.detach_tx.clone(),
                     detached: Arc::clone(&detached),
                     detach_requested: Arc::clone(&detach_requested),
-                    input_enabled,
+                    input_enabled: Arc::clone(&input_enabled),
                 },
             );
         let sessions = Arc::clone(&self.sessions);
-        let cleanup =
-            ControlSessionTeardown::new(sessions, operation_id.clone(), Arc::clone(&detached));
+        let cleanup = ControlSessionTeardown::new(
+            sessions,
+            operation_id.clone(),
+            Arc::clone(&detached),
+            Arc::clone(&input_enabled),
+        );
         let spawn_result = std::thread::Builder::new()
             .name(format!("herdr-remote-focus-{operation_id}"))
             .spawn(move || {
@@ -637,6 +641,12 @@ struct CancellableReader<'a> {
 #[cfg(unix)]
 impl Read for CancellableReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.detached.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "remote control session detached",
+            ));
+        }
         loop {
             match self
                 .reader
@@ -649,6 +659,13 @@ impl Read for CancellableReader<'_> {
                             "remote control session detached",
                         ));
                     }
+                }
+                Ok(read) if self.detached.load(Ordering::Acquire) => {
+                    let _ = read;
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "remote control session detached",
+                    ));
                 }
                 result => return result,
             }
@@ -678,12 +695,19 @@ fn classify_pre_activation_failure(detail: &str) -> &'static str {
 /// senders. Nothing more is written here — after a connection loss no bytes
 /// may reach the wire.
 #[cfg(unix)]
+fn close_input_gate_and_detach(input_enabled: &AtomicBool, detached: &AtomicBool) {
+    input_enabled.store(false, Ordering::Release);
+    detached.store(true, Ordering::Release);
+}
+
+#[cfg(unix)]
 fn finish_control_session(
     sessions: &Mutex<std::collections::HashMap<String, SessionHandle>>,
     operation_id: &str,
     detached: &Arc<AtomicBool>,
+    input_enabled: &Arc<AtomicBool>,
 ) {
-    detached.store(true, Ordering::Release);
+    close_input_gate_and_detach(input_enabled, detached);
     let mut sessions = sessions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -700,6 +724,7 @@ struct ControlSessionTeardown {
     sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
     operation_id: String,
     detached: Arc<AtomicBool>,
+    input_enabled: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -708,11 +733,13 @@ impl ControlSessionTeardown {
         sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
         operation_id: String,
         detached: Arc<AtomicBool>,
+        input_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sessions,
             operation_id,
             detached,
+            input_enabled,
         }
     }
 }
@@ -720,7 +747,12 @@ impl ControlSessionTeardown {
 #[cfg(unix)]
 impl Drop for ControlSessionTeardown {
     fn drop(&mut self) {
-        finish_control_session(&self.sessions, &self.operation_id, &self.detached);
+        finish_control_session(
+            &self.sessions,
+            &self.operation_id,
+            &self.detached,
+            &self.input_enabled,
+        );
     }
 }
 
@@ -770,9 +802,8 @@ fn run_control_writer(
         };
         if let Some(wire) = wire {
             if protocol::write_message(&mut writer, &wire).is_err() {
+                close_input_gate_and_detach(&input_enabled, &detached);
                 if !is_detach {
-                    input_enabled.store(false, Ordering::Release);
-                    detached.store(true, Ordering::Release);
                     SshRemoteFocusTransport::fail_once(
                         &failure_reported,
                         &event_tx,
@@ -798,8 +829,7 @@ fn run_control_writer(
                 cell_height_px: resize.3,
             };
             if protocol::write_message(&mut writer, &resize_message).is_err() {
-                input_enabled.store(false, Ordering::Release);
-                detached.store(true, Ordering::Release);
+                close_input_gate_and_detach(&input_enabled, &detached);
                 SshRemoteFocusTransport::fail_once(
                     &failure_reported,
                     &event_tx,
@@ -836,6 +866,7 @@ fn run_control_session(
 ) {
     let RemoteProxyChannels {
         outbound_rx,
+        detach_tx,
         resize_slot,
         input_enabled,
         ..
@@ -846,6 +877,7 @@ fn run_control_session(
     let mut stream = match runner.connect(&host) {
         Ok(stream) => stream,
         Err(error) => {
+            close_input_gate_and_detach(&input_enabled, &detached);
             SshRemoteFocusTransport::fail_once(
                 &failure_reported,
                 &event_tx,
@@ -874,6 +906,7 @@ fn run_control_session(
         let detail = diagnostic
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| error.to_string());
+        close_input_gate_and_detach(&input_enabled, &detached);
         SshRemoteFocusTransport::fail_once(
             &failure_reported,
             &event_tx,
@@ -891,6 +924,7 @@ fn run_control_session(
                 let detail = diagnostic
                     .filter(|message| !message.trim().is_empty())
                     .unwrap_or_else(|| error.to_string());
+                close_input_gate_and_detach(&input_enabled, &detached);
                 SshRemoteFocusTransport::fail_once(
                     &failure_reported,
                     &event_tx,
@@ -908,6 +942,7 @@ fn run_control_session(
         ..
     } = welcome
     else {
+        close_input_gate_and_detach(&input_enabled, &detached);
         SshRemoteFocusTransport::fail_once(
             &failure_reported,
             &event_tx,
@@ -953,6 +988,7 @@ fn run_control_session(
             takeover: false,
         },
     ) {
+        close_input_gate_and_detach(&input_enabled, &detached);
         SshRemoteFocusTransport::fail_once(
             &failure_reported,
             &event_tx,
@@ -997,6 +1033,7 @@ fn run_control_session(
             )
         });
     if let Err(error) = writer_thread {
+        close_input_gate_and_detach(&input_enabled, &detached);
         SshRemoteFocusTransport::fail_once(
             &failure_reported,
             &event_tx,
@@ -1021,11 +1058,14 @@ fn run_control_session(
         } else {
             read_message_with_deadline(&mut *reader, control_ready_deadline)
         } {
+            Ok(_message) if detached.load(Ordering::Acquire) => break,
             Ok(message) => message,
             Err(error) => {
                 if detached.load(Ordering::Acquire) {
                     break;
                 }
+                close_input_gate_and_detach(&input_enabled, &detached);
+                let _ = detach_tx.try_send(ProxyOutbound::Detach);
                 let diagnostic = reader.close_diagnostic();
                 let detail = diagnostic
                     .filter(|message| !message.trim().is_empty())
@@ -1048,6 +1088,9 @@ fn run_control_session(
                 break;
             }
         };
+        if detached.load(Ordering::Acquire) {
+            break;
+        }
         match message {
             ServerMessage::ControlReady { context } => {
                 active = true;
@@ -1058,6 +1101,8 @@ fn run_control_session(
                     })
                     .is_err()
                 {
+                    close_input_gate_and_detach(&input_enabled, &detached);
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     break;
                 }
             }
@@ -1070,6 +1115,8 @@ fn run_control_session(
                         })
                         .is_err()
                 {
+                    close_input_gate_and_detach(&input_enabled, &detached);
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     break;
                 }
             }
@@ -1083,11 +1130,15 @@ fn run_control_session(
                     })
                     .is_err()
                 {
+                    close_input_gate_and_detach(&input_enabled, &detached);
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     break;
                 }
             }
             ServerMessage::ControlError { code, message } => {
                 if !detached.load(Ordering::Acquire) {
+                    close_input_gate_and_detach(&input_enabled, &detached);
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     SshRemoteFocusTransport::fail_once(
                         &failure_reported,
                         &event_tx,
@@ -1100,6 +1151,8 @@ fn run_control_session(
             }
             ServerMessage::ServerShutdown { reason } => {
                 if !detached.load(Ordering::Acquire) {
+                    close_input_gate_and_detach(&input_enabled, &detached);
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     SshRemoteFocusTransport::fail_once(
                         &failure_reported,
                         &event_tx,
@@ -1942,6 +1995,87 @@ mod tests {
         let _: ClientMessage = protocol::read_message(&mut frames, MAX_FRAME_SIZE)
             .expect("control request was written");
         assert!(frames.is_empty(), "loss must not cause a replay");
+    }
+
+    #[test]
+    fn reader_loss_closes_input_gate_before_failure_event_is_delivered() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport =
+            transport_with_read_gate(input, output, None, Some(Arc::clone(&read_gate)));
+        let (channels, _outbound_tx) = test_channels();
+        let input_enabled = Arc::clone(&channels.input_enabled);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        transport
+            .start(
+                "operation",
+                &agent_ref(),
+                "proxy",
+                channels,
+                event_tx.clone(),
+            )
+            .expect("thread starts");
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. })
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+
+        event_tx
+            .blocking_send(crate::events::AppEvent::RemoteFocusFrame {
+                operation_id: "sentinel".into(),
+                frame: Box::new(crate::protocol::TerminalFrame {
+                    seq: 0,
+                    width: 1,
+                    height: 1,
+                    full: true,
+                    bytes: Vec::new(),
+                }),
+            })
+            .expect("hold failure event behind a pending app event");
+        input_enabled.store(true, Ordering::Release);
+        read_gate.store(true, Ordering::Release);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while input_enabled.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "reader loss did not close the input gate before reporting failure"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!input_enabled.load(Ordering::Acquire));
+
+        let _sentinel = event_rx.blocking_recv().expect("sentinel event");
+        assert_eq!(receive_failure(&mut event_rx).code, "connection_lost");
+    }
+
+    #[test]
+    fn cancellable_reader_stops_between_partial_frame_reads_after_detach() {
+        let detached = AtomicBool::new(false);
+        let mut reader = FakeReader {
+            input: Cursor::new(b"partial".to_vec()),
+            fail_at: None,
+            panic_at: None,
+            read_gate: None,
+        };
+        let mut reader = CancellableReader {
+            reader: &mut reader,
+            detached: &detached,
+        };
+        let mut first = [0_u8; 1];
+        assert_eq!(reader.read(&mut first).expect("first byte"), 1);
+
+        detached.store(true, Ordering::Release);
+        let mut second = [0_u8; 1];
+        assert!(matches!(
+            reader.read(&mut second),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted
+        ));
     }
 
     #[test]
