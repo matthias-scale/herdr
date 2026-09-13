@@ -64,6 +64,14 @@ pub enum AppEvent {
         operation_id: String,
         transition: Box<crate::app::remote_focus::RemoteFocusTransition>,
     },
+    /// One complete remote terminal frame for a remote focus proxy pane.
+    /// Frames are an ordered diff stream; they must be delivered reliably, so
+    /// the transport blocks on a full channel rather than dropping one.
+    #[allow(dead_code)] // Constructed by the wire transport, which is not yet the default.
+    RemoteFocusFrame {
+        operation_id: String,
+        frame: Box<crate::protocol::TerminalFrame>,
+    },
     /// A PTY user-write gate was poisoned. Remote control must be disabled,
     /// but the pane and its child process remain alive.
     #[cfg(unix)]

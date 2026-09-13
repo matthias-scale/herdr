@@ -2365,6 +2365,9 @@ async fn run_client_loop(
                 ServerMessage::ControlReady { .. } => {
                     debug!("received unexpected ControlReady in main loop");
                 }
+                ServerMessage::ControlContext { .. } => {
+                    debug!("received unexpected ControlContext in main loop");
+                }
                 ServerMessage::ControlError { code, message } => {
                     return Err(ClientError::ServerShutdown {
                         reason: Some(format!("remote control {code}: {message}")),

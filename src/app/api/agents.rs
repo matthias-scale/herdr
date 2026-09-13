@@ -419,6 +419,7 @@ mod tests {
             operation_id: &str,
             agent_ref: &AgentRef,
             _proxy_pane_id: &str,
+            _channels: crate::pane::RemoteProxyChannels,
             event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
         ) -> Result<(), ErrorBody> {
             let transition = if agent_ref.agent.ends_with("p3") {
@@ -1738,8 +1739,13 @@ mod tests {
         assert_eq!(status["result"]["error"]["code"], "host_unreachable");
         assert!(status["result"]["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("proxy pane is not available")));
+            .is_some_and(|message| message.contains("transport is not available")));
         assert!(status["result"].get("context").is_none());
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "the stub failure closes the proxy pane it opened"
+        );
     }
 
     #[test]
