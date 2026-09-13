@@ -93,6 +93,9 @@ _RECOMMENDATION_RE = re.compile(
 _NONBLOCKING_MARKER_RE = re.compile(
     r"^·[ \t]+non-blocking\b[ \t]*(?:[:—–-][ \t]*)?", re.IGNORECASE
 )
+_NONBLOCKING_MARKER_SUFFIX_RE = re.compile(
+    r"(?s)(?P<text>.*?)\s*·\s*non-blocking\b\s*[.]*\s*$", re.IGNORECASE
+)
 _DECIDED_AT_RE = re.compile(
     r"\b(?:decided\s+at|at)\s+(?P<value>\d{1,2}:\d{2}(?:\s*[A-Z]{2})?)",
     re.IGNORECASE,
@@ -441,9 +444,16 @@ def _parse_items(
         body = text[match.start("body") : item_end]
         label = match.group("label") or match.group("plain_label") or ""
         cleaned_body = _clean_body(body)
-        nonblocking_marker = _NONBLOCKING_MARKER_RE.match(cleaned_body)
-        if nonblocking_marker:
-            cleaned_body = cleaned_body[nonblocking_marker.end() :].strip()
+        nonblocking_prefix = _NONBLOCKING_MARKER_RE.match(cleaned_body)
+        nonblocking = False
+        if nonblocking_prefix:
+            cleaned_body = cleaned_body[nonblocking_prefix.end() :].strip()
+            nonblocking = True
+        else:
+            nonblocking_suffix = _NONBLOCKING_MARKER_SUFFIX_RE.match(cleaned_body)
+            if nonblocking_suffix:
+                cleaned_body = nonblocking_suffix.group("text").rstrip()
+                nonblocking = True
         normalized_label = label.capitalize()
         parsed.append(
             Item(
@@ -451,10 +461,7 @@ def _parse_items(
                 normalized_label,
                 cleaned_body,
                 blocking=normalized_label == "Gate"
-                or (
-                    normalized_label in {"Answer", "Verify"}
-                    and nonblocking_marker is None
-                ),
+                or (normalized_label in {"Answer", "Verify"} and not nonblocking),
             )
         )
     return parsed

@@ -368,6 +368,23 @@ NONBLOCKING_ONLY = """\
 Done here.
 """
 
+SUFFIX_NONBLOCKING_ITEMS = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** — Choose the release lane · non-blocking
+2. **Verify** — Confirm the optional visual detail · non-blocking.
+
+Done here.
+"""
+
+MID_SENTENCE_NONBLOCKING_WORD = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** — This is non-blocking until we hear from QA.
+
+Done here.
+"""
+
 BLOCKING_ANSWER = """\
 **Critical action points (0 blocking)**
 
@@ -378,6 +395,44 @@ Done here.
 
 
 class ClosingBlockV2Tests(unittest.TestCase):
+    def test_suffix_nonblocking_items(self):
+        block = closing_block.parse(SUFFIX_NONBLOCKING_ITEMS)
+
+        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(
+            [(item["label"], item["text"], item["blocking"]) for item in block.wire_items()],
+            [
+                ("Answer", "Choose the release lane", False),
+                ("Verify", "Confirm the optional visual detail", False),
+            ],
+        )
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertEqual(outcome["payload"]["state"], "idle")
+        self.assertEqual(
+            [item["blocking"] for item in outcome["payload"]["items"]],
+            [False, False],
+        )
+        metadata = rpc.call_args_list[-1].args[3]
+        self.assertEqual(metadata["tokens"]["closing_idle"], "1")
+
+    def test_nonblocking_word_in_middle_is_blocking(self):
+        block = closing_block.parse(MID_SENTENCE_NONBLOCKING_WORD)
+
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.wire_items()[0]["blocking"], True)
+        self.assertEqual(block.wire_items()[0]["text"], "This is non-blocking until we hear from QA.")
+
     def test_nonblocking_only(self):
         block = closing_block.parse(NONBLOCKING_ONLY)
 
