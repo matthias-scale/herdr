@@ -1559,6 +1559,7 @@ mod tests {
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
             tab_first_pane: false,
+            remote_host: None,
         }
     }
 

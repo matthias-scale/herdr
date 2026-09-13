@@ -266,6 +266,15 @@ pub(crate) fn compact_dot_for_state(
 }
 
 fn compact_provider(entry: &AgentPanelEntry) -> String {
+    let provider = compact_provider_token(entry);
+    match entry.remote_host.as_deref() {
+        Some(host) if provider.is_empty() => host.to_string(),
+        Some(host) => format!("{host} · {provider}"),
+        None => provider,
+    }
+}
+
+fn compact_provider_token(entry: &AgentPanelEntry) -> String {
     if !entry.has_agent {
         return ">_".to_string();
     }
@@ -927,6 +936,9 @@ pub(crate) struct AgentPanelEntry {
     /// First pane in canonical layout order for its tab. The renderer uses it
     /// to project the tab row exactly once before its pane children.
     pub tab_first_pane: bool,
+    /// Fleet host this pane is attached to over ssh. The pane lives in the
+    /// local list, so the row names the machine next to the provider.
+    pub remote_host: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1279,6 +1291,16 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let space_label = workspace_label.clone();
+                    let remote_host = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .and_then(|tab| tab.panes.get(&detail.pane_id))
+                        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                        .and_then(|terminal| terminal.launch_argv.as_deref())
+                        .and_then(|argv| {
+                            crate::fleet::attached_host_name(&app.fleet_snapshot, argv)
+                        })
+                        .map(str::to_string);
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
                     let starred = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.starred);
                     let tab_has_custom_name = ws
@@ -1357,6 +1379,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         holds_shell: detail.holds_shell,
                         gate_count: detail.gate_count,
                         tab_first_pane: false,
+                        remote_host,
                     }
                 })
         })
@@ -1511,6 +1534,7 @@ pub(crate) fn remote_agent_panel_entries(
                         state_labels,
                         tokens,
                         tab_first_pane: false,
+                        remote_host: None,
                     },
                     narrow_host,
                 ),
@@ -8914,6 +8938,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_pane_attached_to_a_fleet_host_names_the_machine_before_the_provider() {
+        let mut app = app_with_agents(&["attached"]);
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["ub1".into()],
+            hosts: vec![fleet_host_snapshot("ub1", false, Vec::new())],
+            ..crate::fleet::Snapshot::default()
+        };
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.launch_argv = Some(vec![
+            "ssh".into(),
+            "-t".into(),
+            "ub1".into(),
+            "herdr agent attach 'w1:p1'".into(),
+        ]);
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("attached entry");
+        assert_eq!(entry.remote_host.as_deref(), Some("ub1"));
+        let provider = compact_provider(&entry);
+        assert!(provider.starts_with("ub1 · "), "{provider:?}");
+
+        let width = 40;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_compact_agent_row_with_prefix(
+                    &app,
+                    frame,
+                    &entry,
+                    Rect::new(0, 0, width, 1),
+                    0,
+                    false,
+                    None,
+                    None,
+                )
+            })
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), 0, width);
+        assert!(rendered.contains(&provider), "{rendered:?}");
+    }
+
+    #[test]
     fn remote_host_groups_start_collapsed_and_keep_an_explicit_expansion() {
         let mut app = app_with_two_remote_hosts();
 
@@ -10819,6 +10892,7 @@ pub(crate) mod tests {
             state_labels,
             tokens: std::collections::HashMap::new(),
             tab_first_pane: false,
+            remote_host: None,
         }
     }
 
