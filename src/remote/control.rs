@@ -103,16 +103,24 @@ impl SshRunner for OpenSshRunner {
 #[cfg(unix)]
 fn ssh_command(host: &crate::config::FleetHostConfig) -> std::process::Command {
     let mut command = std::process::Command::new("ssh");
-    let socket = host
-        .socket
-        .as_deref()
-        .map(|path| format!("HERDR_SOCKET_PATH={} ", shell_quote(path)))
-        .unwrap_or_default();
-    let session = host
-        .session
-        .as_deref()
-        .map(|name| format!("HERDR_SESSION={} ", shell_quote(name)))
-        .unwrap_or_default();
+    let remote_command = if let Some(path) = host.socket.as_deref() {
+        let session = host
+            .session
+            .as_deref()
+            .map(|name| format!("HERDR_SESSION={} ", shell_quote(name)))
+            .unwrap_or_default();
+        format!(
+            "HERDR_SOCKET_PATH={} {session}herdr remote-control-bridge",
+            shell_quote(path)
+        )
+    } else if let Some(session) = host.session.as_deref() {
+        format!(
+            "herdr --session {} remote-control-bridge",
+            shell_quote(session)
+        )
+    } else {
+        "herdr remote-control-bridge".to_owned()
+    };
     command
         .arg("-T")
         .arg("-o")
@@ -123,7 +131,7 @@ fn ssh_command(host: &crate::config::FleetHostConfig) -> std::process::Command {
         .arg("ConnectTimeout=5")
         .arg("--")
         .arg(&host.target)
-        .arg(format!("{socket}{session}herdr remote-control-bridge"))
+        .arg(remote_command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -1661,6 +1669,29 @@ mod tests {
         assert_eq!(
             args[separator + 2],
             "HERDR_SOCKET_PATH='/run/herdr remote.sock' HERDR_SESSION='agents-main' herdr remote-control-bridge"
+        );
+    }
+
+    #[test]
+    fn control_ssh_argv_makes_named_session_selection_explicit() {
+        let host = crate::config::FleetHostConfig {
+            target: "operator@buildbox".into(),
+            session: Some("agents-main".into()),
+            ..Default::default()
+        };
+        let command = ssh_command(&host);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let separator = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("SSH target separator");
+
+        assert_eq!(
+            args[separator + 2],
+            "herdr --session 'agents-main' remote-control-bridge"
         );
     }
 
