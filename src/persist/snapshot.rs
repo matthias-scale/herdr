@@ -794,6 +794,7 @@ mod tests {
                 0,
                 std::sync::Arc::new(tokio::sync::Notify::new()),
                 std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+                crate::remote::RemoteFocusOperationState::new(),
             )
             .expect("proxy runtime");
             let mut terminal =

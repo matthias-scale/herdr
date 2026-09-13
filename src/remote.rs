@@ -3,6 +3,51 @@ mod control;
 #[cfg(unix)]
 mod host_unix;
 
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum RemoteFocusOperationPhase {
+    Live = 0,
+    Terminal = 1,
+}
+
+/// Shared lifecycle state for one remote focus operation.
+///
+/// The transport changes this state before publishing a failure event, while
+/// the app uses it to reject late frames and context transitions that were
+/// already queued before the connection ended.
+#[derive(Debug)]
+pub(crate) struct RemoteFocusOperationState {
+    phase: AtomicU8,
+}
+
+impl RemoteFocusOperationState {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            phase: AtomicU8::new(RemoteFocusOperationPhase::Live as u8),
+        })
+    }
+
+    pub(crate) fn terminate(&self) -> bool {
+        self.phase
+            .compare_exchange(
+                RemoteFocusOperationPhase::Live as u8,
+                RemoteFocusOperationPhase::Terminal as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == RemoteFocusOperationPhase::Terminal as u8
+    }
+}
+
 pub(crate) use attach::*;
 pub(crate) use control::SshRemoteFocusTransport;
 #[cfg(unix)]

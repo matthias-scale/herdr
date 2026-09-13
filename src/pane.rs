@@ -1331,6 +1331,9 @@ pub(crate) struct RemoteProxyChannels {
     /// Shared with the transport so a failed wire write closes the local
     /// input gate before the proxy pane is torn down.
     pub input_enabled: Arc<AtomicBool>,
+    /// Shared with the app and transport so connection loss is terminal even
+    /// while already queued app events are still being delivered.
+    pub operation_state: Arc<crate::remote::RemoteFocusOperationState>,
 }
 
 /// Keystroke bursts (including pastes) queue briefly; a stuck transport drops
@@ -1346,6 +1349,7 @@ enum PaneRuntimeIo {
         /// Input gate. Keystrokes are refused (never buffered) until the first
         /// complete frame and `ControlReady` have both arrived.
         input_enabled: Arc<AtomicBool>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
         resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
         /// Terminal responses to queries in the frame stream are discarded:
         /// the remote server already answered them for its own terminal.
@@ -1587,9 +1591,10 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::RemoteProxy {
                 outbound,
                 input_enabled,
+                operation_state,
                 ..
             } => {
-                if !input_enabled.load(Ordering::Acquire) {
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                     return Err(mpsc::error::SendError(bytes));
                 }
                 outbound.send(ProxyOutbound::Input(bytes)).await.map_err(
@@ -1623,9 +1628,10 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::RemoteProxy {
                 outbound,
                 input_enabled,
+                operation_state,
                 ..
             } => {
-                if !input_enabled.load(Ordering::Acquire) {
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                     return Err(mpsc::error::TrySendError::Closed(bytes));
                 }
                 outbound
@@ -1659,10 +1665,15 @@ impl PaneRuntimeIo {
     }
 
     fn remote_proxy_input_enabled(&self) -> Option<bool> {
-        let PaneRuntimeIo::RemoteProxy { input_enabled, .. } = self else {
+        let PaneRuntimeIo::RemoteProxy {
+            input_enabled,
+            operation_state,
+            ..
+        } = self
+        else {
             return None;
         };
-        Some(input_enabled.load(Ordering::Acquire))
+        Some(!operation_state.is_terminal() && input_enabled.load(Ordering::Acquire))
     }
 
     fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
@@ -1696,13 +1707,15 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::RemoteProxy {
                 outbound,
                 input_enabled,
+                operation_state,
                 ..
             } => {
                 let outbound = outbound.clone();
                 let input_enabled = Arc::clone(input_enabled);
+                let operation_state = Arc::clone(operation_state);
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    if !input_enabled.load(Ordering::Acquire) {
+                    if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                         return;
                     }
                     let _ = outbound.send(ProxyOutbound::Input(bytes)).await;
@@ -2119,6 +2132,7 @@ impl PaneRuntime {
         scrollback_limit_bytes: usize,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
     ) -> std::io::Result<(Self, RemoteProxyChannels)> {
         let (outbound_tx, outbound_rx) = mpsc::channel(REMOTE_PROXY_OUTBOUND_CAPACITY);
         let detach_tx = outbound_tx.clone();
@@ -2136,6 +2150,7 @@ impl PaneRuntime {
                 io: PaneRuntimeIo::RemoteProxy {
                     outbound: outbound_tx,
                     input_enabled: Arc::clone(&input_enabled),
+                    operation_state: Arc::clone(&operation_state),
                     resize_slot: Arc::clone(&resize_slot),
                     response_sink,
                     render_notify,
@@ -2168,6 +2183,7 @@ impl PaneRuntime {
                 detach_tx,
                 resize_slot,
                 input_enabled,
+                operation_state,
             },
         ))
     }
@@ -2179,9 +2195,17 @@ impl PaneRuntime {
     /// Opens or closes the input gate. Keystrokes are refused while the gate
     /// is closed; they are never buffered for later delivery.
     pub(crate) fn set_remote_proxy_input_enabled(&self, enabled: bool) -> bool {
-        let PaneRuntimeIo::RemoteProxy { input_enabled, .. } = &self.io else {
+        let PaneRuntimeIo::RemoteProxy {
+            input_enabled,
+            operation_state,
+            ..
+        } = &self.io
+        else {
             return false;
         };
+        if enabled && operation_state.is_terminal() {
+            return false;
+        }
         input_enabled.store(enabled, Ordering::Release);
         true
     }
@@ -4130,6 +4154,7 @@ mod tests {
             0,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
         )
         .expect("proxy runtime");
 
@@ -4172,6 +4197,7 @@ mod tests {
             0,
             Arc::clone(&render_notify),
             Arc::clone(&render_dirty),
+            crate::remote::RemoteFocusOperationState::new(),
         )
         .expect("proxy runtime");
         let mut channels = channels;

@@ -9630,6 +9630,7 @@ next_tab = ""
             detach_tx: outbound_tx,
             resize_slot: Arc::new(std::sync::Mutex::new((24, 80, 0, 0))),
             input_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            operation_state: crate::remote::RemoteFocusOperationState::new(),
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
         transport

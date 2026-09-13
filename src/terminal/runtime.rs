@@ -236,6 +236,7 @@ impl TerminalRuntime {
         scrollback_limit_bytes: usize,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
     ) -> std::io::Result<(Self, crate::pane::RemoteProxyChannels)> {
         crate::pane::PaneRuntime::spawn_remote_proxy(
             pane_id,
@@ -244,6 +245,7 @@ impl TerminalRuntime {
             scrollback_limit_bytes,
             render_notify,
             render_dirty,
+            operation_state,
         )
         .map(|(runtime, channels)| (Self(runtime), channels))
     }
