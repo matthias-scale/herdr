@@ -1824,6 +1824,9 @@ impl App {
             if self.drain_internal_events() {
                 needs_render = true;
             }
+            if self.reconcile_remote_focus_lifecycle() {
+                needs_render = true;
+            }
             if self.expire_due_metadata(Instant::now()) {
                 needs_render = true;
             }
