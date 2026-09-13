@@ -290,6 +290,18 @@ impl RemoteFocusOperations {
             operation.state,
             RemoteFocusState::Failed | RemoteFocusState::Closed
         ) {
+            if operation.state == RemoteFocusState::Failed
+                && matches!(&transition, RemoteFocusTransition::Failed(_))
+                && operation.error.as_ref().is_some_and(|error| {
+                    error.code == "connection_lost"
+                        && error.message == "remote focus connection terminated"
+                })
+            {
+                if let RemoteFocusTransition::Failed(error) = transition {
+                    operation.error = Some(error);
+                    return true;
+                }
+            }
             return false;
         }
         if operation.operation_state.is_terminal()
@@ -1314,6 +1326,71 @@ mod tests {
             RemoteFocusState::Connecting
         );
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn detailed_failure_replaces_reconciliation_placeholder_without_reopening() {
+        let (mut app, _recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let operation_id = started.operation_id.clone();
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+        app.apply_remote_focus_frame(&operation_id, &full_frame(b"ready"));
+        assert!(app.remote_focus_operations.input_gate_open(&operation_id));
+
+        let operation_state = app
+            .remote_focus_operations
+            .operation_state(&operation_id)
+            .expect("operation state");
+        assert!(operation_state.terminate(), "loss terminates the operation");
+
+        let reconciled = app
+            .remote_focus_status(&operation_id)
+            .expect("reconciled operation remains queryable");
+        assert_eq!(reconciled.state, RemoteFocusState::Failed);
+        assert_eq!(
+            reconciled.error.as_ref().map(|error| error.code.as_str()),
+            Some("connection_lost")
+        );
+        let completed_at = app
+            .remote_focus_operations
+            .operations
+            .get(&operation_id)
+            .and_then(|operation| operation.completed_at)
+            .expect("reconciliation completes the operation");
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Failed(ErrorBody {
+                code: "ssh_write_failed".into(),
+                message: "remote control stream stopped reading".into(),
+            }),
+        );
+
+        let detailed = app
+            .remote_focus_status(&operation_id)
+            .expect("detailed failure remains queryable");
+        assert_eq!(detailed.state, RemoteFocusState::Failed);
+        assert_eq!(
+            detailed.error,
+            Some(ErrorBody {
+                code: "ssh_write_failed".into(),
+                message: "remote control stream stopped reading".into(),
+            })
+        );
+        assert_eq!(
+            app.remote_focus_operations
+                .operations
+                .get(&operation_id)
+                .and_then(|operation| operation.completed_at),
+            Some(completed_at)
+        );
+        assert!(!app.remote_focus_operations.input_gate_open(&operation_id));
     }
 
     #[test]
