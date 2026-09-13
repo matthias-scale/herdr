@@ -803,16 +803,14 @@ fn run_control_writer(
             ProxyOutbound::Detach => Some(ClientMessage::Detach),
         };
         if let Some(wire) = wire {
-            let write_result = if is_input {
+            if is_input {
                 termination.operation_state.before_input_send();
                 let _admission = termination.operation_state.lock_input_admission();
                 if termination.operation_state.is_terminal() {
                     return;
                 }
-                protocol::write_message(&mut writer, &wire)
-            } else {
-                protocol::write_message(&mut writer, &wire)
             };
+            let write_result = protocol::write_message(&mut writer, &wire);
             if write_result.is_err() {
                 termination.terminate();
                 if !is_detach {
@@ -1351,6 +1349,33 @@ mod tests {
                 io::ErrorKind::BrokenPipe,
                 "fake broken pipe",
             ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StalledWriter {
+        started_tx: Option<std::sync::mpsc::Sender<()>>,
+        release_rx: std::sync::mpsc::Receiver<()>,
+        stalled: bool,
+    }
+
+    impl Write for StalledWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if !self.stalled {
+                self.stalled = true;
+                self.started_tx
+                    .take()
+                    .expect("stalled writer start signal")
+                    .send(())
+                    .expect("stalled writer start receiver");
+                self.release_rx
+                    .recv()
+                    .expect("stalled writer release signal");
+            }
+            Ok(buffer.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -2297,6 +2322,70 @@ mod tests {
         );
 
         assert!(wire_messages(&output.lock().expect("fake output lock")).is_empty());
+    }
+
+    #[test]
+    fn writer_does_not_hold_admission_while_stdin_write_is_stalled() {
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"blocked")))
+            .expect("input queued");
+        drop(outbound_tx);
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let input_enabled = Arc::new(AtomicBool::new(true));
+        let detached = Arc::new(AtomicBool::new(false));
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let termination = test_termination_with_state(
+            Arc::clone(&detached),
+            Arc::clone(&input_enabled),
+            operation_state,
+        );
+        let termination_for_writer = Arc::clone(&termination);
+        let writer_thread = std::thread::spawn(move || {
+            run_control_writer(
+                Box::new(StalledWriter {
+                    started_tx: Some(started_tx),
+                    release_rx,
+                    stalled: false,
+                }),
+                outbound_rx,
+                Arc::new(Mutex::new((24, 80, 0, 0))),
+                None,
+                detached,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                tokio::sync::mpsc::channel(1).0,
+                "operation".into(),
+                termination_for_writer,
+            );
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer reached the stalled stdin write");
+
+        let (terminated_tx, terminated_rx) = std::sync::mpsc::channel();
+        let termination_for_teardown = Arc::clone(&termination);
+        let teardown_thread = std::thread::spawn(move || {
+            termination_for_teardown.terminate();
+            terminated_tx
+                .send(())
+                .expect("termination completion receiver");
+        });
+        let terminated_before_write_release = terminated_rx
+            .recv_timeout(Duration::from_millis(250))
+            .is_ok();
+
+        release_tx.send(()).expect("release stalled stdin write");
+        writer_thread.join().expect("writer thread completes");
+        teardown_thread.join().expect("teardown thread completes");
+
+        assert!(
+            terminated_before_write_release,
+            "termination waited for the stalled stdin write"
+        );
     }
 
     #[test]
