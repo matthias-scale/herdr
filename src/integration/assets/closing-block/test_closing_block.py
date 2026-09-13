@@ -359,8 +359,75 @@ Done here.
     for count in (0, 1, 2, 99)
 }
 
+NONBLOCKING_ONLY = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** · non-blocking: Share any preference if useful.
+2. **Verify** · non-blocking: Confirm the optional visual detail.
+
+Done here.
+"""
+
+BLOCKING_ANSWER = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** — Choose the release lane.
+
+Done here.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
+    def test_nonblocking_only(self):
+        block = closing_block.parse(NONBLOCKING_ONLY)
+
+        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(
+            [(item["label"], item["text"], item["blocking"]) for item in block.wire_items()],
+            [
+                ("Answer", "Share any preference if useful.", False),
+                ("Verify", "Confirm the optional visual detail.", False),
+            ],
+        )
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertEqual(outcome["payload"]["state"], "idle")
+        self.assertEqual(
+            [item["blocking"] for item in outcome["payload"]["items"]],
+            [False, False],
+        )
+        metadata = rpc.call_args_list[-1].args[3]
+        self.assertEqual(metadata["tokens"]["closing_idle"], "1")
+
+    def test_blocking_answer(self):
+        block = closing_block.parse(BLOCKING_ANSWER)
+
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertTrue(block.wire_items()[0]["blocking"])
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc"):
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertEqual(outcome["payload"]["state"], "blocked")
+
     def test_contract_line_parses_met_and_unmet_states(self):
         met = closing_block.parse(CONTRACT_MET)
         unmet = closing_block.parse(CONTRACT_MET.replace("— met", "— unmet"))
@@ -398,6 +465,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 "n": 1,
                 "label": "Gate",
                 "text": "Approve PR #2606 for MAT-125 before production rollout.",
+                "blocking": True,
                 "pr": 2606,
                 "ticket": "MAT-125",
                 "url": None,

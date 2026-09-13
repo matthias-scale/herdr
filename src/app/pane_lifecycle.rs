@@ -240,7 +240,7 @@ pub(crate) fn pane_is_done(
     crate::terminal::state::session_is_quiet(
         state,
         !terminal.closing_gates.is_empty()
-            || !terminal.closing_items.is_empty()
+            || terminal.has_blocking_closing_items()
             || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
@@ -258,7 +258,7 @@ pub(crate) fn pane_is_quiet(
     crate::terminal::state::session_is_quiet(
         state,
         !terminal.closing_gates.is_empty()
-            || !terminal.closing_items.is_empty()
+            || terminal.has_blocking_closing_items()
             || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
@@ -412,6 +412,7 @@ mod tests {
             .clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Gate".into(),
             text: "Choose the release path".into(),
@@ -439,6 +440,7 @@ mod tests {
             .clone();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose the release path".into(),

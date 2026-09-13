@@ -4960,6 +4960,7 @@ mod tests {
             .get_mut(&attention_terminal_id)
             .expect("attention terminal state")
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose a lane".into(),

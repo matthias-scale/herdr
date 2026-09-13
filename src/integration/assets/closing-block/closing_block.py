@@ -2,8 +2,9 @@
 
 The adapter deliberately keeps the authoring format unchanged. Critical action
 points retain their Gate/Answer/Verify labels. A Gate always blocks; Answer and
-Verify block once no sub-agent work remains. The optional What to test section
-is context, and auto-proceeded decisions are a separate delimited list.
+Verify block once no sub-agent work remains unless their label carries the
+`· non-blocking` marker. The optional What to test section is context, and
+auto-proceeded decisions are a separate delimited list.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 # The header line alone is the trigger: agents drop the bold markers, add a
 # heading marker or a colon, or vary the case often enough that any strictness
 # here silently un-latches gates. The `(N blocking)` count still counts Gates;
-# parsed Answer and Verify items independently mark an idle pane as blocked.
+# owed Answer and Verify items independently mark an idle pane as blocked.
 # Only the full-line anchor is kept so prose mentions never match.
 _HEADER_RE = re.compile(
     r"^(?:#{1,6}[ \t]*)?(?:\*\*)?Critical action points"
@@ -89,6 +90,9 @@ _RECOMMENDATION_RE = re.compile(
     r"(?P<value>.+?)(?=\s+(?:because|at\s+\d{1,2}:\d{2}|decided\s+at)|$)",
     re.IGNORECASE,
 )
+_NONBLOCKING_MARKER_RE = re.compile(
+    r"^·[ \t]+non-blocking\b[ \t]*(?:[:—–-][ \t]*)?", re.IGNORECASE
+)
 _DECIDED_AT_RE = re.compile(
     r"\b(?:decided\s+at|at)\s+(?P<value>\d{1,2}:\d{2}(?:\s*[A-Z]{2})?)",
     re.IGNORECASE,
@@ -121,10 +125,7 @@ class Item:
     label: str  # Gate | Answer | Verify | What to test
     text: str
     metadata: dict[str, Any] | None = None
-
-    @property
-    def blocking(self) -> bool:
-        return self.label == "Gate"
+    blocking: bool = False
 
     def wire(self) -> dict[str, Any]:
         metadata = _metadata(self.text)
@@ -134,6 +135,7 @@ class Item:
             "n": self.index,
             "label": self.label,
             "text": self.text,
+            "blocking": self.blocking,
             **metadata,
             "default": None,
             "default_at": None,
@@ -187,21 +189,25 @@ class ClosingBlock:
 
     @property
     def gates(self) -> list[Item]:
-        return [item for item in self.items if item.blocking]
+        return [item for item in self.items if item.label == "Gate"]
 
     @property
-    def nonblocking_items(self) -> list[Item]:
-        return [item for item in self.items if not item.blocking]
+    def nongate_items(self) -> list[Item]:
+        return [item for item in self.items if item.label != "Gate"]
 
     @property
     def action_points(self) -> list[Item]:
-        return [item for item in self.items if item.label in {"Answer", "Verify"}]
+        return [
+            item
+            for item in self.items
+            if item.label in {"Answer", "Verify"} and item.blocking
+        ]
 
     @property
     def blocking(self) -> int:
         # Labels are the authority for the authored Gate count. Answer and
-        # Verify do not increment `(N blocking)`, though they still block an
-        # idle pane because the human owes an action. Once any item parsed with
+        # Verify do not increment `(N blocking)`, though owed ones still block
+        # an idle pane because the human owes an action. Once any item parsed with
         # a label, the labeled gates are the count. A header that says
         # "(1 blocking)" above a lone Answer is a miscounted header, not a
         # hidden Gate.
@@ -253,7 +259,7 @@ class ClosingBlock:
         return [item.wire() for item in self.gates]
 
     def wire_items(self) -> list[dict[str, Any]]:
-        return [item.wire() for item in self.nonblocking_items]
+        return [item.wire() for item in self.nongate_items]
 
     def wire_decisions(self) -> list[dict[str, Any]]:
         return [decision.wire() for decision in self.decisions]
@@ -434,11 +440,21 @@ def _parse_items(
         item_end = min(end_candidates)
         body = text[match.start("body") : item_end]
         label = match.group("label") or match.group("plain_label") or ""
+        cleaned_body = _clean_body(body)
+        nonblocking_marker = _NONBLOCKING_MARKER_RE.match(cleaned_body)
+        if nonblocking_marker:
+            cleaned_body = cleaned_body[nonblocking_marker.end() :].strip()
+        normalized_label = label.capitalize()
         parsed.append(
             Item(
                 int(match.group("idx")),
-                label.capitalize(),
-                _clean_body(body),
+                normalized_label,
+                cleaned_body,
+                blocking=normalized_label == "Gate"
+                or (
+                    normalized_label in {"Answer", "Verify"}
+                    and nonblocking_marker is None
+                ),
             )
         )
     return parsed
@@ -538,6 +554,7 @@ def parse(text: str) -> ClosingBlock:
                 for item in block.items:
                     if item.label == "" and labeled_gates < declared:
                         item.label = "Gate"
+                        item.blocking = True
                         labeled_gates += 1
             kept = [item for item in block.items if item.label]
             block.discarded_items = len(block.items) - len(kept)

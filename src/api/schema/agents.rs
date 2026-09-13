@@ -369,7 +369,7 @@ impl AgentInfo {
             attention_tier: crate::terminal::state::attention_tier(
                 state,
                 open_blockers,
-                !self.items.is_empty(),
+                self.items.iter().any(|item| item.blocking),
                 self.usage_limited,
             ),
             open_blockers,

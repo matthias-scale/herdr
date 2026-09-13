@@ -2399,6 +2399,7 @@ mod tests {
 
     fn test_gate() -> crate::api::schema::ClosingBlockItem {
         crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Gate".into(),
             text: "Choose the release path".into(),
@@ -5332,6 +5333,7 @@ mod tests {
             .unwrap()
             .set_detected_state(Some(Agent::Claude), AgentState::Working);
         let gates = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Gate".into(),
             text: "Approve the open Herdr PR".into(),
@@ -5342,6 +5344,7 @@ mod tests {
             default_at: None,
         }];
         let items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 2,
             label: "Answer".into(),
             text: "Use the fork PR".into(),
@@ -5676,6 +5679,7 @@ mod tests {
             agent_session_id: None,
             agent_session_path: None,
             gates: Some(vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: text.into(),
@@ -5740,6 +5744,7 @@ mod tests {
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: Some(vec![crate::api::schema::ClosingBlockItem {
+                    blocking: true,
                     n: 1,
                     label: "Gate".into(),
                     text: "legacy gate".into(),

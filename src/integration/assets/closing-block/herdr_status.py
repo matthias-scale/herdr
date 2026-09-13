@@ -3,7 +3,8 @@
 The closing-block adapter writes one payload:
 
     {"v": 2, "agent": "claude", "blocking": 1, "agents": 0,
-     "gates": [{"n": 1, "label": "Gate", "text": "...", "pr": null,
+     "gates": [{"n": 1, "label": "Gate", "text": "...", "blocking": true,
+                "pr": null,
                 "ticket": null, "url": null, "default": null,
                 "default_at": null}],
      "items": [], "decisions": [], "agent_names": []}
@@ -76,6 +77,7 @@ def _normalize_item(
             "n": index,
             "label": label,
             "text": text,
+            "blocking": True,
             "pr": None,
             "ticket": None,
             "url": None,
@@ -86,6 +88,7 @@ def _normalize_item(
     item.setdefault("n", index)
     item.setdefault("label", label)
     item.setdefault("text", "")
+    item.setdefault("blocking", True)
     item.setdefault("pr", None)
     item.setdefault("ticket", None)
     item.setdefault("url", None)
@@ -245,6 +248,7 @@ def report(
         item
         for item in item_objects
         if str(item.get("label") or "").lower() in {"answer", "verify"}
+        and item.get("blocking", True) is not False
     ]
     decision_objects = [
         _normalize_decision(value, index=index)

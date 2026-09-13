@@ -105,7 +105,7 @@ impl PaneState {
             attention_tier: attention_tier(
                 state,
                 open_blockers,
-                !terminal.closing_items.is_empty(),
+                terminal.has_blocking_closing_items(),
                 terminal.usage_limited,
             ),
             open_blockers,
@@ -144,6 +144,30 @@ mod tests {
         assert_eq!(
             projection(AgentState::Working, AttentionTier::Blocked).status_key(),
             "working"
+        );
+    }
+
+    #[test]
+    fn attention_tier_ignores_nonblocking_items() {
+        let terminal_id = TerminalId::alloc();
+        let mut terminal = TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal.set_raw_agent_state_for_test(AgentState::Idle);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Optional preference".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let pane = PaneState::new(terminal_id);
+
+        assert_eq!(
+            pane.agent_projection(&terminal).attention_tier,
+            AttentionTier::None
         );
     }
 }
