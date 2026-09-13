@@ -527,6 +527,7 @@ fn theme_runtime_config(
         light_name: config.theme.light_name.clone().unwrap_or(default_light),
         auto_switch: config.theme.auto_switch,
         host_appearance: config.theme.host_appearance,
+        runtime_host_appearance: None,
         custom: config.theme.custom.clone(),
         legacy_accent: (use_legacy_ui_accent
             && config.ui.accent != "cyan"
@@ -2703,7 +2704,23 @@ impl App {
         }
 
         if !invalid_section("theme") {
+            // A reload re-reads config, and config alone cannot know the host
+            // appearance on a relay that drops OSC 11 answers. Rebuilding the
+            // runtime wholesale therefore threw away whatever `herdr theme set`
+            // or the attach relay had asserted, and the chrome fell back to
+            // `[theme] name` until the next push.
+            let asserted = self.state.theme_runtime.runtime_host_appearance;
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
+            if let Some(appearance) = asserted {
+                self.state.theme_runtime.runtime_host_appearance = Some(appearance);
+                // A pinned config value still wins, matching how the client
+                // resolves config against the environment.
+                if self.state.theme_runtime.host_appearance
+                    == crate::config::HostAppearanceOverride::Auto
+                {
+                    self.state.theme_runtime.host_appearance = appearance;
+                }
+            }
             self.refresh_effective_app_theme();
         }
 
@@ -4839,6 +4856,47 @@ mod tests {
         let pane_theme = app.state.pane_terminal_theme();
         assert_eq!(pane_theme.foreground, Some(reported_foreground));
         assert_eq!(pane_theme.background, Some(reported_background));
+    }
+
+    fn app_with_auto_switch_theme_config() -> (crate::config::Config, App) {
+        let mut config = Config::default();
+        config.theme.auto_switch = true;
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        config.theme.dark_name = Some("github-dark-high-contrast".to_string());
+        config.theme.light_name = Some("github-light-high-contrast".to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        (config, app)
+    }
+
+    #[test]
+    fn config_reload_keeps_an_appearance_asserted_at_runtime() {
+        let (config, mut app) = app_with_auto_switch_theme_config();
+        app.set_host_appearance_override(crate::config::HostAppearanceOverride::Dark);
+        assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+
+        app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(
+            app.state.theme_runtime.host_appearance,
+            crate::config::HostAppearanceOverride::Dark
+        );
+        assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+    }
+
+    #[test]
+    fn config_reload_lets_a_pinned_appearance_beat_the_runtime_one() {
+        let (mut config, mut app) = app_with_auto_switch_theme_config();
+        app.set_host_appearance_override(crate::config::HostAppearanceOverride::Dark);
+        config.theme.host_appearance = crate::config::HostAppearanceOverride::Light;
+
+        app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(
+            app.state.theme_runtime.host_appearance,
+            crate::config::HostAppearanceOverride::Light
+        );
+        assert_eq!(app.state.theme_name, "github-light-high-contrast");
     }
 
     #[test]

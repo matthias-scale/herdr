@@ -2883,6 +2883,11 @@ pub struct ThemeRuntimeConfig {
     pub light_name: String,
     pub auto_switch: bool,
     pub host_appearance: crate::config::HostAppearanceOverride,
+    /// The appearance a runtime source asserted (the theme API, the attach-time
+    /// environment relay, or the theme toggle), kept apart from the config
+    /// value so a config reload can restore it. Where OSC 11 never answers,
+    /// this is the only appearance signal the server has.
+    pub runtime_host_appearance: Option<crate::config::HostAppearanceOverride>,
     pub custom: Option<crate::config::CustomThemeColors>,
     pub legacy_accent: Option<String>,
 }
@@ -6462,6 +6467,7 @@ impl AppState {
                 light_name: "catppuccin-latte".to_string(),
                 auto_switch: false,
                 host_appearance: crate::config::HostAppearanceOverride::Auto,
+                runtime_host_appearance: None,
                 custom: None,
                 legacy_accent: None,
             },
