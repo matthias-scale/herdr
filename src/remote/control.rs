@@ -378,11 +378,13 @@ impl SshRemoteFocusTransport {
                 .collect::<Vec<_>>()
         };
         for (_, handle) in &revoked {
-            let _decision = handle
-                .writer_decision
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            handle.detach_requested.store(true, Ordering::Release);
+            {
+                let _decision = handle
+                    .writer_decision
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                handle.detach_requested.store(true, Ordering::Release);
+            }
             handle.termination.terminate();
             let _ = handle.outbound_tx.try_send(ProxyOutbound::Detach);
         }
@@ -611,11 +613,13 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
             let Some(handle) = handle else {
                 return;
             };
-            let _decision = handle
-                .writer_decision
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            handle.detach_requested.store(true, Ordering::Release);
+            {
+                let _decision = handle
+                    .writer_decision
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                handle.detach_requested.store(true, Ordering::Release);
+            }
             handle.termination.terminate();
             // The flag is the urgent side channel. If the normal queue is
             // full, the writer drops queued input and writes Detach directly
@@ -939,24 +943,29 @@ fn write_control_message(
     writer_decision: &Mutex<()>,
     operation_state: &crate::remote::RemoteFocusOperationState,
 ) -> WriterWriteOutcome {
-    let _decision = writer_decision
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (message, stop, intentional) = if detach_requested.load(Ordering::Acquire) {
-        (&ClientMessage::Detach, true, true)
-    } else if detached.load(Ordering::Acquire) {
-        return WriterWriteOutcome::Skipped;
-    } else {
-        (message, stop, false)
-    };
-    if is_input && !intentional {
-        operation_state.before_input_send();
-        let admission = operation_state.lock_input_admission();
-        if operation_state.is_terminal() {
+    let detach_message = ClientMessage::Detach;
+    let (message, stop, intentional) = {
+        let _decision = writer_decision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if detach_requested.load(Ordering::Acquire) {
+            (&detach_message, true, true)
+        } else if detached.load(Ordering::Acquire) {
             return WriterWriteOutcome::Skipped;
+        } else {
+            if is_input {
+                operation_state.before_input_send();
+                let admission = operation_state.lock_input_admission();
+                if operation_state.is_terminal() {
+                    return WriterWriteOutcome::Skipped;
+                }
+                drop(admission);
+            }
+            (message, stop, false)
         }
-        drop(admission);
-    }
+    };
+    // The decision is serialized with detach, but wire I/O must not be: SSH
+    // stdin can block indefinitely while the app still needs to close.
     match protocol::write_message(writer, message) {
         Ok(()) => WriterWriteOutcome::Sent { stop },
         Err(error) => WriterWriteOutcome::Failed {
@@ -1298,7 +1307,7 @@ mod tests {
         panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
         write_error: Option<String>,
-        input_write_gate: Option<Arc<InputWriteGate>>,
+        write_gate: Option<Arc<WriteGate>>,
         diagnostic: Option<String>,
     }
 
@@ -1352,7 +1361,7 @@ mod tests {
                 Box::new(FakeWriter {
                     output: this.output,
                     write_error: this.write_error,
-                    input_write_gate: this.input_write_gate,
+                    write_gate: this.write_gate,
                 }),
             )
         }
@@ -1428,14 +1437,12 @@ mod tests {
     struct FakeWriter {
         output: Arc<Mutex<Vec<u8>>>,
         write_error: Option<String>,
-        input_write_gate: Option<Arc<InputWriteGate>>,
+        write_gate: Option<Arc<WriteGate>>,
     }
 
     impl Write for FakeWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            if let Some(gate) = &self.input_write_gate {
-                gate.wait_until_released();
-            }
+            let write_index = self.write_gate.as_ref().map(|gate| gate.begin_write());
             if let Some(error) = &self.write_error {
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionReset,
@@ -1446,6 +1453,9 @@ mod tests {
                 .lock()
                 .expect("fake output lock")
                 .extend_from_slice(buffer);
+            if let (Some(gate), Some(write_index)) = (&self.write_gate, write_index) {
+                gate.finish_write(write_index);
+            }
             Ok(buffer.len())
         }
 
@@ -1454,43 +1464,65 @@ mod tests {
         }
     }
 
-    struct InputWriteGate {
-        started: AtomicBool,
-        released: Mutex<bool>,
-        wake: std::sync::Condvar,
+    struct WriteGate {
+        stalled_write: usize,
+        next_write: std::sync::atomic::AtomicUsize,
+        started_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        detach_written_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     }
 
-    impl InputWriteGate {
-        fn new() -> Arc<Self> {
+    impl WriteGate {
+        fn new(
+            stalled_write: usize,
+            started_tx: std::sync::mpsc::Sender<()>,
+            release_rx: std::sync::mpsc::Receiver<()>,
+            detach_written_tx: std::sync::mpsc::Sender<()>,
+        ) -> Arc<Self> {
             Arc::new(Self {
-                started: AtomicBool::new(false),
-                released: Mutex::new(false),
-                wake: std::sync::Condvar::new(),
+                stalled_write,
+                next_write: std::sync::atomic::AtomicUsize::new(0),
+                started_tx: Mutex::new(Some(started_tx)),
+                release_rx: Mutex::new(Some(release_rx)),
+                detach_written_tx: Mutex::new(Some(detach_written_tx)),
             })
         }
 
-        fn wait_until_started(&self) {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !self.started.load(Ordering::Acquire) {
-                assert!(
-                    Instant::now() < deadline,
-                    "writer did not reach the write gate"
-                );
-                std::thread::sleep(Duration::from_millis(1));
+        fn begin_write(&self) -> usize {
+            let write_index = self
+                .next_write
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if write_index == self.stalled_write {
+                self.started_tx
+                    .lock()
+                    .expect("write gate started lock")
+                    .take()
+                    .expect("write gate start signal")
+                    .send(())
+                    .expect("write gate start receiver");
+                self.release_rx
+                    .lock()
+                    .expect("write gate release lock")
+                    .take()
+                    .expect("write gate release receiver")
+                    .recv()
+                    .expect("write gate release signal");
             }
+            write_index
         }
 
-        fn wait_until_released(&self) {
-            self.started.store(true, Ordering::Release);
-            let mut released = self.released.lock().expect("write gate lock");
-            while !*released {
-                released = self.wake.wait(released).expect("write gate wait");
+        fn finish_write(&self, write_index: usize) {
+            // Each frame uses a prefix and payload write; the detach payload
+            // is therefore the fourth write after the stalled frame starts.
+            if write_index == self.stalled_write + 3 {
+                self.detach_written_tx
+                    .lock()
+                    .expect("detach-written lock")
+                    .take()
+                    .expect("detach-written signal")
+                    .send(())
+                    .expect("detach-written receiver");
             }
-        }
-
-        fn release(&self) {
-            *self.released.lock().expect("write gate lock") = true;
-            self.wake.notify_all();
         }
     }
 
@@ -1669,21 +1701,13 @@ mod tests {
         )
     }
 
-    fn transport_with_input_write_gate(
+    fn transport_with_write_gate(
         input: Vec<u8>,
         output: Arc<Mutex<Vec<u8>>>,
         read_gate: Option<Arc<AtomicBool>>,
-        input_write_gate: Arc<InputWriteGate>,
+        write_gate: Arc<WriteGate>,
     ) -> SshRemoteFocusTransport {
-        transport_with_writer_options(
-            input,
-            output,
-            None,
-            None,
-            read_gate,
-            None,
-            Some(input_write_gate),
-        )
+        transport_with_writer_options(input, output, None, None, read_gate, None, Some(write_gate))
     }
 
     fn transport_with_writer_options(
@@ -1693,7 +1717,7 @@ mod tests {
         panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
         write_error: Option<String>,
-        input_write_gate: Option<Arc<InputWriteGate>>,
+        write_gate: Option<Arc<WriteGate>>,
     ) -> SshRemoteFocusTransport {
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
@@ -1713,7 +1737,7 @@ mod tests {
                     panic_at,
                     read_gate,
                     write_error,
-                    input_write_gate,
+                    write_gate,
                     diagnostic: None,
                 })),
                 connect_error: None,
@@ -1914,7 +1938,7 @@ mod tests {
                 panic_at: None,
                 read_gate: None,
                 write_error: None,
-                input_write_gate: None,
+                write_gate: None,
                 diagnostic: Some("buildbox: Permission denied (publickey).".into()),
             })),
             connect_error: None,
@@ -2128,7 +2152,7 @@ mod tests {
                 panic_at: None,
                 read_gate: None,
                 write_error: None,
-                input_write_gate: None,
+                write_gate: None,
                 diagnostic: None,
             })),
             connect_error: None,
@@ -2204,7 +2228,7 @@ mod tests {
             panic_at: None,
             read_gate: Some(read_gate),
             write_error: None,
-            input_write_gate: None,
+            write_gate: None,
             diagnostic: None,
         };
         let started = Instant::now();
@@ -2427,64 +2451,140 @@ mod tests {
     }
 
     #[test]
-    fn detach_cannot_complete_while_a_dequeued_input_is_being_written() {
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let mut input = welcome_bytes();
-        input.extend(framed(&ServerMessage::ControlReady {
-            context: Box::new(control_context()),
-        }));
-        let read_gate = Arc::new(AtomicBool::new(false));
-        let write_gate = InputWriteGate::new();
-        let transport = transport_with_input_write_gate(
-            input,
-            Arc::clone(&output),
-            Some(Arc::clone(&read_gate)),
-            Arc::clone(&write_gate),
-        );
-        let transport = Arc::new(Mutex::new(transport));
-        let (channels, outbound_tx) = test_channels();
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
-        transport
-            .lock()
-            .expect("transport lock")
-            .start("operation", &agent_ref(), "proxy", channels, event_tx)
-            .expect("thread starts");
-        let first = event_rx.blocking_recv().expect("active event");
-        assert!(matches!(
-            first,
-            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
-                if matches!(*transition, RemoteFocusTransition::Active(_))
-        ));
-        outbound_tx
-            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"answer")))
-            .expect("input queued");
-        write_gate.wait_until_started();
-
-        let detach_done = Arc::new(AtomicBool::new(false));
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let detach_transport = Arc::clone(&transport);
-        let detach_done_for_thread = Arc::clone(&detach_done);
-        let detach_thread = std::thread::spawn(move || {
-            started_tx.send(()).expect("detach start notification");
-            detach_transport
+    fn detach_returns_during_stalled_input_or_resize_and_writes_detach() {
+        for stall_resize in [false, true] {
+            let output = Arc::new(Mutex::new(Vec::new()));
+            let mut input = welcome_bytes();
+            input.extend(framed(&ServerMessage::ControlReady {
+                context: Box::new(control_context()),
+            }));
+            let read_gate = Arc::new(AtomicBool::new(false));
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (detach_written_tx, detach_written_rx) = std::sync::mpsc::channel();
+            let write_gate = WriteGate::new(0, started_tx, release_rx, detach_written_tx);
+            let transport = transport_with_write_gate(
+                input,
+                Arc::clone(&output),
+                Some(Arc::clone(&read_gate)),
+                write_gate,
+            );
+            let transport = Arc::new(Mutex::new(transport));
+            let (channels, outbound_tx) = test_channels();
+            let resize_slot = Arc::clone(&channels.resize_slot);
+            let input_enabled = Arc::clone(&channels.input_enabled);
+            let operation_state = Arc::clone(&channels.operation_state);
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+            transport
                 .lock()
                 .expect("transport lock")
-                .detach("operation");
-            detach_done_for_thread.store(true, Ordering::Release);
-        });
-        started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("detach started");
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            !detach_done.load(Ordering::Acquire),
-            "detach completed before the dequeued input write finished"
-        );
+                .start("operation", &agent_ref(), "proxy", channels, event_tx)
+                .expect("thread starts");
+            let first = event_rx.blocking_recv().expect("active event");
+            assert!(matches!(
+                first,
+                crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                    if matches!(*transition, RemoteFocusTransition::Active(_))
+            ));
 
-        write_gate.release();
-        detach_thread.join().expect("detach thread");
-        read_gate.store(true, Ordering::Release);
-        drop(event_rx);
+            if stall_resize {
+                *resize_slot.lock().expect("resize slot lock") = (30, 100, 9, 18);
+                outbound_tx
+                    .blocking_send(ProxyOutbound::SyncResize)
+                    .expect("resize queued");
+            } else {
+                outbound_tx
+                    .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"answer")))
+                    .expect("input queued");
+            }
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("writer reached the stalled input or resize write");
+
+            let (detach_done_tx, detach_done_rx) = std::sync::mpsc::channel();
+            let detach_transport = Arc::clone(&transport);
+            let detach_thread = std::thread::spawn(move || {
+                detach_transport
+                    .lock()
+                    .expect("transport lock")
+                    .detach("operation");
+                detach_done_tx.send(()).expect("detach completion receiver");
+            });
+            let detach_returned = detach_done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            if detach_returned {
+                assert!(
+                    operation_state.is_terminal(),
+                    "detach must terminate the operation"
+                );
+                assert!(
+                    !input_enabled.load(Ordering::Acquire),
+                    "detach must close the input gate"
+                );
+                assert!(
+                    transport
+                        .lock()
+                        .expect("transport lock")
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_empty(),
+                    "detach must unregister the session before releasing the write"
+                );
+                outbound_tx
+                    .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"late")))
+                    .expect("late input queued");
+            }
+            release_tx.send(()).expect("release stalled write");
+            detach_thread.join().expect("detach thread");
+            assert!(
+                detach_returned,
+                "detach waited for the stalled {} write",
+                if stall_resize { "resize" } else { "input" }
+            );
+
+            detach_written_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("detach reached the wire");
+            let sessions_empty = transport
+                .lock()
+                .expect("transport lock")
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+            assert!(sessions_empty, "detach must release the remote lease");
+
+            let messages = wire_messages(&output.lock().expect("fake output lock"));
+            assert!(matches!(messages[0], ClientMessage::Hello { .. }));
+            assert!(matches!(messages[1], ClientMessage::ControlTerminal { .. }));
+            if stall_resize {
+                assert!(matches!(
+                    messages[2],
+                    ClientMessage::Resize {
+                        cols: 100,
+                        rows: 30,
+                        cell_width_px: 9,
+                        cell_height_px: 18,
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    &messages[2],
+                    ClientMessage::Input { data } if data == b"answer"
+                ));
+            }
+            assert!(matches!(messages[3], ClientMessage::Detach));
+            assert!(
+                !messages.iter().any(
+                    |message| matches!(message, ClientMessage::Input { data } if data == b"late")
+                ),
+                "input queued after detach must not reach the wire"
+            );
+
+            read_gate.store(true, Ordering::Release);
+            drop(outbound_tx);
+            drop(event_rx);
+        }
     }
 
     #[test]
@@ -2575,7 +2675,7 @@ mod tests {
             Box::new(FakeWriter {
                 output: Arc::clone(&output),
                 write_error: None,
-                input_write_gate: None,
+                write_gate: None,
             }),
             outbound_rx,
             resize_slot,
@@ -2676,7 +2776,7 @@ mod tests {
             Box::new(FakeWriter {
                 output: Arc::clone(&output),
                 write_error: None,
-                input_write_gate: None,
+                write_gate: None,
             }),
             outbound_rx,
             Arc::new(Mutex::new((24, 80, 0, 0))),
@@ -2779,7 +2879,7 @@ mod tests {
             Box::new(FakeWriter {
                 output: Arc::clone(&output),
                 write_error: None,
-                input_write_gate: None,
+                write_gate: None,
             }),
             outbound_rx,
             resize_slot,
