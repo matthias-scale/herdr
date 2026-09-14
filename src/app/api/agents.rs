@@ -56,7 +56,10 @@ impl App {
                     },
                 ),
             (None, Some(agent_ref)) => {
-                if !self.configured_remote_focus_hosts.contains(&agent_ref.host) {
+                if !self
+                    .remote_focus_transport
+                    .accepts_remote_host(&agent_ref.host)
+                {
                     return encode_error(
                         id,
                         "unknown_host",
@@ -414,6 +417,10 @@ mod tests {
     struct FakeRemoteFocusTransport;
 
     impl crate::app::remote_focus::RemoteFocusTransport for FakeRemoteFocusTransport {
+        fn accepts_remote_host(&self, _host: &str) -> bool {
+            true
+        }
+
         fn start(
             &mut self,
             operation_id: &str,
@@ -440,10 +447,6 @@ mod tests {
                     message: "fake event queue closed".into(),
                 })
         }
-    }
-
-    fn configure_remote_host(app: &mut App, name: &str) {
-        app.configured_remote_focus_hosts.insert(name.into());
     }
 
     fn remote_context() -> RemoteControlContext {
@@ -1709,43 +1712,19 @@ mod tests {
     }
 
     #[test]
-    fn production_remote_focus_default_never_reaches_active() {
+    fn production_remote_focus_rejects_hosts_absent_from_transport_snapshot() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
-        configure_remote_host(&mut app, "buildbox");
-        let request = |method| Request {
+        let response = app.handle_api_request(Request {
             id: "remote-focus".into(),
-            method,
-        };
-        let started = app.handle_api_request(request(Method::AgentFocus(AgentFocusParams {
-            target: None,
-            agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
-        })));
-        let started: serde_json::Value = serde_json::from_str(&started).expect("started response");
-        assert_eq!(started["result"]["type"], "agent_focus_started");
-        assert_eq!(started["result"]["state"], "connecting");
-        let operation_id = started["result"]["operation_id"]
-            .as_str()
-            .expect("operation id")
-            .to_string();
-        assert!(started["result"]["proxy_pane_id"].as_str().is_some());
-
-        let status =
-            app.handle_api_request(request(Method::AgentFocusStatus(AgentFocusStatusParams {
-                operation_id,
-            })));
-        let status: serde_json::Value = serde_json::from_str(&status).expect("status response");
-        assert_eq!(status["result"]["state"], "failed");
-        assert_eq!(status["result"]["error"]["code"], "host_unreachable");
-        assert!(status["result"]["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("transport is not available")));
-        assert!(status["result"].get("context").is_none());
-        assert_eq!(
-            app.state.workspaces[0].tabs.len(),
-            1,
-            "the stub failure closes the proxy pane it opened"
-        );
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
+            }),
+        });
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "unknown_host");
+        assert_eq!(app.remote_focus_operations.len(), 0);
     }
 
     #[test]
@@ -1765,7 +1744,6 @@ mod tests {
     fn injected_transport_can_drive_remote_focus_active_closed_and_failed() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
-        configure_remote_host(&mut app, "buildbox");
         app.remote_focus_transport = Box::new(FakeRemoteFocusTransport);
 
         let started = app.handle_api_request(Request {

@@ -14,9 +14,9 @@ use crate::layout::PaneId;
 use crate::pane::RemoteProxyChannels;
 use crate::terminal::TerminalId;
 
-/// The production transport is intentionally inert until the proxy pane is
-/// proven against a real remote server. `SshRemoteFocusTransport` stays
-/// compiled and tested; this stub remains the default.
+/// A deterministic failure transport for tests that need to exercise the app
+/// operation lifecycle without opening an SSH connection.
+#[allow(dead_code)] // Keep the stub available to tests that inject a failing transport.
 #[derive(Debug, Default)]
 pub(crate) struct StubRemoteFocusTransport;
 
@@ -34,17 +34,6 @@ impl RemoteFocusTransport for StubRemoteFocusTransport {
             message: "remote focus transport is not available yet".to_owned(),
         })
     }
-}
-
-pub(crate) fn configured_remote_hosts(
-    fleet: &crate::config::FleetConfig,
-) -> std::collections::HashSet<String> {
-    fleet
-        .hosts
-        .iter()
-        .filter(|host| !host.local && !host.target.trim().is_empty())
-        .map(|host| host.name.clone())
-        .collect()
 }
 
 /// Terminal operation records remain queryable for five minutes.
@@ -77,6 +66,18 @@ pub(crate) enum RemoteFocusTransition {
 /// in the resize slot), and detach. `detach` must not block; it releases the
 /// remote lease on a live session and is a no-op otherwise.
 pub(crate) trait RemoteFocusTransport: Send {
+    /// Resolve admission and connection details from the same live snapshot.
+    /// Implementations that do not support remote focus reject every alias.
+    fn accepts_remote_host(&self, _host: &str) -> bool {
+        false
+    }
+
+    /// Replace the connection snapshot. Returned operation IDs are sessions
+    /// revoked because their configured connection changed or disappeared.
+    fn reload_fleet(&mut self, _fleet: &crate::config::FleetConfig) -> Vec<String> {
+        Vec::new()
+    }
+
     fn start(
         &mut self,
         operation_id: &str,
@@ -96,9 +97,13 @@ pub(crate) struct RemoteFocusOperation {
     pub(crate) state: RemoteFocusState,
     pub(crate) context: Option<RemoteControlContext>,
     pub(crate) error: Option<ErrorBody>,
+    operation_state: std::sync::Arc<crate::remote::RemoteFocusOperationState>,
     /// Local proxy pane and its terminal, once the pane exists.
     proxy: Option<(PaneId, TerminalId)>,
     first_frame_processed: bool,
+    /// The error came from lifecycle reconciliation, not from the transport.
+    /// A later detailed failure replaces it.
+    error_is_placeholder: bool,
     created_at: Instant,
     completed_at: Option<Instant>,
 }
@@ -145,6 +150,7 @@ impl RemoteFocusOperations {
         agent_ref: AgentRef,
         now: Instant,
     ) -> Result<RemoteFocusOperationStart, ErrorBody> {
+        self.reconcile_terminal_operations(now);
         self.prune(now);
 
         let concurrent = self
@@ -200,8 +206,10 @@ impl RemoteFocusOperations {
                 state: RemoteFocusState::Connecting,
                 context: None,
                 error: None,
+                operation_state: crate::remote::RemoteFocusOperationState::new(),
                 proxy: None,
                 first_frame_processed: false,
+                error_is_placeholder: false,
                 created_at: now,
                 completed_at: None,
             },
@@ -213,11 +221,21 @@ impl RemoteFocusOperations {
         })
     }
 
+    pub(crate) fn operation_state(
+        &self,
+        operation_id: &str,
+    ) -> Option<std::sync::Arc<crate::remote::RemoteFocusOperationState>> {
+        self.operations
+            .get(operation_id)
+            .map(|operation| std::sync::Arc::clone(&operation.operation_state))
+    }
+
     pub(crate) fn snapshot(
         &mut self,
         operation_id: &str,
         now: Instant,
     ) -> Result<RemoteFocusOperationSnapshot, ErrorBody> {
+        self.reconcile_terminal_operations(now);
         self.prune(now);
         let Some(operation) = self.operations.get(operation_id) else {
             return Err(ErrorBody {
@@ -235,20 +253,64 @@ impl RemoteFocusOperations {
         })
     }
 
+    /// Projects the transport-owned terminal bit into the app-owned record.
+    /// Failure events still carry the detailed error and drive normal UI
+    /// updates, but delivery of one is not required for lifecycle correctness.
+    pub(crate) fn reconcile_terminal_operations(&mut self, now: Instant) -> Vec<String> {
+        if self.operations.is_empty() {
+            return Vec::new();
+        }
+        let mut reconciled = Vec::new();
+        for (operation_id, operation) in &mut self.operations {
+            if operation.operation_state.is_terminal()
+                && matches!(
+                    operation.state,
+                    RemoteFocusState::Connecting | RemoteFocusState::Active
+                )
+            {
+                operation.state = RemoteFocusState::Failed;
+                operation.context = None;
+                operation.error = Some(ErrorBody {
+                    code: "connection_lost".into(),
+                    message: "remote focus connection terminated".into(),
+                });
+                operation.error_is_placeholder = true;
+                operation.completed_at = Some(now);
+                reconciled.push(operation_id.clone());
+            }
+        }
+        reconciled
+    }
+
     pub(crate) fn transition(
         &mut self,
         operation_id: &str,
         transition: RemoteFocusTransition,
         now: Instant,
-    ) {
+    ) -> bool {
         let Some(operation) = self.operations.get_mut(operation_id) else {
-            return;
+            return false;
         };
         if matches!(
             operation.state,
             RemoteFocusState::Failed | RemoteFocusState::Closed
         ) {
-            return;
+            if operation.state == RemoteFocusState::Failed && operation.error_is_placeholder {
+                if let RemoteFocusTransition::Failed(error) = transition {
+                    operation.error = Some(error);
+                    operation.error_is_placeholder = false;
+                    return true;
+                }
+            }
+            return false;
+        }
+        if operation.operation_state.is_terminal()
+            && matches!(
+                &transition,
+                RemoteFocusTransition::Active(_) | RemoteFocusTransition::ContextUpdated(_)
+            )
+        {
+            return false;
         }
 
         match transition {
@@ -267,18 +329,22 @@ impl RemoteFocusOperations {
                 }
             }
             RemoteFocusTransition::Failed(error) => {
+                operation.operation_state.terminate();
                 operation.state = RemoteFocusState::Failed;
                 operation.context = None;
                 operation.error = Some(error);
+                operation.error_is_placeholder = false;
                 operation.completed_at = Some(now);
             }
             RemoteFocusTransition::Closed => {
+                operation.operation_state.terminate();
                 operation.state = RemoteFocusState::Closed;
                 operation.context = None;
                 operation.error = None;
                 operation.completed_at = Some(now);
             }
         }
+        true
     }
 
     /// Binds the local proxy pane to the operation and publishes the real
@@ -322,6 +388,9 @@ impl RemoteFocusOperations {
         let Some(operation) = self.operations.get_mut(operation_id) else {
             return false;
         };
+        if operation.operation_state.is_terminal() {
+            return false;
+        }
         if frame_complete {
             operation.first_frame_processed = true;
         }
@@ -332,7 +401,9 @@ impl RemoteFocusOperations {
     /// been processed, the two halves of the input gate.
     pub(crate) fn input_gate_open(&self, operation_id: &str) -> bool {
         self.operations.get(operation_id).is_some_and(|operation| {
-            operation.state == RemoteFocusState::Active && operation.first_frame_processed
+            !operation.operation_state.is_terminal()
+                && operation.state == RemoteFocusState::Active
+                && operation.first_frame_processed
         })
     }
 
@@ -607,6 +678,7 @@ impl crate::app::App {
         &mut self,
         agent_ref: AgentRef,
     ) -> Result<RemoteFocusOperationStart, ErrorBody> {
+        self.reconcile_remote_focus_lifecycle();
         // Windowless runs have no remote PTY to display or control.
         if self.fleet_marks_windowless(&agent_ref) {
             return Err(ErrorBody {
@@ -617,7 +689,11 @@ impl crate::app::App {
         let mut started = self
             .remote_focus_operations
             .begin(agent_ref.clone(), Instant::now())?;
-        let channels = match self.create_remote_proxy_pane() {
+        let operation_state = self
+            .remote_focus_operations
+            .operation_state(&started.operation_id)
+            .expect("operation state exists after begin");
+        let channels = match self.create_remote_proxy_pane(operation_state) {
             Ok((pane_id, terminal_id, public_pane_id, channels)) => {
                 started.proxy_pane_id = public_pane_id.clone();
                 self.remote_focus_operations.attach_proxy(
@@ -658,6 +734,7 @@ impl crate::app::App {
     /// the remote control lease.
     fn create_remote_proxy_pane(
         &mut self,
+        operation_state: std::sync::Arc<crate::remote::RemoteFocusOperationState>,
     ) -> Result<(PaneId, TerminalId, String, RemoteProxyChannels), ErrorBody> {
         let workspace_count = self.state.workspaces.len();
         let ws_idx = self
@@ -679,6 +756,7 @@ impl crate::app::App {
             self.state.pane_scrollback_limit_bytes,
             self.render_notify.clone(),
             self.render_dirty.clone(),
+            operation_state,
         )
         .map_err(|error| ErrorBody {
             code: "host_unreachable".into(),
@@ -724,8 +802,28 @@ impl crate::app::App {
         &mut self,
         operation_id: &str,
     ) -> Result<RemoteFocusOperationSnapshot, ErrorBody> {
-        self.remote_focus_operations
-            .snapshot(operation_id, Instant::now())
+        self.reconcile_remote_focus_lifecycle();
+        let snapshot = self
+            .remote_focus_operations
+            .snapshot(operation_id, Instant::now())?;
+        if matches!(
+            snapshot.state,
+            RemoteFocusState::Failed | RemoteFocusState::Closed
+        ) {
+            self.close_remote_proxy_pane(operation_id);
+        }
+        Ok(snapshot)
+    }
+
+    pub(crate) fn reconcile_remote_focus_lifecycle(&mut self) -> bool {
+        let terminal_operations = self
+            .remote_focus_operations
+            .reconcile_terminal_operations(Instant::now());
+        let changed = !terminal_operations.is_empty();
+        for operation_id in terminal_operations {
+            self.close_remote_proxy_pane(&operation_id);
+        }
+        changed
     }
 
     pub(crate) fn apply_remote_focus_transition(
@@ -738,8 +836,12 @@ impl crate::app::App {
             | RemoteFocusTransition::ContextUpdated(context) => Some((**context).clone()),
             _ => None,
         };
-        self.remote_focus_operations
-            .transition(operation_id, transition, Instant::now());
+        let applied =
+            self.remote_focus_operations
+                .transition(operation_id, transition, Instant::now());
+        if !applied {
+            return;
+        }
         let state = self
             .remote_focus_operations
             .snapshot(operation_id, Instant::now())
@@ -1081,6 +1183,218 @@ mod tests {
     }
 
     #[test]
+    fn connection_loss_keeps_late_frames_and_context_updates_terminal() {
+        let (mut app, recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let operation_id = started.operation_id.clone();
+        let terminal_id = proxy_terminal_id(&app, &operation_id);
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+        app.apply_remote_focus_frame(&operation_id, &full_frame(b"ready"));
+        assert!(app.remote_focus_operations.input_gate_open(&operation_id));
+
+        let operation_state = app
+            .remote_focus_operations
+            .operation_state(&operation_id)
+            .expect("operation state");
+        assert!(
+            operation_state.terminate(),
+            "loss terminates the operation once"
+        );
+        assert!(
+            !operation_state.terminate(),
+            "repeated loss cannot release the operation twice"
+        );
+        let runtime = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(false);
+        assert!(
+            !runtime.set_remote_proxy_input_enabled(true),
+            "a terminal operation cannot reopen its pane input"
+        );
+
+        // This frame was queued before the transport observed the loss, but
+        // the app delivers it after the shared operation state is terminal.
+        let queued_frame = full_frame(b"late frame");
+        app.apply_remote_focus_frame(&operation_id, &queued_frame);
+        assert!(!app.remote_focus_operations.input_gate_open(&operation_id));
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("proxy runtime")
+            .try_send_bytes(bytes::Bytes::from_static(b"after loss"))
+            .is_err());
+
+        let mut late_context = context();
+        late_context.cwd = "/work/late".into();
+        late_context.foreground_cwd = "/work/late".into();
+        late_context.foreground_process.cwd = "/work/late".into();
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Active(Box::new(late_context.clone())),
+        );
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::ContextUpdated(Box::new(late_context)),
+        );
+
+        let snapshot = app
+            .remote_focus_status(&operation_id)
+            .expect("operation status");
+        assert_eq!(snapshot.context, None);
+        assert_eq!(snapshot.state, RemoteFocusState::Failed);
+        assert!(!app.remote_focus_operations.input_gate_open(&operation_id));
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_none(),
+            "status reconciliation closes the terminal proxy"
+        );
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Failed(ErrorBody {
+                code: "connection_lost".into(),
+                message: "stream ended".into(),
+            }),
+        );
+        assert_eq!(
+            recording.lock().expect("recording lock").detached,
+            vec![operation_id]
+        );
+    }
+
+    #[test]
+    fn dropped_failure_event_reconciles_state_closes_pane_and_allows_retry() {
+        let (mut app, recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let operation_id = started.operation_id.clone();
+        let (pane_id, terminal_id) = app
+            .remote_focus_operations
+            .proxy_location(&operation_id)
+            .expect("proxy location");
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+        app.apply_remote_focus_frame(&operation_id, &full_frame(b"ready"));
+        let operation_state = app
+            .remote_focus_operations
+            .operation_state(&operation_id)
+            .expect("operation state");
+        assert!(operation_state.terminate(), "loss terminates the operation");
+
+        // No RemoteFocusTransition::Failed is delivered. The shared terminal
+        // bit is the only loss signal available to the app here.
+        let snapshot = app
+            .remote_focus_status(&operation_id)
+            .expect("terminal operation remains queryable");
+        assert_eq!(snapshot.state, RemoteFocusState::Failed);
+        assert_eq!(
+            snapshot.error.as_ref().map(|error| error.code.as_str()),
+            Some("connection_lost")
+        );
+        assert!(
+            app.find_pane(pane_id).is_none(),
+            "terminal loss closes the proxy pane"
+        );
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_none(),
+            "terminal loss shuts down the proxy runtime"
+        );
+        assert_eq!(
+            recording.lock().expect("recording lock").detached,
+            vec![operation_id.clone()]
+        );
+
+        let retry = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("same host and agent can be focused again");
+        assert_ne!(retry.operation_id, operation_id);
+        assert_eq!(retry.agent_ref, agent_ref());
+        assert_eq!(
+            app.remote_focus_status(&retry.operation_id)
+                .expect("retry status")
+                .state,
+            RemoteFocusState::Connecting
+        );
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn detailed_failure_replaces_reconciliation_placeholder_without_reopening() {
+        let (mut app, _recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        let operation_id = started.operation_id.clone();
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+        app.apply_remote_focus_frame(&operation_id, &full_frame(b"ready"));
+        assert!(app.remote_focus_operations.input_gate_open(&operation_id));
+
+        let operation_state = app
+            .remote_focus_operations
+            .operation_state(&operation_id)
+            .expect("operation state");
+        assert!(operation_state.terminate(), "loss terminates the operation");
+
+        let reconciled = app
+            .remote_focus_status(&operation_id)
+            .expect("reconciled operation remains queryable");
+        assert_eq!(reconciled.state, RemoteFocusState::Failed);
+        assert_eq!(
+            reconciled.error.as_ref().map(|error| error.code.as_str()),
+            Some("connection_lost")
+        );
+        let completed_at = app
+            .remote_focus_operations
+            .operations
+            .get(&operation_id)
+            .and_then(|operation| operation.completed_at)
+            .expect("reconciliation completes the operation");
+
+        app.apply_remote_focus_transition(
+            &operation_id,
+            RemoteFocusTransition::Failed(ErrorBody {
+                code: "ssh_write_failed".into(),
+                message: "remote control stream stopped reading".into(),
+            }),
+        );
+
+        let detailed = app
+            .remote_focus_status(&operation_id)
+            .expect("detailed failure remains queryable");
+        assert_eq!(detailed.state, RemoteFocusState::Failed);
+        assert_eq!(
+            detailed.error,
+            Some(ErrorBody {
+                code: "ssh_write_failed".into(),
+                message: "remote control stream stopped reading".into(),
+            })
+        );
+        assert_eq!(
+            app.remote_focus_operations
+                .operations
+                .get(&operation_id)
+                .and_then(|operation| operation.completed_at),
+            Some(completed_at)
+        );
+        assert!(!app.remote_focus_operations.input_gate_open(&operation_id));
+    }
+
+    #[test]
     fn control_ready_before_first_frame_keeps_the_gate_closed() {
         let (mut app, _recording) = proxy_app();
         let started = app
@@ -1362,33 +1676,6 @@ mod tests {
         assert!(recording.lock().expect("lock").started.is_empty());
     }
 
-    #[test]
-    fn configured_remote_hosts_excludes_local_and_incomplete_entries() {
-        let fleet = crate::config::FleetConfig {
-            hosts: vec![
-                crate::config::FleetHostConfig {
-                    name: "buildbox".into(),
-                    target: "buildbox".into(),
-                    ..Default::default()
-                },
-                crate::config::FleetHostConfig {
-                    name: "laptop".into(),
-                    local: true,
-                    ..Default::default()
-                },
-                crate::config::FleetHostConfig {
-                    name: "incomplete".into(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            configured_remote_hosts(&fleet),
-            std::iter::once("buildbox".to_string()).collect()
-        );
-    }
-
     fn agent_ref() -> AgentRef {
         AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")
     }
@@ -1486,6 +1773,37 @@ mod tests {
                 .as_ref()
                 .map(|error| error.code.as_str()),
             Some("host_unreachable")
+        );
+    }
+
+    #[test]
+    fn transport_terminal_state_releases_a_concurrent_slot_without_an_event() {
+        let now = Instant::now();
+        let mut operations = RemoteFocusOperations::default();
+        for index in 0..REMOTE_FOCUS_MAX_CONCURRENT_OPERATIONS {
+            operations
+                .begin(
+                    AgentRef::new("buildbox", format!("w1:p{index}"))
+                        .expect("valid agent reference"),
+                    now,
+                )
+                .expect("operation stays under concurrent cap");
+        }
+
+        let first_state = operations
+            .operation_state("remote-focus-1")
+            .expect("first operation state");
+        assert!(first_state.terminate(), "transport marks the first loss");
+        let retry = operations
+            .begin(agent_ref(), now)
+            .expect("terminal transport state releases the slot");
+        assert_eq!(retry.operation_id, "remote-focus-17");
+        assert_eq!(
+            operations
+                .snapshot("remote-focus-1", now)
+                .expect("terminal operation remains queryable")
+                .state,
+            RemoteFocusState::Failed
         );
     }
 

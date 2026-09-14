@@ -1,7 +1,7 @@
 //! Non-interactive OpenSSH control transport for remote focus.
 //
-// This transport is intentionally retained as compiled/tested code while the
-// production default remains the proxy-pane stub.
+// This transport opens one lazy SSH-backed wire session per active remote
+// focus. It never installs, restarts, upgrades, or hands off a remote server.
 #![allow(dead_code)]
 
 #[cfg(unix)]
@@ -9,9 +9,13 @@ use std::io;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use crate::api::schema::{AgentRef, ErrorBody};
 #[cfg(unix)]
@@ -31,23 +35,35 @@ use crate::protocol::{
 /// after a read failure the SSH stderr explains the loss better than the I/O
 /// error does.
 #[cfg(unix)]
-pub(crate) trait ControlReadHalf: Read + Send {
+pub(crate) trait TimedRead: Read {
+    fn read_with_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> io::Result<usize>;
+}
+
+#[cfg(unix)]
+pub(crate) trait ControlReadHalf: TimedRead + Send {
     fn close_diagnostic(&mut self) -> Option<String> {
         None
     }
 }
 
 #[cfg(unix)]
-pub(crate) trait ControlStream: Read + Write + Send {
+pub(crate) trait ControlStream: TimedRead + Write + Send {
     /// Splits the stream after the handshake so the session can read frames
     /// and write input concurrently. The writer half closes the remote
     /// bridge's stdin when dropped.
     fn split(self: Box<Self>) -> (Box<dyn ControlReadHalf>, Box<dyn Write + Send>);
+
+    fn close_diagnostic(&mut self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(unix)]
 pub(crate) trait SshRunner: Send + Sync {
-    fn connect(&self, target: &str) -> Result<Box<dyn ControlStream>, io::Error>;
+    fn connect(
+        &self,
+        host: &crate::config::FleetHostConfig,
+    ) -> Result<Box<dyn ControlStream>, io::Error>;
 }
 
 #[cfg(unix)]
@@ -56,14 +72,17 @@ pub(crate) struct OpenSshRunner;
 
 #[cfg(unix)]
 impl SshRunner for OpenSshRunner {
-    fn connect(&self, target: &str) -> Result<Box<dyn ControlStream>, io::Error> {
-        if target.starts_with('-') {
+    fn connect(
+        &self,
+        host: &crate::config::FleetHostConfig,
+    ) -> Result<Box<dyn ControlStream>, io::Error> {
+        if host.target.starts_with('-') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SSH target must not begin with '-'",
             ));
         }
-        let mut command = ssh_command(target);
+        let mut command = ssh_command(host);
         let mut child = command.spawn()?;
         let Some(stdin) = child.stdin.take() else {
             return Err(io::Error::other("ssh stdin was not available"));
@@ -82,8 +101,26 @@ impl SshRunner for OpenSshRunner {
 }
 
 #[cfg(unix)]
-fn ssh_command(target: &str) -> std::process::Command {
+fn ssh_command(host: &crate::config::FleetHostConfig) -> std::process::Command {
     let mut command = std::process::Command::new("ssh");
+    let remote_command = if let Some(path) = host.socket.as_deref() {
+        let session = host
+            .session
+            .as_deref()
+            .map(|name| format!("HERDR_SESSION={} ", shell_quote(name)))
+            .unwrap_or_default();
+        format!(
+            "HERDR_SOCKET_PATH={} {session}herdr remote-control-bridge",
+            shell_quote(path)
+        )
+    } else if let Some(session) = host.session.as_deref() {
+        format!(
+            "herdr --session {} remote-control-bridge",
+            shell_quote(session)
+        )
+    } else {
+        "herdr remote-control-bridge".to_owned()
+    };
     command
         .arg("-T")
         .arg("-o")
@@ -93,13 +130,42 @@ fn ssh_command(target: &str) -> std::process::Command {
         .arg("-o")
         .arg("ConnectTimeout=5")
         .arg("--")
-        .arg(target)
-        .arg("herdr")
-        .arg("remote-control-bridge")
+        .arg(&host.target)
+        .arg(remote_command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     command
+}
+
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+fn read_with_timeout<R: Read + AsRawFd>(
+    reader: &mut R,
+    buffer: &mut [u8],
+    timeout: Duration,
+) -> io::Result<usize> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut poll_fd = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for remote control data",
+        ));
+    }
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    reader.read(buffer)
 }
 
 #[cfg(unix)]
@@ -114,6 +180,13 @@ struct ProcessControlStream {
 impl Read for ProcessControlStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.stdout.read(buffer)
+    }
+}
+
+#[cfg(unix)]
+impl TimedRead for ProcessControlStream {
+    fn read_with_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        read_with_timeout(&mut self.stdout, buffer, timeout)
     }
 }
 
@@ -141,6 +214,16 @@ impl ControlStream for ProcessControlStream {
             Box::new(this.stdin),
         )
     }
+
+    fn close_diagnostic(&mut self) -> Option<String> {
+        let _ = self.child.kill();
+        let mut output = Vec::new();
+        if let Some(stderr) = &mut self.stderr {
+            let _ = stderr.read_to_end(&mut output);
+        }
+        let _ = self.child.wait();
+        (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned())
+    }
 }
 
 #[cfg(unix)]
@@ -158,8 +241,16 @@ impl Read for ProcessControlReader {
 }
 
 #[cfg(unix)]
+impl TimedRead for ProcessControlReader {
+    fn read_with_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        read_with_timeout(&mut self.stdout, buffer, timeout)
+    }
+}
+
+#[cfg(unix)]
 impl ControlReadHalf for ProcessControlReader {
     fn close_diagnostic(&mut self) -> Option<String> {
+        let _ = self.child.kill();
         let mut output = Vec::new();
         if let Some(stderr) = &mut self.stderr {
             let _ = stderr.read_to_end(&mut output);
@@ -177,14 +268,42 @@ impl Drop for ProcessControlReader {
     }
 }
 
+/// Shared, idempotent termination for one control session.
+#[cfg(unix)]
+struct ControlSessionTermination {
+    sessions: Weak<Mutex<std::collections::HashMap<String, SessionHandle>>>,
+    operation_id: String,
+    detached: Arc<AtomicBool>,
+    input_enabled: Arc<AtomicBool>,
+    operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+}
+
+#[cfg(unix)]
+impl ControlSessionTermination {
+    fn terminate(&self) {
+        self.operation_state.terminate();
+        if let Some(sessions) = self.sessions.upgrade() {
+            finish_control_session(
+                &sessions,
+                &self.operation_id,
+                &self.detached,
+                &self.input_enabled,
+            );
+        } else {
+            close_input_gate_and_detach(&self.input_enabled, &self.detached);
+        }
+    }
+}
+
 /// One live control session. `detached` distinguishes an intentional local
 /// detach (quiet close) from a connection loss (ambiguous delivery).
 #[cfg(unix)]
 #[derive(Clone)]
 struct SessionHandle {
+    host: String,
     outbound_tx: tokio::sync::mpsc::Sender<ProxyOutbound>,
-    detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
+    termination: Arc<ControlSessionTermination>,
 }
 
 pub(crate) struct SshRemoteFocusTransport {
@@ -194,17 +313,12 @@ pub(crate) struct SshRemoteFocusTransport {
     sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
     #[cfg(all(test, unix))]
     writer_start_gate: Option<Arc<std::sync::Barrier>>,
-    targets: std::collections::HashMap<String, String>,
+    hosts: std::collections::HashMap<String, crate::config::FleetHostConfig>,
 }
 
 impl SshRemoteFocusTransport {
     pub(crate) fn new(fleet: &crate::config::FleetConfig) -> Self {
-        let admitted_hosts = crate::fleet::select_hosts(fleet, None).unwrap_or_default();
-        let targets = admitted_hosts
-            .iter()
-            .filter(|host| !host.local && !host.target.trim().is_empty())
-            .map(|host| (host.name.clone(), host.target.clone()))
-            .collect();
+        let hosts = Self::admitted_hosts(fleet);
         Self {
             #[cfg(unix)]
             runner: Arc::new(OpenSshRunner),
@@ -212,8 +326,19 @@ impl SshRemoteFocusTransport {
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             #[cfg(all(test, unix))]
             writer_start_gate: None,
-            targets,
+            hosts,
         }
+    }
+
+    fn admitted_hosts(
+        fleet: &crate::config::FleetConfig,
+    ) -> std::collections::HashMap<String, crate::config::FleetHostConfig> {
+        crate::fleet::select_hosts(fleet, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|host| !host.local && !host.target.trim().is_empty())
+            .map(|host| (host.name.clone(), host))
+            .collect()
     }
 
     #[cfg(all(test, unix))]
@@ -224,6 +349,43 @@ impl SshRemoteFocusTransport {
         let mut transport = Self::new(fleet);
         transport.runner = runner;
         transport
+    }
+
+    #[cfg(unix)]
+    fn reconfigure(&mut self, fleet: &crate::config::FleetConfig) -> Vec<String> {
+        let next_hosts = Self::admitted_hosts(fleet);
+        let revoked = {
+            let sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sessions
+                .iter()
+                .filter_map(|(operation_id, handle)| {
+                    let changed = match (next_hosts.get(&handle.host), self.hosts.get(&handle.host))
+                    {
+                        (Some(next), Some(previous)) => {
+                            next.target != previous.target
+                                || next.socket != previous.socket
+                                || next.session != previous.session
+                        }
+                        (None, Some(_)) | (Some(_), None) => true,
+                        (None, None) => false,
+                    };
+                    changed.then(|| (operation_id.clone(), handle.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (_, handle) in &revoked {
+            handle.detach_requested.store(true, Ordering::Release);
+            handle.termination.terminate();
+            let _ = handle.outbound_tx.try_send(ProxyOutbound::Detach);
+        }
+        self.hosts = next_hosts;
+        revoked
+            .into_iter()
+            .map(|(operation_id, _)| operation_id)
+            .collect()
     }
 
     #[cfg(unix)]
@@ -238,7 +400,7 @@ impl SshRemoteFocusTransport {
         channels: RemoteProxyChannels,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Result<(), ErrorBody> {
-        let Some(target) = self.targets.get(&agent_ref.host).cloned() else {
+        let Some(host) = self.hosts.get(&agent_ref.host).cloned() else {
             return Err(ErrorBody {
                 code: "host_unreachable".to_owned(),
                 message: format!("remote host alias {} is not configured", agent_ref.host),
@@ -249,6 +411,16 @@ impl SshRemoteFocusTransport {
         let runner = Arc::clone(&self.runner);
         let detached = Arc::new(AtomicBool::new(false));
         let detach_requested = Arc::new(AtomicBool::new(false));
+        let input_enabled = Arc::clone(&channels.input_enabled);
+        let sessions = Arc::clone(&self.sessions);
+        let termination = Arc::new(ControlSessionTermination {
+            sessions: Arc::downgrade(&sessions),
+            operation_id: operation_id.clone(),
+            detached: Arc::clone(&detached),
+            input_enabled: Arc::clone(&input_enabled),
+            operation_state: Arc::clone(&channels.operation_state),
+        });
+        let failure_reported = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
         let writer_start_gate = self.writer_start_gate.clone();
         self.sessions
@@ -257,27 +429,26 @@ impl SshRemoteFocusTransport {
             .insert(
                 operation_id.clone(),
                 SessionHandle {
+                    host: agent_ref.host.clone(),
                     outbound_tx: channels.detach_tx.clone(),
-                    detached: Arc::clone(&detached),
                     detach_requested: Arc::clone(&detach_requested),
+                    termination: Arc::clone(&termination),
                 },
             );
-        let sessions = Arc::clone(&self.sessions);
-        let cleanup =
-            ControlSessionTeardown::new(sessions, operation_id.clone(), Arc::clone(&detached));
+        let cleanup = ControlSessionTeardown::new(Arc::clone(&termination));
         let spawn_result = std::thread::Builder::new()
             .name(format!("herdr-remote-focus-{operation_id}"))
             .spawn(move || {
                 // The guard owns the only teardown path. It is constructed
                 // before spawn so dropping a failed spawn also unregisters
                 // the session; closure unwinding covers panic/cancellation.
-                let cleanup_detached = Arc::clone(&cleanup.detached);
-                let panic_operation_id = cleanup.operation_id.clone();
+                let cleanup_detached = Arc::clone(&cleanup.termination.detached);
+                let panic_operation_id = cleanup.termination.operation_id.clone();
                 let cleanup_event_tx = event_tx.clone();
                 let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_control_session(
                         runner,
-                        target,
+                        host,
                         operation_id,
                         agent_ref,
                         version,
@@ -286,6 +457,8 @@ impl SshRemoteFocusTransport {
                         channels,
                         cleanup_detached,
                         detach_requested,
+                        failure_reported,
+                        Arc::clone(&cleanup.termination),
                         #[cfg(test)]
                         writer_start_gate,
                         event_tx,
@@ -347,18 +520,47 @@ impl SshRemoteFocusTransport {
             })),
         });
     }
+
+    #[cfg(unix)]
+    fn fail_once(
+        failure_reported: &AtomicBool,
+        event_tx: &tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        operation_id: &str,
+        code: &str,
+        message: impl Into<String>,
+    ) {
+        if !failure_reported.swap(true, Ordering::AcqRel) {
+            Self::fail(event_tx, operation_id, code, message);
+        }
+    }
 }
 
 impl std::fmt::Debug for SshRemoteFocusTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SshRemoteFocusTransport")
-            .field("targets", &self.targets)
+            .field("hosts", &self.hosts)
             .finish_non_exhaustive()
     }
 }
 
 impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport {
+    fn accepts_remote_host(&self, host: &str) -> bool {
+        self.hosts.contains_key(host)
+    }
+
+    fn reload_fleet(&mut self, fleet: &crate::config::FleetConfig) -> Vec<String> {
+        #[cfg(unix)]
+        {
+            self.reconfigure(fleet)
+        }
+        #[cfg(not(unix))]
+        {
+            self.hosts = Self::admitted_hosts(fleet);
+            Vec::new()
+        }
+    }
+
     fn start(
         &mut self,
         operation_id: &str,
@@ -402,7 +604,7 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
                 return;
             };
             handle.detach_requested.store(true, Ordering::Release);
-            handle.detached.store(true, Ordering::Release);
+            handle.termination.terminate();
             // The flag is the urgent side channel. If the normal queue is
             // full, the writer drops queued input and writes Detach directly
             // instead of waiting behind it.
@@ -416,12 +618,94 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
 }
 
 #[cfg(unix)]
+const CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(unix)]
+struct DeadlineReader<'a> {
+    reader: &'a mut dyn TimedRead,
+    deadline: Instant,
+}
+
+#[cfg(unix)]
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let Some(timeout) = self.deadline.checked_duration_since(Instant::now()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote control handshake timed out",
+            ));
+        };
+        self.reader.read_with_timeout(buffer, timeout)
+    }
+}
+
+#[cfg(unix)]
+fn read_frame_with_deadline(
+    reader: &mut dyn TimedRead,
+    deadline: Instant,
+) -> Result<Vec<u8>, protocol::FramingError> {
+    let mut reader = DeadlineReader { reader, deadline };
+    protocol::read_frame(&mut reader, MAX_FRAME_SIZE)
+}
+
+#[cfg(unix)]
+fn read_message_with_deadline(
+    reader: &mut dyn TimedRead,
+    deadline: Instant,
+) -> Result<ServerMessage, protocol::FramingError> {
+    let mut reader = DeadlineReader { reader, deadline };
+    protocol::read_message(&mut reader, MAX_FRAME_SIZE)
+}
+
+#[cfg(unix)]
 fn read_initial_welcome(
     stream: &mut dyn ControlStream,
+    deadline: Instant,
 ) -> Result<ServerMessage, protocol::FramingError> {
-    let payload = protocol::read_frame(stream, MAX_FRAME_SIZE)?;
+    let payload = read_frame_with_deadline(stream, deadline)?;
     protocol::decode_frame(&payload)
         .or_else(|error| protocol::decode_legacy_server_welcome(&payload).ok_or(error))
+}
+
+#[cfg(unix)]
+struct CancellableReader<'a> {
+    reader: &'a mut dyn ControlReadHalf,
+    detached: &'a AtomicBool,
+}
+
+#[cfg(unix)]
+impl Read for CancellableReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.detached.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "remote control session detached",
+            ));
+        }
+        loop {
+            match self
+                .reader
+                .read_with_timeout(buffer, Duration::from_millis(100))
+            {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    if self.detached.load(Ordering::Acquire) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionAborted,
+                            "remote control session detached",
+                        ));
+                    }
+                }
+                Ok(read) if self.detached.load(Ordering::Acquire) => {
+                    let _ = read;
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "remote control session detached",
+                    ));
+                }
+                result => return result,
+            }
+        }
+    }
 }
 
 /// Ends the session: marks it detached so a late local detach is a no-op and
@@ -430,18 +714,25 @@ fn read_initial_welcome(
 /// senders. Nothing more is written here — after a connection loss no bytes
 /// may reach the wire.
 #[cfg(unix)]
+fn close_input_gate_and_detach(input_enabled: &AtomicBool, detached: &AtomicBool) {
+    input_enabled.store(false, Ordering::Release);
+    detached.store(true, Ordering::Release);
+}
+
+#[cfg(unix)]
 fn finish_control_session(
     sessions: &Mutex<std::collections::HashMap<String, SessionHandle>>,
     operation_id: &str,
     detached: &Arc<AtomicBool>,
+    input_enabled: &Arc<AtomicBool>,
 ) {
-    detached.store(true, Ordering::Release);
+    close_input_gate_and_detach(input_enabled, detached);
     let mut sessions = sessions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if sessions
         .get(operation_id)
-        .is_some_and(|handle| Arc::ptr_eq(&handle.detached, detached))
+        .is_some_and(|handle| Arc::ptr_eq(&handle.termination.detached, detached))
     {
         sessions.remove(operation_id);
     }
@@ -449,30 +740,20 @@ fn finish_control_session(
 
 #[cfg(unix)]
 struct ControlSessionTeardown {
-    sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
-    operation_id: String,
-    detached: Arc<AtomicBool>,
+    termination: Arc<ControlSessionTermination>,
 }
 
 #[cfg(unix)]
 impl ControlSessionTeardown {
-    fn new(
-        sessions: Arc<Mutex<std::collections::HashMap<String, SessionHandle>>>,
-        operation_id: String,
-        detached: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            sessions,
-            operation_id,
-            detached,
-        }
+    fn new(termination: Arc<ControlSessionTermination>) -> Self {
+        Self { termination }
     }
 }
 
 #[cfg(unix)]
 impl Drop for ControlSessionTeardown {
     fn drop(&mut self) {
-        finish_control_session(&self.sessions, &self.operation_id, &self.detached);
+        self.termination.terminate();
     }
 }
 
@@ -488,7 +769,8 @@ fn read_resize_slot(resize_slot: &Mutex<(u16, u16, u32, u32)>) -> (u16, u16, u32
 /// writer compares the latest slot with the last geometry it wrote and emits a
 /// resize when they differ. A resize marker only wakes this check. Ends on
 /// detach, on a closed channel (best-effort detach so the remote lease is
-/// still released), or on a write failure (the reader reports the loss).
+/// still released), or on a write failure (the writer reports the loss and
+/// closes the local input gate).
 #[cfg(unix)]
 fn run_control_writer(
     mut writer: Box<dyn Write + Send>,
@@ -497,6 +779,10 @@ fn run_control_writer(
     initial_resize: Option<(u16, u16, u32, u32)>,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
+    failure_reported: Arc<AtomicBool>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    operation_id: String,
+    termination: Arc<ControlSessionTermination>,
 ) {
     let mut last_sent_resize = initial_resize;
     while let Some(message) = outbound_rx.blocking_recv() {
@@ -507,6 +793,7 @@ fn run_control_writer(
         if detached.load(Ordering::Acquire) {
             return;
         }
+        let is_input = matches!(message, ProxyOutbound::Input(_));
         let is_detach = matches!(message, ProxyOutbound::Detach);
         let wire = match message {
             ProxyOutbound::Input(bytes) => Some(ClientMessage::Input {
@@ -516,7 +803,27 @@ fn run_control_writer(
             ProxyOutbound::Detach => Some(ClientMessage::Detach),
         };
         if let Some(wire) = wire {
-            if protocol::write_message(&mut writer, &wire).is_err() {
+            if is_input {
+                termination.operation_state.before_input_send();
+                let _admission = termination.operation_state.lock_input_admission();
+                if termination.operation_state.is_terminal() {
+                    return;
+                }
+            };
+            let write_result = protocol::write_message(&mut writer, &wire);
+            if write_result.is_err() {
+                termination.terminate();
+                if !is_detach {
+                    SshRemoteFocusTransport::fail_once(
+                        &failure_reported,
+                        &event_tx,
+                        &operation_id,
+                        "connection_lost",
+                        "remote control writer failed; delivery of the last accepted batch is unknown",
+                    );
+                } else {
+                    detached.store(true, Ordering::Release);
+                }
                 return;
             }
         }
@@ -532,6 +839,14 @@ fn run_control_writer(
                 cell_height_px: resize.3,
             };
             if protocol::write_message(&mut writer, &resize_message).is_err() {
+                termination.terminate();
+                SshRemoteFocusTransport::fail_once(
+                    &failure_reported,
+                    &event_tx,
+                    &operation_id,
+                    "connection_lost",
+                    "remote control writer failed; delivery of the last accepted batch is unknown",
+                );
                 return;
             }
             last_sent_resize = Some(resize);
@@ -546,7 +861,7 @@ fn run_control_writer(
 #[allow(clippy::too_many_arguments)]
 fn run_control_session(
     runner: Arc<dyn SshRunner>,
-    target: String,
+    host: crate::config::FleetHostConfig,
     operation_id: String,
     agent_ref: AgentRef,
     version: u32,
@@ -555,23 +870,31 @@ fn run_control_session(
     channels: RemoteProxyChannels,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
+    failure_reported: Arc<AtomicBool>,
+    termination: Arc<ControlSessionTermination>,
     #[cfg(test)] writer_start_gate: Option<Arc<std::sync::Barrier>>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) {
     let RemoteProxyChannels {
         outbound_rx,
+        detach_tx,
         resize_slot,
         ..
     } = channels;
-    let mut stream = match runner.connect(&target) {
+    if detached.load(Ordering::Acquire) {
+        return;
+    }
+    let mut stream = match runner.connect(&host) {
         Ok(stream) => stream,
         Err(error) => {
-            let code = if error.to_string().contains("Permission denied") {
-                "auth_failed"
-            } else {
-                "host_unreachable"
-            };
-            SshRemoteFocusTransport::fail(&event_tx, &operation_id, code, error.to_string());
+            termination.terminate();
+            SshRemoteFocusTransport::fail_once(
+                &failure_reported,
+                &event_tx,
+                &operation_id,
+                "host_unreachable",
+                error.to_string(),
+            );
             return;
         }
     };
@@ -589,26 +912,39 @@ fn run_control_session(
         launch_mode: ClientLaunchMode::TerminalAttach,
     };
     if let Err(error) = protocol::write_message(&mut stream, &hello) {
-        SshRemoteFocusTransport::fail(
+        let diagnostic = stream.close_diagnostic();
+        let detail = diagnostic
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| error.to_string());
+        termination.terminate();
+        SshRemoteFocusTransport::fail_once(
+            &failure_reported,
             &event_tx,
             &operation_id,
             "host_unreachable",
-            format!("remote control handshake write failed: {error}"),
+            format!("remote control handshake write failed: {detail}"),
         );
         return;
     }
-    let welcome: ServerMessage = match read_initial_welcome(&mut *stream) {
-        Ok(message) => message,
-        Err(error) => {
-            SshRemoteFocusTransport::fail(
-                &event_tx,
-                &operation_id,
-                "host_unreachable",
-                format!("remote control handshake read failed: {error}"),
-            );
-            return;
-        }
-    };
+    let welcome: ServerMessage =
+        match read_initial_welcome(&mut *stream, Instant::now() + CONTROL_HANDSHAKE_TIMEOUT) {
+            Ok(message) => message,
+            Err(error) => {
+                let diagnostic = stream.close_diagnostic();
+                let detail = diagnostic
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| error.to_string());
+                termination.terminate();
+                SshRemoteFocusTransport::fail_once(
+                    &failure_reported,
+                    &event_tx,
+                    &operation_id,
+                    "host_unreachable",
+                    format!("remote control handshake read failed: {detail}"),
+                );
+                return;
+            }
+        };
     let ServerMessage::Welcome {
         version,
         build_version,
@@ -616,7 +952,9 @@ fn run_control_session(
         ..
     } = welcome
     else {
-        SshRemoteFocusTransport::fail(
+        termination.terminate();
+        SshRemoteFocusTransport::fail_once(
+            &failure_reported,
             &event_tx,
             &operation_id,
             "version_skew",
@@ -629,7 +967,9 @@ fn run_control_session(
         || build_version.is_empty()
         || build_version != crate::build_info::version()
     {
-        SshRemoteFocusTransport::fail(
+        termination.terminate();
+        SshRemoteFocusTransport::fail_once(
+            &failure_reported,
             &event_tx,
             &operation_id,
             "version_skew",
@@ -659,7 +999,9 @@ fn run_control_session(
             takeover: false,
         },
     ) {
-        SshRemoteFocusTransport::fail(
+        termination.terminate();
+        SshRemoteFocusTransport::fail_once(
+            &failure_reported,
             &event_tx,
             &operation_id,
             "host_unreachable",
@@ -671,6 +1013,10 @@ fn run_control_session(
     let writer_detached = Arc::clone(&detached);
     let writer_detach_requested = Arc::clone(&detach_requested);
     let writer_resize_slot = Arc::clone(&resize_slot);
+    let writer_failure_reported = Arc::clone(&failure_reported);
+    let writer_event_tx = event_tx.clone();
+    let writer_operation_id = operation_id.clone();
+    let writer_termination = Arc::clone(&termination);
     let writer_initial_resize = Some((
         hello_rows,
         hello_cols,
@@ -691,10 +1037,16 @@ fn run_control_session(
                 writer_initial_resize,
                 writer_detached,
                 writer_detach_requested,
+                writer_failure_reported,
+                writer_event_tx,
+                writer_operation_id,
+                writer_termination,
             )
         });
     if let Err(error) = writer_thread {
-        SshRemoteFocusTransport::fail(
+        termination.terminate();
+        SshRemoteFocusTransport::fail_once(
+            &failure_reported,
             &event_tx,
             &operation_id,
             "host_unreachable",
@@ -703,27 +1055,38 @@ fn run_control_session(
         return;
     }
     let mut active = false;
+    let control_ready_deadline = Instant::now() + CONTROL_HANDSHAKE_TIMEOUT;
     loop {
         if detached.load(Ordering::Acquire) {
             break;
         }
-        let message: ServerMessage = match protocol::read_message(&mut reader, MAX_FRAME_SIZE) {
+        let message: ServerMessage = match if active {
+            let mut reader = CancellableReader {
+                reader: &mut *reader,
+                detached: &detached,
+            };
+            protocol::read_message(&mut reader, MAX_FRAME_SIZE)
+        } else {
+            read_message_with_deadline(&mut *reader, control_ready_deadline)
+        } {
+            Ok(_message) if detached.load(Ordering::Acquire) => break,
             Ok(message) => message,
             Err(error) => {
                 if detached.load(Ordering::Acquire) {
                     break;
                 }
+                termination.terminate();
+                let _ = detach_tx.try_send(ProxyOutbound::Detach);
                 let diagnostic = reader.close_diagnostic();
                 let detail = diagnostic
                     .filter(|message| !message.trim().is_empty())
                     .unwrap_or_else(|| error.to_string());
-                SshRemoteFocusTransport::fail(
+                SshRemoteFocusTransport::fail_once(
+                    &failure_reported,
                     &event_tx,
                     &operation_id,
                     if active {
                         "connection_lost"
-                    } else if detail.contains("Permission denied") {
-                        "auth_failed"
                     } else {
                         "host_unreachable"
                     },
@@ -736,6 +1099,9 @@ fn run_control_session(
                 break;
             }
         };
+        if detached.load(Ordering::Acquire) {
+            break;
+        }
         match message {
             ServerMessage::ControlReady { context } => {
                 active = true;
@@ -746,6 +1112,8 @@ fn run_control_session(
                     })
                     .is_err()
                 {
+                    termination.terminate();
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     break;
                 }
             }
@@ -758,6 +1126,8 @@ fn run_control_session(
                         })
                         .is_err()
                 {
+                    termination.terminate();
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     break;
                 }
             }
@@ -771,18 +1141,31 @@ fn run_control_session(
                     })
                     .is_err()
                 {
+                    termination.terminate();
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
                     break;
                 }
             }
             ServerMessage::ControlError { code, message } => {
                 if !detached.load(Ordering::Acquire) {
-                    SshRemoteFocusTransport::fail(&event_tx, &operation_id, &code, message);
+                    termination.terminate();
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
+                    SshRemoteFocusTransport::fail_once(
+                        &failure_reported,
+                        &event_tx,
+                        &operation_id,
+                        &code,
+                        message,
+                    );
                 }
                 break;
             }
             ServerMessage::ServerShutdown { reason } => {
                 if !detached.load(Ordering::Acquire) {
-                    SshRemoteFocusTransport::fail(
+                    termination.terminate();
+                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
+                    SshRemoteFocusTransport::fail_once(
+                        &failure_reported,
                         &event_tx,
                         &operation_id,
                         if active {
@@ -816,6 +1199,7 @@ mod tests {
         fail_at: Option<u64>,
         panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
+        diagnostic: Option<String>,
     }
 
     impl Read for FakeStream {
@@ -823,6 +1207,21 @@ mod tests {
             // The handshake reads through the whole stream before the split;
             // the gate only holds the post-split reader.
             read_fake_input(&mut self.input, self.fail_at, None, None, buffer)
+        }
+    }
+
+    impl TimedRead for FakeStream {
+        fn read_with_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> io::Result<usize> {
+            if self
+                .read_gate
+                .as_ref()
+                .is_some_and(|gate| !gate.load(Ordering::Acquire))
+                && self.input.position() >= self.input.get_ref().len() as u64
+            {
+                std::thread::sleep(timeout.min(Duration::from_millis(5)));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "fake read timeout"));
+            }
+            self.read(buffer)
         }
     }
 
@@ -854,6 +1253,10 @@ mod tests {
                     output: this.output,
                 }),
             )
+        }
+
+        fn close_diagnostic(&mut self) -> Option<String> {
+            self.diagnostic.take()
         }
     }
 
@@ -903,6 +1306,21 @@ mod tests {
         }
     }
 
+    impl TimedRead for FakeReader {
+        fn read_with_timeout(&mut self, buffer: &mut [u8], timeout: Duration) -> io::Result<usize> {
+            if self
+                .read_gate
+                .as_ref()
+                .is_some_and(|gate| !gate.load(Ordering::Acquire))
+                && self.input.position() >= self.input.get_ref().len() as u64
+            {
+                std::thread::sleep(timeout.min(Duration::from_millis(5)));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "fake read timeout"));
+            }
+            self.read(buffer)
+        }
+    }
+
     impl ControlReadHalf for FakeReader {}
 
     struct FakeWriter {
@@ -923,18 +1341,70 @@ mod tests {
         }
     }
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "fake broken pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StalledWriter {
+        started_tx: Option<std::sync::mpsc::Sender<()>>,
+        release_rx: std::sync::mpsc::Receiver<()>,
+        stalled: bool,
+    }
+
+    impl Write for StalledWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if !self.stalled {
+                self.stalled = true;
+                self.started_tx
+                    .take()
+                    .expect("stalled writer start signal")
+                    .send(())
+                    .expect("stalled writer start receiver");
+                self.release_rx
+                    .recv()
+                    .expect("stalled writer release signal");
+            }
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     struct FakeRunner {
         stream: Mutex<Option<FakeStream>>,
         connect_error: Option<String>,
+        connected_targets: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     impl SshRunner for FakeRunner {
-        fn connect(&self, _target: &str) -> Result<Box<dyn ControlStream>, io::Error> {
+        fn connect(
+            &self,
+            host: &crate::config::FleetHostConfig,
+        ) -> Result<Box<dyn ControlStream>, io::Error> {
             if let Some(error) = &self.connect_error {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     error.clone(),
                 ));
+            }
+            if let Some(targets) = &self.connected_targets {
+                targets
+                    .lock()
+                    .expect("fake targets lock")
+                    .push(host.target.clone());
             }
             self.stream
                 .lock()
@@ -961,9 +1431,37 @@ mod tests {
                 outbound_rx,
                 detach_tx: outbound_tx.clone(),
                 resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
+                input_enabled: Arc::new(AtomicBool::new(false)),
+                operation_state: crate::remote::RemoteFocusOperationState::new(),
             },
             outbound_tx,
         )
+    }
+
+    fn test_termination(
+        detached: Arc<AtomicBool>,
+        input_enabled: Arc<AtomicBool>,
+    ) -> Arc<ControlSessionTermination> {
+        test_termination_with_state(
+            detached,
+            input_enabled,
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+    }
+
+    fn test_termination_with_state(
+        detached: Arc<AtomicBool>,
+        input_enabled: Arc<AtomicBool>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+    ) -> Arc<ControlSessionTermination> {
+        let sessions = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        Arc::new(ControlSessionTermination {
+            sessions: Arc::downgrade(&sessions),
+            operation_id: "writer-test".into(),
+            detached,
+            input_enabled,
+            operation_state,
+        })
     }
 
     fn transport_with(
@@ -1015,8 +1513,10 @@ mod tests {
                     fail_at,
                     panic_at,
                     read_gate,
+                    diagnostic: None,
                 })),
                 connect_error: None,
+                connected_targets: None,
             }),
         )
     }
@@ -1035,6 +1535,7 @@ mod tests {
             Arc::new(FakeRunner {
                 stream: Mutex::new(None),
                 connect_error: Some(error.to_owned()),
+                connected_targets: None,
             }),
         )
     }
@@ -1184,19 +1685,54 @@ mod tests {
     }
 
     #[test]
-    fn ssh_auth_failure_is_not_forwarded_to_the_remote_agent() {
+    fn ssh_permission_failure_without_provenance_is_host_unreachable() {
         let mut transport = transport_with_connect_error("Permission denied (publickey)");
         let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
             .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
-        assert_eq!(receive_failure(&mut event_rx).code, "auth_failed");
+        assert_eq!(receive_failure(&mut event_rx).code, "host_unreachable");
+    }
+
+    #[test]
+    fn ssh_auth_diagnostic_without_provenance_is_host_unreachable() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "buildbox".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let runner = Arc::new(FakeRunner {
+            stream: Mutex::new(Some(FakeStream {
+                input: Cursor::new(Vec::new()),
+                output: Arc::new(Mutex::new(Vec::new())),
+                fail_at: None,
+                panic_at: None,
+                read_gate: None,
+                diagnostic: Some("buildbox: Permission denied (publickey).".into()),
+            })),
+            connect_error: None,
+            connected_targets: None,
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&fleet, runner);
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        assert_eq!(receive_failure(&mut event_rx).code, "host_unreachable");
     }
 
     #[test]
     fn hostile_ssh_target_is_rejected_before_any_process_spawn() {
-        let result = OpenSshRunner.connect("-oProxyCommand=touch /tmp/herdr-owned");
+        let host = crate::config::FleetHostConfig {
+            target: "-oProxyCommand=touch /tmp/herdr-owned".into(),
+            ..Default::default()
+        };
+        let result = OpenSshRunner.connect(&host);
         assert!(matches!(
             result,
             Err(error) if error.kind() == io::ErrorKind::InvalidInput
@@ -1206,7 +1742,11 @@ mod tests {
     #[test]
     // AC7: the control SSH command is non-interactive and separates the target from the bridge command.
     fn control_ssh_argv_has_batch_mode_and_command_separator() {
-        let command = ssh_command("buildbox");
+        let host = crate::config::FleetHostConfig {
+            target: "buildbox".into(),
+            ..Default::default()
+        };
+        let command = ssh_command(&host);
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1222,7 +1762,54 @@ mod tests {
         );
         assert_eq!(
             &args[separator + 2..],
-            ["herdr".to_owned(), "remote-control-bridge".to_owned()]
+            ["herdr remote-control-bridge".to_owned()]
+        );
+    }
+
+    #[test]
+    fn control_ssh_argv_honors_socket_and_session() {
+        let host = crate::config::FleetHostConfig {
+            target: "operator@buildbox".into(),
+            socket: Some("/run/herdr remote.sock".into()),
+            session: Some("agents-main".into()),
+            ..Default::default()
+        };
+        let command = ssh_command(&host);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let separator = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("SSH target separator");
+        assert_eq!(args[separator + 1], "operator@buildbox");
+        assert_eq!(
+            args[separator + 2],
+            "HERDR_SOCKET_PATH='/run/herdr remote.sock' HERDR_SESSION='agents-main' herdr remote-control-bridge"
+        );
+    }
+
+    #[test]
+    fn control_ssh_argv_makes_named_session_selection_explicit() {
+        let host = crate::config::FleetHostConfig {
+            target: "operator@buildbox".into(),
+            session: Some("agents-main".into()),
+            ..Default::default()
+        };
+        let command = ssh_command(&host);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let separator = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("SSH target separator");
+
+        assert_eq!(
+            args[separator + 2],
+            "herdr --session 'agents-main' remote-control-bridge"
         );
     }
 
@@ -1246,10 +1833,13 @@ mod tests {
         };
         let transport = SshRemoteFocusTransport::new(&fleet);
         assert_eq!(
-            transport.targets.get("buildbox").map(String::as_str),
+            transport
+                .hosts
+                .get("buildbox")
+                .map(|host| host.target.as_str()),
             Some("operator@buildbox")
         );
-        assert!(!transport.targets.contains_key("laptop"));
+        assert!(!transport.hosts.contains_key("laptop"));
 
         let invalid = crate::config::FleetConfig {
             hosts: vec![
@@ -1266,7 +1856,139 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(SshRemoteFocusTransport::new(&invalid).targets.is_empty());
+        assert!(SshRemoteFocusTransport::new(&invalid).hosts.is_empty());
+    }
+
+    #[test]
+    fn reloading_fleet_replaces_the_target_used_by_focus() {
+        let old_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "old-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let new_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "new-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let connected_targets = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(FakeRunner {
+            stream: Mutex::new(Some(FakeStream {
+                input: Cursor::new(welcome_bytes()),
+                output,
+                fail_at: None,
+                panic_at: None,
+                read_gate: None,
+                diagnostic: None,
+            })),
+            connect_error: None,
+            connected_targets: Some(Arc::clone(&connected_targets)),
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&old_fleet, runner);
+        assert!(transport.accepts_remote_host("buildbox"));
+        assert!(transport.reload_fleet(&new_fleet).is_empty());
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "host_unreachable");
+        assert_eq!(
+            connected_targets.lock().expect("targets lock").as_slice(),
+            ["new-target"]
+        );
+    }
+
+    #[test]
+    fn reloading_changed_host_revokes_the_existing_session_and_gate() {
+        let new_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "new-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport =
+            transport_with_read_gate(input, output, None, Some(Arc::clone(&read_gate)));
+        let (channels, _outbound_tx) = test_channels();
+        let input_enabled = Arc::clone(&channels.input_enabled);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. })
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+
+        assert_eq!(transport.reload_fleet(&new_fleet), vec!["operation"]);
+        assert!(!input_enabled.load(Ordering::Acquire));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !transport.sessions.lock().expect("sessions lock").is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "revoked session remained registered"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        read_gate.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn stalled_initial_welcome_read_is_bounded() {
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut stream = FakeStream {
+            input: Cursor::new(Vec::new()),
+            output: Arc::new(Mutex::new(Vec::new())),
+            fail_at: None,
+            panic_at: None,
+            read_gate: Some(read_gate),
+            diagnostic: None,
+        };
+        let started = Instant::now();
+        let result = read_initial_welcome(&mut stream, started + Duration::from_millis(20));
+        assert!(matches!(
+            result,
+            Err(protocol::FramingError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stalled_control_ready_read_is_bounded() {
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut reader = FakeReader {
+            input: Cursor::new(Vec::new()),
+            fail_at: None,
+            panic_at: None,
+            read_gate: Some(read_gate),
+        };
+        let started = Instant::now();
+        let result = read_message_with_deadline(&mut reader, started + Duration::from_millis(20));
+        assert!(matches!(
+            result,
+            Err(protocol::FramingError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -1341,6 +2063,93 @@ mod tests {
     }
 
     #[test]
+    fn reader_loss_closes_input_gate_before_failure_event_is_delivered() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport =
+            transport_with_read_gate(input, output, None, Some(Arc::clone(&read_gate)));
+        let (channels, _outbound_tx) = test_channels();
+        let input_enabled = Arc::clone(&channels.input_enabled);
+        let operation_state = Arc::clone(&channels.operation_state);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        transport
+            .start(
+                "operation",
+                &agent_ref(),
+                "proxy",
+                channels,
+                event_tx.clone(),
+            )
+            .expect("thread starts");
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. })
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+
+        event_tx
+            .blocking_send(crate::events::AppEvent::RemoteFocusFrame {
+                operation_id: "sentinel".into(),
+                frame: Box::new(crate::protocol::TerminalFrame {
+                    seq: 0,
+                    width: 1,
+                    height: 1,
+                    full: true,
+                    bytes: Vec::new(),
+                }),
+            })
+            .expect("hold failure event behind a pending app event");
+        input_enabled.store(true, Ordering::Release);
+        read_gate.store(true, Ordering::Release);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while input_enabled.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "reader loss did not close the input gate before reporting failure"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!input_enabled.load(Ordering::Acquire));
+        assert!(operation_state.is_terminal());
+        assert!(
+            transport.sessions.lock().expect("sessions lock").is_empty(),
+            "reader loss must unregister the session before failure delivery"
+        );
+
+        let _sentinel = event_rx.blocking_recv().expect("sentinel event");
+        assert_eq!(receive_failure(&mut event_rx).code, "connection_lost");
+    }
+
+    #[test]
+    fn cancellable_reader_stops_between_partial_frame_reads_after_detach() {
+        let detached = AtomicBool::new(false);
+        let mut reader = FakeReader {
+            input: Cursor::new(b"partial".to_vec()),
+            fail_at: None,
+            panic_at: None,
+            read_gate: None,
+        };
+        let mut reader = CancellableReader {
+            reader: &mut reader,
+            detached: &detached,
+        };
+        let mut first = [0_u8; 1];
+        assert_eq!(reader.read(&mut first).expect("first byte"), 1);
+
+        detached.store(true, Ordering::Release);
+        let mut second = [0_u8; 1];
+        assert!(matches!(
+            reader.read(&mut second),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted
+        ));
+    }
+
+    #[test]
     // The proxy pane's screen is the remote terminal: every complete Terminal
     // frame becomes one ordered frame event for the app.
     fn terminal_frames_are_forwarded_as_ordered_frame_events() {
@@ -1409,6 +2218,13 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            tokio::sync::mpsc::channel(1).0,
+            "writer-test".into(),
+            test_termination(
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            ),
         );
 
         let messages = wire_messages(&output.lock().expect("fake output lock"));
@@ -1424,6 +2240,152 @@ mod tests {
                 ClientMessage::Detach,
             ]
         ));
+    }
+
+    #[test]
+    fn writer_failure_reports_unknown_delivery_and_closes_input_gate() {
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"answer")))
+            .expect("input queued");
+        let input_enabled = Arc::new(AtomicBool::new(true));
+        let detached = Arc::new(AtomicBool::new(false));
+        let termination = test_termination(Arc::clone(&detached), Arc::clone(&input_enabled));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+
+        run_control_writer(
+            Box::new(FailingWriter),
+            outbound_rx,
+            Arc::new(Mutex::new((24, 80, 0, 0))),
+            None,
+            Arc::clone(&detached),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            event_tx,
+            "operation".into(),
+            termination,
+        );
+
+        assert!(detached.load(Ordering::Acquire));
+        assert!(!input_enabled.load(Ordering::Acquire));
+        let Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. }) =
+            event_rx.blocking_recv()
+        else {
+            panic!("writer failure event");
+        };
+        let RemoteFocusTransition::Failed(error) = *transition else {
+            panic!("expected writer failure");
+        };
+        assert_eq!(error.code, "connection_lost");
+        assert!(error.message.contains("delivery"));
+    }
+
+    #[test]
+    fn writer_drops_input_when_loss_wins_before_wire_admission() {
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(
+                b"late input",
+            )))
+            .expect("input queued");
+        drop(outbound_tx);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let input_enabled = Arc::new(AtomicBool::new(true));
+        let detached = Arc::new(AtomicBool::new(false));
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+        let termination = test_termination_with_state(
+            Arc::clone(&detached),
+            Arc::clone(&input_enabled),
+            operation_state,
+        );
+
+        run_control_writer(
+            Box::new(FakeWriter {
+                output: Arc::clone(&output),
+            }),
+            outbound_rx,
+            Arc::new(Mutex::new((24, 80, 0, 0))),
+            None,
+            detached,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            tokio::sync::mpsc::channel(1).0,
+            "operation".into(),
+            termination,
+        );
+
+        assert!(wire_messages(&output.lock().expect("fake output lock")).is_empty());
+    }
+
+    #[test]
+    fn writer_does_not_hold_admission_while_stdin_write_is_stalled() {
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1);
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"blocked")))
+            .expect("input queued");
+        drop(outbound_tx);
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let input_enabled = Arc::new(AtomicBool::new(true));
+        let detached = Arc::new(AtomicBool::new(false));
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let termination = test_termination_with_state(
+            Arc::clone(&detached),
+            Arc::clone(&input_enabled),
+            operation_state,
+        );
+        let termination_for_writer = Arc::clone(&termination);
+        let writer_thread = std::thread::spawn(move || {
+            run_control_writer(
+                Box::new(StalledWriter {
+                    started_tx: Some(started_tx),
+                    release_rx,
+                    stalled: false,
+                }),
+                outbound_rx,
+                Arc::new(Mutex::new((24, 80, 0, 0))),
+                None,
+                detached,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                tokio::sync::mpsc::channel(1).0,
+                "operation".into(),
+                termination_for_writer,
+            );
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer reached the stalled stdin write");
+
+        let (terminated_tx, terminated_rx) = std::sync::mpsc::channel();
+        let termination_for_teardown = Arc::clone(&termination);
+        let teardown_thread = std::thread::spawn(move || {
+            termination_for_teardown.terminate();
+            terminated_tx
+                .send(())
+                .expect("termination completion receiver");
+        });
+        let terminated_before_write_release = terminated_rx
+            .recv_timeout(Duration::from_millis(250))
+            .is_ok();
+
+        release_tx.send(()).expect("release stalled stdin write");
+        writer_thread.join().expect("writer thread completes");
+        teardown_thread.join().expect("teardown thread completes");
+
+        assert!(
+            terminated_before_write_release,
+            "termination waited for the stalled stdin write"
+        );
     }
 
     #[test]
@@ -1452,6 +2414,13 @@ mod tests {
             Some((24, 80, 0, 0)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            tokio::sync::mpsc::channel(1).0,
+            "writer-test".into(),
+            test_termination(
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            ),
         );
 
         let messages = wire_messages(&output.lock().expect("fake output lock"));
@@ -1490,6 +2459,8 @@ mod tests {
             outbound_rx,
             detach_tx: outbound_tx,
             resize_slot,
+            input_enabled: Arc::new(AtomicBool::new(false)),
+            operation_state: crate::remote::RemoteFocusOperationState::new(),
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         let mut transport = transport_with(welcome_bytes(), Arc::clone(&output), None);
@@ -1629,6 +2600,8 @@ mod tests {
             outbound_rx,
             detach_tx: outbound_tx.clone(),
             resize_slot: Arc::new(Mutex::new((24, 80, 0, 0))),
+            input_enabled: Arc::new(AtomicBool::new(false)),
+            operation_state: crate::remote::RemoteFocusOperationState::new(),
         };
         outbound_tx
             .try_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"stale")))
@@ -1637,6 +2610,14 @@ mod tests {
         transport
             .start("operation", &agent_ref(), "proxy", channels, event_tx)
             .expect("thread starts");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while wire_messages(&output.lock().expect("fake output lock")).len() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control handshake did not reach the wire before detach"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         transport.detach("operation");
         writer_start_gate.wait();
 

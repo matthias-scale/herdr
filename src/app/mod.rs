@@ -167,7 +167,6 @@ pub struct App {
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
-    pub(crate) configured_remote_focus_hosts: HashSet<String>,
     /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -1379,12 +1378,9 @@ impl App {
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
-            // Step 4 must add the local proxy pane's frame, input, resize, and
-            // detach consumers before production may switch to SSH transport.
-            remote_focus_transport: Box::new(remote_focus::StubRemoteFocusTransport),
-            configured_remote_focus_hosts: remote_focus::configured_remote_hosts(
+            remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
-            ),
+            )),
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
@@ -1827,6 +1823,9 @@ impl App {
             // Drain a bounded internal-event batch for responsiveness. API handlers
             // perform an exhaustive drain before reading pane/runtime state.
             if self.drain_internal_events() {
+                needs_render = true;
+            }
+            if self.reconcile_remote_focus_lifecycle() {
                 needs_render = true;
             }
             if self.expire_due_metadata(Instant::now()) {
@@ -2448,8 +2447,15 @@ impl App {
         }
 
         if !invalid_section("remote") {
-            self.configured_remote_focus_hosts =
-                remote_focus::configured_remote_hosts(&config.remote.fleet);
+            let revoked_operations = self
+                .remote_focus_transport
+                .reload_fleet(&config.remote.fleet);
+            for operation_id in revoked_operations {
+                self.apply_remote_focus_transition(
+                    &operation_id,
+                    remote_focus::RemoteFocusTransition::Closed,
+                );
+            }
             let agent_host_name = config.remote.fleet.resolved_self_name();
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;
