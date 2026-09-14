@@ -105,25 +105,49 @@ fn agent_line(
 
     let lead = format!(" {dot} ");
     let age = waited_label(agent);
-    // Dot and age are always drawn; the rest of the row splits what is left.
-    let available = (width as usize).saturating_sub(display_width(&lead) + display_width(&age) + 2);
-    // The workspace column gives way first on a narrow Home so the session title
-    // stays readable.
-    let label_width = (available / 3).min(16);
-    let workspace = truncate_end(&agent.workspace_label, label_width);
-    let workspace_pad = label_width.saturating_sub(display_width(&workspace));
-    let after_workspace = available.saturating_sub(label_width + 1);
-    // The provider is dropped before it could squeeze the title below a fragment.
-    let provider_cell = if provider.is_empty()
-        || after_workspace < display_width(provider) + 2 + MIN_ROW_TITLE_WIDTH
-    {
+    let available = (width as usize).saturating_sub(display_width(&lead) + 1);
+    let provider_cell = if provider.is_empty() {
         String::new()
     } else {
-        format!("{provider}  ")
+        format!(" {provider} ")
     };
-    // Whatever the title consumes, provider and age keep their columns: the list
-    // is sorted by age, so a ragged right edge would hide the ordering.
-    let title_width = after_workspace.saturating_sub(display_width(&provider_cell));
+    // The repo row contract keeps, in order, the dot, a title fragment and the
+    // provider; workspace and age give way first on a narrow Home.
+    let (label_width, show_provider, show_age) = [(true, true), (false, true), (false, false)]
+        .into_iter()
+        .map(|(workspace, age_shown)| {
+            let age_width = if age_shown {
+                display_width(&age) + 1
+            } else {
+                0
+            };
+            let rest = available.saturating_sub(display_width(&provider_cell) + age_width);
+            let label_width = if workspace { (rest / 3).min(16) } else { 0 };
+            (label_width, rest.saturating_sub(label_width + 1), age_shown)
+        })
+        .find(|(_, title_width, _)| *title_width >= MIN_ROW_TITLE_WIDTH)
+        .map(|(label_width, _, age_shown)| (label_width, true, age_shown))
+        .unwrap_or_else(|| ((available / 3).min(16), false, true));
+    let provider_cell = if show_provider {
+        provider_cell
+    } else {
+        String::new()
+    };
+    let age_cell = if show_age {
+        format!(" {age}")
+    } else {
+        String::new()
+    };
+    let workspace = truncate_end(&agent.workspace_label, label_width);
+    let workspace_pad = label_width.saturating_sub(display_width(&workspace));
+    let workspace_cell = if label_width == 0 {
+        String::new()
+    } else {
+        format!("{workspace}{} ", " ".repeat(workspace_pad))
+    };
+    let title_width = available.saturating_sub(
+        display_width(&workspace_cell) + display_width(&provider_cell) + display_width(&age_cell),
+    );
     let title = truncate_end(title, title_width);
     let title_pad = title_width.saturating_sub(display_width(&title));
     // A filled row is the cursor, the same surface the sidebar uses.
@@ -149,16 +173,10 @@ fn agent_line(
             base.fg(dot_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ", base),
-        Span::styled(
-            format!("{workspace}{} ", " ".repeat(workspace_pad)),
-            text_style,
-        ),
+        Span::styled(workspace_cell, text_style),
         Span::styled(format!("{title}{}", " ".repeat(title_pad)), text_style),
         Span::styled(provider_cell, base.fg(provider_color)),
-        Span::styled(
-            format!("{age:>width$} ", width = display_width(&age) + 1),
-            age_style,
-        ),
+        Span::styled(format!("{age_cell} "), age_style),
     ])
 }
 
@@ -1877,6 +1895,17 @@ mod tests {
             provider: "cc".into(),
             provider_color: app.palette.peach,
         };
+        let mut aged = agent.clone();
+        aged.blocked_since =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(18 * 60));
+        let narrow = agent_line(&app, &aged, Some(&cells), false, 18);
+        let text: String = narrow
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(display_width(&text), 18, "{text:?}");
+        assert!(text.contains('界') && text.contains("cc"), "{text:?}");
         for width in [18u16, 27, 40, 80] {
             let line = agent_line(&app, &agent, Some(&cells), false, width);
             let text: String = line
