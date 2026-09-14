@@ -1267,7 +1267,17 @@ fn run_control_session(
         );
         return;
     }
-    if let Err(error) = protocol::write_message(
+    {
+        // Serialize the decision with reload revocation, but not the wire write:
+        // SSH stdin can block indefinitely while the app still needs to close.
+        let _decision = writer_decision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if detached.load(Ordering::Acquire) || detach_requested.load(Ordering::Acquire) {
+            return;
+        }
+    }
+    let control_write = protocol::write_message(
         &mut stream,
         &ClientMessage::ControlTerminal {
             target: agent_ref.to_string(),
@@ -1275,7 +1285,8 @@ fn run_control_session(
             expected_context,
             takeover: false,
         },
-    ) {
+    );
+    if let Err(error) = control_write {
         termination.terminate();
         SshRemoteFocusTransport::fail_once(
             &failure_reported,
@@ -1751,6 +1762,12 @@ mod tests {
         connected_targets: Option<Arc<Mutex<Vec<String>>>>,
     }
 
+    struct BlockingRunner {
+        inner: FakeRunner,
+        connect_started_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        connect_release_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
     impl SshRunner for FakeRunner {
         fn connect(
             &self,
@@ -1774,6 +1791,29 @@ mod tests {
                 .take()
                 .map(|stream| Box::new(stream) as Box<dyn ControlStream>)
                 .ok_or_else(|| io::Error::other("no fake connection"))
+        }
+    }
+
+    impl SshRunner for BlockingRunner {
+        fn connect(
+            &self,
+            host: &crate::config::FleetHostConfig,
+        ) -> Result<Box<dyn ControlStream>, io::Error> {
+            self.connect_started_tx
+                .lock()
+                .expect("connect-started lock")
+                .take()
+                .expect("connect-started signal")
+                .send(())
+                .expect("connect-started receiver");
+            self.connect_release_rx
+                .lock()
+                .expect("connect-release lock")
+                .take()
+                .expect("connect-release signal")
+                .recv()
+                .expect("connect-release sender");
+            self.inner.connect(host)
         }
     }
 
@@ -2917,6 +2957,73 @@ mod tests {
                 agent_ref: Some(wire_ref), ..
             }) if wire_ref.host == "new-remote"
         ));
+    }
+
+    #[test]
+    fn reloading_changed_host_during_connect_does_not_request_old_control() {
+        let old_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "old-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let new_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "new-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (connect_started_tx, connect_started_rx) = std::sync::mpsc::channel();
+        let (connect_release_tx, connect_release_rx) = std::sync::mpsc::channel();
+        let runner = Arc::new(BlockingRunner {
+            inner: FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(welcome_bytes()),
+                    output: Arc::clone(&output),
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            },
+            connect_started_tx: Mutex::new(Some(connect_started_tx)),
+            connect_release_rx: Mutex::new(Some(connect_release_rx)),
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&old_fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "old-target",
+            "old-remote",
+        ));
+        let (channels, _outbound_tx) = test_channels();
+        let operation_state = Arc::clone(&channels.operation_state);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        connect_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("connect starts");
+        assert_eq!(transport.reload_fleet(&new_fleet), vec!["operation"]);
+        assert!(operation_state.is_terminal());
+        connect_release_tx.send(()).expect("release connect");
+
+        assert!(
+            event_rx.blocking_recv().is_none(),
+            "revoked connect must not report an active or duplicate failure transition"
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(messages.as_slice(), [ClientMessage::Hello { .. }]));
     }
 
     #[test]
