@@ -1351,11 +1351,13 @@ impl HeadlessServer {
             .get(&source_id)
             .filter(|client| client.writer.is_some() && client.is_full_app_client())
             .map_or_else(Default::default, |client| {
-                crate::ui::pomodoro::input_gate_at(
-                    &self.app.state,
-                    client.pomodoro_presentation,
-                    Instant::now(),
-                )
+                let mut presentation = client.pomodoro_presentation;
+                if presentation.area.is_empty() {
+                    // The first input can arrive before the first committed frame; in that case
+                    // the stored input gate has no valid area yet, so derive one from terminal size.
+                    presentation.area = Self::pomodoro_client_area(client);
+                }
+                crate::ui::pomodoro::input_gate_at(&self.app.state, presentation, Instant::now())
             })
     }
 
@@ -15190,6 +15192,52 @@ next_tab = ""
         assert!(
             pane_input.try_recv().is_err(),
             "the prompt raised between frames must gate the next batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_headless_prompt_gates_input_before_the_clients_first_frame() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let now = Instant::now();
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            now,
+        );
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(test_client_writer().0),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.handle_scheduled_tasks_headless(now + Duration::from_secs(60), false);
+        assert!(server.app.state.pomodoro.held());
+        server.resize_shared_runtime_to_effective_size();
+
+        let key = crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+        assert!(server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::OuterFocusGained, key],
+        ));
+        assert!(server.app.state.pomodoro.prompt.is_some());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the pre-frame prompt must gate input after a focus return"
         );
     }
 
