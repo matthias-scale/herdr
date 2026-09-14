@@ -166,14 +166,25 @@ fn prompt_content_rect(inner: Rect, orb_visible: bool) -> Rect {
     }
 }
 
-pub(crate) fn animation_visible(app: &AppState, area: Rect) -> bool {
+fn send_off_rect(area: Rect) -> Option<Rect> {
+    centered_popup_rect(area, SEND_OFF_WIDTH, SEND_OFF_HEIGHT)
+        .filter(|popup| popup.width == SEND_OFF_WIDTH && popup.height == SEND_OFF_HEIGHT)
+}
+
+pub(crate) fn send_off_fits(area: Rect) -> bool {
+    send_off_rect(area).is_some()
+}
+
+pub(crate) fn send_off_visible_at(app: &AppState, area: Rect, now: std::time::Instant) -> bool {
+    app.pomodoro.visible_send_off_at(now).is_some() && send_off_rect(area).is_some()
+}
+
+pub(crate) fn animation_visible_at(app: &AppState, area: Rect, now: std::time::Instant) -> bool {
     if app.pomodoro.prompt.is_some() {
-        return prompt_inner_rect(area).is_some_and(|inner| inner.height >= 9);
+        return orb_layout_available(area)
+            && prompt_inner_rect(area).is_some_and(|inner| inner.height >= 9);
     }
-    app.pomodoro
-        .visible_send_off_at(app.view_observed_at)
-        .and_then(|_| centered_popup_rect(area, SEND_OFF_WIDTH, SEND_OFF_HEIGHT))
-        .is_some_and(|popup| popup.height >= SEND_OFF_HEIGHT)
+    send_off_visible_at(app, area, now)
 }
 
 pub(crate) fn prompt_button_rects(area: Rect) -> Option<(Rect, Rect)> {
@@ -565,7 +576,7 @@ fn render_send_off(app: &AppState, frame: &mut Frame, area: Rect) {
     } else {
         palette.mauve
     };
-    let Some(popup) = centered_popup_rect(area, SEND_OFF_WIDTH, SEND_OFF_HEIGHT) else {
+    let Some(popup) = send_off_rect(area) else {
         return;
     };
     let Some(inner) = render_panel_shell(frame, popup, border, palette.panel_bg) else {
@@ -973,6 +984,48 @@ mod render_tests {
         );
         assert!(text.contains("●"), "pulsing dots: {text:?}");
         assert!(text.contains("any key closes"), "dismiss hint: {text:?}");
+    }
+
+    #[test]
+    fn narrow_fallback_skips_the_send_off_card_instead_of_clipping_it() {
+        let now = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        app.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: PomodoroPhase::ShortBreak,
+            shown_at: now,
+        });
+        app.view_observed_at = now;
+
+        let buffer = veiled_frame(&app, Rect::new(0, 0, 18, 30));
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(
+            text.contains("cargo test --all"),
+            "pane remains visible: {text:?}"
+        );
+        assert!(
+            !text
+                .chars()
+                .any(|ch| matches!(ch, '┌' | '┐' | '└' | '┘' | '│' | '─')),
+            "no clipped card shell: {text:?}"
+        );
+    }
+
+    #[test]
+    fn animation_visibility_matches_the_orb_and_full_send_off_geometry() {
+        let now = std::time::Instant::now();
+        let app = prompted();
+
+        assert!(!animation_visible_at(&app, Rect::new(0, 0, 60, 16), now));
+        assert!(animation_visible_at(&app, Rect::new(0, 0, 100, 30), now));
+
+        let mut app = AppState::test_new();
+        app.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: PomodoroPhase::ShortBreak,
+            shown_at: now,
+        });
+        assert!(!animation_visible_at(&app, Rect::new(0, 0, 18, 30), now));
+        assert!(animation_visible_at(&app, Rect::new(0, 0, 100, 30), now));
     }
 
     #[test]

@@ -2865,6 +2865,9 @@ impl App {
     ) {
         self.begin_contract_false_positive_input_burst();
         for event in events {
+            if self.intercept_pomodoro_send_off_raw_input(&event) {
+                continue;
+            }
             let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {

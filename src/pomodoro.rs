@@ -253,12 +253,22 @@ impl PomodoroState {
 
     /// Advances the countdown, holding an expired phase while no host terminal
     /// is focused. Unknown focus support is resolved by the caller.
+    #[cfg(test)]
     pub fn tick_with_host_focus(&mut self, now: Instant, host_focused: bool) -> PomodoroTick {
+        self.tick_with_host_focus_and_animation(now, host_focused, true)
+    }
+
+    pub(crate) fn tick_with_host_focus_and_animation(
+        &mut self,
+        now: Instant,
+        host_focused: bool,
+        animation_visible: bool,
+    ) -> PomodoroTick {
         if !self.enabled {
             return PomodoroTick::default();
         }
         let mut tick = PomodoroTick {
-            changed: self.tick_animation(now),
+            changed: self.tick_animation(now, animation_visible),
             phase_ended: false,
         };
         if self.held {
@@ -356,7 +366,7 @@ impl PomodoroState {
     }
 
     /// The next exact presentation deadline for the breathing animation or
-    /// send-off expiry. No visible Pomodoro card means no deadline.
+    /// send-off expiry. The caller suppresses it when geometry draws no animation.
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let started_at = self
             .prompt
@@ -417,14 +427,17 @@ impl PomodoroState {
         self.rendered_animation_frame = 0;
     }
 
-    fn tick_animation(&mut self, now: Instant) -> bool {
+    fn tick_animation(&mut self, now: Instant, animation_visible: bool) -> bool {
         if self
             .send_off
             .is_some_and(|send_off| now >= send_off.shown_at + SEND_OFF_DURATION)
         {
             self.send_off = None;
             self.rendered_animation_frame = 0;
-            return true;
+            return animation_visible;
+        }
+        if !animation_visible {
+            return false;
         }
         let Some(started_at) = self
             .prompt

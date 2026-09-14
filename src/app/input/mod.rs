@@ -4658,19 +4658,6 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
-        // The send-off owns mouse input until dismissed. Movement and release
-        // cannot affect the UI below it; the first press closes the card.
-        if self.state.pomodoro.send_off.is_some() {
-            let now = std::time::Instant::now();
-            if self.state.pomodoro.visible_send_off_at(now).is_none() {
-                self.state.pomodoro.dismiss_send_off_at(now);
-            } else {
-                if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                    self.state.pomodoro.dismiss_send_off_at(now);
-                }
-                return;
-            }
-        }
         // A due break reminder is the topmost modal and must decide the click
         // before hover, pane focus, or any underlying control can react.
         if self.state.pomodoro.prompt.is_some() {
@@ -6033,6 +6020,7 @@ enabled = true
         }
         app.route_client_input(b"\r".to_vec());
         assert!(app.state.pomodoro.send_off.is_some());
+        compute_hidden_sidebar(&mut app);
 
         app.route_client_input(b"x".to_vec());
 
@@ -6040,6 +6028,107 @@ enabled = true
         assert!(
             pane_input.try_recv().is_err(),
             "the closing key must not reach the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_raw_text_paste_and_uncaptured_click_close_send_off_without_pane_input() {
+        fn app_with_send_off() -> (App, tokio::sync::mpsc::Receiver<Bytes>) {
+            let mut app = hidden_sidebar_config_app();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, pane_input) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80,
+                    24,
+                    0,
+                    b"\x1b[?1000h\x1b[?1006h",
+                    4,
+                );
+            assert!(
+                runtime.mouse_reporting_enabled(),
+                "reproduction requires a mouse-reporting pane"
+            );
+            app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+            app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+                started: crate::pomodoro::PomodoroPhase::ShortBreak,
+                shown_at: std::time::Instant::now(),
+            });
+            app.state.mouse_capture = false;
+            compute_hidden_sidebar(&mut app);
+            (app, pane_input)
+        }
+
+        for event in [
+            crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new("committed")),
+            crate::raw_input::RawInputEvent::Paste("pasted".into()),
+        ] {
+            let (mut app, mut pane_input) = app_with_send_off();
+            app.route_client_events(vec![event], true);
+
+            assert!(app.state.pomodoro.send_off.is_none());
+            assert!(
+                pane_input.try_recv().is_err(),
+                "the closing raw input must not reach the pane"
+            );
+        }
+
+        let (mut app, mut pane_input) = app_with_send_off();
+        let pane = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|pane| pane.is_focused)
+            .expect("focused pane");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.inner_rect.x,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.route_client_events(vec![crate::raw_input::RawInputEvent::Mouse(click)], true);
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the closing click must not reach the mouse-reporting pane"
+        );
+
+        let (mut app, mut pane_input) = app_with_send_off();
+        app.state.pomodoro.send_off = None;
+        let pane = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|pane| pane.is_focused)
+            .expect("focused pane");
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: pane.inner_rect.x,
+                row: pane.inner_rect.y,
+                modifiers: KeyModifiers::empty(),
+            })],
+            true,
+        );
+        assert!(
+            pane_input.try_recv().is_ok(),
+            "without the send-off, the same click reaches the mouse-reporting pane"
+        );
+
+        let (mut app, mut pane_input) = app_with_send_off();
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 18, 30));
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("visible-pane"),
+            )],
+            true,
+        );
+
+        assert!(app.state.pomodoro.send_off.is_some());
+        assert_eq!(
+            pane_input.recv().await.expect("text reaches pane").as_ref(),
+            b"visible-pane"
         );
     }
 
@@ -6059,14 +6148,14 @@ enabled = true
         assert!(timer.width > 0, "timer control is below the send-off");
         assert!(app.state.pomodoro.running());
 
-        app.handle_mouse_from_input_source(
-            crate::app::LOCAL_INPUT_SOURCE,
-            MouseEvent {
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: timer.x,
                 row: timer.y,
                 modifiers: KeyModifiers::empty(),
-            },
+            })],
+            true,
         );
 
         assert!(app.state.pomodoro.send_off.is_none());

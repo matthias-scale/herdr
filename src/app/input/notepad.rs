@@ -230,6 +230,35 @@ impl AppState {
 }
 
 impl crate::app::App {
+    pub(crate) fn intercept_pomodoro_send_off_raw_input(
+        &mut self,
+        event: &crate::raw_input::RawInputEvent,
+    ) -> bool {
+        if self.state.pomodoro.send_off.is_none() {
+            return false;
+        }
+        let dismisses = match event {
+            crate::raw_input::RawInputEvent::Key(key) => {
+                !matches!(key.kind, crossterm::event::KeyEventKind::Release)
+            }
+            crate::raw_input::RawInputEvent::Text(_)
+            | crate::raw_input::RawInputEvent::Paste(_) => true,
+            crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_))
+            }
+            _ => false,
+        };
+        if !dismisses {
+            return false;
+        }
+
+        let now = std::time::Instant::now();
+        if !crate::ui::pomodoro::send_off_fits(self.state.screen_rect()) {
+            return false;
+        }
+        self.state.pomodoro.dismiss_send_off_at(now)
+    }
+
     /// The one rule for when the break prompt or the notepad owns a key.
     ///
     /// Both the in-process TUI loop and the headless server route keys through
@@ -238,9 +267,6 @@ impl crate::app::App {
     /// while every keystroke went to the pane behind it.
     pub(crate) fn intercept_notepad_key(&mut self, key: &crate::input::TerminalKey) -> bool {
         let now = std::time::Instant::now();
-        if self.state.pomodoro.dismiss_send_off_at(now) {
-            return true;
-        }
         if self.state.pomodoro.prompt.is_some() {
             self.state
                 .handle_pomodoro_prompt_key(key.as_key_event(), now);
