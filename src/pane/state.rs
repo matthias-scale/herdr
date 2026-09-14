@@ -170,4 +170,46 @@ mod tests {
             AttentionTier::None
         );
     }
+
+    #[test]
+    fn attention_tier_keeps_blocking_items_and_gates() {
+        // MAT-147 AC5
+        let terminal_id = TerminalId::alloc();
+        let mut terminal = TerminalState::new(terminal_id.clone(), "/tmp".into());
+        terminal.set_raw_agent_state_for_test(AgentState::Idle);
+        let pane = PaneState::new(terminal_id);
+
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Confirm the requested rollout mode".into(),
+            blocking: true,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert_eq!(
+            pane.agent_projection(&terminal).attention_tier,
+            AttentionTier::Attention
+        );
+
+        terminal.closing_items = vec![];
+        terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Gate".into(),
+            text: "Choose the release path".into(),
+            blocking: true,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert_eq!(
+            pane.agent_projection(&terminal).attention_tier,
+            AttentionTier::Blocked
+        );
+    }
 }

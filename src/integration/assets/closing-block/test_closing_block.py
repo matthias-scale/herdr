@@ -393,6 +393,14 @@ BLOCKING_ANSWER = """\
 Done here.
 """
 
+UNMARKED_VERIFY_BLOCKING_ANSWER = """\
+**Critical action points (0 blocking)**
+
+1. **Verify**: check the log
+
+Done here.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
     def test_suffix_nonblocking_items(self):
@@ -480,8 +488,30 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 items=block.wire_items(),
                 pane_id="w1:p1",
                 sock_path="/tmp/herdr-test.sock",
+        )
+        self.assertEqual(outcome["payload"]["state"], "blocked")
+
+    # MAT-147 AC2
+    def test_verify_not_marked_as_nonblocking(self):
+        block = closing_block.parse(UNMARKED_VERIFY_BLOCKING_ANSWER)
+
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertTrue(block.wire_items()[0]["blocking"])
+        self.assertEqual(block.wire_items()[0]["label"], "Verify")
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
             )
         self.assertEqual(outcome["payload"]["state"], "blocked")
+        self.assertEqual(outcome["payload"]["items"][0]["blocking"], True)
 
     def test_contract_line_parses_met_and_unmet_states(self):
         met = closing_block.parse(CONTRACT_MET)
