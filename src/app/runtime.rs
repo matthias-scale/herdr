@@ -1254,43 +1254,11 @@ mod tests {
 
     #[tokio::test]
     async fn monolithic_raw_text_paste_and_uncaptured_click_close_send_off_without_pane_input() {
-        fn app_with_send_off(
-            mouse_capture: bool,
-        ) -> (super::super::App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
-            let (mut app, pane_id) = test_app_with_pane();
-            app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
-            app.state.ensure_test_terminals();
-            let terminal_id = app.state.workspaces[0]
-                .terminal_id(pane_id)
-                .cloned()
-                .expect("test pane terminal");
-            let (runtime, pane_input) =
-                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                    80,
-                    24,
-                    0,
-                    b"\x1b[?1003h\x1b[?1006h",
-                    16,
-                );
-            assert!(
-                runtime.mouse_reporting_enabled(),
-                "reproduction requires a mouse-reporting pane"
-            );
-            app.terminal_runtimes.insert(terminal_id, runtime);
-            app.state.mode = crate::app::Mode::Terminal;
-            app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
-                started: crate::pomodoro::PomodoroPhase::ShortBreak,
-                shown_at: Instant::now(),
-            });
-            app.state.mouse_capture = mouse_capture;
-            (app, pane_input)
-        }
-
         for event in [
             crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new("committed")),
             crate::raw_input::RawInputEvent::Paste("pasted".into()),
         ] {
-            let (mut app, mut pane_input) = app_with_send_off(false);
+            let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
             assert!(app.handle_raw_input_event(event).await);
             assert!(app.state.pomodoro.send_off.is_none());
             assert!(
@@ -1308,7 +1276,8 @@ mod tests {
             })
         };
         for mouse_capture in [false, true] {
-            let (mut app, mut pane_input) = app_with_send_off(mouse_capture);
+            let (mut app, mut pane_input) =
+                test_app_with_send_off_and_mouse_reporting(mouse_capture);
             for event in [
                 mouse(crossterm::event::MouseEventKind::Moved),
                 mouse(crossterm::event::MouseEventKind::ScrollDown),
@@ -1331,7 +1300,7 @@ mod tests {
             );
         }
 
-        let (mut app, mut pane_input) = app_with_send_off(false);
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
         app.state.pomodoro.send_off = None;
         let click = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -1350,7 +1319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn monolithic_send_off_key_lease_swallows_repeats_and_release() {
+    async fn f2_monolithic_send_off_release_clears_the_dismissal_key_lease() {
         let (mut app, pane_id) = test_app_with_pane();
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.state.ensure_test_terminals();
@@ -1382,16 +1351,113 @@ mod tests {
             ))
             .await
         );
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
         assert!(
             !app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(
-                key.with_kind(crossterm::event::KeyEventKind::Release),
+                key.clone()
+                    .with_kind(crossterm::event::KeyEventKind::Release),
             ))
             .await
         );
+        assert!(app.input_leases.is_empty());
+        assert!(app.state.pomodoro.send_off.is_some());
         assert!(
             pane_input.try_recv().is_err(),
             "the dismissal key lifecycle must not reach the pane"
         );
+        app.state.pomodoro.send_off = None;
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(key))
+                .await
+        );
+        assert_eq!(
+            pane_input.recv().await.expect("second press reaches pane"),
+            bytes::Bytes::from_static(b"x")
+        );
+    }
+
+    #[tokio::test]
+    async fn f3_monolithic_send_off_only_swallows_mouse_up_after_its_down() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        app.state.pomodoro.send_off = None;
+        let mouse = |kind| {
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 40,
+                row: 12,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+        };
+
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Down(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        pane_input.recv().await.expect("mouse down reaches pane");
+
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Up(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        pane_input.recv().await.expect("mouse up reaches pane");
+        assert!(app.state.pomodoro.send_off.is_some());
+
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Down(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Up(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        assert!(pane_input.try_recv().is_err());
+    }
+
+    fn test_app_with_send_off_and_mouse_reporting(
+        mouse_capture: bool,
+    ) -> (super::super::App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let (runtime, pane_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1003h\x1b[?1006h",
+                16,
+            );
+        assert!(
+            runtime.mouse_reporting_enabled(),
+            "reproduction requires a mouse-reporting pane"
+        );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        app.state.mouse_capture = mouse_capture;
+        (app, pane_input)
     }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {

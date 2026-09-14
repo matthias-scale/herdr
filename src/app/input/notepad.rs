@@ -255,10 +255,13 @@ impl crate::app::App {
                 .get(&source_id)
                 .copied()
             {
-                if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(released) if released == button)
-                {
-                    self.pending_pomodoro_send_off_mouse_releases
-                        .remove(&source_id);
+                if let crossterm::event::MouseEventKind::Up(released) = mouse.kind {
+                    if released == button {
+                        self.pending_pomodoro_send_off_mouse_releases
+                            .remove(&source_id);
+                        return true;
+                    }
+                    return false;
                 }
                 return true;
             }
@@ -268,7 +271,12 @@ impl crate::app::App {
         }
 
         let dismisses = match event {
-            crate::raw_input::RawInputEvent::Key(_) => true,
+            crate::raw_input::RawInputEvent::Key(key) => {
+                if key.kind == crossterm::event::KeyEventKind::Release {
+                    return false;
+                }
+                true
+            }
             crate::raw_input::RawInputEvent::Text(_)
             | crate::raw_input::RawInputEvent::Paste(_) => true,
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
@@ -277,7 +285,7 @@ impl crate::app::App {
                         .insert(source_id, button);
                     true
                 } else {
-                    return true;
+                    return !matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_));
                 }
             }
             _ => false,
