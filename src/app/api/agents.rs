@@ -66,6 +66,19 @@ impl App {
                         format!("unknown remote focus host: {}", agent_ref.host),
                     );
                 }
+                if !self
+                    .remote_focus_transport
+                    .remote_host_ready(&agent_ref.host)
+                {
+                    return encode_error(
+                        id,
+                        "host_unreachable",
+                        format!(
+                            "remote host {} has no unambiguous identity from a successful fleet poll",
+                            agent_ref.host
+                        ),
+                    );
+                }
                 let started = match self.start_remote_focus_operation(agent_ref) {
                     Ok(started) => started,
                     Err(error) => return encode_error_body(id, error),
@@ -421,6 +434,10 @@ mod tests {
             true
         }
 
+        fn remote_host_ready(&self, _host: &str) -> bool {
+            true
+        }
+
         fn start(
             &mut self,
             operation_id: &str,
@@ -446,6 +463,33 @@ mod tests {
                     code: "connection_lost".into(),
                     message: "fake event queue closed".into(),
                 })
+        }
+    }
+
+    #[derive(Debug)]
+    struct IdentityUnavailableTransport;
+
+    impl crate::app::remote_focus::RemoteFocusTransport for IdentityUnavailableTransport {
+        fn accepts_remote_host(&self, _host: &str) -> bool {
+            true
+        }
+
+        fn remote_host_ready(&self, _host: &str) -> bool {
+            false
+        }
+
+        fn start(
+            &mut self,
+            _operation_id: &str,
+            _agent_ref: &AgentRef,
+            _proxy_pane_id: &str,
+            _channels: crate::pane::RemoteProxyChannels,
+            _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        ) -> Result<(), ErrorBody> {
+            Err(ErrorBody {
+                code: "connection_lost".into(),
+                message: "identity preflight was bypassed".into(),
+            })
         }
     }
 
@@ -1725,6 +1769,25 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
         assert_eq!(error.error.code, "unknown_host");
         assert_eq!(app.remote_focus_operations.len(), 0);
+    }
+
+    #[test]
+    fn remote_focus_rejects_an_unidentified_configured_host_before_opening_a_proxy() {
+        let mut app = app_with_agent();
+        app.state.agent_host_name = "laptop".into();
+        app.remote_focus_transport = Box::new(IdentityUnavailableTransport);
+        let response = app.handle_api_request(Request {
+            id: "identity-unavailable".into(),
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
+            }),
+        });
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "host_unreachable");
+        assert!(error.error.message.contains("no unambiguous identity"));
+        assert_eq!(app.remote_focus_operations.len(), 0);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
     }
 
     #[test]

@@ -679,6 +679,7 @@ mod tests {
                     version: None,
                     protocol: None,
                     error: None,
+                    remote_identity: None,
                     entries: vec![crate::fleet::FleetRow::test_agent_info_row(
                         "remote",
                         remote_agent,

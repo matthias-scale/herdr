@@ -997,7 +997,7 @@ mod tests {
 
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
         assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
 
@@ -1005,11 +1005,11 @@ mod tests {
         assert_eq!(drain(&mut rx), "");
         assert!(app.tick_auto_nudges(now + Duration::from_secs(10 * 60)));
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
 
         assert!(app.tick_auto_nudges(now + Duration::from_secs(30 * 60)));
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
         assert!(app.tick_auto_nudges(now + Duration::from_secs(30 * 60) + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
         assert!(!app.tick_auto_nudges(now + Duration::from_secs(1_000 * 60)));
@@ -1111,7 +1111,7 @@ mod tests {
         assert!(app.tick_auto_nudges(now));
         assert_eq!(
             drain(&mut rx),
-            "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+            "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."
         );
         assert!(!app.tick_auto_nudges(now + Duration::from_millis(299)));
         assert_eq!(drain(&mut rx), "");
@@ -1161,7 +1161,7 @@ mod tests {
         let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
         assert!(app.stall_nudge_episodes.contains_key(&terminal_id));
 
         app.handle_internal_event_with_prefix_sync(crate::events::AppEvent::HookStateReported {
@@ -1213,7 +1213,7 @@ mod tests {
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
         assert_eq!(app.stall_nudge_episodes[&terminal_id].nudges_sent, 2);
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
     }
 
     #[tokio::test]
@@ -1355,7 +1355,7 @@ mod tests {
 
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
 
         app.note_human_text(pane_id, "human input");
         tokio::time::sleep(STALL_NUDGE_SUBMIT_DELAY + Duration::from_millis(50)).await;
@@ -1395,7 +1395,7 @@ mod tests {
 
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx)
-            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."));
+            .contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."));
 
         app.state
             .pending_human_drafts

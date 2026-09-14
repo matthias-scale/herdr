@@ -167,6 +167,7 @@ pub struct App {
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
+    pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -1347,7 +1348,8 @@ impl App {
             });
         }
         crate::symphony::start_poller(event_tx.clone());
-        crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
+        let fleet_poller_config =
+            crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -1385,6 +1387,7 @@ impl App {
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
             )),
+            fleet_poller_config,
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
@@ -2462,6 +2465,15 @@ impl App {
             let revoked_operations = self
                 .remote_focus_transport
                 .reload_fleet(&config.remote.fleet);
+            let config_generation = self
+                .fleet_poller_config
+                .replace(config.remote.fleet.clone());
+            self.state.fleet_snapshot = self
+                .state
+                .fleet_snapshot
+                .reconcile_after_config_reload(&config.remote.fleet, config_generation);
+            self.state.reconcile_dock_hosts_selection();
+            self.refresh_remote_agent_panel_entries();
             for operation_id in revoked_operations {
                 self.apply_remote_focus_transition(
                     &operation_id,

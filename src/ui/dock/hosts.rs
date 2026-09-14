@@ -286,6 +286,7 @@ mod tests {
             version: Some("0.8.2".to_string()),
             protocol: Some(crate::protocol::PROTOCOL_VERSION),
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         }
     }
@@ -310,6 +311,7 @@ mod tests {
             polled: true,
             refreshed_at: Some(SystemTime::UNIX_EPOCH),
             refreshed_at_unix_ms: Some(0),
+            config_generation: 0,
             configured_hosts: vec!["ub2".to_string(), "ub1".to_string()],
             hosts: vec![skewed, unreachable],
         };
