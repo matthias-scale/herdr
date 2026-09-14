@@ -266,6 +266,15 @@ pub(crate) fn compact_dot_for_state(
 }
 
 fn compact_provider(entry: &AgentPanelEntry) -> String {
+    let provider = compact_provider_token(entry);
+    match entry.remote_host.as_deref() {
+        Some(host) if provider.is_empty() => host.to_string(),
+        Some(host) => format!("{host} · {provider}"),
+        None => provider,
+    }
+}
+
+fn compact_provider_token(entry: &AgentPanelEntry) -> String {
     if !entry.has_agent {
         return ">_".to_string();
     }
@@ -328,7 +337,7 @@ fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
     candidate.unwrap_or(DEFAULT_THREAD_TITLE)
 }
 
-fn title_without_object_identifier(title: &str) -> Option<&str> {
+pub(crate) fn title_without_object_identifier(title: &str) -> Option<&str> {
     let (identifier, title) = title.split_once(" · ")?;
     let github_identifier = identifier
         .strip_prefix('#')
@@ -402,6 +411,27 @@ fn compact_row_layout(
         provider,
         activity_age: (widths.age > 0).then_some(age),
         activity_instant: (widths.age > 0).then_some(activity_instant).flatten(),
+    }
+}
+
+/// The sidebar's own vocabulary for one agent row, for surfaces that list the
+/// same agents elsewhere and must not drift from it.
+#[derive(Clone)]
+pub(crate) struct AgentRowCells {
+    pub dot: String,
+    pub dot_color: Color,
+    pub title: String,
+    pub provider: String,
+    pub provider_color: Color,
+}
+
+pub(crate) fn agent_row_cells(entry: &AgentPanelEntry, p: &Palette) -> AgentRowCells {
+    AgentRowCells {
+        dot: compact_row_dot_text(entry),
+        dot_color: compact_row_color(entry, p),
+        title: compact_row_title(entry, true).to_string(),
+        provider: compact_provider(entry),
+        provider_color: provider_color(entry, p),
     }
 }
 
@@ -927,6 +957,9 @@ pub(crate) struct AgentPanelEntry {
     /// First pane in canonical layout order for its tab. The renderer uses it
     /// to project the tab row exactly once before its pane children.
     pub tab_first_pane: bool,
+    /// Fleet host this pane is attached to over ssh. The pane lives in the
+    /// local list, so the row names the machine next to the provider.
+    pub remote_host: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1279,6 +1312,16 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let space_label = workspace_label.clone();
+                    let remote_host = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .and_then(|tab| tab.panes.get(&detail.pane_id))
+                        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                        .and_then(|terminal| terminal.launch_argv.as_deref())
+                        .and_then(|argv| {
+                            crate::fleet::attached_host_name(&app.fleet_snapshot, argv)
+                        })
+                        .map(str::to_string);
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
                     let starred = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.starred);
                     let tab_has_custom_name = ws
@@ -1357,6 +1400,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         holds_shell: detail.holds_shell,
                         gate_count: detail.gate_count,
                         tab_first_pane: false,
+                        remote_host,
                     }
                 })
         })
@@ -1511,6 +1555,7 @@ pub(crate) fn remote_agent_panel_entries(
                         state_labels,
                         tokens,
                         tab_first_pane: false,
+                        remote_host: None,
                     },
                     narrow_host,
                 ),
@@ -1633,6 +1678,11 @@ fn aggregate_tab_entries(
                         (current, candidate) => current.or(candidate),
                     };
                     tab_entry.holds_shell |= entry.holds_shell;
+                    // Like a mixed provider, a machine name only labels a tab
+                    // whose panes all sit on that machine.
+                    if tab_entry.remote_host != entry.remote_host {
+                        tab_entry.remote_host = None;
+                    }
                     tab_entry.gate_count = tab_entry.gate_count.saturating_add(entry.gate_count);
                     tab_entry.active_subagents =
                         match (tab_entry.active_subagents, entry.active_subagents) {
@@ -2128,8 +2178,9 @@ fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool 
     let workspace = app.workspaces.get(entry.ws_idx);
     let context = entry_work_context(app, entry);
     let haystack = format!(
-        "{} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {}",
         entry.primary_label,
+        entry.remote_host.as_deref().unwrap_or_default(),
         entry.primary_tab_label.as_deref().unwrap_or_default(),
         entry.pane_label.as_deref().unwrap_or_default(),
         entry.terminal_title.as_deref().unwrap_or_default(),
@@ -2291,10 +2342,13 @@ fn compact_sidebar_rows_inner(
             expand_worktrees,
             terminal_runtimes,
         );
-        append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-        if has_remote_rows {
-            append_remote_rows(app, &mut rows, &remote_terms);
-        }
+        append_tail_sections(
+            app,
+            &mut rows,
+            settled_entries,
+            expand_worktrees,
+            has_remote_rows.then_some(remote_terms.as_slice()),
+        );
         return rows;
     }
     match app.sidebar_group_mode {
@@ -2307,10 +2361,13 @@ fn compact_sidebar_rows_inner(
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
     }
-    append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-    if has_remote_rows {
-        append_remote_rows(app, &mut rows, &remote_terms);
-    }
+    append_tail_sections(
+        app,
+        &mut rows,
+        settled_entries,
+        expand_worktrees,
+        has_remote_rows.then_some(remote_terms.as_slice()),
+    );
     rows
 }
 
@@ -2890,15 +2947,20 @@ fn append_object_group_rows(
     }
 }
 
-/// The two sections that close the list, in order: Symphony first so open
-/// workflows sit directly under the spaces they relate to, then Settled, which
-/// is history and always sinks to the bottom.
+/// The sections that close the list, in order: the external machine groups
+/// sit under the local spaces, Symphony follows because its workflows run on
+/// no pane of either, then Settled, which is history and always sinks to the
+/// bottom.
 fn append_tail_sections(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     settled_entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
+    remote_terms: Option<&[&str]>,
 ) {
+    if let Some(terms) = remote_terms {
+        append_remote_rows(app, rows, terms);
+    }
     append_symphony_rows(app, rows);
     append_settled_rows(app, rows, settled_entries, expand_worktrees);
 }
@@ -8881,6 +8943,96 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn symphony_section_follows_the_external_machine_groups() {
+        let mut app = app_with_two_remote_hosts();
+        app.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: vec![symphony_workflow("job")],
+            unavailable: None,
+            polled: true,
+        };
+        let rows = sidebar_rows(&app);
+        let last_host = rows
+            .iter()
+            .rposition(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("host:")))
+            .expect("host group header");
+        let symphony = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == SYMPHONY_SECTION_TITLE))
+            .expect("symphony header");
+        assert!(
+            last_host < symphony,
+            "symphony must sit below the machine groups"
+        );
+    }
+
+    #[test]
+    fn a_pane_attached_to_a_fleet_host_names_the_machine_before_the_provider() {
+        let mut app = app_with_agents(&["attached"]);
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["ub1".into()],
+            hosts: vec![fleet_host_snapshot("ub1", false, Vec::new())],
+            ..crate::fleet::Snapshot::default()
+        };
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.launch_argv = Some(vec![
+            "ssh".into(),
+            "-t".into(),
+            "ub1".into(),
+            "herdr agent attach 'w1:p1'".into(),
+        ]);
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("attached entry");
+        assert_eq!(entry.remote_host.as_deref(), Some("ub1"));
+        let provider = compact_provider(&entry);
+        assert!(provider.starts_with("ub1 · "), "{provider:?}");
+
+        let width = 40;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_compact_agent_row_with_prefix(
+                    &app,
+                    frame,
+                    &entry,
+                    Rect::new(0, 0, width, 1),
+                    0,
+                    false,
+                    None,
+                    None,
+                )
+            })
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), 0, width);
+        assert!(rendered.contains(&provider), "{rendered:?}");
+
+        // The machine name is on the row, so searching for it must keep the row.
+        app.sidebar_work_filter.query = "ub1".into();
+        assert_eq!(sidebar_filtered_agent_entries_from(&app, None).len(), 1);
+        app.sidebar_work_filter.query = "ub9".into();
+        assert!(sidebar_filtered_agent_entries_from(&app, None).is_empty());
+
+        // A tab that mixes the attached pane with a local one names no machine.
+        let mut local = entry.clone();
+        local.pane_id = crate::layout::PaneId::from_raw(entry.pane_id.raw() + 1);
+        local.remote_host = None;
+        let same = aggregate_tab_entries(&[entry.clone(), entry.clone()]);
+        assert_eq!(
+            same.values().next().unwrap().remote_host.as_deref(),
+            Some("ub1")
+        );
+        let mixed = aggregate_tab_entries(&[entry, local]);
+        assert_eq!(mixed.values().next().unwrap().remote_host, None);
+    }
+
+    #[test]
     fn remote_host_groups_start_collapsed_and_keep_an_explicit_expansion() {
         let mut app = app_with_two_remote_hosts();
 
@@ -10786,6 +10938,7 @@ pub(crate) mod tests {
             state_labels,
             tokens: std::collections::HashMap::new(),
             tab_first_pane: false,
+            remote_host: None,
         }
     }
 
