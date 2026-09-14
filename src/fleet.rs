@@ -2241,6 +2241,20 @@ mod tests {
     }
 
     #[test]
+    // A2: an empty reachable inventory records no remote identity.
+    fn empty_remote_inventory_records_no_identity() {
+        let hosts = vec![host("office", false)];
+        let snapshot = collect_snapshot_with(
+            &fake_reader(Ok(Vec::new()), HostRuntime::default()),
+            &hosts,
+            &FleetConfig::default(),
+        );
+
+        assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
+        assert!(snapshot.hosts[0].remote_identity.is_none());
+    }
+
+    #[test]
     fn fleet_names_reserve_the_agent_ref_separator() {
         let mut fleet = FleetConfig {
             self_name: Some("local::invalid".to_string()),
