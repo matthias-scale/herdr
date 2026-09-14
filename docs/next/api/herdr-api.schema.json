@@ -111,6 +111,10 @@
         },
         "ClosingBlockItem": {
           "properties": {
+            "blocking": {
+              "default": true,
+              "type": "boolean"
+            },
             "default": {
               "default": null,
               "type": [
@@ -2284,6 +2288,10 @@
         },
         "ClosingBlockItem": {
           "properties": {
+            "blocking": {
+              "default": true,
+              "type": "boolean"
+            },
             "default": {
               "default": null,
               "type": [
@@ -7830,6 +7838,10 @@
         },
         "ClosingBlockItem": {
           "properties": {
+            "blocking": {
+              "default": true,
+              "type": "boolean"
+            },
             "default": {
               "default": null,
               "type": [

@@ -91,12 +91,12 @@ pub(crate) enum AttentionTier {
 pub(crate) fn attention_tier(
     state: AgentState,
     has_closing_gates: bool,
-    has_closing_items: bool,
+    has_blocking_closing_items: bool,
     usage_limited: bool,
 ) -> AttentionTier {
     if usage_limited || has_closing_gates {
         AttentionTier::Blocked
-    } else if has_closing_items && state != AgentState::Working {
+    } else if has_blocking_closing_items && state != AgentState::Working {
         AttentionTier::Attention
     } else if state == AgentState::Blocked {
         AttentionTier::Blocked
@@ -690,6 +690,10 @@ impl TerminalState {
         self.closing_decisions = decisions;
         self.revision = self.revision.saturating_add(1);
         true
+    }
+
+    pub(crate) fn has_blocking_closing_items(&self) -> bool {
+        self.closing_items.iter().any(|item| item.blocking)
     }
 
     pub(crate) fn apply_closing_contract_tokens(
@@ -4279,6 +4283,7 @@ mod tests {
         let mut source = test_terminal();
         source.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Choose the release path".into(),

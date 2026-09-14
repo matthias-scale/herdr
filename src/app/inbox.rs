@@ -244,6 +244,7 @@ mod tests {
             .expect("terminal")
             .clone();
         let item = crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose the release lane".into(),
@@ -321,6 +322,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
             terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".to_string(),
                 text: "merge the release".to_string(),
@@ -422,6 +424,7 @@ mod tests {
                         terminal.set_raw_agent_state_for_test(state);
                         if latched_gate {
                             terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
+                                blocking: true,
                                 n: 1,
                                 label: "Gate".to_string(),
                                 text: "decide".to_string(),

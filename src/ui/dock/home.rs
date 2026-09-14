@@ -1758,6 +1758,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("terminal state")
             .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Gate".to_string(),
             text: "Rotate the **shared** token?".to_string(),

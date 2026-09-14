@@ -9342,6 +9342,7 @@ pub(crate) mod tests {
             false,
         );
         info.items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose one".into(),
@@ -10180,6 +10181,7 @@ pub(crate) mod tests {
             .unwrap()
             .apply_closing_block_payload(
                 vec![crate::api::schema::ClosingBlockItem {
+                    blocking: true,
                     n: 1,
                     label: "Gate".into(),
                     text: "Approve the open PR".into(),
@@ -10696,6 +10698,7 @@ pub(crate) mod tests {
         terminal_state.set_raw_agent_state_for_test(AgentState::Idle);
         terminal_state.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Approve the PR".into(),
@@ -11462,6 +11465,7 @@ pub(crate) mod tests {
         terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Approve the open PR".into(),
@@ -11533,6 +11537,7 @@ pub(crate) mod tests {
     fn closing_items_render_at_their_runtime_attention_tier() {
         let mut app = app_with_agents(&["gate", "items", "mixed", "resumed"]);
         let item = |label: &str| crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: label.into(),
             text: "Needs the human".into(),
@@ -11597,6 +11602,7 @@ pub(crate) mod tests {
         terminal.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Answer".into(),
                 text: "Choose one".into(),
@@ -11640,6 +11646,7 @@ pub(crate) mod tests {
         terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Approve the open PR".into(),
@@ -11706,6 +11713,7 @@ pub(crate) mod tests {
         terminal.set_raw_agent_state_for_test(AgentState::Working);
         terminal.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Approve the open PR".into(),
@@ -14523,6 +14531,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.hide_done_after = std::time::Duration::from_secs(30 * 60);
         app.terminals.get_mut(&terminal_id).unwrap().closing_gates =
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Choose the release path".into(),
@@ -20414,6 +20423,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&attention_terminal)
             .unwrap()
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose one".into(),

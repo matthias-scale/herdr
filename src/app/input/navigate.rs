@@ -3726,6 +3726,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("terminal state")
             .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "gate".into(),
             text: "A latched gate".into(),
@@ -3751,6 +3752,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("terminal state")
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose a lane".into(),
