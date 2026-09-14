@@ -405,6 +405,26 @@ fn compact_row_layout(
     }
 }
 
+/// The sidebar's own vocabulary for one agent row, for surfaces that list the
+/// same agents elsewhere and must not drift from it.
+pub(crate) struct AgentRowCells {
+    pub dot: String,
+    pub dot_color: Color,
+    pub title: String,
+    pub provider: String,
+    pub provider_color: Color,
+}
+
+pub(crate) fn agent_row_cells(entry: &AgentPanelEntry, p: &Palette) -> AgentRowCells {
+    AgentRowCells {
+        dot: compact_row_dot_text(entry),
+        dot_color: compact_row_color(entry, p),
+        title: compact_row_title(entry, true).to_string(),
+        provider: compact_provider(entry),
+        provider_color: provider_color(entry, p),
+    }
+}
+
 fn compact_provider_field_width(provider: &str) -> usize {
     if provider.is_empty() {
         0

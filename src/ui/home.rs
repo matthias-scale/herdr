@@ -77,45 +77,78 @@ fn header_line(app: &AppState, counts: HomeCounts, width: u16) -> Line<'static> 
     Line::from(spans)
 }
 
-/// `▸  workspace       what it is asking            18m`
-fn agent_line(app: &AppState, agent: &BlockedAgent, selected: bool, width: u16) -> Line<'static> {
-    let bullet = if selected { " ▸  " } else { " ·  " };
-    let age = waited_label(agent);
-    let label_width = 16usize;
-    let workspace = truncate(&agent.workspace_label, label_width);
-    // Whatever the ask consumes, the age keeps its column: the list is sorted by
-    // it, so a ragged right edge would hide the ordering the sort exists for.
-    let ask_width = (width as usize)
-        .saturating_sub(bullet.chars().count() + label_width + 1 + age.chars().count() + 2);
-    let ask = truncate(&agent.agent_label, ask_width);
-    // Bold-vs-dim alone was not readable as a cursor. A filled row is, and it
-    // is the same surface the sidebar uses for its selection.
+/// `○ workspace        session title                 cc >_  18m`
+///
+/// Dot, title and provider come from the sidebar row for the same pane, so the
+/// two lists read the same way. A pane the sidebar cannot resolve keeps the
+/// queue's own label and the empty waiting dot.
+fn agent_line(
+    app: &AppState,
+    agent: &BlockedAgent,
+    cells: Option<&crate::ui::sidebar::AgentRowCells>,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
     let attention_color = match agent.attention_tier {
         crate::terminal::state::AttentionTier::Blocked => app.palette.red,
         crate::terminal::state::AttentionTier::Attention => app.palette.peach,
         crate::terminal::state::AttentionTier::None => app.palette.subtext0,
     };
-    let style = if selected {
-        Style::default()
-            .fg(app.palette.text)
-            .bg(app.palette.surface0)
-            .add_modifier(Modifier::BOLD)
+    let dot = cells.map_or("○", |cells| cells.dot.as_str());
+    let dot_color = cells.map_or(attention_color, |cells| cells.dot_color);
+    let title = cells.map_or(agent.agent_label.as_str(), |cells| cells.title.as_str());
+    let provider = cells.map_or("", |cells| cells.provider.as_str());
+    let provider_color = cells.map_or(app.palette.overlay0, |cells| cells.provider_color);
+
+    let lead = format!(" {dot} ");
+    let age = waited_label(agent);
+    let label_width = 16usize;
+    let workspace = truncate(&agent.workspace_label, label_width);
+    let provider_cell = if provider.is_empty() {
+        String::new()
     } else {
-        Style::default().fg(attention_color)
+        format!("{provider}  ")
     };
-    let age_style = if selected {
-        Style::default()
-            .fg(app.palette.overlay1)
-            .bg(app.palette.surface0)
+    // Whatever the title consumes, provider and age keep their columns: the list
+    // is sorted by age, so a ragged right edge would hide the ordering.
+    let title_width = (width as usize).saturating_sub(
+        display_width(&lead)
+            + label_width
+            + 1
+            + display_width(&provider_cell)
+            + display_width(&age)
+            + 2,
+    );
+    let title = truncate(title, title_width);
+    let title_pad = title_width.saturating_sub(display_width(&title));
+    // A filled row is the cursor, the same surface the sidebar uses.
+    let base = if selected {
+        Style::default().bg(app.palette.surface0)
     } else {
-        Style::default().fg(app.palette.overlay0)
+        Style::default()
     };
+    let text_style = if selected {
+        base.fg(app.palette.text).add_modifier(Modifier::BOLD)
+    } else {
+        base.fg(attention_color)
+    };
+    let age_style = base.fg(if selected {
+        app.palette.overlay1
+    } else {
+        app.palette.overlay0
+    });
     Line::from(vec![
-        Span::styled(bullet.to_string(), style),
-        Span::styled(format!("{workspace:<label_width$} "), style),
-        Span::styled(format!("{ask:<ask_width$}"), style),
+        Span::styled(" ", base),
         Span::styled(
-            format!("{age:>width$} ", width = age.chars().count() + 1),
+            dot.to_string(),
+            base.fg(dot_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", base),
+        Span::styled(format!("{workspace:<label_width$} "), text_style),
+        Span::styled(format!("{title}{}", " ".repeat(title_pad)), text_style),
+        Span::styled(provider_cell, base.fg(provider_color)),
+        Span::styled(
+            format!("{age:>width$} ", width = display_width(&age) + 1),
             age_style,
         ),
     ])
@@ -1444,6 +1477,11 @@ pub(super) fn render_home(
         .map(|home| home.selected(queue))
         .unwrap_or(0);
 
+    let entries = if queue.is_empty() {
+        Vec::new()
+    } else {
+        crate::ui::sidebar::all_agent_panel_entries(app)
+    };
     let lines: Vec<Line<'static>> = if queue.is_empty() {
         vec![empty_line(app)]
     } else {
@@ -1452,7 +1490,13 @@ pub(super) fn render_home(
             .enumerate()
             .skip(scroll)
             .take(visible)
-            .map(|(idx, agent)| agent_line(app, agent, idx == selected, body.width))
+            .map(|(idx, agent)| {
+                let cells = entries
+                    .iter()
+                    .find(|entry| entry.pane_id == agent.pane_id)
+                    .map(|entry| crate::ui::sidebar::agent_row_cells(entry, &app.palette));
+                agent_line(app, agent, cells.as_ref(), idx == selected, body.width)
+            })
             .collect()
     };
     frame.render_widget(Paragraph::new(lines), body);
@@ -1784,6 +1828,37 @@ mod tests {
     }
 
     #[test]
+    fn home_rows_use_the_sidebar_dot_session_title_and_provider() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("Critical action links".into());
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("test terminal");
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        let mut home = HomeState::default();
+        home.focus = None;
+        app.home = Some(home);
+        let queue = app.home_attention_agents();
+        assert_eq!(queue.len(), 1);
+        let area = Rect::new(0, 0, 80, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+        let row = row_text(&buffer, area, 2);
+
+        assert!(row.contains("Critical action links"), "{row}");
+        assert!(row.contains(" cc "), "{row}");
+        assert!(!row.contains("claude"), "{row}");
+        assert_eq!(buffer[(1, 2)].symbol(), "○");
+        assert_eq!(buffer[(1, 2)].fg, app.palette.red);
+    }
+
+    #[test]
     fn home_renders_blocked_rows_and_marks_the_selected_row_with_bold_text() {
         let mut app = AppState::test_new();
         app.home = Some(crate::app::home::HomeState::default());
@@ -1794,15 +1869,15 @@ mod tests {
 
         assert!(row_text(&buffer, area, 2).contains("agent0"));
         assert!(row_text(&buffer, area, 3).contains("agent1"));
-        assert_eq!(buffer[(1, 2)].symbol(), "▸");
-        assert_eq!(buffer[(1, 3)].symbol(), "·");
+        assert_eq!(buffer[(1, 2)].symbol(), "○");
+        assert_eq!(buffer[(1, 3)].symbol(), "○");
         assert_eq!(
-            buffer[(1, 2)].style().add_modifier(Modifier::BOLD),
-            buffer[(1, 2)].style()
+            buffer[(3, 2)].style().add_modifier(Modifier::BOLD),
+            buffer[(3, 2)].style()
         );
         assert_ne!(
-            buffer[(1, 3)].style().add_modifier(Modifier::BOLD),
-            buffer[(1, 3)].style()
+            buffer[(3, 3)].style().add_modifier(Modifier::BOLD),
+            buffer[(3, 3)].style()
         );
     }
 
@@ -2135,7 +2210,7 @@ mod tests {
         let buffer = draw_home(&app, &queue, area);
         let hits = home_hit_areas(&app, &queue, area);
 
-        assert_eq!(buffer[(area.x + 1, layout.body.y)].symbol(), "▸");
+        assert_eq!(buffer[(area.x + 1, layout.body.y)].symbol(), "○");
         assert_eq!(composer.prompt.x, composer.frame.x + 1);
         assert_eq!(composer.chips.x, composer.frame.x + 1);
         assert_eq!(composer.bottom.x, composer.frame.x + 1);
