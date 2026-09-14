@@ -390,6 +390,7 @@ struct FleetPollerState {
 #[derive(Debug)]
 pub(crate) struct FleetPollerConfig {
     state: std::sync::Mutex<FleetPollerState>,
+    changed: std::sync::Condvar,
 }
 
 pub(crate) type FleetPollerHandle = Arc<FleetPollerConfig>;
@@ -401,6 +402,7 @@ impl FleetPollerConfig {
                 fleet,
                 generation: 0,
             }),
+            changed: std::sync::Condvar::new(),
         }
     }
 
@@ -411,6 +413,7 @@ impl FleetPollerConfig {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.fleet = fleet;
         state.generation = state.generation.saturating_add(1);
+        self.changed.notify_all();
     }
 
     fn snapshot(&self) -> FleetPollerState {
@@ -418,6 +421,17 @@ impl FleetPollerConfig {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn wait_for_change(&self, generation: u64, timeout: Duration) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _state = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| state.generation == generation)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
     }
 }
 
@@ -440,9 +454,10 @@ pub(crate) fn start_poller(
                 tracing::warn!("dropped fleet refresh because the event queue is full");
             }
         }
-        std::thread::sleep(Duration::from_millis(
-            state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS),
-        ));
+        poller_config_for_thread.wait_for_change(
+            state.generation,
+            Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS)),
+        );
     });
     poller_config
 }
@@ -2126,6 +2141,48 @@ mod tests {
         assert!(!unpolled.polled);
         assert!(polled.polled);
         assert!(polled.hosts.is_empty());
+    }
+
+    #[test]
+    fn replacing_fleet_wakes_a_poller_wait_and_publishes_new_config() {
+        let initial = FleetConfig {
+            refresh_interval_ms: 60_000,
+            ..FleetConfig::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(initial));
+        let initial_state = poller.snapshot();
+        let waiter = Arc::clone(&poller);
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let wait_thread = std::thread::spawn(move || {
+            waiter.wait_for_change(initial_state.generation, Duration::from_secs(60));
+            woke_tx.send(()).expect("woken poller receiver");
+        });
+
+        let replacement = FleetConfig {
+            refresh_interval_ms: 100,
+            hosts: vec![FleetHostConfig {
+                name: "new-host".into(),
+                target: "new-host".into(),
+                ..FleetHostConfig::default()
+            }],
+            ..FleetConfig::default()
+        };
+        poller.replace(replacement.clone());
+
+        woke_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fleet reload wakes the old interval wait");
+        wait_thread.join().expect("poller wait thread");
+        let state = poller.snapshot();
+        assert_eq!(state.generation, 1);
+        assert_eq!(
+            state.fleet.refresh_interval_ms,
+            replacement.refresh_interval_ms
+        );
+        assert_eq!(
+            state.fleet.hosts.first().map(|host| host.name.as_str()),
+            Some("new-host")
+        );
     }
 
     #[test]
