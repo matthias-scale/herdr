@@ -235,6 +235,20 @@ impl crate::app::App {
         source_id: crate::app::InputSourceId,
         event: &crate::raw_input::RawInputEvent,
     ) -> bool {
+        let visible = crate::ui::pomodoro::send_off_visible_at(
+            &self.state,
+            self.state.screen_rect(),
+            std::time::Instant::now(),
+        );
+        self.intercept_pomodoro_send_off_raw_input_with_visibility(source_id, event, visible)
+    }
+
+    pub(crate) fn intercept_pomodoro_send_off_raw_input_with_visibility(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+        event: &crate::raw_input::RawInputEvent,
+        visible: bool,
+    ) -> bool {
         if let crate::raw_input::RawInputEvent::Mouse(mouse) = event {
             if let Some(button) = self
                 .pending_pomodoro_send_off_mouse_releases
@@ -249,17 +263,12 @@ impl crate::app::App {
                 return true;
             }
         }
-        if self.state.pomodoro.send_off.is_none() {
-            return false;
-        }
-        if !crate::ui::pomodoro::send_off_fits(self.state.screen_rect()) {
+        if !visible {
             return false;
         }
 
         let dismisses = match event {
-            crate::raw_input::RawInputEvent::Key(key) => {
-                !matches!(key.kind, crossterm::event::KeyEventKind::Release)
-            }
+            crate::raw_input::RawInputEvent::Key(_) => true,
             crate::raw_input::RawInputEvent::Text(_)
             | crate::raw_input::RawInputEvent::Paste(_) => true,
             crate::raw_input::RawInputEvent::Mouse(mouse) => {

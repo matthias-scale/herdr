@@ -206,7 +206,9 @@ impl App {
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
-        if self.intercept_pomodoro_send_off_raw_input(super::LOCAL_INPUT_SOURCE, &event) {
+        if !matches!(&event, crate::raw_input::RawInputEvent::Key(_))
+            && self.intercept_pomodoro_send_off_raw_input(super::LOCAL_INPUT_SOURCE, &event)
+        {
             return true;
         }
         let previous_mode = self.state.mode;
@@ -214,6 +216,19 @@ impl App {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let lease_key = super::input::InputLeaseKey::new(super::LOCAL_INPUT_SOURCE, &key);
                 let key = self.input_leases.normalize_press(&lease_key, key);
+                let normalized_event = crate::raw_input::RawInputEvent::Key(key.clone());
+                if self.intercept_pomodoro_send_off_raw_input(
+                    super::LOCAL_INPUT_SOURCE,
+                    &normalized_event,
+                ) {
+                    if key.kind != crossterm::event::KeyEventKind::Release {
+                        self.input_leases.insert_consumed(
+                            lease_key,
+                            super::input::ConsumedInputLease::SuppressRepeats,
+                        );
+                    }
+                    return true;
+                }
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
                         let initial_context = self.terminal_input_context();
@@ -353,11 +368,21 @@ impl App {
             .flatten()
     }
 
+    fn pomodoro_animation_due(&self, now: Instant) -> bool {
+        crate::ui::pomodoro::animation_due_at(
+            &self.state,
+            self.state.screen_rect(),
+            now,
+            self.last_render_at,
+        )
+    }
+
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = self.take_due_agent_activity_refresh(now);
         changed |= self.handle_loop_receipt_fallback(now);
         changed |= self.tick_notepad(now);
         changed |= self.tick_pomodoro(now, self.state.outer_terminal_focus != Some(false));
+        changed |= self.pomodoro_animation_due(now);
         changed |= self.tick_sidebar_animation(now);
         let mut resized = false;
 
@@ -1028,7 +1053,14 @@ impl App {
     }
 
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
+        let deadline = self.next_loop_deadline_with_resize_poll(now, needs_render, true, true);
+        [
+            deadline,
+            crate::ui::pomodoro::animation_deadline_at(&self.state, self.state.screen_rect(), now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub(crate) fn next_headless_loop_deadline_with_client_refresh(
@@ -1070,20 +1102,10 @@ impl App {
             self.state.next_done_settle_deadline(now),
             self.copy_feedback_deadline,
             // Presentation only: an unattached headless server draws no
-            // sidebar, so the animation must never be what wakes it.
+            // sidebar, so client-specific animation deadlines are handled by
+            // the headless server instead of this shared App scheduler.
             include_client_refresh
                 .then(|| self.sidebar_animation_deadline())
-                .flatten(),
-            include_client_refresh
-                .then(|| {
-                    crate::ui::pomodoro::animation_visible_at(
-                        &self.state,
-                        self.state.screen_rect(),
-                        now,
-                    )
-                    .then(|| self.state.pomodoro.animation_deadline())
-                    .flatten()
-                })
                 .flatten(),
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh
@@ -1327,6 +1349,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn monolithic_send_off_key_lease_swallows_repeats_and_release() {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        );
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(key.clone()))
+                .await
+        );
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(
+                key.clone()
+                    .with_kind(crossterm::event::KeyEventKind::Repeat),
+            ))
+            .await
+        );
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(
+                key.with_kind(crossterm::event::KeyEventKind::Release),
+            ))
+            .await
+        );
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the dismissal key lifecycle must not reach the pane"
+        );
+    }
+
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {
         let mut app = super::super::App::new(
             &crate::config::Config::default(),
@@ -1432,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn pomodoro_loop_deadline_and_redraw_require_a_rendered_animation() {
+    fn pomodoro_animation_deadline_uses_the_visible_client_geometry() {
         fn app_without_other_deadlines() -> super::super::App {
             let mut config = crate::config::Config::default();
             config.ui.status_bar.enabled = false;
@@ -1446,66 +1513,58 @@ mod tests {
         }
 
         let now = Instant::now();
-        let mut compact = app_without_other_deadlines();
-        compact.state.pomodoro.enabled = true;
-        compact.state.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
+        let mut app = app_without_other_deadlines();
+        app.next_resize_poll = now + Duration::from_secs(5);
+        app.state.pomodoro.enabled = true;
+        app.state.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
             ended: crate::pomodoro::PomodoroPhase::Work,
             next: crate::pomodoro::PomodoroPhase::ShortBreak,
             raised_at: now,
             input: String::new(),
             error: None,
         });
-        compact.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 60, 16);
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 18, 30);
 
         assert_eq!(
-            compact.next_headless_loop_deadline_with_client_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             None
         );
-        assert!(!compact.tick_pomodoro(now + crate::pomodoro::ANIMATION_FRAME_INTERVAL, true));
-
-        compact.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
         assert_eq!(
-            compact.next_headless_loop_deadline_with_client_refresh(now, false, true),
-            Some(now + crate::pomodoro::ANIMATION_FRAME_INTERVAL)
+            app.next_loop_deadline_with_resize_poll(now, false, false, true),
+            None
         );
-        assert!(compact.tick_pomodoro(now + crate::pomodoro::ANIMATION_FRAME_INTERVAL, true));
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            Some(now + Duration::from_secs(5))
+        );
 
-        let mut skipped_send_off = app_without_other_deadlines();
-        skipped_send_off.state.pomodoro.enabled = true;
-        skipped_send_off.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            Some(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL)
+        );
+        assert!(!app.tick_pomodoro(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL, true));
+        assert!(app.pomodoro_animation_due(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL));
+
+        let mut send_off = app_without_other_deadlines();
+        send_off.state.pomodoro.enabled = true;
+        send_off.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
             started: crate::pomodoro::PomodoroPhase::ShortBreak,
             shown_at: now,
         });
-        skipped_send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 18, 30);
-
+        send_off.next_resize_poll = now + Duration::from_secs(5);
+        send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 18, 30);
         assert_eq!(
-            skipped_send_off.next_headless_loop_deadline_with_client_refresh(now, false, true),
-            None
+            send_off.next_loop_deadline(now, false),
+            Some(now + Duration::from_secs(5))
         );
-        assert!(
-            !skipped_send_off.tick_pomodoro(now + crate::pomodoro::ANIMATION_FRAME_INTERVAL, true)
-        );
-
-        skipped_send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
-        skipped_send_off.state.view_observed_at =
-            now + crate::pomodoro::SEND_OFF_DURATION - Duration::from_millis(1);
-        assert!(skipped_send_off.tick_pomodoro(now + crate::pomodoro::SEND_OFF_DURATION, true));
-        assert!(skipped_send_off.state.pomodoro.send_off.is_none());
-
-        let mut compact_send_off = app_without_other_deadlines();
-        compact_send_off.state.pomodoro.enabled = true;
-        compact_send_off.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
-            started: crate::pomodoro::PomodoroPhase::ShortBreak,
-            shown_at: now,
-        });
-        compact_send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 60, 16);
-
+        send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
         assert_eq!(
-            compact_send_off.next_headless_loop_deadline_with_client_refresh(now, false, true),
-            Some(now + crate::pomodoro::ANIMATION_FRAME_INTERVAL)
+            send_off.next_loop_deadline(now, false),
+            Some(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL)
         );
-        assert!(compact_send_off.tick_pomodoro(now + crate::pomodoro::SEND_OFF_DURATION, true));
-        assert!(compact_send_off.state.pomodoro.send_off.is_none());
+        assert!(send_off.tick_pomodoro(now + crate::pomodoro::SEND_OFF_DURATION, true));
+        assert!(send_off.state.pomodoro.send_off.is_none());
     }
 
     #[test]

@@ -194,16 +194,7 @@ impl super::App {
 
     /// Advances the break timer. Returns whether the frame changed.
     pub(crate) fn tick_pomodoro(&mut self, now: Instant, host_focused: bool) -> bool {
-        let animation_visible = crate::ui::pomodoro::animation_visible_at(
-            &self.state,
-            self.state.screen_rect(),
-            self.state.view_observed_at,
-        );
-        let tick = self.state.pomodoro.tick_with_host_focus_and_animation(
-            now,
-            host_focused,
-            animation_visible,
-        );
+        let tick = self.state.pomodoro.tick_with_host_focus(now, host_focused);
         if tick.phase_ended {
             // The overlay is the reminder; the sound is what reaches an operator
             // who is looking at another window.

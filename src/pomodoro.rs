@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 /// How much text the operator has to type before a due prompt can be dismissed.
 /// A bare Enter is what makes a reminder ignorable, so the prompt refuses one.
 pub const DEFAULT_MIN_CONFIRM_CHARS: usize = 3;
-pub(crate) const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(125);
 pub(crate) const SEND_OFF_DURATION: Duration = Duration::from_secs(6);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +60,8 @@ pub struct PomodoroConfirmation {
     pub note: String,
 }
 
-/// The outcome of one tick: whether the rendered timer changed, and whether the
-/// tick is the one that ended a phase.
+/// The outcome of one tick: whether shared timer lifecycle state changed, and
+/// whether the tick is the one that ended a phase.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PomodoroTick {
     pub changed: bool,
@@ -94,9 +93,6 @@ pub struct PomodoroState {
     /// Whole seconds last reported to the renderer. Ticking is cheap and happens
     /// on every server wake, so it only reports a change at 1 Hz.
     rendered_secs: u64,
-    /// Last breathing frame reported to the renderer for the visible prompt or
-    /// send-off. The frame number is derived from that view's start instant.
-    rendered_animation_frame: u64,
 }
 
 impl Default for PomodoroState {
@@ -117,7 +113,6 @@ impl Default for PomodoroState {
             deadline: None,
             remaining: work,
             rendered_secs: work.as_secs(),
-            rendered_animation_frame: 0,
         }
     }
 }
@@ -253,22 +248,12 @@ impl PomodoroState {
 
     /// Advances the countdown, holding an expired phase while no host terminal
     /// is focused. Unknown focus support is resolved by the caller.
-    #[cfg(test)]
     pub fn tick_with_host_focus(&mut self, now: Instant, host_focused: bool) -> PomodoroTick {
-        self.tick_with_host_focus_and_animation(now, host_focused, true)
-    }
-
-    pub(crate) fn tick_with_host_focus_and_animation(
-        &mut self,
-        now: Instant,
-        host_focused: bool,
-        animation_visible: bool,
-    ) -> PomodoroTick {
         if !self.enabled {
             return PomodoroTick::default();
         }
         let mut tick = PomodoroTick {
-            changed: self.tick_animation(now, animation_visible),
+            changed: self.expire_send_off_at(now),
             phase_ended: false,
         };
         if self.held {
@@ -336,7 +321,6 @@ impl PomodoroState {
             started,
             shown_at: now,
         });
-        self.rendered_animation_frame = 0;
         Some(PomodoroConfirmation {
             ended,
             started,
@@ -357,35 +341,25 @@ impl PomodoroState {
     }
 
     pub fn dismiss_send_off_at(&mut self, now: Instant) -> bool {
-        let visible = self.visible_send_off_at(now).is_some();
+        let visible = self
+            .send_off
+            .is_some_and(|send_off| now < send_off.shown_at + SEND_OFF_DURATION);
         if visible || self.send_off.is_some() {
             self.send_off = None;
-            self.rendered_animation_frame = 0;
         }
         visible
     }
 
-    /// The next exact presentation deadline for the breathing animation or
-    /// send-off expiry. The caller suppresses it when geometry draws no animation.
-    pub(crate) fn animation_deadline(&self) -> Option<Instant> {
-        let started_at = self
-            .prompt
-            .as_ref()
-            .map(|prompt| prompt.raised_at)
-            .or_else(|| self.send_off.map(|send_off| send_off.shown_at))?;
-        let frame =
-            u32::try_from(self.rendered_animation_frame.saturating_add(1)).unwrap_or(u32::MAX);
-        let next_frame = started_at + ANIMATION_FRAME_INTERVAL.saturating_mul(frame);
-        Some(match self.send_off {
-            Some(send_off) => next_frame.min(send_off.shown_at + SEND_OFF_DURATION),
-            None => next_frame,
-        })
-    }
-
-    pub(crate) fn visible_send_off_at(&self, now: Instant) -> Option<&PomodoroSendOff> {
-        self.send_off
-            .as_ref()
-            .filter(|send_off| now < send_off.shown_at + SEND_OFF_DURATION)
+    pub(crate) fn expire_send_off_at(&mut self, now: Instant) -> bool {
+        if self
+            .send_off
+            .is_some_and(|send_off| now >= send_off.shown_at + SEND_OFF_DURATION)
+        {
+            self.send_off = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// The phase that follows the current one. A long break replaces the short
@@ -424,40 +398,6 @@ impl PomodoroState {
             input: String::new(),
             error: None,
         });
-        self.rendered_animation_frame = 0;
-    }
-
-    fn tick_animation(&mut self, now: Instant, animation_visible: bool) -> bool {
-        if self
-            .send_off
-            .is_some_and(|send_off| now >= send_off.shown_at + SEND_OFF_DURATION)
-        {
-            self.send_off = None;
-            self.rendered_animation_frame = 0;
-            return animation_visible;
-        }
-        if !animation_visible {
-            return false;
-        }
-        let Some(started_at) = self
-            .prompt
-            .as_ref()
-            .map(|prompt| prompt.raised_at)
-            .or_else(|| self.send_off.map(|send_off| send_off.shown_at))
-        else {
-            return false;
-        };
-        let frame = now
-            .saturating_duration_since(started_at)
-            .as_nanos()
-            .checked_div(ANIMATION_FRAME_INTERVAL.as_nanos())
-            .and_then(|frame| u64::try_from(frame).ok())
-            .unwrap_or(u64::MAX);
-        if frame <= self.rendered_animation_frame {
-            return false;
-        }
-        self.rendered_animation_frame = frame;
-        true
     }
 }
 
@@ -568,7 +508,7 @@ mod tests {
         let prompt = state.prompt.clone();
 
         let tick = state.tick_with_host_focus(now + Duration::from_secs(60 * 60), false);
-        assert!(tick.changed, "the visible breathing frame advanced");
+        assert!(!tick.changed, "the timer state did not change");
         assert!(!tick.phase_ended);
         assert_eq!(state.prompt, prompt);
         assert!(!state.held());
@@ -660,11 +600,8 @@ mod tests {
         state.prompt.as_mut().expect("prompt").input = "water".into();
         state.confirm(prompt_at).expect("confirm");
 
-        assert!(state
-            .visible_send_off_at(prompt_at + SEND_OFF_DURATION - Duration::from_millis(1))
-            .is_some());
         assert!(
-            state
+            !state
                 .tick(prompt_at + SEND_OFF_DURATION - Duration::from_millis(1))
                 .changed
         );
@@ -686,47 +623,6 @@ mod tests {
         assert!(state.dismiss_send_off_at(prompt_at));
         assert!(state.send_off.is_none());
         assert!(!state.dismiss_send_off_at(prompt_at));
-    }
-
-    #[test]
-    fn animation_deadlines_exist_only_for_visible_pomodoro_cards() {
-        let started = Instant::now();
-        let mut state = enabled_state(started);
-        assert_eq!(state.animation_deadline(), None);
-
-        let prompt_at = started + Duration::from_secs(25 * 60);
-        state.tick(prompt_at);
-        assert_eq!(
-            state.animation_deadline(),
-            Some(prompt_at + ANIMATION_FRAME_INTERVAL)
-        );
-        state.dismiss_and_pause(prompt_at);
-        assert_eq!(state.animation_deadline(), None);
-    }
-
-    #[test]
-    fn breathing_redraws_at_eight_frames_per_second_at_most() {
-        let started = Instant::now();
-        let prompt_at = started + Duration::from_secs(25 * 60);
-        let mut state = enabled_state(started);
-        state.tick(prompt_at);
-
-        assert_eq!(ANIMATION_FRAME_INTERVAL, Duration::from_millis(125));
-        assert!(
-            !state
-                .tick(prompt_at + ANIMATION_FRAME_INTERVAL - Duration::from_millis(1))
-                .changed
-        );
-        assert!(state.tick(prompt_at + ANIMATION_FRAME_INTERVAL).changed);
-        assert!(
-            !state
-                .tick(prompt_at + ANIMATION_FRAME_INTERVAL + Duration::from_millis(1))
-                .changed
-        );
-        assert_eq!(
-            state.animation_deadline(),
-            Some(prompt_at + ANIMATION_FRAME_INTERVAL * 2)
-        );
     }
 
     #[test]

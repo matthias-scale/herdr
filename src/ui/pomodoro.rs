@@ -19,7 +19,7 @@ use super::widgets::{
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
 };
 use crate::app::AppState;
-use crate::pomodoro::{PomodoroPhase, PomodoroPrompt, ANIMATION_FRAME_INTERVAL};
+use crate::pomodoro::{PomodoroPhase, PomodoroPrompt, SEND_OFF_DURATION};
 
 /// Width of `⏱ 25:00` plus a leading space.
 const INDICATOR_WIDTH: u16 = 9;
@@ -33,6 +33,8 @@ const ORB_COLUMN_WIDTH: u16 = 29;
 const ORB_CONTENT_WIDTH: u16 = 40;
 const SEND_OFF_WIDTH: u16 = 52;
 const SEND_OFF_HEIGHT: u16 = 7;
+pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(125);
 const BREAK_TIPS: [&str; 3] = [
     "stand up · look at something far away",
     "unclench your jaw · drop your shoulders",
@@ -98,6 +100,31 @@ fn animation_elapsed_at(
     let frames = elapsed.as_nanos() / ANIMATION_FRAME_INTERVAL.as_nanos();
     let nanos = frames.saturating_mul(ANIMATION_FRAME_INTERVAL.as_nanos());
     std::time::Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+fn animation_started_at(app: &AppState) -> Option<std::time::Instant> {
+    app.pomodoro
+        .prompt
+        .as_ref()
+        .map(|prompt| prompt.raised_at)
+        .or_else(|| app.pomodoro.send_off.map(|send_off| send_off.shown_at))
+}
+
+fn animation_frame_at(now: std::time::Instant, started_at: std::time::Instant) -> u64 {
+    now.saturating_duration_since(started_at)
+        .as_nanos()
+        .checked_div(ANIMATION_FRAME_INTERVAL.as_nanos())
+        .and_then(|frame| u64::try_from(frame).ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn next_animation_frame_at(
+    now: std::time::Instant,
+    started_at: std::time::Instant,
+) -> std::time::Instant {
+    let next_frame = animation_frame_at(now, started_at).saturating_add(1);
+    started_at
+        + ANIMATION_FRAME_INTERVAL.saturating_mul(u32::try_from(next_frame).unwrap_or(u32::MAX))
 }
 
 fn orb_cell(dx: i32, dy: i32, radius: f64) -> Option<OrbCell> {
@@ -171,12 +198,10 @@ fn send_off_rect(area: Rect) -> Option<Rect> {
         .filter(|popup| popup.width == SEND_OFF_WIDTH && popup.height == SEND_OFF_HEIGHT)
 }
 
-pub(crate) fn send_off_fits(area: Rect) -> bool {
-    send_off_rect(area).is_some()
-}
-
 pub(crate) fn send_off_visible_at(app: &AppState, area: Rect, now: std::time::Instant) -> bool {
-    app.pomodoro.visible_send_off_at(now).is_some() && send_off_rect(area).is_some()
+    app.pomodoro.send_off.is_some_and(|send_off| {
+        now < send_off.shown_at + SEND_OFF_DURATION && send_off_rect(area).is_some()
+    })
 }
 
 pub(crate) fn animation_visible_at(app: &AppState, area: Rect, now: std::time::Instant) -> bool {
@@ -185,6 +210,43 @@ pub(crate) fn animation_visible_at(app: &AppState, area: Rect, now: std::time::I
             && prompt_inner_rect(area).is_some_and(|inner| inner.height >= 9);
     }
     send_off_visible_at(app, area, now)
+}
+
+pub(crate) fn animation_deadline_at(
+    app: &AppState,
+    area: Rect,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    let started_at = animation_started_at(app)?;
+    if app.pomodoro.prompt.is_some() {
+        if !animation_visible_at(app, area, now) {
+            return None;
+        }
+        return Some(next_animation_frame_at(now, started_at));
+    }
+    let send_off = app.pomodoro.send_off.as_ref()?;
+    if !send_off_visible_at(app, area, now) {
+        return None;
+    }
+    Some(next_animation_frame_at(now, started_at).min(send_off.shown_at + SEND_OFF_DURATION))
+}
+
+pub(crate) fn animation_due_at(
+    app: &AppState,
+    area: Rect,
+    now: std::time::Instant,
+    last_rendered_at: Option<std::time::Instant>,
+) -> bool {
+    if !animation_visible_at(app, area, now) {
+        return false;
+    }
+    let Some(started_at) = animation_started_at(app) else {
+        return false;
+    };
+    let Some(last_rendered_at) = last_rendered_at else {
+        return true;
+    };
+    animation_frame_at(now, started_at) > animation_frame_at(last_rendered_at, started_at)
 }
 
 pub(crate) fn prompt_button_rects(area: Rect) -> Option<(Rect, Rect)> {
@@ -567,7 +629,12 @@ fn render_prompt_buttons(app: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_send_off(app: &AppState, frame: &mut Frame, area: Rect) {
-    let Some(send_off) = app.pomodoro.visible_send_off_at(app.view_observed_at) else {
+    let Some(send_off) = app
+        .pomodoro
+        .send_off
+        .as_ref()
+        .filter(|send_off| app.view_observed_at < send_off.shown_at + SEND_OFF_DURATION)
+    else {
         return;
     };
     let palette = &app.palette;
@@ -734,6 +801,45 @@ mod tests {
             animation_elapsed_at(started_at + ANIMATION_FRAME_INTERVAL, started_at),
             ANIMATION_FRAME_INTERVAL
         );
+    }
+
+    #[test]
+    fn animation_wakes_only_for_a_visible_card_at_eight_fps_or_less() {
+        let started_at = std::time::Instant::now();
+        let mut app = state();
+        app.pomodoro.prompt = Some(PomodoroPrompt {
+            ended: PomodoroPhase::Work,
+            next: PomodoroPhase::ShortBreak,
+            raised_at: started_at,
+            input: String::new(),
+            error: None,
+        });
+        let wide = Rect::new(0, 0, 100, 30);
+        let compact = Rect::new(0, 0, 18, 30);
+
+        assert_eq!(
+            animation_deadline_at(&app, wide, started_at),
+            Some(started_at + ANIMATION_FRAME_INTERVAL)
+        );
+        assert!(!animation_due_at(
+            &app,
+            wide,
+            started_at + ANIMATION_FRAME_INTERVAL - std::time::Duration::from_millis(1),
+            Some(started_at),
+        ));
+        assert!(animation_due_at(
+            &app,
+            wide,
+            started_at + ANIMATION_FRAME_INTERVAL,
+            Some(started_at),
+        ));
+        assert_eq!(animation_deadline_at(&app, compact, started_at), None);
+        assert!(!animation_due_at(
+            &app,
+            compact,
+            started_at,
+            Some(started_at)
+        ));
     }
 
     #[test]

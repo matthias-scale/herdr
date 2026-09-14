@@ -2951,17 +2951,54 @@ impl App {
         before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
         controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
     ) {
+        let pomodoro_send_off_visible = crate::ui::pomodoro::send_off_visible_at(
+            &self.state,
+            self.state.screen_rect(),
+            std::time::Instant::now(),
+        );
+        self.route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
+            source_id,
+            events,
+            apply_host_terminal_theme,
+            before_terminal_input,
+            controlled_owners,
+            pomodoro_send_off_visible,
+        );
+    }
+
+    pub(crate) fn route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
+        &mut self,
+        source_id: InputSourceId,
+        events: Vec<crate::raw_input::RawInputEvent>,
+        apply_host_terminal_theme: bool,
+        before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
+        pomodoro_send_off_visible: bool,
+    ) {
         self.begin_contract_false_positive_input_burst();
         for event in events {
-            if self.intercept_pomodoro_send_off_raw_input(source_id, &event) {
-                continue;
-            }
+            let send_off_visible =
+                pomodoro_send_off_visible && self.state.pomodoro.send_off.is_some();
             let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
                     let lease_key = input::InputLeaseKey::new(source_id, &key);
                     let key = self.input_leases.normalize_press(&lease_key, key);
+                    let normalized_event = crate::raw_input::RawInputEvent::Key(key.clone());
+                    if self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                        source_id,
+                        &normalized_event,
+                        send_off_visible,
+                    ) {
+                        if key.kind != crossterm::event::KeyEventKind::Release {
+                            self.input_leases.insert_consumed(
+                                lease_key,
+                                input::ConsumedInputLease::SuppressRepeats,
+                            );
+                        }
+                        continue;
+                    }
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
                             // Before the pane-context decision below: a focused
@@ -3087,6 +3124,14 @@ impl App {
                             }
                         }
                     }
+                }
+                _ if self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                    source_id,
+                    &event,
+                    send_off_visible,
+                ) =>
+                {
+                    continue
                 }
                 crate::raw_input::RawInputEvent::Text(text) => {
                     self.state.clear_hovered_control();
