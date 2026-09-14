@@ -15,7 +15,7 @@ static INIT: Once = Once::new();
 static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
 const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".herdr-test-owner-pid";
-pub const CURRENT_PROTOCOL: u32 = 21;
+pub const CURRENT_PROTOCOL: u32 = 22;
 
 // Reuse the binary's own version logic so tests follow a stamped fork build
 // instead of hardcoding the bare cargo version. build.rs `rustc-env` settings
@@ -76,8 +76,11 @@ pub fn unregister_runtime_dir(path: &Path) {
 pub fn herdr_server_pids_for_runtime_dir(runtime_dir: &Path) -> std::io::Result<Vec<u32>> {
     let mut pids = Vec::new();
     for pid in iter_worktree_server_pids()? {
-        let Some(process_runtime_dir) = process_runtime_dir(pid)? else {
-            continue;
+        // A server can exit between the process scan and its environ read;
+        // that unrelated race must not hide live servers in this runtime.
+        let process_runtime_dir = match process_runtime_dir(pid) {
+            Ok(Some(process_runtime_dir)) => process_runtime_dir,
+            Ok(None) | Err(_) => continue,
         };
         if process_runtime_dir == runtime_dir {
             pids.push(pid);
@@ -190,6 +193,12 @@ fn encode_varint_enum(variant_idx: u32, fields: &[&[u8]]) -> Vec<u8> {
     buf
 }
 
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut encoded = encode_varint_u32(value.len() as u32);
+    encoded.extend_from_slice(value.as_bytes());
+    encoded
+}
+
 fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
     let mut offset = 0;
     let (variant, consumed) = decode_varint_u32(payload, offset)?;
@@ -202,6 +211,9 @@ fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
 
     let (version, consumed) = decode_varint_u32(payload, offset)?;
     offset += consumed;
+
+    let (build_len, consumed) = decode_varint_u32(payload, offset)?;
+    offset += consumed + build_len as usize;
 
     let (_encoding, consumed) = decode_varint_u32(payload, offset)?;
     offset += consumed;
@@ -240,10 +252,12 @@ pub fn client_handshake(
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
 
+    let build_version = expected_version();
     let hello_payload = encode_varint_enum(
         0,
         &[
             &encode_varint_u32(version),
+            &encode_string(&build_version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
             &encode_varint_u32(8),  // cell_width_px

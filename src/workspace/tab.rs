@@ -312,12 +312,33 @@ pub struct Tab {
     /// moves the row between sidebar groups the way `pinned` does, and nothing
     /// but an explicit toggle ever changes it.
     pub starred: bool,
+    /// User-named sidebar subgroup this window belongs to. Organisation, not
+    /// presentation: it persists with the session, and it never moves the
+    /// window to a different group — it only nests the window one level under
+    /// the group it already renders in.
+    pub subgroup: Option<String>,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
 }
 
 impl Tab {
+    /// The subgroup this window renders under, normalized: trimmed, and
+    /// absent rather than empty so a blanked-out name cannot leave a window
+    /// stranded in a nameless header.
+    pub(crate) fn subgroup(&self) -> Option<&str> {
+        self.subgroup
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
+    pub(crate) fn set_subgroup(&mut self, subgroup: Option<String>) {
+        self.subgroup = subgroup
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+    }
+
     fn pane_is_agent(&self, pane: PaneId, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
         self.terminal_id(pane)
             .and_then(|terminal_id| terminals.get(terminal_id))
@@ -559,6 +580,7 @@ impl Tab {
                 prio: false,
                 pinned: false,
                 starred: false,
+                subgroup: None,
                 events,
                 render_notify,
                 render_dirty,
@@ -935,6 +957,7 @@ impl Tab {
             prio: false,
             pinned: false,
             starred: false,
+            subgroup: None,
             events,
             render_notify,
             render_dirty,

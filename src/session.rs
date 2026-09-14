@@ -957,6 +957,54 @@ mod tests {
     }
 
     #[test]
+    fn explicit_session_selection_wins_over_inherited_socket_overrides() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_home = std::env::temp_dir().join(format!(
+            "herdr-session-remote-selector-{}",
+            crate::config::test_unique_suffix()
+        ));
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(SESSION_ENV_VAR);
+        env.set(
+            crate::api::SOCKET_PATH_ENV_VAR,
+            "/tmp/remote-inherited.sock",
+        );
+        env.set(
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            "/tmp/remote-inherited-client.sock",
+        );
+        clear_explicit_session_for_test();
+
+        let args = vec![
+            "herdr".to_string(),
+            "--session".to_string(),
+            "agents-main".to_string(),
+            "remote-control-bridge".to_string(),
+        ];
+        assert_eq!(
+            configure_from_args(&args).expect("remote selector is valid"),
+            vec!["herdr", "remote-control-bridge"]
+        );
+
+        let expected_api = config_home
+            .join(crate::config::app_dir_name())
+            .join("sessions")
+            .join("agents-main")
+            .join("herdr.sock");
+        let expected_client = expected_api
+            .parent()
+            .expect("session directory")
+            .join("herdr-client.sock");
+        assert_eq!(active_api_socket_path(), expected_api);
+        assert_eq!(
+            crate::server::socket_paths::client_socket_path(),
+            expected_client
+        );
+
+        clear_explicit_session_for_test();
+    }
+
+    #[test]
     fn env_socket_override_wins_without_explicit_session() {
         let _guard = env_lock()
             .lock()

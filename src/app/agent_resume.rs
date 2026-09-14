@@ -456,7 +456,7 @@ impl App {
             launch_pending: terminal.managed_agent_launch_pending(),
             agent_matches: terminal.effective_known_agent() == Some(nudge.agent),
             hosts_agent: super::agents::runtime_hosts_agent(runtime, nudge.agent),
-            state: terminal.state,
+            state: terminal.raw_agent_state(),
         })
     }
 

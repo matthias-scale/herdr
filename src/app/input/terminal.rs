@@ -34,10 +34,21 @@ impl App {
         self.handle_terminal_key_headless_from(crate::app::LOCAL_INPUT_SOURCE, key)
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_terminal_key_headless_from(
         &mut self,
         source_id: InputSourceId,
         key: TerminalKey,
+    ) -> Option<TerminalInputTarget> {
+        self.handle_terminal_key_headless_from_with_hook(source_id, key, &mut |_| {}, None)
+    }
+
+    pub(crate) fn handle_terminal_key_headless_from_with_hook(
+        &mut self,
+        source_id: InputSourceId,
+        key: TerminalKey,
+        before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
     ) -> Option<TerminalInputTarget> {
         match self.prepare_popup_key_forward(key.clone()) {
             PreparedPopupInput::NotOpen => {}
@@ -81,9 +92,22 @@ impl App {
         let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let has_bytes = !input.bytes.is_empty();
-        let sent = self
-            .terminal_input_runtime(&input.target)
-            .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok());
+        let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
+            if has_bytes {
+                #[cfg(unix)]
+                if let Some(owner_id) =
+                    controlled_owners.and_then(|owners| owners.get(&input.target.terminal_id))
+                {
+                    runtime.release_remote_owner(*owner_id);
+                }
+                #[cfg(not(unix))]
+                let _ = controlled_owners;
+                before_terminal_input(&input.target);
+            }
+            runtime.try_send_bytes(input.bytes).is_ok()
+        } else {
+            false
+        };
         if sent && has_bytes {
             if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
                 self.note_human_key(pane_id, &key_for_draft);
@@ -2061,7 +2085,7 @@ mod tests {
             Some(1),
         );
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Blocked
         );
 
@@ -2072,7 +2096,7 @@ mod tests {
 
         assert_eq!(rx.try_recv().unwrap().as_ref(), b"x");
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
@@ -2086,7 +2110,7 @@ mod tests {
                 crate::detect::AgentState::Working,
             );
         assert_eq!(
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Working
         );
     }

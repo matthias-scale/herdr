@@ -9,7 +9,7 @@ use ratatui::{
 use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
 use crate::{
     app::{state::InfoPanelLinkRow, AppState},
-    terminal::{state::AgentMetadata, TerminalState},
+    terminal::{AgentMetadata, TerminalState},
 };
 
 fn field_line(app: &AppState, label: &str, value: impl Into<String>) -> Line<'static> {
@@ -133,7 +133,8 @@ fn context_lines(app: &AppState) -> Option<Vec<Line<'static>>> {
     let model = terminal
         .effective_display_agent()
         .unwrap_or_else(|| "—".to_string());
-    let state = super::status::state_label(terminal.state, true);
+    let projection = workspace.pane_state(pane_id)?.agent_projection(terminal);
+    let state = projection.status_key();
     let last_update = latest_update(terminal)
         .map(|at| {
             format!(
@@ -347,7 +348,7 @@ mod tests {
         let terminal_id = app.workspaces[0].terminal_id(pane_id).cloned().unwrap();
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(crate::detect::Agent::Codex);
-        terminal.state = crate::detect::AgentState::Working;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Working);
         terminal.manual_label = Some("focused worker".into());
         terminal.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
             source: "herdr:codex".into(),

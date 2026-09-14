@@ -798,6 +798,7 @@ pub(super) fn apply_context_menu_action(
     idx: usize,
 ) {
     let item = menu.items().get(idx).copied();
+    let (menu_x, menu_y) = (menu.x, menu.y);
     match (menu.kind, item) {
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
             state.request_new_linked_worktree = Some(ws_idx);
@@ -884,6 +885,39 @@ pub(super) fn apply_context_menu_action(
                 tab.starred = !tab.starred;
                 state.mark_session_dirty();
             }
+            state.mode = if state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM),
+        ) => {
+            // The picker hangs off the menu cell the operator just chose, the
+            // way every other downward menu hangs off its anchor.
+            state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+                ws_idx,
+                tab_idx,
+                anchor: (menu_x, menu_y),
+                filter: crate::ui::dropdown::DropdownFilterState::default(),
+            });
+            state.mode = if state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
+        ) => {
+            state.clear_tab_subgroup(ws_idx, tab_idx);
             state.mode = if state.active.is_some() {
                 Mode::Terminal
             } else {
@@ -1335,6 +1369,7 @@ impl App {
 
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
         let item = menu.items().get(idx).copied();
+        let (menu_x, menu_y) = (menu.x, menu.y);
         match (menu.kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
@@ -1410,6 +1445,32 @@ impl App {
                 Some(crate::app::state::STAR_ITEM | crate::app::state::UNSTAR_ITEM),
             ) => {
                 self.toggle_tab_star_via_api(ws_idx, tab_idx);
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM),
+            ) => {
+                // The picker hangs off the menu cell the operator just chose,
+                // the way every other downward menu hangs off its anchor.
+                self.state.sidebar_subgroup_picker =
+                    Some(crate::app::state::SidebarSubgroupPickerState {
+                        ws_idx,
+                        tab_idx,
+                        anchor: (menu_x, menu_y),
+                        filter: crate::ui::dropdown::DropdownFilterState::default(),
+                    });
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
+            ) => {
+                self.state.clear_tab_subgroup(ws_idx, tab_idx);
                 leave_modal(&mut self.state);
             }
             (
@@ -2750,6 +2811,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                has_subgroup: false,
             },
             x: 0,
             y: 0,
@@ -2766,6 +2828,112 @@ mod tests {
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn tab_context_menu_offers_subgroup_actions_exactly_when_relevant() {
+        let plain = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            plain.items(),
+            vec![
+                "New tab",
+                "Rename",
+                crate::app::state::STAR_ITEM,
+                crate::app::state::MOVE_TO_SUBGROUP_ITEM,
+                "Close",
+            ],
+            "a window with no subgroup gets the move action only"
+        );
+        let member = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            member.items(),
+            vec![
+                "New tab",
+                "Rename",
+                crate::app::state::STAR_ITEM,
+                crate::app::state::MOVE_TO_SUBGROUP_ITEM,
+                crate::app::state::REMOVE_FROM_SUBGROUP_ITEM,
+                "Close",
+            ],
+            "a window in a subgroup also gets the remove action"
+        );
+    }
+
+    #[test]
+    fn api_context_menu_move_to_subgroup_opens_the_picker_at_the_menu() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: false,
+            },
+            x: 7,
+            y: 4,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == crate::app::state::MOVE_TO_SUBGROUP_ITEM)
+            .expect("move to subgroup item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let picker = app
+            .state
+            .sidebar_subgroup_picker
+            .as_ref()
+            .expect("the subgroup picker opens");
+        assert_eq!((picker.ws_idx, picker.tab_idx), (0, 0));
+        assert_eq!(picker.anchor, (7, 4));
+    }
+
+    #[test]
+    fn api_context_menu_remove_from_subgroup_clears_the_assignment() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == crate::app::state::REMOVE_FROM_SUBGROUP_ITEM)
+            .expect("remove from subgroup item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), None);
     }
 
     #[test]

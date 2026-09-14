@@ -227,6 +227,49 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// A pane runtime with no PTY whose screen is fed by remote focus wire
+    /// frames. Construction performs no process or I/O setup.
+    pub(crate) fn spawn_remote_proxy(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+    ) -> std::io::Result<(Self, crate::pane::RemoteProxyChannels)> {
+        crate::pane::PaneRuntime::spawn_remote_proxy(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            render_notify,
+            render_dirty,
+            operation_state,
+        )
+        .map(|(runtime, channels)| (Self(runtime), channels))
+    }
+
+    pub(crate) fn is_remote_proxy(&self) -> bool {
+        self.0.is_remote_proxy()
+    }
+
+    /// Opens or closes the remote proxy input gate. Returns false when this
+    /// runtime is not a remote proxy.
+    pub(crate) fn set_remote_proxy_input_enabled(&self, enabled: bool) -> bool {
+        self.0.set_remote_proxy_input_enabled(enabled)
+    }
+
+    pub(crate) fn remote_proxy_input_enabled(&self) -> Option<bool> {
+        self.0.remote_proxy_input_enabled()
+    }
+
+    /// Feeds one complete remote terminal frame into the local screen. Runs
+    /// on the app event loop, never in a render or layout path.
+    pub(crate) fn process_remote_frame(&self, bytes: &[u8]) -> bool {
+        self.0.process_remote_frame(bytes)
+    }
+
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.0.apply_host_terminal_theme(theme);
     }
@@ -269,6 +312,10 @@ impl TerminalRuntime {
     ) {
         self.0
             .set_full_lifecycle_authority_state(active, output_retirement_eligible);
+    }
+
+    pub fn set_supervisor_stale(&self, stale: bool) {
+        self.0.set_supervisor_stale(stale);
     }
 
     pub fn rebaseline_hook_authority_output(&self) {
@@ -491,6 +538,36 @@ impl TerminalRuntime {
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.0.try_send_bytes(bytes)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_acquire_remote_owner(
+        &self,
+        owner_id: u64,
+    ) -> crate::pty::actor::RemoteOwnerAcquireResult {
+        self.0.try_acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(all(unix, test))]
+    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.0.acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn release_remote_owner(&self, owner_id: u64) {
+        self.0.release_remote_owner(owner_id);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_send_controlled_bytes(
+        &self,
+        owner_id: u64,
+        bytes: &[u8],
+    ) -> crate::pty::actor::ControlledWriteResult {
+        if self.is_suspended() {
+            return crate::pty::actor::ControlledWriteResult::Refused;
+        }
+        self.0.try_send_controlled_bytes(owner_id, bytes)
     }
 
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {

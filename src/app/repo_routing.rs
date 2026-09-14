@@ -33,6 +33,9 @@ pub(crate) enum RepoRouteDecision {
     NoBoundWorkspace,
     /// The pane already sits in the workspace bound to its repository.
     AlreadyPlaced,
+    /// The pane sits in another workspace whose resolved panes all name the
+    /// same repository. This workspace is an intentional sibling Space.
+    SiblingWorkspace,
     /// The pane is the one the human is currently focused in. Moving it would
     /// disturb live work, so it is left where it is and routed later, once
     /// focus has moved on.
@@ -42,8 +45,7 @@ pub(crate) enum RepoRouteDecision {
 }
 
 impl App {
-    /// Repository the pane works on, as resolved by work-context tier order.
-    pub(crate) fn pane_effective_repo(&self, ws_idx: usize, pane_id: PaneId) -> Option<String> {
+    fn pane_effective_repo_ref(&self, ws_idx: usize, pane_id: PaneId) -> Option<&str> {
         let terminal_id = self
             .state
             .workspaces
@@ -51,13 +53,19 @@ impl App {
             .tabs
             .iter()
             .find_map(|tab| tab.panes.get(&pane_id))
-            .map(|pane| pane.attached_terminal_id.clone())?;
+            .map(|pane| &pane.attached_terminal_id)?;
         self.state
             .terminals
-            .get(&terminal_id)?
+            .get(terminal_id)?
             .effective_work_context()
             .repo
-            .clone()
+            .as_deref()
+    }
+
+    /// Repository the pane works on, as resolved by work-context tier order.
+    pub(crate) fn pane_effective_repo(&self, ws_idx: usize, pane_id: PaneId) -> Option<String> {
+        self.pane_effective_repo_ref(ws_idx, pane_id)
+            .map(str::to_owned)
     }
 
     /// Current workspace index of a pane. Routing moves panes between
@@ -80,6 +88,40 @@ impl App {
                 .as_deref()
                 .is_some_and(|bound| crate::work_context::repo_slugs_match(bound, repo))
         })
+    }
+
+    fn workspace_is_repo_sibling(&self, ws_idx: usize, pane_id: PaneId, repo: &str) -> bool {
+        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
+            return false;
+        };
+        let Some(candidate) = workspace
+            .tabs
+            .iter()
+            .find_map(|tab| tab.panes.get(&pane_id))
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+        else {
+            return false;
+        };
+        if !candidate
+            .work_context
+            .git_observed_repo()
+            .is_some_and(|observed_repo| crate::work_context::repo_slugs_match(observed_repo, repo))
+        {
+            return false;
+        }
+
+        workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|(other_pane_id, _)| **other_pane_id != pane_id)
+            .filter_map(|(_, pane)| {
+                self.state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+            })
+            .all(|resolved_repo| crate::work_context::repo_slugs_match(resolved_repo, repo))
     }
 
     /// Adopt a repository binding for a workspace whose panes agree on one.
@@ -150,6 +192,9 @@ impl App {
         if target_ws_idx == ws_idx {
             return RepoRouteDecision::AlreadyPlaced;
         }
+        if self.workspace_is_repo_sibling(ws_idx, pane_id, &repo) {
+            return RepoRouteDecision::SiblingWorkspace;
+        }
         if self.pane_is_human_focused(ws_idx, pane_id) {
             return RepoRouteDecision::HeldByFocus;
         }
@@ -190,7 +235,7 @@ impl App {
         // Reuse the ordinary move path so layout, events, persistence and the
         // focus rules established for socket-initiated moves all apply. `focus`
         // is false: this move is bookkeeping, not navigation.
-        let _ = self.dispatch_api_request(
+        let response = self.dispatch_api_request(
             "repo-routing",
             Method::PaneMove(PaneMoveParams {
                 pane_id: public_pane_id,
@@ -201,6 +246,19 @@ impl App {
                 focus: false,
             }),
         );
+        if let Ok(crate::api::schema::SuccessResponse {
+            result: crate::api::schema::ResponseResult::PaneMove { move_result },
+            ..
+        }) = serde_json::from_str(&response)
+        {
+            if move_result.changed {
+                crate::logging::repo_routing_moved(
+                    &move_result.previous_pane_id,
+                    &move_result.previous_workspace_id,
+                    &move_result.pane.workspace_id,
+                );
+            }
+        }
         decision
     }
 
@@ -277,6 +335,16 @@ mod tests {
         // which would renumber every index the assertions rely on.
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         seed_terminals(&mut app);
+        app
+    }
+
+    fn app_with_single_pane_sibling() -> App {
+        let mut app = app_with_bound_workspace();
+        app.state.workspaces = vec![Workspace::test_new("bound"), Workspace::test_new("sibling")];
+        app.state.ensure_test_terminals();
+        seed_terminals(&mut app);
+        app.state.workspaces[0].repo_binding = Some("owner/bound".into());
+        app.state.active = Some(0);
         app
     }
 
@@ -417,10 +485,12 @@ mod tests {
     }
 
     #[test]
-    fn observed_repo_routes_a_pane_into_its_bound_workspace() {
+    fn mixed_repo_workspace_routes_the_matching_pane() {
         let mut app = app_with_bound_workspace();
-        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let panes = workspace_pane_ids(&app, 0);
+        let pane = panes[0];
         observe_git_repo(&mut app, 0, pane, "owner/bound");
+        observe_git_repo(&mut app, 0, panes[1], "owner/other");
 
         let decision = app.route_pane_to_bound_workspace(0, pane);
 
@@ -430,6 +500,52 @@ mod tests {
             Some(1),
             "the pane must end up in the workspace bound to its repository"
         );
+    }
+
+    #[test]
+    fn sibling_repo_workspace_keeps_its_only_pane_and_stays_open() {
+        let mut app = app_with_single_pane_sibling();
+        let pane = app.state.workspaces[1].tabs[0].root_pane;
+        observe_git_repo(&mut app, 1, pane, "owner/bound");
+
+        let decision = app.route_pane_to_bound_workspace(1, pane);
+
+        assert_eq!(decision, RepoRouteDecision::SiblingWorkspace);
+        assert_eq!(app.workspace_index_for_pane(pane), Some(1));
+        assert_eq!(
+            app.state.workspaces.len(),
+            2,
+            "the sibling space stays open"
+        );
+    }
+
+    #[test]
+    fn unresolved_pane_does_not_disqualify_a_sibling_repo_workspace() {
+        let mut app = app_with_single_pane_sibling();
+        let pane = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.workspaces[1].test_split(ratatui::layout::Direction::Horizontal);
+        seed_terminals(&mut app);
+        observe_git_repo(&mut app, 1, pane, "owner/bound");
+
+        let decision = app.route_pane_to_bound_workspace(1, pane);
+
+        assert_eq!(decision, RepoRouteDecision::SiblingWorkspace);
+        assert_eq!(app.workspace_index_for_pane(pane), Some(1));
+        assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn declaration_does_not_make_a_different_checkout_a_sibling() {
+        let mut app = app_with_single_pane_sibling();
+        let pane = app.state.workspaces[1].tabs[0].root_pane;
+        observe_git_repo(&mut app, 1, pane, "owner/shared-worktree");
+        declare_repo(&mut app, 1, pane, "owner/bound");
+
+        let decision = app.route_pane_to_bound_workspace(1, pane);
+
+        assert_eq!(decision, RepoRouteDecision::Route { target_ws_idx: 0 });
+        assert_eq!(app.workspace_index_for_pane(pane), Some(0));
+        assert_eq!(app.state.workspaces.len(), 1, "the empty source closes");
     }
 
     /// The headline property. The pane's checkout points at one repository
@@ -496,7 +612,8 @@ mod tests {
         seed_terminals(&mut app);
         app.state.workspaces[0].tabs[0].layout.focus_pane(sibling);
         app.state.active = Some(0);
-        observe_git_repo(&mut app, 0, pane, "owner/bound");
+        observe_git_repo(&mut app, 0, pane, "owner/shared-worktree");
+        declare_repo(&mut app, 0, pane, "owner/bound");
 
         app.route_pane_to_bound_workspace(0, pane);
 
@@ -518,7 +635,8 @@ mod tests {
         let pane = app.state.workspaces[0].tabs[0].root_pane;
         app.state.workspaces[0].tabs[0].layout.focus_pane(pane);
         app.state.active = Some(0);
-        observe_git_repo(&mut app, 0, pane, "owner/bound");
+        observe_git_repo(&mut app, 0, pane, "owner/shared-worktree");
+        declare_repo(&mut app, 0, pane, "owner/bound");
 
         let decision = app.route_pane_to_bound_workspace(0, pane);
 
@@ -537,7 +655,8 @@ mod tests {
         let pane = app.state.workspaces[0].tabs[0].root_pane;
         app.state.workspaces[0].tabs[0].layout.focus_pane(pane);
         app.state.active = Some(0);
-        observe_git_repo(&mut app, 0, pane, "owner/bound");
+        observe_git_repo(&mut app, 0, pane, "owner/shared-worktree");
+        declare_repo(&mut app, 0, pane, "owner/bound");
         assert_eq!(
             app.route_pane_to_bound_workspace(0, pane),
             RepoRouteDecision::HeldByFocus
@@ -606,7 +725,8 @@ mod tests {
         seed_terminals(&mut app);
         app.state.workspaces[0].tabs[0].layout.focus_pane(second);
         app.state.active = Some(0);
-        observe_git_repo(&mut app, 0, first, "owner/bound");
+        observe_git_repo(&mut app, 0, first, "owner/shared-worktree");
+        declare_repo(&mut app, 0, first, "owner/bound");
         declare_repo(&mut app, 0, second, "owner/bound");
 
         app.reconcile_repo_routing();

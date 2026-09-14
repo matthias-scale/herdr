@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 21,
+  "protocol": 22,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -111,6 +111,10 @@
         },
         "ClosingBlockItem": {
           "properties": {
+            "blocking": {
+              "default": true,
+              "type": "boolean"
+            },
             "default": {
               "default": null,
               "type": [
@@ -2284,6 +2288,10 @@
         },
         "ClosingBlockItem": {
           "properties": {
+            "blocking": {
+              "default": true,
+              "type": "boolean"
+            },
             "default": {
               "default": null,
               "type": [
@@ -7598,6 +7606,14 @@
             "screen_detection_skipped": {
               "type": "boolean"
             },
+            "settled_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "state_change_seq": {
               "default": 0,
               "format": "uint64",
@@ -7822,6 +7838,10 @@
         },
         "ClosingBlockItem": {
           "properties": {
+            "blocking": {
+              "default": true,
+              "type": "boolean"
+            },
             "default": {
               "default": null,
               "type": [
@@ -10761,6 +10781,9 @@
             "cwd": {
               "type": "string"
             },
+            "detected_agent": {
+              "type": "string"
+            },
             "foreground_cwd": {
               "type": "string"
             },
@@ -10816,6 +10839,7 @@
             "foreground_cwd",
             "tty",
             "foreground_process",
+            "detected_agent",
             "interactive_ready",
             "human_draft",
             "state_change_seq",

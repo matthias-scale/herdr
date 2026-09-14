@@ -244,6 +244,7 @@ mod tests {
             prio: false,
             starred: false,
             state: AgentState::Working,
+            attention_tier: None,
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
@@ -258,6 +259,7 @@ mod tests {
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
             tab_first_pane: false,
+            remote_host: None,
         }
     }
 

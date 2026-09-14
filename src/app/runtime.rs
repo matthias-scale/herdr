@@ -55,6 +55,9 @@ impl App {
             terminal_id: terminal_id.clone(),
         };
         self.release_input_target_headless(&target);
+        // A proxy pane's shutdown releases its remote focus lease exactly
+        // once, on whichever close path removed the pane.
+        self.detach_remote_proxy_for_terminal(&terminal_id);
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
             runtime.shutdown();
         }
@@ -214,14 +217,16 @@ impl App {
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
                         let initial_context = self.terminal_input_context();
+                        let proxy_input_gate_closed = self.focused_remote_proxy_input_gate_closed();
                         let target = self.handle_key(key.clone()).await;
                         let resulting_context = self.terminal_input_context();
-                        let plan = self.input_leases.complete_press(
+                        let plan = self.input_leases.complete_press_with_reprocess(
                             lease_key,
                             &key,
                             initial_context.as_ref(),
                             resulting_context.as_ref(),
                             target,
+                            !proxy_input_gate_closed,
                         );
                         self.execute_repeat_plan(lease_key, key, plan).await;
                         true
@@ -418,6 +423,8 @@ impl App {
                 self.emit_pane_state_update(&update);
                 changed = true;
             }
+            // The mark is what re-enables the process probe under a hook.
+            self.sync_detection_authority_mirrors();
         }
 
         if self.state.done_hide_transition_due(now) {
@@ -437,7 +444,7 @@ impl App {
             .is_some_and(|deadline| now >= deadline)
         {
             let (updates, due) = self.state.expire_due_full_lifecycle_hook_authority_at(now);
-            self.sync_full_lifecycle_authority_detection_pauses();
+            self.sync_detection_authority_mirrors();
             for update in &updates {
                 self.emit_pane_state_update(update);
             }

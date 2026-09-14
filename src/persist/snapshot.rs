@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::layout::Direction;
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Node;
-use crate::terminal::TerminalRuntimeRegistry;
+use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
@@ -114,6 +115,10 @@ pub struct TabSnapshot {
     /// before stars existed restore unchanged.
     #[serde(default)]
     pub starred: bool,
+    /// User-named sidebar subgroup. Defaulted so session files written before
+    /// subgroups existed restore unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subgroup: Option<String>,
     #[serde(default)]
     pub prio: bool,
     #[serde(default)]
@@ -125,6 +130,12 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    /// Unix timestamp of the pane's last meaningful activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<u64>,
+    /// Unix timestamp of the latest observed not-quiet to quiet transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_since_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +229,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             prio: false,
             pinned: false,
             starred: false,
+            subgroup: None,
             focused: snap.focused,
             root_pane: snap.root_pane,
         };
@@ -340,12 +352,25 @@ pub fn capture(
     collapsed_space_keys: std::collections::HashSet<String>,
     prio_panel_collapsed: bool,
 ) -> SessionSnapshot {
+    let captured_at = Instant::now();
+    let captured_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         generation: None,
         workspaces: workspaces
             .iter()
-            .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
+            .map(|workspace| {
+                capture_workspace(
+                    workspace,
+                    terminals,
+                    terminal_runtimes,
+                    captured_at,
+                    captured_at_unix,
+                )
+            })
             .collect(),
         active,
         selected,
@@ -363,31 +388,118 @@ fn capture_workspace(
         crate::terminal::TerminalState,
     >,
     terminal_runtimes: &TerminalRuntimeRegistry,
+    captured_at: Instant,
+    captured_at_unix: u64,
 ) -> WorkspaceSnapshot {
+    let captured_tabs = capture_tabs(
+        ws,
+        terminals,
+        terminal_runtimes,
+        false,
+        captured_at,
+        captured_at_unix,
+    );
+    let identity_cwd = captured_tabs
+        .first()
+        .and_then(|captured| {
+            captured
+                .snapshot
+                .root_pane
+                .and_then(|root_pane| {
+                    captured
+                        .tab
+                        .panes
+                        .keys()
+                        .find(|pane_id| pane_id.raw() == root_pane)
+                        .copied()
+                })
+                .and_then(|root_pane| {
+                    captured
+                        .tab
+                        .cwd_for_pane(root_pane, terminals, terminal_runtimes)
+                })
+        })
+        .unwrap_or_else(|| ws.identity_cwd.clone());
+    let public_tab_numbers = captured_tabs
+        .iter()
+        .map(|captured| captured.tab.number)
+        .collect();
+    let active_tab = captured_tabs
+        .iter()
+        .position(|captured| captured.source_index == ws.active_tab)
+        .or_else(|| {
+            captured_tabs
+                .iter()
+                .position(|captured| captured.source_index > ws.active_tab)
+        })
+        .unwrap_or_else(|| captured_tabs.len().saturating_sub(1));
+    let tabs = captured_tabs
+        .into_iter()
+        .map(|captured| captured.snapshot)
+        .collect();
     WorkspaceSnapshot {
         id: Some(ws.id.clone()),
         custom_name: ws.custom_name.clone(),
-        identity_cwd: ws
-            .resolved_identity_cwd_from(terminals, terminal_runtimes)
-            .unwrap_or_else(|| ws.identity_cwd.clone()),
+        identity_cwd,
         worktree_space: ws.worktree_space.clone(),
         repo_binding: ws.repo_binding.clone(),
         repo_binding_cleared: ws.repo_binding_cleared,
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
+            .filter(|(pane_id, _)| {
+                ws.tabs.iter().all(|tab| {
+                    tab.panes.get(pane_id).is_none_or(|pane| {
+                        !terminal_runtimes
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(TerminalRuntime::is_remote_proxy)
+                    })
+                })
+            })
             .map(|(pane_id, number)| (pane_id.raw(), *number))
             .collect(),
         next_public_pane_number: ws.next_public_pane_number,
-        public_tab_numbers: ws.tabs.iter().map(|tab| tab.number).collect(),
+        public_tab_numbers,
         next_public_tab_number: ws.next_public_tab_number,
-        tabs: ws
-            .tabs
-            .iter()
-            .map(|tab| capture_tab(tab, terminals, terminal_runtimes))
-            .collect(),
-        active_tab: ws.active_tab,
+        tabs,
+        active_tab,
     }
+}
+
+struct CapturedTab<'a> {
+    source_index: usize,
+    tab: &'a crate::workspace::Tab,
+    snapshot: TabSnapshot,
+    history: Option<HashMap<u32, PaneHistorySnapshot>>,
+}
+
+fn capture_tabs<'a>(
+    ws: &'a Workspace,
+    terminals: &HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    include_history: bool,
+    captured_at: Instant,
+    captured_at_unix: u64,
+) -> Vec<CapturedTab<'a>> {
+    ws.tabs
+        .iter()
+        .enumerate()
+        .filter_map(|(source_index, tab)| {
+            let snapshot = capture_tab(
+                tab,
+                terminals,
+                terminal_runtimes,
+                captured_at,
+                captured_at_unix,
+            )?;
+            Some(CapturedTab {
+                source_index,
+                tab,
+                snapshot,
+                history: include_history.then(|| capture_tab_history(ws, tab, terminal_runtimes)),
+            })
+        })
+        .collect()
 }
 
 fn capture_tab(
@@ -397,9 +509,25 @@ fn capture_tab(
         crate::terminal::TerminalState,
     >,
     terminal_runtimes: &TerminalRuntimeRegistry,
-) -> TabSnapshot {
+    captured_at: Instant,
+    captured_at_unix: u64,
+) -> Option<TabSnapshot> {
+    let excluded_panes = tab
+        .panes
+        .iter()
+        .filter_map(|(pane_id, pane)| {
+            terminal_runtimes
+                .get(&pane.attached_terminal_id)
+                .is_some_and(TerminalRuntime::is_remote_proxy)
+                .then_some(*pane_id)
+        })
+        .collect::<HashSet<_>>();
+    let layout = capture_node_without_panes(tab.layout.root(), &excluded_panes)?;
     let mut panes = HashMap::new();
     for id in tab.panes.keys() {
+        if excluded_panes.contains(id) {
+            continue;
+        }
         let cwd = tab
             .cwd_for_pane(*id, terminals, terminal_runtimes)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -457,6 +585,14 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                last_activity_at: pane.map(|pane| {
+                    pane.activity
+                        .unix_timestamp_at(captured_at, captured_at_unix)
+                }),
+                quiet_since_at: pane.and_then(|pane| {
+                    pane.activity
+                        .quiet_unix_timestamp_at(captured_at, captured_at_unix)
+                }),
                 settled_at: pane.and_then(|pane| pane.settled_at),
                 settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
                 settled_auto_label: terminal
@@ -471,38 +607,57 @@ fn capture_tab(
             },
         );
     }
-    TabSnapshot {
+    let focused = if excluded_panes.contains(&tab.layout.focused()) {
+        first_pane_id_in_layout(&layout)?
+    } else {
+        tab.layout.focused().raw()
+    };
+    let root_pane = first_pane_id_in_layout(&layout)?;
+    Some(TabSnapshot {
         custom_name: tab.custom_name.clone(),
         name_origin: tab.name_origin,
-        layout: capture_node(tab.layout.root()),
+        layout,
         panes,
         zoomed: tab.zoomed,
         prio: tab.prio,
         pinned: tab.pinned,
         starred: tab.starred,
-        focused: Some(tab.layout.focused().raw()),
-        root_pane: Some(tab.root_pane.raw()),
-    }
+        subgroup: tab.subgroup.clone(),
+        focused: Some(focused),
+        root_pane: Some(root_pane),
+    })
 }
 
 /// Capture pane screen history separately from the structural session snapshot.
 pub fn capture_history(
     workspaces: &[Workspace],
+    terminals: &HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> SessionHistorySnapshot {
+    let captured_at = Instant::now();
+    let captured_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
         generation: None,
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceHistorySnapshot {
-                tabs: workspace
-                    .tabs
-                    .iter()
-                    .map(|tab| TabHistorySnapshot {
-                        panes: capture_tab_history(workspace, tab, terminal_runtimes),
-                    })
-                    .collect(),
+                tabs: capture_tabs(
+                    workspace,
+                    terminals,
+                    terminal_runtimes,
+                    true,
+                    captured_at,
+                    captured_at_unix,
+                )
+                .into_iter()
+                .map(|captured| TabHistorySnapshot {
+                    panes: captured.history.unwrap_or_default(),
+                })
+                .collect(),
             })
             .collect(),
     }
@@ -530,9 +685,12 @@ fn capture_pane_history(
     pane_id: Option<String>,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<PaneHistorySnapshot> {
-    let ansi = terminal_runtimes
-        .get(&pane?.attached_terminal_id)?
-        .snapshot_history()?;
+    let runtime = terminal_runtimes.get(&pane?.attached_terminal_id)?;
+    if runtime.is_remote_proxy() {
+        // Proxy screens belong to the remote terminal, not to local history.
+        return None;
+    }
+    let ansi = runtime.snapshot_history()?;
     let lines = ansi.lines().count();
     Some(PaneHistorySnapshot {
         pane_id,
@@ -541,6 +699,7 @@ fn capture_pane_history(
     })
 }
 
+#[cfg(test)]
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
     match node {
         Node::Pane(id) => LayoutSnapshot::Pane(id.raw()),
@@ -559,6 +718,38 @@ pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
             ratio: *ratio,
             first: Box::new(capture_node(first)),
             second: Box::new(capture_node(second)),
+        },
+    }
+}
+
+fn capture_node_without_panes(
+    node: &Node,
+    excluded_panes: &HashSet<crate::layout::PaneId>,
+) -> Option<LayoutSnapshot> {
+    match node {
+        Node::Pane(id) => (!excluded_panes.contains(id)).then_some(LayoutSnapshot::Pane(id.raw())),
+        Node::Split {
+            direction,
+            leading,
+            ratio,
+            first,
+            second,
+        } => match (
+            capture_node_without_panes(first, excluded_panes),
+            capture_node_without_panes(second, excluded_panes),
+        ) {
+            (Some(first), Some(second)) => Some(LayoutSnapshot::Split {
+                direction: match direction {
+                    Direction::Horizontal => DirectionSnapshot::Horizontal,
+                    Direction::Vertical => DirectionSnapshot::Vertical,
+                },
+                leading: *leading,
+                ratio: *ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+            (None, None) => None,
         },
     }
 }
@@ -596,6 +787,7 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use ratatui::layout::{Direction, Rect};
 
@@ -665,7 +857,221 @@ mod tests {
         state: &AppState,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> SessionHistorySnapshot {
-        capture_history(&state.workspaces, terminal_runtimes)
+        capture_history(&state.workspaces, &state.terminals, terminal_runtimes)
+    }
+
+    #[test]
+    fn remote_proxy_tabs_are_excluded_from_capture_and_history() {
+        let mut state = state_with_workspaces(&["local"]);
+        let terminal_runtimes = {
+            let mut registry = TerminalRuntimeRegistry::new();
+            let pane_id = crate::layout::PaneId::alloc();
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            let (runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+                pane_id,
+                24,
+                80,
+                0,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+                crate::remote::RemoteFocusOperationState::new(),
+            )
+            .expect("proxy runtime");
+            let terminal = crate::terminal::TerminalState::new(terminal_id.clone(), "/tmp".into());
+            state.terminals.insert(terminal_id.clone(), terminal);
+            registry.insert(terminal_id.clone(), runtime);
+            let events = state.workspaces[0].tabs[0].events.clone();
+            state.workspaces[0].create_tab_from_existing_pane(
+                crate::workspace::MovedPane {
+                    pane_id,
+                    pane_state: crate::pane::PaneState::new(terminal_id),
+                },
+                Some("buildbox::w1:p3".to_string()),
+                events,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            );
+            registry
+        };
+        state.workspaces[0].active_tab = 1;
+        let local_pane = state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let proxy_tab = state.workspaces[0].active_tab();
+        assert_eq!(state.workspaces[0].tabs.len(), 2);
+        assert!(proxy_tab.is_some_and(|tab| tab.panes.len() == 2));
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(
+            snapshot.workspaces[0].tabs.len(),
+            2,
+            "a local sibling remains restorable when its tab also contains a proxy"
+        );
+        let mixed_tab = snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .find(|tab| tab.custom_name.as_deref() == Some("buildbox::w1:p3"))
+            .expect("mixed proxy tab remains with its local pane");
+        match &mixed_tab.layout {
+            LayoutSnapshot::Pane(id) => assert_eq!(*id, local_pane.raw()),
+            LayoutSnapshot::Split { .. } => panic!("proxy leaf was not pruned"),
+        }
+        assert!(mixed_tab.panes.contains_key(&local_pane.raw()));
+        assert_eq!(mixed_tab.panes.len(), 1);
+        let history = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
+        assert!(
+            history
+                .workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .all(|tab| tab.panes.is_empty()),
+            "a proxy screen never enters local pane history"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_proxy_local_capture_restores_tab_identity_focus_and_history() {
+        let mut state = state_with_workspaces(&["local"]);
+        let (first_terminal, second_tab, second_pane, second_terminal) = {
+            let workspace = &mut state.workspaces[0];
+            workspace.identity_cwd = PathBuf::from("/local/identity");
+            let first_pane = workspace.tabs[0].root_pane;
+            let first_terminal = workspace.tabs[0]
+                .panes
+                .get(&first_pane)
+                .expect("first pane")
+                .attached_terminal_id
+                .clone();
+            let second_tab = workspace.test_add_tab(Some("later-local"));
+            let second_pane = workspace.tabs[second_tab].root_pane;
+            let second_terminal = workspace.tabs[second_tab]
+                .panes
+                .get(&second_pane)
+                .expect("second pane")
+                .attached_terminal_id
+                .clone();
+            (first_terminal, second_tab, second_pane, second_terminal)
+        };
+        state.ensure_test_terminals();
+        state
+            .terminals
+            .get_mut(&first_terminal)
+            .expect("first terminal")
+            .cwd = PathBuf::from("/local/one");
+        state
+            .terminals
+            .get_mut(&second_terminal)
+            .expect("second terminal")
+            .cwd = PathBuf::from("/local/two");
+
+        let proxy_pane = crate::layout::PaneId::alloc();
+        let proxy_terminal = crate::terminal::TerminalId::alloc();
+        let (proxy_runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            proxy_pane,
+            24,
+            80,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        state.terminals.insert(
+            proxy_terminal.clone(),
+            crate::terminal::TerminalState::new(proxy_terminal.clone(), "/remote/proxy".into()),
+        );
+        let workspace = &mut state.workspaces[0];
+        let events = workspace.tabs[0].events.clone();
+        let proxy_tab = workspace.create_tab_from_existing_pane(
+            crate::workspace::MovedPane {
+                pane_id: proxy_pane,
+                pane_state: crate::pane::PaneState::new(proxy_terminal.clone()),
+            },
+            Some("remote-proxy".to_owned()),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+        );
+        assert_eq!(proxy_tab, 2);
+        workspace.active_tab = second_tab;
+        assert!(workspace.move_tab(proxy_tab, 1));
+        assert_eq!(workspace.active_tab, 2);
+
+        let first_runtime = crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+            80,
+            24,
+            0,
+            b"LOCAL_ONE\r\n",
+        );
+        let second_runtime = crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+            80,
+            24,
+            0,
+            b"LOCAL_TWO\r\n",
+        );
+        let terminal_runtimes = TerminalRuntimeRegistry::from(HashMap::from([
+            (first_terminal.clone(), first_runtime),
+            (second_terminal.clone(), second_runtime),
+            (proxy_terminal, proxy_runtime),
+        ]));
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        let captured = &snapshot.workspaces[0];
+        assert_eq!(captured.identity_cwd, PathBuf::from("/local/one"));
+        assert_eq!(captured.public_tab_numbers, vec![1, 2]);
+        assert_eq!(captured.tabs.len(), 2);
+        assert_eq!(captured.active_tab, 1);
+        assert_eq!(captured.tabs[1].focused, Some(second_pane.raw()));
+
+        assert!(state.workspaces[0].move_tab(1, 0));
+        let reordered = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        assert_eq!(
+            reordered.workspaces[0].identity_cwd,
+            PathBuf::from("/local/one")
+        );
+
+        let history = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
+        assert_eq!(history.workspaces[0].tabs.len(), 2);
+        assert!(history.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .any(|pane| pane.ansi.contains("LOCAL_ONE")));
+        assert!(history.workspaces[0].tabs[1]
+            .panes
+            .values()
+            .any(|pane| pane.ansi.contains("LOCAL_TWO")));
+
+        let (events, _events_rx) = tokio::sync::mpsc::channel(8);
+        let (restored_workspaces, _restored_terminals, mut restored_runtimes) =
+            crate::persist::restore(
+                &snapshot,
+                Some(&history),
+                24,
+                80,
+                0,
+                "/bin/sh",
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            );
+        let restored = &restored_workspaces[0];
+        assert_eq!(
+            restored
+                .tabs
+                .iter()
+                .map(|tab| tab.number)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(restored.active_tab, 1);
+        assert_eq!(
+            restored.tabs[1].layout.focused(),
+            restored.tabs[1].root_pane
+        );
+        for (_terminal_id, runtime) in restored_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
@@ -673,6 +1079,37 @@ mod tests {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
             LayoutSnapshot::Pane(_) => None,
         }
+    }
+
+    #[test]
+    fn tab_subgroup_round_trips_through_the_session_snapshot() {
+        let mut state = state_with_workspaces(&["subgrouped"]);
+        state.workspaces[0].tabs[0].set_subgroup(Some(" api ".to_string()));
+        let snapshot = capture_from_state(&state);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("api"),
+            "the assignment is captured normalized"
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize session snapshot");
+        let restored: SessionSnapshot =
+            serde_json::from_str(&json).expect("parse session snapshot");
+        assert_eq!(
+            restored.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("api")
+        );
+    }
+
+    #[test]
+    fn tab_snapshot_defaults_a_missing_subgroup_for_legacy_sessions() {
+        let snapshot: TabSnapshot =
+            serde_json::from_str(r#"{"layout":{"Pane":1},"panes":{},"zoomed":false}"#)
+                .expect("legacy tab snapshot without a subgroup field");
+        assert_eq!(snapshot.subgroup, None);
+        // An unset subgroup is also omitted when writing, so sessions that
+        // never used subgroups keep their old shape.
+        let json = serde_json::to_string(&snapshot).expect("serialize tab snapshot");
+        assert!(!json.contains("subgroup"), "{json}");
     }
 
     #[test]
@@ -1200,7 +1637,16 @@ mod tests {
         terminal.settled_auto_label = Some("#7 Persist settlement".into());
         let terminals = std::collections::HashMap::from([(terminal_id, terminal)]);
 
-        let captured = capture_workspace(&ws, &terminals, &Default::default());
+        let captured = capture_workspace(
+            &ws,
+            &terminals,
+            &Default::default(),
+            Instant::now(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
         let encoded = serde_json::to_string(&captured).expect("encode");
         let decoded: WorkspaceSnapshot = serde_json::from_str(&encoded).expect("decode");
 
@@ -1243,6 +1689,8 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
+                last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: Some(1_725_000_000),
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
                 settled_auto_label: Some("#7 Fix restore".into()),
@@ -1259,6 +1707,8 @@ mod tests {
             1,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
+                last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1300,6 +1750,7 @@ mod tests {
                     prio: false,
                     pinned: false,
                     starred: false,
+                    subgroup: None,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1934,6 +2385,32 @@ mod tests {
     }
 
     #[test]
+    fn capture_persists_the_observed_quiet_clock() {
+        let mut state = state_with_workspaces(&["quiet"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let quiet_since = Instant::now() - Duration::from_secs(90);
+        let pane = state.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.activity.observe_quiet(true, quiet_since);
+
+        let captured = capture_from_state(&state);
+        let saved = &captured.workspaces[0].tabs[0].panes[&pane_id.raw()];
+
+        assert!(saved.quiet_since_at.is_some());
+    }
+
+    #[test]
+    fn pane_snapshot_without_a_quiet_clock_stays_compatible() {
+        let legacy = serde_json::json!({
+            "cwd": "/tmp",
+            "work_context": {}
+        });
+
+        let pane: PaneSnapshot = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(pane.quiet_since_at, None);
+    }
+
+    #[test]
     fn old_unversioned_snapshot_loads_as_version_0() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
         let snap = parse_snapshot(json).unwrap();
@@ -1960,6 +2437,8 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+                last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1978,6 +2457,8 @@ mod tests {
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
+                last_activity_at: None,
+                quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -2020,6 +2501,7 @@ mod tests {
                     prio: false,
                     pinned: false,
                     starred: false,
+                    subgroup: None,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],

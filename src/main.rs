@@ -562,11 +562,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # settle_finished_after_minutes = 10
 # Settle a pane that has only gone quiet for settle_after_days.
 # auto_settle_inactive = true
-# Settle a resumable pane whose agent read Done and then stayed quiet, instead
-# of leaving it running until reap_done_after_minutes closes it. A pane with no
-# resume plan is left to reaping.
+# Settle an agent pane after it stays idle without gates, usage limits, active
+# sub-agents, or a held shell. Seen panes and stale panes whose screen resolves
+# idle use the same quiet clock.
 # auto_settle_done = true
-# How long a Done pane stays quiet before auto_settle_done settles it.
+# How long an eligible agent pane stays quiet before auto_settle_done settles it.
 # settle_done_after_minutes = 30
 # Stop resumable agent processes when their pane settles.
 # settle_stops_agent = true
@@ -578,8 +578,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resume_nudge_message = "continue"
 # Nudge an agent when both its status declaration and pane activity have gone quiet.
 # auto_nudge_stalled_agents = false
+# Mark a quiet, unattended agent status report stale after this many minutes: a
+# finished report still holding sub-processes, or a pane parked on an unverified
+# subagent claim. An agent reporting itself working keeps the 20-minute budget.
+# agent_stale_after_minutes = 5
 # Initial quiet period and maximum sends in one stale-status episode.
-# nudge_after_minutes = 20
+# nudge_after_minutes = 5
 # max_nudges = 3
 # The plain-text prompt sent to a stalled agent.
 # stall_nudge_message = "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
@@ -759,6 +763,10 @@ fn main() -> io::Result<()> {
     // Subcommands and flags (no TUI, no logging needed)
     if args.get(1).map(|s| s.as_str()) == Some("remote-client-bridge") {
         return remote::run_remote_client_bridge();
+    }
+
+    if args.get(1).map(|s| s.as_str()) == Some("remote-control-bridge") {
+        return remote::run_remote_control_bridge();
     }
 
     if args.get(1).map(|s| s.as_str()) == Some("server") {
@@ -962,6 +970,7 @@ fn main() -> io::Result<()> {
                 "server",
                 "client",
                 "remote-client-bridge",
+                "remote-control-bridge",
                 "update",
                 "status",
                 "config",
@@ -1181,7 +1190,8 @@ mod tests {
     #[test]
     fn default_config_documents_stalled_agent_nudge_and_status_alternative() {
         assert!(DEFAULT_CONFIG.contains("# auto_nudge_stalled_agents = false"));
-        assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 20"));
+        assert!(DEFAULT_CONFIG.contains("# agent_stale_after_minutes = 5"));
+        assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 5"));
         assert!(DEFAULT_CONFIG.contains("# max_nudges = 3"));
         assert!(DEFAULT_CONFIG.contains(
             "# stall_nudge_message = \"Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.\""

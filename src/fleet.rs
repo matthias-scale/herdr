@@ -306,6 +306,30 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
     }
 }
 
+/// The fleet host a local pane was attached to, read back from its launch
+/// argv. Hosts may share an SSH target under different sessions or sockets, so
+/// a match compares everything the attach encoded, not the target alone.
+pub(crate) fn attached_host_name<'a>(snapshot: &'a Snapshot, argv: &[String]) -> Option<&'a str> {
+    let target = match argv {
+        [ssh, flag, target, _] if ssh == "ssh" && flag == "-t" => target,
+        [herdr, flag, target, ..] if herdr == "herdr" && flag == "--remote" => target,
+        _ => return None,
+    };
+    snapshot
+        .hosts
+        .iter()
+        .filter(|host| !host.local && host.target == *target)
+        .find(|host| match argv {
+            [ssh, _, _, command] if ssh == "ssh" => {
+                let agent_prefix =
+                    remote_attach_command(host.socket.as_deref(), host.session.as_deref(), "");
+                command.starts_with(agent_prefix.trim_end_matches("''"))
+            }
+            _ => host_attach_argv(host).is_ok_and(|expected| expected == argv),
+        })
+        .map(|host| host.name.as_str())
+}
+
 pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, String> {
     if host.local {
         return Err(format!("{} is the local host", host.name));
@@ -1114,13 +1138,25 @@ impl FleetRow {
 
     fn from_agent(host: &str, host_is_local: bool, agent: AgentInfo, now_s: u64) -> Option<Self> {
         let agent_info = agent.clone();
-        let liveness = match agent.agent_status {
-            AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
-            AgentStatus::Done => Liveness::Terminal,
-            AgentStatus::Stale | AgentStatus::Unknown => Liveness::Unknown,
+        let projection = agent.agent_projection();
+        let liveness = if projection.settled {
+            Liveness::Terminal
+        } else {
+            match agent.agent_status {
+                AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked => Liveness::Live,
+                AgentStatus::Done => Liveness::Terminal,
+                AgentStatus::Stale | AgentStatus::Unknown => Liveness::Unknown,
+            }
         };
-        let blocked = agent.agent_status == AgentStatus::Blocked || !agent.gates.is_empty();
-        let raw_state = agent_status_str(agent.agent_status).to_string();
+        let blocked = projection.counts_as_blocked();
+        let raw_state = if projection.settled {
+            "done"
+        } else if projection.attention_tier == crate::terminal::state::AttentionTier::Attention {
+            "attention"
+        } else {
+            agent_status_str(agent.agent_status)
+        }
+        .to_string();
         let state = effective_state(&raw_state, liveness, blocked);
         let reported_at = agent.reported_at.clone();
         let age_s = reported_at
@@ -1130,6 +1166,7 @@ impl FleetRow {
         let gates = agent
             .gates
             .iter()
+            .filter(|_| projection.open_blockers)
             .map(|gate| FleetGate {
                 n: gate.n,
                 label: gate.label.clone(),
@@ -1877,6 +1914,53 @@ mod tests {
     }
 
     #[test]
+    fn agent_attention_projection_excludes_questions_and_settled_panes_from_blocked() {
+        let mut answer = agent(AgentStatus::Blocked, serde_json::json!([]));
+        answer.items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let answer_row =
+            FleetRow::from_agent("ub1", false, answer, 1_777_000_000).expect("valid attention row");
+        assert!(!answer_row.blocked);
+        assert_eq!(answer_row.state, "attention");
+
+        let mut optional = agent(AgentStatus::Idle, serde_json::json!([]));
+        optional.items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Verify".into(),
+            text: "Optional check".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let optional_row = FleetRow::from_agent("ub1", false, optional, 1_777_000_000)
+            .expect("valid nonblocking row");
+        assert!(!optional_row.blocked);
+        assert_eq!(optional_row.state, "idle");
+
+        let mut settled = agent(
+            AgentStatus::Blocked,
+            serde_json::json!([{"n": 1, "label": "Gate", "text": "Approve"}]),
+        );
+        settled.settled_at = Some(1_777_000_000);
+        let settled_row =
+            FleetRow::from_agent("ub1", false, settled, 1_777_000_000).expect("valid settled row");
+        assert!(!settled_row.blocked);
+        assert_eq!(settled_row.state, "done");
+    }
+
+    #[test]
     fn legacy_agent_without_ref_uses_configured_host_and_pane_identity() {
         let agent = agent(AgentStatus::Idle, serde_json::json!([]));
         assert!(agent.agent_ref.is_none());
@@ -2048,6 +2132,53 @@ mod tests {
                 "HERDR_SOCKET_PATH='/home/you/.config/herdr/herdr.sock' HERDR_SESSION='agents' herdr agent attach 'w1:p2'"
             ]
         );
+    }
+
+    #[test]
+    fn attached_host_name_reads_both_attach_shapes_back_to_the_host() {
+        let host = HostSnapshot {
+            name: "workbox".to_string(),
+            target: "you@workbox".to_string(),
+            local: false,
+            session: Some("agents".to_string()),
+            socket: None,
+            state: HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            entries: Vec::new(),
+        };
+        let snapshot = Snapshot {
+            hosts: vec![host.clone()],
+            ..Snapshot::default()
+        };
+        let agent = agent_attach_argv(&host, "w1:p2").expect("attach argv");
+        let whole = host_attach_argv(&host).expect("host argv");
+        assert_eq!(attached_host_name(&snapshot, &agent), Some("workbox"));
+        assert_eq!(attached_host_name(&snapshot, &whole), Some("workbox"));
+        assert_eq!(
+            attached_host_name(
+                &snapshot,
+                &["ssh".into(), "-t".into(), "elsewhere".into(), "x".into()]
+            ),
+            None
+        );
+        assert_eq!(attached_host_name(&snapshot, &["zsh".into()]), None);
+
+        // A second alias on the same target under another session keeps its
+        // own name instead of borrowing the first host's.
+        let mut sibling = host.clone();
+        sibling.name = "workbox-b".to_string();
+        sibling.session = Some("batch".to_string());
+        let both = Snapshot {
+            hosts: vec![host.clone(), sibling.clone()],
+            ..Snapshot::default()
+        };
+        let sibling_agent = agent_attach_argv(&sibling, "w1:p2").expect("attach argv");
+        let sibling_whole = host_attach_argv(&sibling).expect("host argv");
+        assert_eq!(attached_host_name(&both, &agent), Some("workbox"));
+        assert_eq!(attached_host_name(&both, &sibling_agent), Some("workbox-b"));
+        assert_eq!(attached_host_name(&both, &sibling_whole), Some("workbox-b"));
     }
 
     #[test]

@@ -513,6 +513,8 @@ pub struct ClosingBlockItem {
     pub n: u32,
     pub label: String,
     pub text: String,
+    #[serde(default = "default_true")]
+    pub blocking: bool,
     #[serde(default)]
     pub pr: Option<u64>,
     #[serde(default)]
@@ -535,6 +537,8 @@ impl<'de> Deserialize<'de> for ClosingBlockItem {
             n: u32,
             label: String,
             text: String,
+            #[serde(default = "default_true")]
+            blocking: bool,
             #[serde(default)]
             pr: Option<u64>,
             #[serde(default)]
@@ -553,6 +557,7 @@ impl<'de> Deserialize<'de> for ClosingBlockItem {
             n: wire.n,
             label: wire.label,
             text: wire.text,
+            blocking: wire.blocking,
             pr: wire.pr,
             ticket: wire.ticket,
             url: wire.url,
@@ -560,6 +565,10 @@ impl<'de> Deserialize<'de> for ClosingBlockItem {
             default_at: None,
         })
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

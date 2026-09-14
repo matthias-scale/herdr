@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -345,6 +345,8 @@ pub enum ClientMessage {
     Hello {
         /// Protocol version the client speaks.
         version: u32,
+        /// Exact Herdr build identity. Control clients must match the server.
+        build_version: String,
         /// Terminal width in columns.
         cols: u16,
         /// Terminal height in rows.
@@ -427,6 +429,13 @@ pub enum ClientMessage {
     ControlTerminal {
         /// Pane, terminal, or agent target to control.
         target: String,
+        /// Cross-host agent identity for the guarded control path.
+        #[serde(default)]
+        agent_ref: Option<crate::api::schema::AgentRef>,
+        /// Context expected by the client, when it has a fresh one. The
+        /// remote server always captures and validates its own context.
+        #[serde(default)]
+        expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
@@ -455,6 +464,87 @@ pub enum ClientMessage {
 
     /// The direct command was written and flushed; terminal response timing starts now.
     GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
+}
+
+#[derive(Serialize, Deserialize)]
+enum LegacyClientMessageV21 {
+    Hello {
+        version: u32,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        requested_encoding: RenderEncoding,
+        keybindings: ClientKeybindings,
+        launch_mode: ClientLaunchMode,
+    },
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+enum LegacyServerMessageV21 {
+    Welcome {
+        version: u32,
+        encoding: RenderEncoding,
+        error: Option<String>,
+    },
+}
+
+pub(crate) fn decode_legacy_client_hello(payload: &[u8]) -> Option<ClientMessage> {
+    let (message, consumed) = bincode::serde::decode_from_slice::<LegacyClientMessageV21, _>(
+        payload,
+        bincode::config::standard(),
+    )
+    .ok()?;
+    if consumed != payload.len() {
+        return None;
+    }
+    let LegacyClientMessageV21::Hello {
+        version,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        requested_encoding,
+        keybindings,
+        launch_mode,
+    } = message;
+    Some(ClientMessage::Hello {
+        version,
+        build_version: String::new(),
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        requested_encoding,
+        keybindings,
+        launch_mode,
+    })
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn decode_legacy_server_welcome(payload: &[u8]) -> Option<ServerMessage> {
+    let (message, consumed) = bincode::serde::decode_from_slice::<LegacyServerMessageV21, _>(
+        payload,
+        bincode::config::standard(),
+    )
+    .ok()?;
+    if consumed != payload.len() {
+        return None;
+    }
+    let LegacyServerMessageV21::Welcome {
+        version,
+        encoding,
+        error,
+    } = message;
+    Some(ServerMessage::Welcome {
+        version,
+        build_version: String::new(),
+        encoding,
+        error,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,6 +759,8 @@ pub enum ServerMessage {
     Welcome {
         /// Protocol version the server speaks.
         version: u32,
+        /// Exact Herdr build identity reported by the server.
+        build_version: String,
         /// Render encoding selected by the server for this connection.
         encoding: RenderEncoding,
         /// If present, the handshake failed and this describes why.
@@ -762,6 +854,14 @@ pub enum ServerMessage {
 
     /// The server no longer needs the client's direct graphics transmission.
     GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
+
+    /// The remote server granted guarded terminal control.
+    ControlReady {
+        context: Box<crate::api::schema::RemoteControlContext>,
+    },
+
+    /// The remote server refused guarded terminal control.
+    ControlError { code: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1043,15 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     reader: &mut R,
     max_frame_size: usize,
 ) -> Result<M, FramingError> {
+    let payload = read_frame(reader, max_frame_size)?;
+    decode_frame(&payload)
+}
+
+/// Reads one length-prefixed payload without selecting a message schema.
+pub fn read_frame<R: Read + ?Sized>(
+    reader: &mut R,
+    max_frame_size: usize,
+) -> Result<Vec<u8>, FramingError> {
     // Read the 4-byte length prefix, reassembling partial reads.
     let mut len_buf = [0u8; LENGTH_PREFIX_BYTES];
     read_exact_or_eof(reader, &mut len_buf)?;
@@ -959,16 +1068,23 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     let mut payload = vec![0u8; claimed_len];
     read_exact_or_eof(reader, &mut payload)?;
 
-    let (msg, consumed) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+    Ok(payload)
+}
+
+pub(crate) fn decode_frame<M: for<'de> Deserialize<'de>>(
+    payload: &[u8],
+) -> Result<M, FramingError> {
+    let (msg, consumed) = bincode::serde::decode_from_slice(payload, bincode::config::standard())
         .map_err(|e| FramingError::Bincode(e.to_string()))?;
 
     // Enforce that the decoder consumed the full payload.
     // Trailing bytes after the decoded message indicate a protocol violation
     // (e.g., a corrupted length prefix or concatenated payloads).
-    if consumed != claimed_len {
+    if consumed != payload.len() {
         return Err(FramingError::Bincode(format!(
-            "decoded {} bytes but payload length was {claimed_len}; trailing bytes are not allowed",
-            consumed
+            "decoded {} bytes but payload length was {}; trailing bytes are not allowed",
+            consumed,
+            payload.len()
         )));
     }
 
@@ -978,7 +1094,7 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
 /// Like `Read::read_exact`, but returns `FramingError::UnexpectedEof`
 /// when the reader hits end-of-stream before filling the buffer, instead
 /// of the generic `io::ErrorKind::UnexpectedEof`.
-fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), FramingError> {
+fn read_exact_or_eof<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> Result<(), FramingError> {
     reader.read_exact(buf).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             FramingError::UnexpectedEof
@@ -1044,6 +1160,7 @@ mod tests {
     fn client_hello_roundtrip() {
         let msg = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             cols: 80,
             rows: 24,
             cell_width_px: 8,
@@ -1081,6 +1198,7 @@ mod tests {
         assert_eq!(
             tag(&ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 cols: 80,
                 rows: 24,
                 cell_width_px: 8,
@@ -1137,6 +1255,8 @@ mod tests {
         assert_eq!(
             tag(&ClientMessage::ControlTerminal {
                 target: "w1:p1".to_owned(),
+                agent_ref: None,
+                expected_context: None,
                 takeover: false,
             }),
             9
@@ -1359,6 +1479,8 @@ mod tests {
     fn client_control_terminal_roundtrip() {
         let msg = ClientMessage::ControlTerminal {
             target: "w1:p1".to_owned(),
+            agent_ref: None,
+            expected_context: None,
             takeover: true,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -1398,6 +1520,7 @@ mod tests {
     fn server_welcome_roundtrip() {
         let msg = ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             encoding: RenderEncoding::SemanticFrame,
             error: None,
         };
@@ -1411,6 +1534,7 @@ mod tests {
     fn server_welcome_with_error_roundtrip() {
         let msg = ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             encoding: RenderEncoding::SemanticFrame,
             error: Some("incompatible version".to_owned()),
         };
@@ -1671,6 +1795,7 @@ mod tests {
     fn framing_small_message_roundtrip() {
         let msg = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             cols: 80,
             rows: 24,
             cell_width_px: 8,
@@ -1745,6 +1870,7 @@ mod tests {
             let msg = match i % 5 {
                 0 => ClientMessage::Hello {
                     version: PROTOCOL_VERSION,
+                    build_version: crate::build_info::version(),
                     cols: (80 + (i % 40) as u16),
                     rows: (24 + (i % 20) as u16),
                     cell_width_px: 8,
@@ -1873,6 +1999,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v21_handshake_fixtures_decode_in_both_directions() {
+        let old_hello = LegacyClientMessageV21::Hello {
+            version: PROTOCOL_VERSION - 1,
+            cols: 120,
+            rows: 40,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            requested_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: ClientKeybindings::Server,
+            launch_mode: ClientLaunchMode::TerminalAttach,
+        };
+        let old_hello_payload =
+            bincode::serde::encode_to_vec(old_hello, bincode::config::standard())
+                .expect("encode v21 Hello fixture");
+        assert!(matches!(
+            decode_legacy_client_hello(&old_hello_payload),
+            Some(ClientMessage::Hello {
+                version,
+                build_version,
+                cols: 120,
+                rows: 40,
+                ..
+            }) if version == PROTOCOL_VERSION - 1 && build_version.is_empty()
+        ));
+
+        let old_welcome = LegacyServerMessageV21::Welcome {
+            version: PROTOCOL_VERSION - 1,
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        };
+        let old_welcome_payload =
+            bincode::serde::encode_to_vec(old_welcome, bincode::config::standard())
+                .expect("encode v21 Welcome fixture");
+        assert!(matches!(
+            decode_legacy_server_welcome(&old_welcome_payload),
+            Some(ServerMessage::Welcome {
+                version,
+                build_version,
+                encoding: RenderEncoding::TerminalAnsi,
+                error: None,
+            }) if version == PROTOCOL_VERSION - 1 && build_version.is_empty()
+        ));
+    }
+
     #[test]
     fn version_older_client_rejected() {
         let result = check_client_version(PROTOCOL_VERSION - 1);
@@ -1914,11 +2086,13 @@ mod tests {
         let response = match check {
             VersionCheck::Compatible => ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 encoding: RenderEncoding::SemanticFrame,
                 error: None,
             },
             VersionCheck::Incompatible(reason) => ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 encoding: RenderEncoding::SemanticFrame,
                 error: Some(reason),
             },
@@ -2181,6 +2355,7 @@ mod tests {
         // A normally-framed message should decode without error.
         let msg = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
+            build_version: crate::build_info::version(),
             cols: 80,
             rows: 24,
             cell_width_px: 8,
@@ -2217,6 +2392,7 @@ mod tests {
         let messages = vec![
             ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
+                build_version: crate::build_info::version(),
                 cols: 200,
                 rows: 60,
                 cell_width_px: 8,

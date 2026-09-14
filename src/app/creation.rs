@@ -177,7 +177,7 @@ impl App {
             return;
         }
 
-        self.runtime_workspace_create(
+        let response = self.runtime_workspace_create(
             request_id,
             crate::api::schema::WorkspaceCreateParams {
                 cwd: None,
@@ -187,6 +187,13 @@ impl App {
                 work_context: None,
             },
         );
+        if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) {
+            crate::logging::workspace_create_failed(
+                request_id,
+                &error.error.code,
+                &error.error.message,
+            );
+        }
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
@@ -642,7 +649,7 @@ impl App {
                 self.state
                     .terminals
                     .get(&pane.attached_terminal_id)
-                    .map(|terminal| (terminal.state, pane.seen))
+                    .map(|terminal| (terminal.raw_agent_state(), pane.seen))
             })
             .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
             .unwrap_or((crate::detect::AgentState::Unknown, true));
@@ -783,7 +790,7 @@ impl App {
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status_with_stale(
-                terminal.state,
+                terminal.raw_agent_state(),
                 pane.seen,
                 terminal.supervisor_stale,
             ),

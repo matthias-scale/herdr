@@ -8,6 +8,7 @@ use super::ScrollbarClickTarget;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SettledMenuAction {
     Resume(crate::app::state::PaneFocusTarget),
+    FocusLive(crate::app::state::PaneFocusTarget),
     NewThread {
         directory: std::path::PathBuf,
         workspace: crate::app::home::HomeWorkspace,
@@ -22,6 +23,18 @@ pub(crate) enum SidebarWorkGroupKeyAction {
 }
 
 impl AppState {
+    pub(crate) fn settled_target_has_resume_plan(
+        &self,
+        target: &crate::app::state::PaneFocusTarget,
+    ) -> bool {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == target.workspace_id)
+            .and_then(|workspace| workspace.pane_state(target.pane_id))
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(crate::app::settled::pane_has_resume_plan)
+    }
+
     pub(crate) fn open_sidebar_new_menu(&mut self) {
         self.sidebar_group_menu_open = false;
         self.sidebar_filter_menu_open = false;
@@ -291,6 +304,133 @@ impl AppState {
         });
     }
 
+    pub(crate) fn open_sidebar_sort_menu(
+        &mut self,
+        target: String,
+        current: crate::app::state::SidebarSortMode,
+        anchor: (u16, u16),
+    ) {
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_object_menu = None;
+        self.sidebar_settled_menu_target = None;
+        self.sidebar_sort_menu = Some(crate::app::state::SidebarSortMenuState {
+            target,
+            current,
+            anchor,
+            selected: current.index(),
+        });
+    }
+
+    pub(crate) fn sidebar_sort_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        crate::ui::sidebar::sidebar_sort_menu_item_at(self, self.screen_rect(), col, row)
+    }
+
+    pub(crate) fn handle_sidebar_sort_menu_key(&mut self, key: KeyEvent) -> bool {
+        let Some(menu) = self.sidebar_sort_menu.as_mut() else {
+            return false;
+        };
+        let count = crate::app::state::SidebarSortMode::ALL.len();
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => self.sidebar_sort_menu = None,
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                menu.selected = menu.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                menu.selected = menu.selected.saturating_add(1).min(count - 1);
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                let target = menu.target.clone();
+                let mode = crate::app::state::SidebarSortMode::ALL
+                    .get(menu.selected)
+                    .copied()
+                    .unwrap_or_default();
+                self.set_sidebar_group_sort(target, mode);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn apply_sidebar_sort_menu_selection(&mut self, index: usize) {
+        let Some(menu) = self.sidebar_sort_menu.as_ref() else {
+            return;
+        };
+        let Some(mode) = crate::app::state::SidebarSortMode::ALL.get(index).copied() else {
+            self.sidebar_sort_menu = None;
+            return;
+        };
+        let target = menu.target.clone();
+        self.set_sidebar_group_sort(target, mode);
+    }
+
+    pub(crate) fn sidebar_subgroup_picker_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar::sidebar_subgroup_picker_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn handle_sidebar_subgroup_picker_key(&mut self, key: KeyEvent) -> bool {
+        if self.sidebar_subgroup_picker.is_none() {
+            return false;
+        }
+        let row_count = crate::ui::sidebar::sidebar_subgroup_picker_choices(self).len();
+        let Some(mut picker) = self.sidebar_subgroup_picker.take() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Up => picker.filter.move_selection(-1, row_count),
+            KeyCode::Down => picker.filter.move_selection(1, row_count),
+            KeyCode::Backspace => picker.filter.pop(),
+            KeyCode::Enter => {
+                let selected = picker.filter.selected;
+                self.sidebar_subgroup_picker = Some(picker);
+                self.accept_sidebar_subgroup_picker(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                picker.filter.push(character);
+            }
+            _ => {}
+        }
+        self.sidebar_subgroup_picker = Some(picker);
+        true
+    }
+
+    pub(crate) fn accept_sidebar_subgroup_picker(&mut self, index: usize) {
+        let choices = crate::ui::sidebar::sidebar_subgroup_picker_choices(self);
+        let Some(picker) = self.sidebar_subgroup_picker.take() else {
+            return;
+        };
+        let Some(name) = choices.get(index).map(|choice| choice.name().to_string()) else {
+            return;
+        };
+        if let Some(tab) = self
+            .workspaces
+            .get_mut(picker.ws_idx)
+            .and_then(|workspace| workspace.tabs.get_mut(picker.tab_idx))
+        {
+            tab.set_subgroup(Some(name));
+            self.mark_session_dirty();
+        }
+    }
+
+    /// Remove the window's subgroup outright, from the tab context menu.
+    pub(crate) fn clear_tab_subgroup(&mut self, ws_idx: usize, tab_idx: usize) {
+        if let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
+        {
+            if tab.subgroup.is_some() {
+                tab.set_subgroup(None);
+                self.mark_session_dirty();
+            }
+        }
+    }
+
     pub(crate) fn sidebar_settled_target_at(
         &self,
         row: u16,
@@ -340,7 +480,10 @@ impl AppState {
         let pane = self.workspaces[ws_idx].pane_state(target.pane_id)?;
         let terminal = self.terminals.get(&pane.attached_terminal_id)?;
         match index {
-            0 => Some(SettledMenuAction::Resume(target)),
+            0 if self.settled_target_has_resume_plan(&target) => {
+                Some(SettledMenuAction::Resume(target))
+            }
+            0 => Some(SettledMenuAction::FocusLive(target)),
             1 => Some(SettledMenuAction::NewThread {
                 directory: terminal.cwd.clone(),
                 workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
@@ -372,6 +515,8 @@ impl AppState {
             || self.sidebar_project_menu_item_at(col, row).is_some()
             || self.sidebar_group_menu_item_at(col, row).is_some()
             || self.sidebar_filter_menu_item_at(col, row).is_some()
+            || self.sidebar_sort_menu_item_at(col, row).is_some()
+            || self.sidebar_subgroup_picker_item_at(col, row).is_some()
             || crate::ui::sidebar_object_menu_item_at(self, self.screen_rect(), col, row).is_some()
     }
 
@@ -1364,6 +1509,10 @@ impl super::super::App {
         };
         match key.code {
             KeyCode::Enter => {
+                if !self.state.settled_target_has_resume_plan(&target) {
+                    self.focus_live_settled_pane(target);
+                    return true;
+                }
                 self.state.sidebar_settled_menu_target = Some(target);
                 self.state.sidebar_settled_menu_selected = 0;
                 self.state.sidebar_settled_menu_delete_armed = false;
@@ -1385,18 +1534,8 @@ impl super::super::App {
             return;
         };
         match action {
-            SettledMenuAction::Resume(target) => {
-                let Some(ws_idx) = self
-                    .state
-                    .workspaces
-                    .iter()
-                    .position(|workspace| workspace.id == target.workspace_id)
-                else {
-                    return;
-                };
-                self.state
-                    .note_pane_activity_at(target.pane_id, std::time::Instant::now());
-                self.focus_pane_internal_via_api(ws_idx, target.pane_id);
+            SettledMenuAction::Resume(target) | SettledMenuAction::FocusLive(target) => {
+                self.focus_live_settled_pane(target)
             }
             SettledMenuAction::NewThread {
                 directory,
@@ -1417,6 +1556,21 @@ impl super::super::App {
                 self.close_focused_pane_via_api_requires_confirmation();
             }
         }
+        self.flush_pane_settlement_events();
+    }
+
+    pub(crate) fn focus_live_settled_pane(&mut self, target: crate::app::state::PaneFocusTarget) {
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)
+        else {
+            return;
+        };
+        self.state
+            .note_pane_activity_at(target.pane_id, std::time::Instant::now());
+        self.focus_pane_internal_via_api(ws_idx, target.pane_id);
         self.flush_pane_settlement_events();
     }
 }
@@ -1481,6 +1635,20 @@ mod tests {
                             ..Default::default()
                         },
                     );
+                if settled {
+                    app.state
+                        .terminals
+                        .get_mut(&terminal_id)
+                        .expect("fixture terminal")
+                        .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                            source: "herdr:codex".into(),
+                            agent: "codex".into(),
+                            session_ref: crate::agent_resume::AgentSessionRef::id(format!(
+                                "settled-{ws_idx}-{tab_idx}"
+                            ))
+                            .expect("valid session id"),
+                        });
+                }
             }
         }
         app.state.active = Some(0);
@@ -1582,6 +1750,198 @@ mod tests {
         }
     }
 
+    /// One workspace with three tabs in a single flat repo group, named so the
+    /// canonical order and the alphabetical order disagree.
+    fn sidebar_sort_mouse_app() -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("ws");
+        workspace.test_add_tab(Some("zeta"));
+        workspace.test_add_tab(Some("alpha"));
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0].custom_name = Some("mike".to_string());
+        for tab_idx in 0..3 {
+            let pane_id = app.state.workspaces[0].tabs[tab_idx].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("fixture terminal");
+            terminal.replace_prevalidated_manual_work_context(
+                crate::work_context::PaneWorkContext {
+                    repo: Some("acme/one".into()),
+                    ..Default::default()
+                },
+            );
+            terminal.detected_agent = Some(Agent::Pi);
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+            terminal.last_agent_state_change_seq = Some(tab_idx as u64 + 1);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.reconcile_sidebar_presentation();
+        app
+    }
+
+    #[test]
+    fn clicking_the_sort_glyph_opens_the_dropdown_and_picking_applies_the_sort() {
+        let mut app = sidebar_order_app(false);
+        app.state.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let sidebar_area = Rect::new(
+            app.state.view.sidebar_rect.x,
+            app.state.view.sidebar_rect.y,
+            app.state.view.sidebar_rect.width.saturating_add(1),
+            app.state.view.sidebar_rect.height,
+        );
+        let card = crate::ui::compute_workspace_card_areas(&app.state, sidebar_area)
+            .first()
+            .expect("repo group card")
+            .rect;
+        let (glyph_col, glyph_row) = (card.right() - 1, card.y);
+        assert_eq!(
+            crate::ui::sidebar::sidebar_group_sort_at(&app.state, glyph_col, glyph_row),
+            Some(("repo:acme/alpha".to_string(), glyph_col)),
+            "the repo group header's last cell is its sort control"
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            glyph_col,
+            glyph_row,
+        ));
+        let menu = app
+            .state
+            .sidebar_sort_menu
+            .as_ref()
+            .expect("clicking the glyph opens the sort dropdown");
+        assert_eq!(menu.target, "repo:acme/alpha");
+        assert_eq!(menu.current, crate::app::state::SidebarSortMode::Default);
+        assert_eq!(menu.selected, 0, "the cursor starts on the current choice");
+
+        let layout =
+            crate::ui::sidebar::sidebar_sort_menu_layout(&app.state, app.state.screen_rect())
+                .expect("sort dropdown layout");
+        let name_row = layout.list_rect.y + 1;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.list_rect.x + 1,
+            name_row,
+        ));
+        assert_eq!(
+            app.state.sidebar_group_sort("repo:acme/alpha"),
+            crate::app::state::SidebarSortMode::Name,
+            "picking a row applies the sort to exactly that group"
+        );
+        assert!(app.state.sidebar_sort_menu.is_none(), "the menu closes");
+        assert_eq!(
+            app.state.take_sidebar_group_sort_persistence_request(),
+            Some((
+                "repo:acme/alpha".to_string(),
+                crate::app::state::SidebarSortMode::Name
+            )),
+            "the choice is queued for client-local persistence"
+        );
+    }
+
+    #[test]
+    fn clicking_a_sorted_row_focuses_that_rows_pane() {
+        let mut app = sidebar_sort_mouse_app();
+        app.state.set_sidebar_group_sort(
+            "repo:acme/one".to_string(),
+            crate::app::state::SidebarSortMode::Name,
+        );
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let first = cards.first().expect("first sorted tab row");
+        assert_eq!(first.tab_idx, 2, "alpha sorts above mike and zeta");
+        let (target_ws, target_tab, target_pane) = (first.ws_idx, first.tab_idx, first.pane_id);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            first.rect.x + 1,
+            first.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            first.rect.x + 1,
+            first.rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(target_ws));
+        assert_eq!(app.state.workspaces[target_ws].active_tab, target_tab);
+        assert_eq!(
+            app.state.workspaces[target_ws].tabs[target_tab]
+                .layout
+                .focused(),
+            target_pane,
+            "the click lands on the row drawn there after sorting, not the row that used to be there"
+        );
+    }
+
+    #[test]
+    fn subgroup_picker_creates_a_name_then_offers_it_to_the_next_window() {
+        let mut app = sidebar_sort_mouse_app();
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (5, 5),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+        for character in "api".chars() {
+            assert!(app.state.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            )));
+        }
+        let choices = crate::ui::sidebar::sidebar_subgroup_picker_choices(&app.state);
+        assert_eq!(
+            choices,
+            vec![crate::ui::sidebar::SidebarSubgroupChoice::Create(
+                "api".to_string()
+            )],
+            "an unknown name is offered as a create row"
+        );
+        assert!(app.state.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].subgroup(),
+            Some("api"),
+            "Enter assigns the typed name"
+        );
+        assert!(app.state.sidebar_subgroup_picker.is_none());
+
+        // The next window's picker offers the name the group already has.
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 1,
+            anchor: (5, 5),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+        let choices = crate::ui::sidebar::sidebar_subgroup_picker_choices(&app.state);
+        assert_eq!(
+            choices,
+            vec![crate::ui::sidebar::SidebarSubgroupChoice::Existing(
+                "api".to_string()
+            )],
+            "an existing subgroup name is a pick, not a retype"
+        );
+        assert!(app.state.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )));
+        assert_eq!(app.state.workspaces[0].tabs[1].subgroup(), Some("api"));
+
+        app.state.clear_tab_subgroup(0, 1);
+        assert_eq!(app.state.workspaces[0].tabs[1].subgroup(), None);
+    }
+
     fn settled_target(app: &mut crate::app::App) -> crate::app::state::PaneFocusTarget {
         if app.state.workspaces.is_empty() {
             app.state.workspaces.push(Workspace::test_new("settled"));
@@ -1595,6 +1955,19 @@ mod tests {
             .get_mut(&pane_id)
             .expect("root pane")
             .settled_at = Some(1_725_000_000);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("settled-menu")
+                    .expect("valid session id"),
+            });
         crate::app::state::PaneFocusTarget {
             workspace_id: app.state.workspaces[0].id.clone(),
             pane_id,
@@ -1938,6 +2311,38 @@ mod tests {
             app.state.workspaces[0].focused_pane_id(),
             Some(target.pane_id)
         );
+    }
+
+    #[test]
+    fn clicking_unresumable_settled_row_focuses_its_live_pane() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("settled-live"),
+            Workspace::test_new("currently-focused"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.ws_idx == 0 && card.pane_id == pane_id)
+            .expect("settled row")
+            .rect;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 1,
+            row.y,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+        assert!(!app.state.pane_is_settled(0, pane_id));
+        assert!(app.state.sidebar_settled_menu_target.is_none());
     }
 
     #[test]
@@ -2656,7 +3061,7 @@ mod tests {
                 .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         };
         set_state(&mut app, 0, first_pane, AgentState::Working);
         set_state(&mut app, 1, second_pane, AgentState::Blocked);
@@ -2768,7 +3173,7 @@ mod tests {
             .clone();
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.detected_agent = Some(Agent::Claude);
-        terminal.state = crate::detect::AgentState::Blocked;
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
 
         let header = crate::ui::compute_sidebar_section_header_areas(
@@ -2815,7 +3220,7 @@ mod tests {
                 .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
-            terminal.state = state;
+            terminal.set_raw_agent_state_for_test(state);
         }
         app.state.active = Some(0);
         app.state.selected = 0;

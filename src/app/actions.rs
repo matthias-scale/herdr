@@ -447,11 +447,11 @@ impl AppState {
             let activity = workspace_activity_summary(ws, &self.terminals);
             let workspace_search_text = format!("{workspace_label} {activity}").to_lowercase();
             let stale = workspace_has_stale_agent(ws, &self.terminals);
+            let (state, seen, attention_tier) = ws.aggregate_state_and_attention(&self.terminals);
             let workspace_matches = match query_kind {
                 NavigatorQueryKind::Empty => true,
                 NavigatorQueryKind::State(filter) => {
-                    let (state, seen) = ws.aggregate_state(&self.terminals);
-                    navigator_state_filter_matches(filter, state, seen, stale)
+                    navigator_state_filter_matches(filter, state, seen, stale, attention_tier)
                 }
                 NavigatorQueryKind::Text => navigator_matches(&query, &workspace_search_text),
             };
@@ -464,7 +464,6 @@ impl AppState {
 
             let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
                 || self.navigator.expanded_workspaces.contains(&ws.id);
-            let (state, seen) = ws.aggregate_state(&self.terminals);
             let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
             rows.push(NavigatorRow {
                 target: NavigatorTarget::Workspace { ws_idx },
@@ -472,6 +471,7 @@ impl AppState {
                 label: format!("{workspace_label} ({pane_count})"),
                 meta: activity,
                 status: state,
+                attention_tier,
                 seen,
                 stale,
                 is_current: self.active == Some(ws_idx),
@@ -509,6 +509,7 @@ impl AppState {
                     tab_row.status,
                     tab_row.seen,
                     tab_row.stale,
+                    tab_row.attention_tier,
                 ),
                 NavigatorQueryKind::Text => navigator_matches(
                     query,
@@ -528,7 +529,13 @@ impl AppState {
                 NavigatorQueryKind::State(filter) => pane_rows
                     .into_iter()
                     .filter(|row| {
-                        navigator_state_filter_matches(filter, row.status, row.seen, row.stale)
+                        navigator_state_filter_matches(
+                            filter,
+                            row.status,
+                            row.seen,
+                            row.stale,
+                            row.attention_tier,
+                        )
                     })
                     .collect::<Vec<_>>(),
                 // A matching workspace or tab shows its whole subtree; panes
@@ -560,7 +567,7 @@ impl AppState {
             .tab_display_projection(&self.terminals, tab_idx)
             .map(|projection| projection.full_label())
             .unwrap_or_else(|| (tab_idx + 1).to_string());
-        let (status, seen) = tab_aggregate_state(tab, &self.terminals);
+        let (status, seen, attention_tier) = tab.aggregate_state_and_attention(&self.terminals);
         let stale = tab_has_stale_agent(tab, &self.terminals);
         let activity = tab_activity_summary(tab, &self.terminals);
         let pane_count = tab.panes.len();
@@ -576,6 +583,7 @@ impl AppState {
             label,
             meta,
             status,
+            attention_tier,
             seen,
             stale,
             is_current: false,
@@ -630,21 +638,20 @@ impl AppState {
                     .and_then(|terminal| terminal.agent_name.as_deref())
                     .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
             });
-            let state = terminal
-                .map(|terminal| terminal.state)
+            let projection = terminal.map(|terminal| pane.agent_projection(terminal));
+            let state = projection
+                .map(|projection| projection.state)
                 .unwrap_or(AgentState::Unknown);
-            let stale = terminal.is_some_and(|terminal| terminal.supervisor_stale);
+            let attention_tier = projection
+                .map(|projection| projection.attention_tier)
+                .unwrap_or_default();
+            let stale = projection.is_some_and(|projection| projection.stale);
+            let status_key = projection.map(|projection| projection.status_key());
             let status_label = terminal
                 .map(|terminal| terminal.effective_presentation().state_labels)
-                .and_then(|labels| {
-                    labels
-                        .get(state_label_text_with_stale(state, pane.seen, stale))
-                        .cloned()
-                });
-            let status = status_label.or_else(|| {
-                agent_label
-                    .map(|_| state_label_text_with_stale(state, pane.seen, stale).to_string())
-            });
+                .and_then(|labels| status_key.and_then(|key| labels.get(key).cloned()));
+            let status = status_label
+                .or_else(|| agent_label.map(|_| status_key.unwrap_or("unknown").to_string()));
             let mut meta_parts = Vec::new();
             if let Some(context) = terminal.map(|terminal| terminal.effective_work_context()) {
                 meta_parts.extend(context.ticket_ids.iter().cloned());
@@ -674,7 +681,8 @@ impl AppState {
                 label,
                 meta,
                 status: state,
-                seen: pane.seen,
+                attention_tier,
+                seen: projection.map_or(pane.seen, |projection| projection.seen),
                 stale,
                 is_current,
                 is_workspace: false,
@@ -960,12 +968,15 @@ fn navigator_state_filter_matches(
     state: AgentState,
     seen: bool,
     stale: bool,
+    attention_tier: crate::terminal::state::AttentionTier,
 ) -> bool {
     if stale {
         return false;
     }
     match filter {
-        NavigatorStateFilter::Blocked => state == AgentState::Blocked,
+        NavigatorStateFilter::Blocked => {
+            attention_tier == crate::terminal::state::AttentionTier::Blocked
+        }
         NavigatorStateFilter::Working => state == AgentState::Working,
         NavigatorStateFilter::Idle => state == AgentState::Idle && seen,
         NavigatorStateFilter::Done => state == AgentState::Idle && !seen,
@@ -986,24 +997,6 @@ fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
         .or_else(|| Some(command.clone()))
 }
 
-fn state_label_text(state: AgentState, seen: bool) -> &'static str {
-    match (state, seen) {
-        (AgentState::Blocked, _) => "blocked",
-        (AgentState::Working, _) => "working",
-        (AgentState::Idle, false) => "done",
-        (AgentState::Idle, true) => "idle",
-        (AgentState::Unknown, _) => "unknown",
-    }
-}
-
-fn state_label_text_with_stale(state: AgentState, seen: bool, stale: bool) -> &'static str {
-    if stale {
-        "stale"
-    } else {
-        state_label_text(state, seen)
-    }
-}
-
 fn tab_has_stale_agent(
     tab: &crate::workspace::Tab,
     terminals: &std::collections::HashMap<
@@ -1014,7 +1007,7 @@ fn tab_has_stale_agent(
     tab.panes.values().any(|pane| {
         terminals
             .get(&pane.attached_terminal_id)
-            .is_some_and(|terminal| terminal.supervisor_stale)
+            .is_some_and(|terminal| pane.agent_projection(terminal).stale)
     })
 }
 
@@ -1029,37 +1022,6 @@ fn workspace_has_stale_agent(
         .tabs
         .iter()
         .any(|tab| tab_has_stale_agent(tab, terminals))
-}
-
-fn tab_aggregate_state(
-    tab: &crate::workspace::Tab,
-    terminals: &std::collections::HashMap<
-        crate::terminal::TerminalId,
-        crate::terminal::TerminalState,
-    >,
-) -> (AgentState, bool) {
-    let mut aggregate = AgentState::Unknown;
-    let mut seen = true;
-    for pane in tab.panes.values() {
-        let Some(terminal) = terminals.get(&pane.attached_terminal_id) else {
-            continue;
-        };
-        if state_priority(terminal.state, pane.seen) > state_priority(aggregate, seen) {
-            aggregate = terminal.state;
-            seen = pane.seen;
-        }
-    }
-    (aggregate, seen)
-}
-
-fn state_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 5,
-        (AgentState::Working, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Idle, true) => 2,
-        (AgentState::Unknown, _) => 1,
-    }
 }
 
 fn tab_activity_summary(
@@ -1090,17 +1052,26 @@ fn activity_summary_for_panes<'a>(
     >,
 ) -> String {
     let mut blocked = 0usize;
+    let mut attention = 0usize;
     let mut working = 0usize;
     let mut done = 0usize;
     for pane in panes {
         let Some(terminal) = terminals.get(&pane.attached_terminal_id) else {
             continue;
         };
-        match crate::app::api_helpers::pane_agent_status_with_stale(
-            terminal.state,
-            pane.seen,
-            terminal.supervisor_stale,
-        ) {
+        let projection = pane.agent_projection(terminal);
+        if projection.stale {
+            continue;
+        }
+        if projection.counts_as_blocked() {
+            blocked += 1;
+            continue;
+        }
+        if projection.attention_tier == crate::terminal::state::AttentionTier::Attention {
+            attention += 1;
+            continue;
+        }
+        match crate::app::api_helpers::pane_agent_status(projection.state, projection.seen) {
             crate::api::schema::AgentStatus::Blocked => blocked += 1,
             crate::api::schema::AgentStatus::Working => working += 1,
             crate::api::schema::AgentStatus::Done => done += 1,
@@ -1111,6 +1082,9 @@ fn activity_summary_for_panes<'a>(
     let mut parts = Vec::new();
     if blocked > 0 {
         parts.push(format!("{blocked} blocked"));
+    }
+    if attention > 0 {
+        parts.push(format!("{attention} attention"));
     }
     if working > 0 {
         parts.push(format!("{working} working"));
@@ -3283,6 +3257,9 @@ impl AppState {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
+            AppEvent::RemoteFocusFrame { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::RemoteControlGatePoisoned { .. } => Vec::new(),
             AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::ScratchpadChanged => Vec::new(),
             AppEvent::NotepadChanged => Vec::new(),
@@ -3394,10 +3371,7 @@ impl AppState {
                 holds_shell,
                 stale_resolution,
             } => {
-                self.update_terminal_state(pane_id, |terminal| {
-                    terminal.set_process_state(holds_shell, stale_resolution);
-                    None
-                });
+                self.apply_pane_process_state(pane_id, holds_shell, stale_resolution);
                 Vec::new()
             }
             AppEvent::HookStateReported {
@@ -3600,6 +3574,61 @@ impl AppState {
         self.update_terminal_state_at(pane_id, Instant::now(), update)
     }
 
+    fn apply_pane_process_state(
+        &mut self,
+        pane_id: PaneId,
+        holds_shell: bool,
+        stale_resolution: Option<(AgentState, bool)>,
+    ) {
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.pane_state(pane_id).is_some())
+        else {
+            return;
+        };
+        let Some(pane) = self.workspaces[ws_idx].pane_state(pane_id) else {
+            return;
+        };
+        let terminal_id = pane.attached_terminal_id.clone();
+        let seen = pane.seen;
+        let Some((previous_state, state, changed)) =
+            self.terminals.get_mut(&terminal_id).map(|terminal| {
+                let previous_state = terminal.sidebar_projection(seen).0;
+                let changed = terminal.set_process_state(holds_shell, stale_resolution);
+                (previous_state, terminal.sidebar_projection(seen).0, changed)
+            })
+        else {
+            return;
+        };
+        if !changed {
+            return;
+        }
+        self.mark_sidebar_projection_changed();
+
+        let projected_state_changed = previous_state != state;
+        if !projected_state_changed {
+            return;
+        }
+        let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) else {
+            return;
+        };
+        let entered_active_state =
+            projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
+        let unsettled = entered_active_state && pane.settled_at.take().is_some();
+
+        if unsettled {
+            let workspace_id = self.workspaces[ws_idx].id.clone();
+            self.pending_pane_settlement_changes
+                .push(crate::app::state::PaneSettlementChange {
+                    workspace_id,
+                    pane_id,
+                    settled_at: None,
+                });
+            self.mark_session_dirty();
+        }
+    }
+
     pub(crate) fn update_terminal_state_at<F>(
         &mut self,
         pane_id: PaneId,
@@ -3738,9 +3767,10 @@ impl AppState {
     }
 
     pub(crate) fn next_agent_watchdog_deadline(&self) -> Option<Instant> {
+        let stale_after = self.agent_stale_after;
         self.terminals
             .values()
-            .filter_map(crate::terminal::TerminalState::agent_status_watchdog_deadline)
+            .filter_map(|terminal| terminal.agent_status_watchdog_deadline(stale_after))
             .min()
     }
 
@@ -3786,6 +3816,7 @@ impl AppState {
     }
 
     pub(crate) fn mark_due_agent_status_stale_at(&mut self, now: Instant) -> Vec<PaneStateUpdate> {
+        let stale_after = self.agent_stale_after;
         let pane_ids = self
             .workspaces
             .iter()
@@ -3794,7 +3825,7 @@ impl AppState {
             .filter_map(|(pane_id, pane)| {
                 self.terminals
                     .get(&pane.attached_terminal_id)
-                    .and_then(|terminal| terminal.agent_status_watchdog_deadline())
+                    .and_then(|terminal| terminal.agent_status_watchdog_deadline(stale_after))
                     .filter(|deadline| now >= *deadline)
                     .map(|_| *pane_id)
             })
@@ -3803,7 +3834,7 @@ impl AppState {
             .into_iter()
             .filter_map(|pane_id| {
                 self.update_terminal_state_at(pane_id, now, |terminal| {
-                    terminal.mark_agent_status_stale_at(now)
+                    terminal.mark_agent_status_stale_at(now, stale_after)
                 })
             })
             .collect()
@@ -3878,14 +3909,16 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
-        let entered_active_agent_state = change.previous_state != change.state
-            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let agent_state_changed = change.previous_state != change.state;
         let foreground_agent_changed = change.previous_known_agent != change.known_agent;
-        let activity = entered_active_agent_state || foreground_agent_changed;
-        if activity {
+        let should_note_activity = agent_state_changed || foreground_agent_changed;
+        let entered_active_agent_state = agent_state_changed
+            && matches!(change.state, AgentState::Working | AgentState::Blocked);
+        let should_unsettle = entered_active_agent_state || foreground_agent_changed;
+        if should_note_activity {
             pane.activity.note(now);
         }
-        let unsettled = activity && pane.settled_at.take().is_some();
+        let unsettled = should_unsettle && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,
@@ -3909,6 +3942,10 @@ impl AppState {
         } else {
             None
         };
+
+        if should_note_activity {
+            self.mark_session_dirty();
+        }
 
         if unsettled {
             let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -4018,7 +4055,7 @@ impl AppState {
             .get(ws_idx)?
             .pane_state(pane_id)
             .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))?;
-        if terminal_state.state != expected_state {
+        if terminal_state.raw_agent_state() != expected_state {
             return None;
         }
         if terminal_state
@@ -4889,6 +4926,74 @@ mod tests {
             )),
             "literal one-letter search may still match visible state text"
         );
+    }
+
+    #[test]
+    fn navigator_blocked_filter_uses_pane_attention_projection() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+        let panes = state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.layout.pane_ids())
+            .take(3)
+            .collect::<Vec<_>>();
+        assert_eq!(panes.len(), 3);
+
+        for pane_id in &panes {
+            let terminal_id = state.workspaces[0]
+                .terminal_id(*pane_id)
+                .cloned()
+                .expect("terminal identity");
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .set_detected_state(Some(Agent::Codex), AgentState::Blocked);
+        }
+        let attention_terminal_id = state.workspaces[0]
+            .terminal_id(panes[0])
+            .cloned()
+            .expect("attention terminal identity");
+        state
+            .terminals
+            .get_mut(&attention_terminal_id)
+            .expect("attention terminal state")
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let settled = panes[1];
+        let settled_tab_idx = state.workspaces[0]
+            .find_tab_index_for_pane(settled)
+            .expect("settled pane tab");
+        state.workspaces[0].tabs[settled_tab_idx]
+            .panes
+            .get_mut(&settled)
+            .expect("settled pane")
+            .settled_at = Some(1);
+
+        state.open_navigator();
+        state.navigator.state_filter = Some(NavigatorStateFilter::Blocked);
+        let filtered = state
+            .navigator_rows()
+            .into_iter()
+            .filter_map(|row| match row.target {
+                NavigatorTarget::Pane { pane_id, .. } => Some(pane_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(filtered, vec![panes[2]]);
+        state.assert_invariants_for_test();
+        state.workspaces[0].assert_invariants_for_test();
     }
 
     #[test]
@@ -5992,7 +6097,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
     }
 
@@ -6040,7 +6145,11 @@ mod tests {
             .unwrap()
             .attached_terminal_id
             .clone();
-        state.terminals.get_mut(&bg_terminal_id).unwrap().state = AgentState::Working;
+        state
+            .terminals
+            .get_mut(&bg_terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
 
         // Now transition to Idle while in background
         let done_at = std::time::Instant::now();
@@ -6078,7 +6187,11 @@ mod tests {
             .unwrap()
             .attached_terminal_id
             .clone();
-        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
         state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
 
         state.handle_app_event(AppEvent::StateChanged {
@@ -6093,7 +6206,7 @@ mod tests {
         });
 
         let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
         assert!(pane.seen);
     }
@@ -6112,7 +6225,11 @@ mod tests {
             hidden_terminal_id.clone(),
             crate::terminal::TerminalState::new(hidden_terminal_id.clone(), "/tmp".into()),
         );
-        state.terminals.get_mut(&hidden_terminal_id).unwrap().state = AgentState::Working;
+        state
+            .terminals
+            .get_mut(&hidden_terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
         state.workspaces[0]
             .panes
             .get_mut(&hidden_pane_id)
@@ -6563,7 +6680,7 @@ mod tests {
         });
 
         let terminal = state.terminals.get(&bg_terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Blocked);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
         let toast = state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, ToastKind::NeedsAttention);
         assert_eq!(toast.title, "codex needs attention");
@@ -6605,7 +6722,7 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
         });
         let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert!(terminal.hook_authority.is_none());
         assert!(terminal.persisted_agent_session.is_some());
 
@@ -6621,7 +6738,7 @@ mod tests {
         });
 
         let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(state.toast.is_none());
     }
 
@@ -6679,7 +6796,7 @@ mod tests {
 
         assert!(updates.is_empty());
         let terminal = &state.terminals[&terminal_id];
-        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
         assert!(terminal.full_lifecycle_hook_authority_active());
@@ -6721,7 +6838,7 @@ mod tests {
         });
 
         let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.hook_authority.is_none());
         assert!(terminal.persisted_agent_session.is_some());
     }
@@ -6918,7 +7035,7 @@ mod tests {
 
         let terminal = &state.terminals[&terminal_id];
         assert!(terminal.hook_authority.is_none());
-        assert_eq!(terminal.state, AgentState::Unknown);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Unknown);
     }
 
     #[test]
@@ -6958,7 +7075,11 @@ mod tests {
             .unwrap()
             .attached_terminal_id
             .clone();
-        state.terminals.get_mut(&bg_terminal_id).unwrap().state = AgentState::Working;
+        state
+            .terminals
+            .get_mut(&bg_terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Working);
 
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
@@ -7318,7 +7439,7 @@ mod tests {
             .unwrap()
             .set_detected_state(Some(Agent::Pi), AgentState::Working);
         assert_eq!(
-            state.terminals.get(&terminal_id).unwrap().state,
+            state.terminals.get(&terminal_id).unwrap().raw_agent_state(),
             AgentState::Working
         );
 

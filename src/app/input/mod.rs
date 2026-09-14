@@ -173,6 +173,12 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        // The subgroup picker floats above panes and is not sidebar-focus
+        // gated: it opens from a right-click menu that never claims the
+        // sidebar's bare-key focus.
+        if self.state.handle_sidebar_subgroup_picker_key(key_event) {
+            return None;
+        }
         // Every sidebar shortcut below is a bare key the operator also types
         // into a pane, so they are reachable only while the sidebar owns the
         // keyboard. Gating them on their own selection or menu state instead
@@ -205,6 +211,9 @@ impl App {
                 return None;
             }
             if self.handle_sidebar_object_menu_key(key_event) {
+                return None;
+            }
+            if self.state.handle_sidebar_sort_menu_key(key_event) {
                 return None;
             }
             if self.state.handle_sidebar_group_menu_key(key_event) {
@@ -807,11 +816,11 @@ impl App {
                     self.state.home_browse_cancel();
                 }
                 KeyCode::Tab if event.modifiers.is_empty() => {
-                    let queue_empty = self.state.blocked_agents().is_empty();
+                    let queue_empty = self.state.home_attention_agents().is_empty();
                     self.state.home_move_composer_focus(false, queue_empty);
                 }
                 KeyCode::BackTab => {
-                    let queue_empty = self.state.blocked_agents().is_empty();
+                    let queue_empty = self.state.home_attention_agents().is_empty();
                     self.state.home_move_composer_focus(true, queue_empty);
                 }
                 KeyCode::Up if event.modifiers.is_empty() => {
@@ -872,7 +881,7 @@ impl App {
         }
 
         let focus = self.state.home.as_ref().and_then(|home| home.focus);
-        let queue = self.state.blocked_agents();
+        let queue = self.state.home_attention_agents();
 
         match event.code {
             KeyCode::Tab if event.modifiers.is_empty() => {
@@ -998,6 +1007,7 @@ impl App {
                 .as_ref()
                 .and_then(|home| home.dispatch_plan().err())
                 .unwrap_or_else(|| "dispatch failed".into());
+            crate::logging::home_dispatch_failed(&message);
             let previous_toast = self.state.toast.clone();
             self.state.toast = Some(crate::app::state::ToastNotification {
                 kind: crate::app::state::ToastKind::NeedsAttention,
@@ -1176,6 +1186,9 @@ impl App {
                     self.state.view.sidebar_rect,
                     self.state.workspace_scroll,
                 );
+            }
+            StatusButtonAction::Attention => {
+                self.state.toggle_home();
             }
             StatusButtonAction::Dock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
@@ -4359,7 +4372,17 @@ impl App {
         self.state.mode = Mode::Terminal;
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
+        self.handle_text_commit_headless_with_hook(text, &mut |_| {}, None);
+    }
+
+    pub(crate) fn handle_text_commit_headless_with_hook(
+        &mut self,
+        text: &str,
+        before_terminal_input: &mut impl FnMut(&super::TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
+    ) {
         if text.is_empty()
             || self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
@@ -4393,10 +4416,31 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            let target_terminal_id = pane_id.and_then(|pane_id| {
+                self.state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.terminal_id(pane_id).cloned())
+            });
             let sent = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
                 .is_some_and(|runtime| {
+                    if let Some(terminal_id) =
+                        target_terminal_id.as_ref().filter(|_| !text.is_empty())
+                    {
+                        #[cfg(unix)]
+                        if let Some(owner_id) =
+                            controlled_owners.and_then(|owners| owners.get(terminal_id))
+                        {
+                            runtime.release_remote_owner(*owner_id);
+                        }
+                        #[cfg(not(unix))]
+                        let _ = controlled_owners;
+                        before_terminal_input(&super::TerminalInputTarget::new(
+                            terminal_id.clone(),
+                        ));
+                    }
                     runtime
                         .try_send_bytes(Bytes::copy_from_slice(text.as_bytes()))
                         .is_ok()
@@ -4988,6 +5032,9 @@ impl App {
                     }
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
+                    }
+                    MouseAction::FocusLiveSettledPane(target) => {
+                        self.focus_live_settled_pane(target)
                     }
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
@@ -6200,7 +6247,7 @@ enabled = true
 
     fn assert_blocked_hook_retired(app: &App, terminal_id: &crate::terminal::TerminalId) {
         assert_eq!(
-            app.state.terminals[terminal_id].state,
+            app.state.terminals[terminal_id].raw_agent_state(),
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[terminal_id].full_lifecycle_hook_authority_active());
@@ -8542,7 +8589,7 @@ navigate_workspace_down = "ctrl+j"
                 .terminals
                 .get_mut(&terminal_id)
                 .expect("test terminal state")
-                .state = crate::detect::AgentState::Blocked;
+                .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         }
         app.state.toggle_home();
         (app, pane_ids)
@@ -8559,7 +8606,7 @@ navigate_workspace_down = "ctrl+j"
         // Click the second row rather than the first, so a jump proves the
         // click chose the row instead of the cursor happening to be there.
         let (index, rect) = hits[1];
-        let queue = app.state.blocked_agents();
+        let queue = app.state.home_attention_agents();
         let target = queue[index].pane_id;
         assert_ne!(target, pane_ids[0]);
 
@@ -9041,7 +9088,7 @@ navigate_workspace_down = "ctrl+j"
                 .home
                 .as_ref()
                 .expect("home overlay")
-                .selected(&app.state.blocked_agents())
+                .selected(&app.state.home_attention_agents())
         };
 
         assert_eq!(selected(&app), 0);

@@ -147,6 +147,7 @@ mod tests {
             agent_label: "codex".to_string(),
             blocked_since,
             seq: None,
+            attention_tier: crate::terminal::state::AttentionTier::Blocked,
         }
     }
 

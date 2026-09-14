@@ -26,69 +26,176 @@ fn waited_label(agent: &BlockedAgent) -> String {
     }
 }
 
-/// `● 4 blocked` on the left, the fleet's size on the right.
+/// Red blockers and lower-tier attention waits on the left, fleet size right.
 ///
-/// Blocked leads and is the only figure with a marker: it is the one number that
-/// means somebody is waiting. The rest is context for reading it.
+/// Blocked leads with the strongest marker. Lower-tier attention follows in
+/// amber so the two kinds remain distinct at a glance.
 fn header_line(app: &AppState, counts: HomeCounts, width: u16) -> Line<'static> {
-    let left = format!(" ● {} blocked", counts.blocked);
+    let blocked = format!(" ● {} blocked", counts.blocked);
+    let attention = format!(" · {} attention", counts.attention);
     let right = format!("{} agents · {} spaces ", counts.agents, counts.spaces,);
-    let gap = (width as usize).saturating_sub(left.chars().count() + right.chars().count());
-    Line::from(vec![
-        Span::styled(
-            left,
+    let show_attention =
+        display_width(&blocked) + display_width(&attention) + display_width(&right)
+            <= width as usize;
+    let attention_width = if show_attention {
+        display_width(&attention)
+    } else {
+        0
+    };
+    let gap = (width as usize)
+        .saturating_sub(display_width(&blocked) + attention_width + display_width(&right));
+    let mut spans = vec![Span::styled(
+        blocked,
+        Style::default()
+            // The palette reserves `red` for needs-attention/blocked, and
+            // the sidebar already says blocked in it. Accent is the generic
+            // highlight colour and read as "selected", not "waiting".
+            .fg(if counts.blocked > 0 {
+                app.palette.red
+            } else {
+                app.palette.overlay0
+            })
+            .add_modifier(Modifier::BOLD),
+    )];
+    if show_attention {
+        spans.push(Span::styled(
+            attention,
             Style::default()
-                // The palette reserves `red` for needs-attention/blocked, and
-                // the sidebar already says blocked in it. Accent is the generic
-                // highlight colour and read as "selected", not "waiting".
-                .fg(if counts.blocked > 0 {
-                    app.palette.red
+                .fg(if counts.attention > 0 {
+                    app.palette.peach
                 } else {
                     app.palette.overlay0
                 })
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(right, Style::default().fg(app.palette.overlay0)),
-    ])
+        ));
+    }
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(
+        right,
+        Style::default().fg(app.palette.overlay0),
+    ));
+    Line::from(spans)
 }
 
-/// `▸  workspace       what it is asking            18m`
-fn agent_line(app: &AppState, agent: &BlockedAgent, selected: bool, width: u16) -> Line<'static> {
-    let bullet = if selected { " ▸  " } else { " ·  " };
+/// Narrowest title fragment worth keeping the provider cell for.
+const MIN_ROW_TITLE_WIDTH: usize = 6;
+
+/// `○ workspace        session title                 cc >_  18m`
+///
+/// Dot, title and provider come from the sidebar row for the same pane, so the
+/// two lists read the same way. A pane the sidebar cannot resolve keeps the
+/// queue's own label and the empty waiting dot.
+fn agent_line(
+    app: &AppState,
+    agent: &BlockedAgent,
+    cells: Option<&crate::ui::sidebar::AgentRowCells>,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
+    let attention_color = match agent.attention_tier {
+        crate::terminal::state::AttentionTier::Blocked => app.palette.red,
+        crate::terminal::state::AttentionTier::Attention => app.palette.peach,
+        crate::terminal::state::AttentionTier::None => app.palette.subtext0,
+    };
+    let dot = cells.map_or("○", |cells| cells.dot.as_str());
+    let dot_color = cells.map_or(attention_color, |cells| cells.dot_color);
+    let title = cells.map_or(agent.agent_label.as_str(), |cells| cells.title.as_str());
+    let provider = cells.map_or("", |cells| cells.provider.as_str());
+    let provider_color = cells.map_or(app.palette.overlay0, |cells| cells.provider_color);
+
+    let lead = format!(" {dot} ");
+    if (width as usize) <= display_width(&lead) {
+        return Line::from(Span::styled(
+            truncate_end(&lead, width as usize),
+            Style::default().fg(dot_color),
+        ));
+    }
     let age = waited_label(agent);
-    let label_width = 16usize;
-    let workspace = truncate(&agent.workspace_label, label_width);
-    // Whatever the ask consumes, the age keeps its column: the list is sorted by
-    // it, so a ragged right edge would hide the ordering the sort exists for.
-    let ask_width = (width as usize)
-        .saturating_sub(bullet.chars().count() + label_width + 1 + age.chars().count() + 2);
-    let ask = truncate(&agent.agent_label, ask_width);
-    // Bold-vs-dim alone was not readable as a cursor. A filled row is, and it
-    // is the same surface the sidebar uses for its selection.
-    let style = if selected {
-        Style::default()
-            .fg(app.palette.text)
-            .bg(app.palette.surface0)
-            .add_modifier(Modifier::BOLD)
+    let available = (width as usize).saturating_sub(display_width(&lead) + 1);
+    // The provider's own name, without subagent counts or the background-shell
+    // marker, which yield before it does.
+    let bare_provider = provider.split(['+', ' ']).next().unwrap_or_default();
+    // The repo row contract keeps, in order, the dot, a title fragment and the
+    // provider; workspace, shell details and age give way first on a narrow Home.
+    let (label_width, provider_text, show_age) = [
+        (true, provider, true),
+        (false, provider, true),
+        (false, bare_provider, true),
+        (false, bare_provider, false),
+    ]
+    .into_iter()
+    .find_map(|(workspace, provider_text, age_shown)| {
+        let provider_width = if provider_text.is_empty() {
+            0
+        } else {
+            display_width(provider_text) + 2
+        };
+        let age_width = if age_shown {
+            display_width(&age) + 1
+        } else {
+            0
+        };
+        let rest = available.saturating_sub(provider_width + age_width);
+        let label_width = if workspace { (rest / 3).min(16) } else { 0 };
+        let title_width = rest.saturating_sub(if workspace { label_width + 1 } else { 0 });
+        (title_width >= MIN_ROW_TITLE_WIDTH).then_some((label_width, provider_text, age_shown))
+    })
+    .unwrap_or((0, "", false));
+    let provider_cell = if provider_text.is_empty() {
+        String::new()
     } else {
-        Style::default().fg(app.palette.subtext0)
+        format!(" {provider_text} ")
     };
-    let age_style = if selected {
-        Style::default()
-            .fg(app.palette.overlay1)
-            .bg(app.palette.surface0)
+    let age_cell = if show_age {
+        format!(" {age}")
     } else {
-        Style::default().fg(app.palette.overlay0)
+        String::new()
     };
+    let workspace = truncate_end(&agent.workspace_label, label_width);
+    let workspace_pad = label_width.saturating_sub(display_width(&workspace));
+    let workspace_cell = if label_width == 0 {
+        String::new()
+    } else {
+        format!("{workspace}{} ", " ".repeat(workspace_pad))
+    };
+    let title_width = available.saturating_sub(
+        display_width(&workspace_cell) + display_width(&provider_cell) + display_width(&age_cell),
+    );
+    // Like the sidebar, a PR or ticket prefix goes before the title it names.
+    let title = if display_width(title) > title_width {
+        crate::ui::sidebar::title_without_object_identifier(title).unwrap_or(title)
+    } else {
+        title
+    };
+    let title = truncate_end(title, title_width);
+    let title_pad = title_width.saturating_sub(display_width(&title));
+    // A filled row is the cursor, the same surface the sidebar uses.
+    let base = if selected {
+        Style::default().bg(app.palette.surface0)
+    } else {
+        Style::default()
+    };
+    let text_style = if selected {
+        base.fg(app.palette.text).add_modifier(Modifier::BOLD)
+    } else {
+        base.fg(attention_color)
+    };
+    let age_style = base.fg(if selected {
+        app.palette.overlay1
+    } else {
+        app.palette.overlay0
+    });
     Line::from(vec![
-        Span::styled(bullet.to_string(), style),
-        Span::styled(format!("{workspace:<label_width$} "), style),
-        Span::styled(format!("{ask:<ask_width$}"), style),
+        Span::styled(" ", base),
         Span::styled(
-            format!("{age:>width$} ", width = age.chars().count() + 1),
-            age_style,
+            dot.to_string(),
+            base.fg(dot_color).add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" ", base),
+        Span::styled(workspace_cell, text_style),
+        Span::styled(format!("{title}{}", " ".repeat(title_pad)), text_style),
+        Span::styled(provider_cell, base.fg(provider_color)),
+        Span::styled(format!("{age_cell} "), age_style),
     ])
 }
 
@@ -181,9 +288,9 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
-/// The normal composer card has a border, a three-row prompt, two control rows,
+/// The normal composer card has a border, a six-row prompt, two control rows,
 /// and a closing border. Short frames fall back to the previous one-row prompt.
-const NORMAL_COMPOSER_CARD_ROWS: u16 = 8;
+const NORMAL_COMPOSER_CARD_ROWS: u16 = 11;
 const COMPACT_COMPOSER_CARD_ROWS: u16 = 6;
 /// The card is a reading surface, not a pane: past this it stops being one
 /// glance and the headline drifts away from the prompt it introduces.
@@ -304,7 +411,7 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
         );
         let inner = frame.inner(Margin::new(1, 1));
         let [prompt, chips_row, divider_row, bottom] = Layout::vertical([
-            Constraint::Length(if normal { 3 } else { 1 }),
+            Constraint::Length(if normal { 6 } else { 1 }),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1004,15 +1111,22 @@ fn lens_snapshot(
             reason: Some("pane is no longer available".into()),
         });
     };
-    if !crate::terminal::counts_as_blocked(
-        terminal.state,
-        !terminal.closing_gates.is_empty(),
-        terminal.usage_limited,
-    ) {
+    let Some(pane) = app
+        .workspaces
+        .get(agent.ws_idx)
+        .and_then(|workspace| workspace.pane_state(agent.pane_id))
+    else {
         return Some(LensSnapshot {
             title,
             output: String::new(),
-            reason: Some("pane is no longer blocked".into()),
+            reason: Some("pane is no longer available".into()),
+        });
+    };
+    if !pane.agent_projection(terminal).needs_human_attention() {
+        return Some(LensSnapshot {
+            title,
+            output: String::new(),
+            reason: Some("pane is no longer waiting on you".into()),
         });
     }
     let Some(runtime) =
@@ -1408,6 +1522,11 @@ pub(super) fn render_home(
         .map(|home| home.selected(queue))
         .unwrap_or(0);
 
+    let entries = if queue.is_empty() {
+        Vec::new()
+    } else {
+        crate::ui::sidebar::all_agent_panel_entries(app)
+    };
     let lines: Vec<Line<'static>> = if queue.is_empty() {
         vec![empty_line(app)]
     } else {
@@ -1416,7 +1535,13 @@ pub(super) fn render_home(
             .enumerate()
             .skip(scroll)
             .take(visible)
-            .map(|(idx, agent)| agent_line(app, agent, idx == selected, body.width))
+            .map(|(idx, agent)| {
+                let cells = entries
+                    .iter()
+                    .find(|entry| entry.pane_id == agent.pane_id)
+                    .map(|entry| crate::ui::sidebar::agent_row_cells(entry, &app.palette));
+                agent_line(app, agent, cells.as_ref(), idx == selected, body.width)
+            })
             .collect()
     };
     frame.render_widget(Paragraph::new(lines), body);
@@ -1692,6 +1817,7 @@ mod tests {
             agent_label: format!("agent{index}"),
             blocked_since: None,
             seq: None,
+            attention_tier: crate::terminal::state::AttentionTier::Blocked,
         }
     }
 
@@ -1705,6 +1831,7 @@ mod tests {
                     queue,
                     HomeCounts {
                         blocked: queue.len(),
+                        attention: 0,
                         agents: queue.len(),
                         spaces: 1,
                     },
@@ -1738,11 +1865,106 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("test terminal")
-            .state = crate::detect::AgentState::Blocked;
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         let mut home = HomeState::default();
         home.focus = None;
         app.home = Some(home);
         app
+    }
+
+    #[test]
+    fn home_rows_use_the_sidebar_dot_session_title_and_provider() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("herdr");
+        workspace.tabs[0].custom_name = Some("Critical action links".into());
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("test terminal");
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        let mut home = HomeState::default();
+        home.focus = None;
+        app.home = Some(home);
+        let queue = app.home_attention_agents();
+        assert_eq!(queue.len(), 1);
+        let area = Rect::new(0, 0, 80, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+        let row = row_text(&buffer, area, 2);
+
+        assert!(row.contains("Critical action links"), "{row}");
+        assert!(row.contains(" cc "), "{row}");
+        assert!(!row.contains("claude"), "{row}");
+        assert_eq!(buffer[(1, 2)].symbol(), "○");
+        assert_eq!(buffer[(1, 2)].fg, app.palette.red);
+    }
+
+    #[test]
+    fn home_rows_fit_their_width_with_wide_titles_and_narrow_frames() {
+        let app = AppState::test_new();
+        let agent = blocked(0);
+        let cells = crate::ui::sidebar::AgentRowCells {
+            dot: "○".into(),
+            dot_color: app.palette.red,
+            title: "界界界界界界界界界界".into(),
+            provider: "cc".into(),
+            provider_color: app.palette.peach,
+        };
+        let mut aged = agent.clone();
+        aged.blocked_since =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(18 * 60));
+        let narrow = agent_line(&app, &aged, Some(&cells), false, 18);
+        let text: String = narrow
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(display_width(&text), 18, "{text:?}");
+        assert!(text.contains('界') && text.contains("cc"), "{text:?}");
+        let decorated = crate::ui::sidebar::AgentRowCells {
+            provider: "cc+2 >_".into(),
+            title: "#159 · sample-pr".into(),
+            ..cells.clone()
+        };
+        let narrow = agent_line(&app, &aged, Some(&decorated), false, 18);
+        let text: String = narrow
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(display_width(&text), 18, "{text:?}");
+        assert!(
+            text.contains(" cc ") && text.contains("sampl") && !text.contains("#159"),
+            "{text:?}"
+        );
+        for width in 0u16..=80 {
+            let line = agent_line(&app, &agent, Some(&cells), false, width);
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(
+                display_width(&text),
+                width as usize,
+                "width {width}: {text:?}"
+            );
+            assert!(
+                width < 18 || text.contains('界'),
+                "width {width} lost the title: {text:?}"
+            );
+        }
+        let wide = agent_line(&app, &agent, Some(&cells), false, 40);
+        let text: String = wide
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains(" cc "), "{text:?}");
     }
 
     #[test]
@@ -1756,15 +1978,15 @@ mod tests {
 
         assert!(row_text(&buffer, area, 2).contains("agent0"));
         assert!(row_text(&buffer, area, 3).contains("agent1"));
-        assert_eq!(buffer[(1, 2)].symbol(), "▸");
-        assert_eq!(buffer[(1, 3)].symbol(), "·");
+        assert_eq!(buffer[(1, 2)].symbol(), "○");
+        assert_eq!(buffer[(1, 3)].symbol(), "○");
         assert_eq!(
-            buffer[(1, 2)].style().add_modifier(Modifier::BOLD),
-            buffer[(1, 2)].style()
+            buffer[(3, 2)].style().add_modifier(Modifier::BOLD),
+            buffer[(3, 2)].style()
         );
         assert_ne!(
-            buffer[(1, 3)].style().add_modifier(Modifier::BOLD),
-            buffer[(1, 3)].style()
+            buffer[(3, 3)].style().add_modifier(Modifier::BOLD),
+            buffer[(3, 3)].style()
         );
     }
 
@@ -1785,6 +2007,29 @@ mod tests {
         // With nothing waiting the count goes quiet rather than staying loud.
         let buffer = draw_home(&app, &[], area);
         assert_eq!(buffer[(1, 0)].style().fg, Some(app.palette.overlay0));
+    }
+
+    #[test]
+    fn narrow_header_drops_attention_before_the_existing_fleet_summary() {
+        let app = AppState::test_new();
+        let counts = HomeCounts {
+            blocked: 1,
+            attention: 2,
+            agents: 3,
+            spaces: 4,
+        };
+        let text = |width| {
+            header_line(&app, counts, width)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        let narrow = text(40);
+        assert!(!narrow.contains("attention"));
+        assert!(narrow.ends_with("3 agents · 4 spaces "));
+        assert!(text(80).contains("2 attention"));
     }
 
     #[test]
@@ -1920,17 +2165,17 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_is_drawn_as_a_card_around_its_three_rows() {
+    fn the_composer_is_drawn_as_a_card_around_its_six_rows() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 60, 14);
+        let area = Rect::new(0, 0, 60, 17);
         let layout = bands(area, queue.len());
         let composer = layout.composer.expect("composer should fit");
         let buffer = draw_home(&app, &queue, area);
 
         assert_eq!(composer.frame.height, NORMAL_COMPOSER_CARD_ROWS);
-        assert_eq!(composer.prompt.height, 3);
+        assert_eq!(composer.prompt.height, 6);
         assert_eq!(buffer[(composer.frame.x, composer.frame.y)].symbol(), "┌");
         assert_eq!(
             buffer[(composer.frame.right() - 1, composer.frame.y)].symbol(),
@@ -2074,7 +2319,7 @@ mod tests {
         let buffer = draw_home(&app, &queue, area);
         let hits = home_hit_areas(&app, &queue, area);
 
-        assert_eq!(buffer[(area.x + 1, layout.body.y)].symbol(), "▸");
+        assert_eq!(buffer[(area.x + 1, layout.body.y)].symbol(), "○");
         assert_eq!(composer.prompt.x, composer.frame.x + 1);
         assert_eq!(composer.chips.x, composer.frame.x + 1);
         assert_eq!(composer.bottom.x, composer.frame.x + 1);
@@ -2198,11 +2443,23 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_hit_area_matches_all_three_normal_rows() {
+    fn the_compact_composer_still_fits_at_the_old_normal_threshold() {
+        let old_normal_threshold = crate::app::home::HOME_COMPOSER_MIN_HEIGHT + 2;
+        let area = Rect::new(0, 0, 60, old_normal_threshold);
+        let layout = bands(area, 1);
+        let composer = layout.composer.expect("compact composer should fit");
+
+        assert_eq!(composer.frame.height, COMPACT_COMPOSER_CARD_ROWS);
+        assert_eq!(composer.prompt.height, 1);
+        assert!(composer.frame.bottom() <= layout.hint.y);
+    }
+
+    #[test]
+    fn the_prompt_hit_area_matches_all_six_normal_rows() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 60, 14);
+        let area = Rect::new(0, 0, 60, 17);
         let layout = bands(area, queue.len());
         let prompt = layout.composer.expect("normal composer").prompt;
         let hit = home_hit_areas(&app, &queue, area)
@@ -2210,7 +2467,7 @@ mod tests {
             .find(|hit| hit.target == HomeHitTarget::Prompt)
             .expect("prompt hit area");
 
-        assert_eq!(prompt.height, 3);
+        assert_eq!(prompt.height, 6);
         assert_eq!(hit.rect, prompt);
     }
 
@@ -2218,10 +2475,12 @@ mod tests {
     fn a_wrapped_unicode_prompt_keeps_its_tail_and_cursor_visible() {
         let mut app = AppState::test_new();
         let mut home = HomeState::default();
-        home.prompt = "开头一 开头二 开始 重构用户认证模块 继续检查边界 最后尾部".into();
+        home.prompt =
+            "开头一 开头二 开头三 开头四 开头五 开头六 开头七 开头八 开头九 开头十 开始 重构用户认证模块 继续检查边界 最后尾部"
+                .into();
         app.home = Some(home);
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 20, 14);
+        let area = Rect::new(0, 0, 20, 17);
         let composer = bands(area, queue.len()).composer.expect("normal composer");
         let buffer = draw_home(&app, &queue, area);
         let prompt_text = (composer.prompt.y..composer.prompt.bottom())
@@ -2498,7 +2757,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn the_lens_renders_the_tail_returned_by_pane_read() {
         let app = app_with_lens_screen(b"old line\r\nretry cap\r\nwhich do you want?\r\n");
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         let area = Rect::new(0, 0, 90, 12);
         let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let expected = lens_snapshot(&app, &runtimes, &queue, 2)
@@ -2518,7 +2777,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn the_lens_renders_a_clickable_new_task_action() {
         let app = app_with_lens_screen(b"which do you want?\r\n");
-        let queue = app.blocked_agents();
+        let queue = app.home_attention_agents();
         let area = Rect::new(0, 0, 90, 12);
         let buffer = draw_home(&app, &queue, area);
         let rendered = buffer
@@ -2574,7 +2833,7 @@ mod tests {
         );
 
         let empty = app_with_lens_screen(b"");
-        let empty_queue = empty.blocked_agents();
+        let empty_queue = empty.home_attention_agents();
         assert_eq!(
             lens_snapshot(&empty, &runtimes, &empty_queue, 2)
                 .expect("lens")
@@ -2584,18 +2843,18 @@ mod tests {
         );
 
         let mut no_longer_blocked = app_with_lens_screen(b"");
-        let stale_queue = no_longer_blocked.blocked_agents();
+        let stale_queue = no_longer_blocked.home_attention_agents();
         no_longer_blocked
             .terminals
             .get_mut(&stale_queue[0].terminal_id)
             .expect("test terminal")
-            .state = crate::detect::AgentState::Idle;
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         assert_eq!(
             lens_snapshot(&no_longer_blocked, &runtimes, &stale_queue, 2)
                 .expect("lens")
                 .reason
                 .as_deref(),
-            Some("pane is no longer blocked")
+            Some("pane is no longer waiting on you")
         );
     }
 

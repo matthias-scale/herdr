@@ -1073,6 +1073,7 @@ impl App {
             });
         }
         if let Some(closed_workspace_id) = &closed_workspace_id {
+            crate::logging::workspace_closed(closed_workspace_id);
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceClosed,
                 data: EventData::WorkspaceClosed {
@@ -2343,6 +2344,418 @@ mod tests {
         (app, public_pane_id)
     }
 
+    fn quiet_settle_test_app() -> (App, String, PaneId, crate::terminal::TerminalId) {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let (_, pane_id) = app.parse_pane_id(&public_pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.active = None;
+        app.state.auto_settle_inactive = false;
+        app.state.auto_settle_finished = false;
+        app.state.auto_settle_done = true;
+        app.state.settle_done_after = std::time::Duration::from_secs(30 * 60);
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("quiet-settle-test")
+                .expect("valid session id"),
+        });
+        let old_quiet = std::time::Instant::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        let pane = app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap();
+        pane.activity.set_last_at(old_quiet);
+        pane.activity.observe_quiet(true, old_quiet);
+        (app, public_pane_id, pane_id, terminal_id)
+    }
+
+    fn closing_block_report(
+        pane_id: &str,
+        seq: u64,
+        gates: Vec<crate::api::schema::ClosingBlockItem>,
+    ) -> PaneReportAgentParams {
+        PaneReportAgentParams {
+            pane_id: pane_id.into(),
+            source: "herdr:codex-closing-block".into(),
+            agent: "codex".into(),
+            state: crate::api::schema::PaneAgentState::Idle,
+            v: Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION),
+            message: None,
+            seq: Some(seq),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            agent_session_id: None,
+            agent_session_path: None,
+            gates: Some(gates),
+            items: Some(Vec::new()),
+            decisions: Some(Vec::new()),
+        }
+    }
+
+    fn test_gate() -> crate::api::schema::ClosingBlockItem {
+        crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Gate".into(),
+            text: "Choose the release path".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }
+    }
+
+    fn merged_work(url: &str) -> crate::work_index::Snapshot {
+        crate::work_index::Snapshot {
+            items: vec![crate::work_index::WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(23),
+                pr_url: Some(url.into()),
+                pr_title: None,
+                pr_state: Some("merged".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: Default::default(),
+                audience: Default::default(),
+                cached_pr_detail: None,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: None,
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: Default::default(),
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        }
+    }
+
+    fn assert_guard_blocks_overdue_inactivity_and_ripe_finished_work(guard: &str) {
+        let now = std::time::Instant::now();
+        let url = "https://github.com/owner/repo/pull/23";
+        let work = merged_work(url);
+        let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        app.state.auto_settle_done = false;
+        app.state.auto_settle_finished = true;
+        app.state.auto_settle_inactive = false;
+        app.state.settle_after = std::time::Duration::from_secs(60);
+        app.state.settle_finished_after = std::time::Duration::from_secs(30);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .restore_work_context(crate::work_context::PaneWorkContext {
+                pr_urls: vec![url.into()],
+                ..Default::default()
+            })
+            .expect("valid work context");
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .activity
+            .set_last_at(now - std::time::Duration::from_secs(120));
+        let armed_at = now - app.state.settle_finished_after;
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), armed_at, 1_725_000_200),
+            0
+        );
+
+        match guard {
+            "closing gate" => {
+                let mut report = closing_block_report(&public_pane_id, 1, vec![test_gate()]);
+                report.state = crate::api::schema::PaneAgentState::Working;
+                let response = app.handle_pane_report_agent("working-gate".into(), report);
+                let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+            }
+            "usage limit" => {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent: Some(Agent::Codex),
+                    state: AgentState::Blocked,
+                    visible_blocker: false,
+                    visible_working: false,
+                    usage_limited: true,
+                    process_exited: false,
+                    observed_at: now,
+                });
+            }
+            _ => unreachable!(),
+        }
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .activity
+            .set_last_at(now - std::time::Duration::from_secs(120));
+        app.state.auto_settle_inactive = true;
+        assert!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(now)
+                >= app.state.settle_after
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id].finished_since,
+            Some(armed_at)
+        );
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), now, 1_725_000_201),
+            0,
+            "{guard} must outrank both ripe settle triggers"
+        );
+        assert!(!app.state.pane_is_settled(0, pane_id));
+
+        match guard {
+            "closing gate" => {
+                let response = app.handle_pane_report_agent(
+                    "clear-working-gate".into(),
+                    closing_block_report(&public_pane_id, 2, Vec::new()),
+                );
+                let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+            }
+            "usage limit" => {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent: Some(Agent::Codex),
+                    state: AgentState::Idle,
+                    visible_blocker: false,
+                    visible_working: false,
+                    usage_limited: false,
+                    process_exited: false,
+                    observed_at: now,
+                });
+            }
+            _ => unreachable!(),
+        }
+        app.state.auto_settle_inactive = false;
+        let cleared_at = std::time::Instant::now();
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(Some(&work), cleared_at, 1_725_000_202),
+            0,
+            "clearing {guard} must arm a fresh finished-work window"
+        );
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                Some(&work),
+                cleared_at + app.state.settle_finished_after,
+                1_725_000_203,
+            ),
+            1
+        );
+        assert!(app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn working_closing_gate_blocks_overdue_inactivity_and_ripe_finished_work() {
+        assert_guard_blocks_overdue_inactivity_and_ripe_finished_work("closing gate");
+    }
+
+    #[test]
+    fn usage_limit_blocks_overdue_inactivity_and_ripe_finished_work() {
+        assert_guard_blocks_overdue_inactivity_and_ripe_finished_work("usage limit");
+    }
+
+    fn assert_blocker_clear_starts_quiet_window(blocker: &str) {
+        let now = std::time::Instant::now();
+        let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        match blocker {
+            "closing gate" => {
+                let response = app.handle_pane_report_agent(
+                    "gate".into(),
+                    closing_block_report(&public_pane_id, 1, vec![test_gate()]),
+                );
+                let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+            }
+            "usage limit" => {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent: Some(Agent::Codex),
+                    state: AgentState::Idle,
+                    visible_blocker: false,
+                    visible_working: false,
+                    usage_limited: true,
+                    process_exited: false,
+                    observed_at: now,
+                });
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            app.state.refresh_settled_panes_at(None, now, 1_725_000_000),
+            0,
+            "{blocker} must block settlement"
+        );
+
+        match blocker {
+            "closing gate" => {
+                let response = app.handle_pane_report_agent(
+                    "clear-gate".into(),
+                    closing_block_report(&public_pane_id, 2, Vec::new()),
+                );
+                let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+            }
+            "usage limit" => {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent: Some(Agent::Codex),
+                    state: AgentState::Idle,
+                    visible_blocker: false,
+                    visible_working: false,
+                    usage_limited: false,
+                    process_exited: false,
+                    observed_at: now,
+                });
+            }
+            _ => unreachable!(),
+        }
+        assert!(!app.state.terminals[&terminal_id].usage_limited);
+        assert_eq!(
+            app.state.refresh_settled_panes_at(None, now, 1_725_000_001),
+            0,
+            "clearing {blocker} must start, not consume, the quiet window"
+        );
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                now + app.state.settle_done_after - std::time::Duration::from_nanos(1),
+                1_725_001_799,
+            ),
+            0
+        );
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                now + app.state.settle_done_after,
+                1_725_001_800,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn closing_gate_clear_starts_the_quiet_settle_window() {
+        assert_blocker_clear_starts_quiet_window("closing gate");
+    }
+
+    #[test]
+    fn usage_limit_clear_starts_the_quiet_settle_window() {
+        assert_blocker_clear_starts_quiet_window("usage limit");
+    }
+
+    #[test]
+    fn settle_guards_follow_focus_pin_and_agent_report_paths() {
+        let now = std::time::Instant::now();
+
+        let (mut focused, public_pane_id, pane_id, _) = quiet_settle_test_app();
+        let response = focused.handle_pane_focus(
+            "focus".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            focused
+                .state
+                .refresh_settled_panes_at(None, now, 1_725_000_100),
+            0,
+            "focused pane settled"
+        );
+        assert!(!focused.state.pane_is_settled(0, pane_id));
+
+        let (mut pinned, _, pane_id, _) = quiet_settle_test_app();
+        let tab_id = pinned.public_tab_id(0, 0).unwrap();
+        let response = pinned.handle_tab_pin(
+            "pin".into(),
+            crate::api::schema::TabPinParams {
+                tab_id,
+                mode: crate::api::schema::TabPinMode::Pin,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            pinned
+                .state
+                .refresh_settled_panes_at(None, now, 1_725_000_101),
+            0,
+            "pinned tab settled"
+        );
+        assert!(!pinned.state.pane_is_settled(0, pane_id));
+
+        let (mut blocked, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        blocked
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(None, AgentState::Unknown);
+        let response = blocked.handle_pane_report_agent(
+            "block".into(),
+            PaneReportAgentParams {
+                pane_id: public_pane_id,
+                source: "custom:review".into(),
+                agent: "review".into(),
+                state: crate::api::schema::PaneAgentState::Blocked,
+                v: None,
+                message: None,
+                seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: None,
+                items: None,
+                decisions: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            blocked
+                .state
+                .refresh_settled_panes_at(None, now, 1_725_000_102),
+            0,
+            "blocked report settled"
+        );
+        assert!(!blocked.state.pane_is_settled(0, pane_id));
+
+        let (mut gated, public_pane_id, pane_id, _) = quiet_settle_test_app();
+        let response = gated.handle_pane_report_agent(
+            "gate".into(),
+            closing_block_report(&public_pane_id, 1, vec![test_gate()]),
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            gated
+                .state
+                .refresh_settled_panes_at(None, now, 1_725_000_103),
+            0,
+            "closing-block report settled"
+        );
+        assert!(!gated.state.pane_is_settled(0, pane_id));
+    }
+
     #[test]
     fn pane_settle_api_round_trip_updates_json_and_emits_transition_events() {
         let (mut app, pane_id) = app_with_test_workspace();
@@ -2978,7 +3391,10 @@ mod tests {
                 None,
                 Some(1),
             );
-            assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Blocked);
+            assert_eq!(
+                app.state.terminals[&terminal_id].raw_agent_state(),
+                AgentState::Blocked
+            );
 
             match &mut method {
                 crate::api::schema::Method::PaneSendText(params) => {
@@ -3000,7 +3416,10 @@ mod tests {
 
             assert_eq!(success.result, ResponseResult::Ok {});
             assert!(rx.try_recv().is_ok());
-            assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+            assert_eq!(
+                app.state.terminals[&terminal_id].raw_agent_state(),
+                AgentState::Idle
+            );
             assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
         }
     }
@@ -4703,7 +5122,11 @@ mod tests {
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
-        app.state.terminals.get_mut(&terminal_id).unwrap().state = crate::detect::AgentState::Idle;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
@@ -4910,6 +5333,7 @@ mod tests {
             .unwrap()
             .set_detected_state(Some(Agent::Claude), AgentState::Working);
         let gates = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Gate".into(),
             text: "Approve the open Herdr PR".into(),
@@ -4920,6 +5344,7 @@ mod tests {
             default_at: None,
         }];
         let items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 2,
             label: "Answer".into(),
             text: "Use the fork PR".into(),
@@ -4978,7 +5403,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn adapter_answer_payload_blocks_every_idle_pane_consumer_and_clears_next_turn() {
+    async fn adapter_answer_payload_needs_attention_and_clears_next_turn() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -5018,18 +5443,18 @@ mod tests {
             .pane_state(internal_pane_id)
             .expect("reported pane");
         let terminal = &app.state.terminals[&terminal_id];
-        let projected = terminal.sidebar_projection(pane.seen).0;
-        assert_eq!(projected, AgentState::Blocked);
+        let projection = pane.agent_projection(terminal);
+        assert_eq!(projection.state, AgentState::Blocked);
         assert_eq!(terminal.closing_items[0].text, "Choose the release lane");
         let pane_info = app
             .pane_info(0, internal_pane_id)
             .expect("reported pane info");
         assert_eq!(pane_info.items[0].text, "Choose the release lane");
-        assert!(crate::terminal::counts_as_blocked(
-            projected,
-            !terminal.closing_gates.is_empty(),
-            terminal.usage_limited
-        ));
+        assert!(!projection.counts_as_blocked());
+        assert_eq!(
+            projection.attention_tier,
+            crate::terminal::state::AttentionTier::Attention
+        );
         assert!(!crate::app::pane_lifecycle::pane_is_done(pane, terminal));
 
         app.state.auto_settle_inactive = true;
@@ -5068,7 +5493,7 @@ mod tests {
         });
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
         let terminal = &app.state.terminals[&terminal_id];
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.closing_gates.is_empty());
         assert!(terminal.closing_items.is_empty());
     }
@@ -5166,9 +5591,9 @@ mod tests {
             )
             .expect("working report accepted");
 
-        let updates = app
-            .state
-            .mark_due_agent_status_stale_at(started + crate::terminal::state::AGENT_STALE_SILENCE);
+        let updates = app.state.mark_due_agent_status_stale_at(
+            started + crate::terminal::state::AGENT_BUSY_STALE_SILENCE,
+        );
         assert_eq!(updates.len(), 1);
         for update in &updates {
             app.emit_pane_state_update(update);
@@ -5254,6 +5679,7 @@ mod tests {
             agent_session_id: None,
             agent_session_path: None,
             gates: Some(vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: text.into(),
@@ -5318,6 +5744,7 @@ mod tests {
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: Some(vec![crate::api::schema::ClosingBlockItem {
+                    blocking: true,
                     n: 1,
                     label: "Gate".into(),
                     text: "legacy gate".into(),
@@ -6977,7 +7404,7 @@ mod tests {
             bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
         let process_state = (
             app.state.terminals[&terminal_id].detected_agent,
-            app.state.terminals[&terminal_id].state,
+            app.state.terminals[&terminal_id].raw_agent_state(),
         );
 
         let params = guarded_work_title_params(
@@ -6995,7 +7422,7 @@ mod tests {
         assert_eq!(
             (
                 app.state.terminals[&terminal_id].detected_agent,
-                app.state.terminals[&terminal_id].state,
+                app.state.terminals[&terminal_id].raw_agent_state(),
             ),
             process_state
         );

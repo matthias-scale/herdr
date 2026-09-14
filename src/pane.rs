@@ -21,6 +21,8 @@ use tracing::{error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
+#[cfg(unix)]
+use crate::pty::actor::{ControlledWriteResult, RemoteOwnerAcquireResult};
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
 
@@ -443,6 +445,9 @@ struct ProcessProbeInput {
     pending_foreground_shell_clear: bool,
     pending_restore_probe: bool,
     elapsed_since_process_check: std::time::Duration,
+    /// The supervisor hook has gone silent past its budget, so its authority is
+    /// the one source we can no longer trust.
+    supervisor_stale: bool,
 }
 
 fn foreground_group_changed(
@@ -484,7 +489,12 @@ fn should_skip_process_probe_for_lifecycle_authority(
     full_lifecycle_authority_active: bool,
     input: ProcessProbeInput,
 ) -> bool {
+    // A stale supervisor is precisely the case the probe exists for. Skipping it
+    // here leaves `stale_resolution` empty, and an empty resolution keeps a
+    // finished pane from ever reading quiet, so it never settles and the
+    // stalled-agent nudge fires against an agent that is already done.
     full_lifecycle_authority_active
+        && !input.supervisor_stale
         && input.foreground_pgid.is_some()
         && !input.pending_foreground_shell_clear
         && input.suppressed_agent.is_none()
@@ -820,6 +830,19 @@ type SpawnedDetectionTask = (
     Arc<Mutex<Option<PendingAgentRelease>>>,
 );
 
+/// The terminal facts a detection task cannot read for itself.
+///
+/// Grouped because they are only ever read together: the hook owns the pane
+/// until it goes stale, and staleness is what hands authority back to the
+/// process probe.
+#[cfg(unix)]
+#[derive(Clone)]
+struct DetectionAuthorityMirrors {
+    full_lifecycle_active: Arc<AtomicBool>,
+    full_lifecycle_blocked: Arc<AtomicBool>,
+    supervisor_stale: Arc<AtomicBool>,
+}
+
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
@@ -828,12 +851,16 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     agent_output_seq: Arc<AtomicU64>,
-    full_lifecycle_authority_active: Arc<AtomicBool>,
-    full_lifecycle_hook_blocked: Arc<AtomicBool>,
+    authority: DetectionAuthorityMirrors,
     state_events: mpsc::Sender<AppEvent>,
     initial_agent: Option<Agent>,
     initial_publish: DetectionPublishState,
 ) -> SpawnedDetectionTask {
+    let DetectionAuthorityMirrors {
+        full_lifecycle_active: full_lifecycle_authority_active,
+        full_lifecycle_blocked: full_lifecycle_hook_blocked,
+        supervisor_stale,
+    } = authority;
     let detect_reset_notify = Arc::new(Notify::new());
     let detect_reset = detect_reset_notify.clone();
     let detect_screen_rescan_notify = Arc::new(Notify::new());
@@ -915,6 +942,7 @@ fn spawn_basic_detection_task(
             let mut agent = agent_presence.current_agent();
             let mut lifecycle_authority_active =
                 full_lifecycle_authority_active.load(Ordering::Acquire);
+            let supervisor_is_stale = supervisor_stale.load(Ordering::Acquire);
             let foreground_pgid = (pid > 0)
                 .then(|| crate::detect::foreground_process_group_id(pid))
                 .flatten();
@@ -932,6 +960,7 @@ fn spawn_basic_detection_task(
                     pending_foreground_shell_clear,
                     pending_restore_probe: false,
                     elapsed_since_process_check: now.duration_since(last_process_check),
+                    supervisor_stale: supervisor_is_stale,
                 };
                 !should_skip_process_probe_for_lifecycle_authority(
                     lifecycle_authority_active,
@@ -1264,6 +1293,7 @@ pub struct PaneRuntime {
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     full_lifecycle_hook_blocked: Arc<AtomicBool>,
+    supervisor_stale: Arc<AtomicBool>,
     detect_reset_notify: Arc<Notify>,
     detect_screen_rescan_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
@@ -1274,12 +1304,64 @@ pub struct PaneRuntime {
     detect_handle: Option<tokio::task::AbortHandle>,
 }
 
+/// Outbound messages from a remote focus proxy pane to its wire transport.
+///
+/// `SyncResize` carries no dimensions. The transport reads the latest values
+/// from the shared resize slot whenever it handles an outbound item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyOutbound {
+    Input(Bytes),
+    SyncResize,
+    // Sent by the Unix wire transport's detach path; on Windows nothing
+    // queues a detach yet.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Detach,
+}
+
+/// Channel ends a remote proxy runtime hands to the focus transport.
+// The Unix wire transport session loop reads these; on Windows the struct is
+// created and dropped without a consumer.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct RemoteProxyChannels {
+    pub outbound_rx: mpsc::Receiver<ProxyOutbound>,
+    /// Sender clone so the transport can queue a detach even after the pane
+    /// (and its own sender) is gone.
+    pub detach_tx: mpsc::Sender<ProxyOutbound>,
+    pub resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+    /// Shared with the transport so a failed wire write closes the local
+    /// input gate before the proxy pane is torn down.
+    pub input_enabled: Arc<AtomicBool>,
+    /// Shared with the app and transport so connection loss is terminal even
+    /// while already queued app events are still being delivered.
+    pub operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+}
+
+/// Keystroke bursts (including pastes) queue briefly; a stuck transport drops
+/// new input instead of growing memory without bound.
+const REMOTE_PROXY_OUTBOUND_CAPACITY: usize = 64;
+
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
+    /// A local pane whose screen is fed by a remote focus wire stream. There
+    /// is no PTY: user input, resizes, and detach flow to the transport.
+    RemoteProxy {
+        outbound: mpsc::Sender<ProxyOutbound>,
+        /// Input gate. Keystrokes are refused (never buffered) until the first
+        /// complete frame and `ControlReady` have both arrived.
+        input_enabled: Arc<AtomicBool>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+        resize_slot: Arc<Mutex<(u16, u16, u32, u32)>>,
+        /// Terminal responses to queries in the frame stream are discarded:
+        /// the remote server already answered them for its own terminal.
+        response_sink: mpsc::Sender<Bytes>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    },
     #[cfg(test)]
     TestChannel {
         sender: mpsc::Sender<Bytes>,
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
+        remote_owner: Arc<Mutex<Option<u64>>>,
     },
 }
 
@@ -1287,6 +1369,7 @@ impl PaneRuntimeIo {
     fn shutdown(&self) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
+            PaneRuntimeIo::RemoteProxy { .. } => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1296,6 +1379,9 @@ impl PaneRuntimeIo {
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                Err(std::io::Error::other("remote proxy pane has no PTY"))
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {
                 Err(std::io::Error::other("test runtime has no PTY master fd"))
@@ -1307,8 +1393,88 @@ impl PaneRuntimeIo {
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
+            PaneRuntimeIo::RemoteProxy { .. } => None,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.try_acquire_remote_owner(owner_id),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                // The pane's surface is owned by its remote focus lease; a
+                // second local controller is rejected, never taken over.
+                let _ = owner_id;
+                RemoteOwnerAcquireResult::AlreadyControlled
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { remote_owner, .. } => {
+                let mut owner = remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match *owner {
+                    None => {
+                        *owner = Some(owner_id);
+                        RemoteOwnerAcquireResult::Acquired
+                    }
+                    Some(existing) if existing == owner_id => RemoteOwnerAcquireResult::Acquired,
+                    Some(_) => RemoteOwnerAcquireResult::AlreadyControlled,
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, test))]
+    fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.try_acquire_remote_owner(owner_id) == RemoteOwnerAcquireResult::Acquired
+    }
+
+    #[cfg(unix)]
+    fn release_remote_owner(&self, owner_id: u64) {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.release_remote_owner(owner_id),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                let _ = owner_id;
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { remote_owner, .. } => {
+                let mut owner = remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *owner == Some(owner_id) {
+                    *owner = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn try_send_controlled_bytes(&self, owner_id: u64, bytes: &[u8]) -> ControlledWriteResult {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.try_write_controlled_user_input(owner_id, bytes),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                let _ = (owner_id, bytes);
+                ControlledWriteResult::Refused
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                let owner = remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *owner != Some(owner_id) {
+                    return ControlledWriteResult::Refused;
+                }
+                match sender.try_send(Bytes::copy_from_slice(bytes)) {
+                    Ok(()) => ControlledWriteResult::Written,
+                    Err(_) => ControlledWriteResult::DeliveryUnknown { written: 0 },
+                }
+            }
         }
     }
 
@@ -1316,6 +1482,10 @@ impl PaneRuntimeIo {
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                let _ = timeout;
+                Ok(())
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1331,6 +1501,7 @@ impl PaneRuntimeIo {
                     actor.rollback_handoff()
                 }
             }
+            PaneRuntimeIo::RemoteProxy { .. } => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1340,6 +1511,7 @@ impl PaneRuntimeIo {
     fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
+            PaneRuntimeIo::RemoteProxy { .. } => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1363,11 +1535,36 @@ impl PaneRuntimeIo {
                     terminal_responses,
                 );
             }
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                resize_slot,
+                ..
+            } => {
+                Self::queue_remote_proxy_resize(
+                    outbound,
+                    resize_slot,
+                    (rows, cols, cell_width_px, cell_height_px),
+                );
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { resize_tx, .. } => {
                 let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
             }
         }
+    }
+
+    fn queue_remote_proxy_resize(
+        outbound: &mpsc::Sender<ProxyOutbound>,
+        resize_slot: &Mutex<(u16, u16, u32, u32)>,
+        size: (u16, u16, u32, u32),
+    ) {
+        let mut slot = resize_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = size;
+        // The marker only wakes the writer. If the queue is full, the writer
+        // will compare this slot while handling the items already ahead of it.
+        let _ = outbound.try_send(ProxyOutbound::SyncResize);
     }
 
     #[cfg(unix)]
@@ -1382,6 +1579,7 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
+            PaneRuntimeIo::RemoteProxy { .. } => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1390,22 +1588,119 @@ impl PaneRuntimeIo {
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                input_enabled,
+                operation_state,
+                ..
+            } => {
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                let terminal_notification = operation_state.terminal_notification().notified();
+                tokio::pin!(terminal_notification);
+                terminal_notification.as_mut().enable();
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                operation_state.before_input_send();
+                let permit = tokio::select! {
+                    permit = outbound.clone().reserve_owned() => permit
+                        .map_err(|_| mpsc::error::SendError(bytes.clone()))?,
+                    _ = &mut terminal_notification => return Err(mpsc::error::SendError(bytes)),
+                };
+                let _admission = operation_state.lock_input_admission();
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                permit.send(ProxyOutbound::Input(bytes));
+                Ok(())
+            }
             #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                if remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some()
+                {
+                    return Err(mpsc::error::SendError(bytes));
+                }
+                sender.send(bytes).await
+            }
         }
     }
 
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                input_enabled,
+                operation_state,
+                ..
+            } => {
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                operation_state.before_input_send();
+                let _admission = operation_state.lock_input_admission();
+                if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                outbound
+                    .try_send(ProxyOutbound::Input(bytes))
+                    .map_err(|error| match error {
+                        mpsc::error::TrySendError::Full(ProxyOutbound::Input(bytes)) => {
+                            mpsc::error::TrySendError::Full(bytes)
+                        }
+                        mpsc::error::TrySendError::Closed(ProxyOutbound::Input(bytes)) => {
+                            mpsc::error::TrySendError::Closed(bytes)
+                        }
+                        _ => unreachable!("only input is sent as bytes"),
+                    })
+            }
             #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                if remote_owner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some()
+                {
+                    return Err(mpsc::error::TrySendError::Closed(bytes));
+                }
+                sender.try_send(bytes)
+            }
         }
+    }
+
+    fn remote_proxy_input_enabled(&self) -> Option<bool> {
+        let PaneRuntimeIo::RemoteProxy {
+            input_enabled,
+            operation_state,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(!operation_state.is_terminal() && input_enabled.load(Ordering::Acquire))
     }
 
     fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_terminal_response(response),
+            PaneRuntimeIo::RemoteProxy { .. } => {
+                // Responses to queries inside a remote frame stream are
+                // dropped: the remote server answered them already.
+                let _ = response;
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => {
                 if let Some(bytes) = response() {
@@ -1426,11 +1721,58 @@ impl PaneRuntimeIo {
                     }
                 });
             }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => {
-                let sender = sender.clone();
+            PaneRuntimeIo::RemoteProxy {
+                outbound,
+                input_enabled,
+                operation_state,
+                ..
+            } => {
+                let outbound = outbound.clone();
+                let input_enabled = Arc::clone(input_enabled);
+                let operation_state = Arc::clone(operation_state);
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
+                    if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let terminal_notification = operation_state.terminal_notification().notified();
+                    tokio::pin!(terminal_notification);
+                    terminal_notification.as_mut().enable();
+                    if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    operation_state.before_input_send();
+                    let permit = match tokio::select! {
+                        permit = outbound.reserve_owned() => permit,
+                        _ = &mut terminal_notification => return,
+                    } {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    let _admission = operation_state.lock_input_admission();
+                    if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    permit.send(ProxyOutbound::Input(bytes));
+                });
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel {
+                sender,
+                remote_owner,
+                ..
+            } => {
+                let sender = sender.clone();
+                let remote_owner = Arc::clone(remote_owner);
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if remote_owner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_some()
+                    {
+                        return;
+                    }
                     let _ = sender.send(bytes).await;
                 });
             }
@@ -1814,6 +2156,124 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
+    /// A pane runtime with no PTY whose screen is fed by remote focus wire
+    /// frames. The returned channels belong to the focus transport: it
+    /// receives user input, resize markers, and detach, and it reads the
+    /// latest dimensions from the resize slot.
+    pub(crate) fn spawn_remote_proxy(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+        operation_state: Arc<crate::remote::RemoteFocusOperationState>,
+    ) -> std::io::Result<(Self, RemoteProxyChannels)> {
+        let (outbound_tx, outbound_rx) = mpsc::channel(REMOTE_PROXY_OUTBOUND_CAPACITY);
+        let detach_tx = outbound_tx.clone();
+        let resize_slot = Arc::new(Mutex::new((rows, cols, 0, 0)));
+        let input_enabled = Arc::new(AtomicBool::new(false));
+        let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let ghostty = GhosttyPaneTerminal::new(terminal, response_tx)?;
+        let (response_sink, _sink_rx) = mpsc::channel(1);
+        Ok((
+            Self {
+                pane_id,
+                terminal: Arc::new(PaneTerminal::new(ghostty)),
+                io: PaneRuntimeIo::RemoteProxy {
+                    outbound: outbound_tx,
+                    input_enabled: Arc::clone(&input_enabled),
+                    operation_state: Arc::clone(&operation_state),
+                    resize_slot: Arc::clone(&resize_slot),
+                    response_sink,
+                    render_notify,
+                    render_dirty,
+                },
+                current_size: Cell::new((rows, cols, 0, 0)),
+                #[cfg(test)]
+                resize_count: Cell::new(0),
+                child_pid: Arc::new(AtomicU32::new(0)),
+                tty_name: None,
+                reported_cwd: Arc::new(Mutex::new(None)),
+                child_wait_completed: None,
+                kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+                content_seq: Arc::new(AtomicU64::new(0)),
+                detection_content_seq: Arc::new(AtomicU64::new(0)),
+                full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
+                full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
+                detect_reset_notify: Arc::new(Notify::new()),
+                detect_screen_rescan_notify: Arc::new(Notify::new()),
+                pending_release: Arc::new(Mutex::new(None)),
+                suspended: false,
+                supervisor_stale: Arc::new(AtomicBool::new(false)),
+                suppress_pane_died: Arc::new(AtomicBool::new(true)),
+                preserve_processes_on_drop: true,
+                detect_handle: None,
+            },
+            RemoteProxyChannels {
+                outbound_rx,
+                detach_tx,
+                resize_slot,
+                input_enabled,
+                operation_state,
+            },
+        ))
+    }
+
+    pub(crate) fn is_remote_proxy(&self) -> bool {
+        matches!(self.io, PaneRuntimeIo::RemoteProxy { .. })
+    }
+
+    /// Opens or closes the input gate. Keystrokes are refused while the gate
+    /// is closed; they are never buffered for later delivery.
+    pub(crate) fn set_remote_proxy_input_enabled(&self, enabled: bool) -> bool {
+        let PaneRuntimeIo::RemoteProxy {
+            input_enabled,
+            operation_state,
+            ..
+        } = &self.io
+        else {
+            return false;
+        };
+        if enabled && operation_state.is_terminal() {
+            return false;
+        }
+        input_enabled.store(enabled, Ordering::Release);
+        true
+    }
+
+    pub(crate) fn remote_proxy_input_enabled(&self) -> Option<bool> {
+        self.io.remote_proxy_input_enabled()
+    }
+
+    /// Feeds one complete remote terminal frame into the local screen.
+    /// Frames are ANSI blits of the remote terminal; the parser applies them
+    /// like ordinary PTY output. This runs on the app event loop, never in a
+    /// render or layout path.
+    pub(crate) fn process_remote_frame(&self, bytes: &[u8]) -> bool {
+        let PaneRuntimeIo::RemoteProxy {
+            response_sink,
+            render_notify,
+            render_dirty,
+            ..
+        } = &self.io
+        else {
+            return false;
+        };
+        self.content_seq.fetch_add(1, Ordering::AcqRel);
+        let result = self
+            .terminal
+            .process_pty_bytes(self.pane_id, 0, bytes, response_sink);
+        self.content_seq.fetch_add(1, Ordering::Release);
+        if result.request_render && render_dirty.request_pty(self.pane_id) {
+            render_notify.notify_one();
+        }
+        result.request_render
+    }
+
     pub fn suspend_processes(&mut self) {
         if self.suspended {
             return;
@@ -2236,6 +2696,7 @@ impl PaneRuntime {
                 }
             });
             let exit_events = events.clone();
+            let poison_events = events.clone();
             let suppress_pane_died_on_exit = suppress_pane_died.clone();
             let on_reader_exit = Box::new(move || {
                 if !suppress_pane_died_on_exit.load(Ordering::Acquire) {
@@ -2249,12 +2710,20 @@ impl PaneRuntime {
                 initially_quiesced: true,
                 on_read,
                 on_reader_exit: Some(on_reader_exit),
+                on_user_writes_poisoned: Some(Arc::new(move || {
+                    if let Err(err) =
+                        poison_events.try_send(AppEvent::RemoteControlGatePoisoned { pane_id })
+                    {
+                        warn!(pane = pane_id.raw(), err = %err, "failed to report poisoned PTY user-write gate");
+                    }
+                })),
             })?)
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
+        let supervisor_stale = Arc::new(AtomicBool::new(false));
         let (detect_handle, detect_reset_notify, detect_screen_rescan_notify, pending_release) =
             spawn_basic_detection_task(
                 pane_id,
@@ -2263,8 +2732,11 @@ impl PaneRuntime {
                 detection_content_seq.clone(),
                 full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq.clone(),
-                full_lifecycle_authority_active.clone(),
-                full_lifecycle_hook_blocked.clone(),
+                DetectionAuthorityMirrors {
+                    full_lifecycle_active: full_lifecycle_authority_active.clone(),
+                    full_lifecycle_blocked: full_lifecycle_hook_blocked.clone(),
+                    supervisor_stale: supervisor_stale.clone(),
+                },
                 events,
                 initial_agent,
                 DetectionPublishState {
@@ -2292,6 +2764,7 @@ impl PaneRuntime {
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
             full_lifecycle_hook_blocked,
+            supervisor_stale,
             detect_reset_notify,
             detect_screen_rescan_notify,
             pending_release,
@@ -2362,6 +2835,7 @@ impl PaneRuntime {
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
+        let supervisor_stale = Arc::new(AtomicBool::new(false));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
@@ -2405,6 +2879,8 @@ impl PaneRuntime {
             let first_output_for_read = first_output.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
+            #[cfg(unix)]
+            let poison_events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
@@ -2462,6 +2938,14 @@ impl PaneRuntime {
                 initially_quiesced: false,
                 on_read,
                 on_reader_exit: None,
+                #[cfg(unix)]
+                on_user_writes_poisoned: Some(Arc::new(move || {
+                    if let Err(err) =
+                        poison_events.try_send(AppEvent::RemoteControlGatePoisoned { pane_id })
+                    {
+                        warn!(pane = pane_id.raw(), err = %err, "failed to report poisoned PTY user-write gate");
+                    }
+                })),
             })?)
         };
 
@@ -2482,6 +2966,7 @@ impl PaneRuntime {
                 full_lifecycle_hook_baseline_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
+            let supervisor_stale_for_task = supervisor_stale.clone();
             let full_lifecycle_hook_blocked_for_task = full_lifecycle_hook_blocked.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
@@ -2579,6 +3064,7 @@ impl PaneRuntime {
                     let mut agent = agent_presence.current_agent();
                     let mut lifecycle_authority_active =
                         full_lifecycle_authority_active_for_task.load(Ordering::Acquire);
+                    let supervisor_is_stale = supervisor_stale_for_task.load(Ordering::Acquire);
                     let process_probe_input = ProcessProbeInput {
                         current_agent: agent,
                         suppressed_agent,
@@ -2590,6 +3076,7 @@ impl PaneRuntime {
                         pending_foreground_shell_clear,
                         pending_restore_probe,
                         elapsed_since_process_check: now.duration_since(last_process_check),
+                        supervisor_stale: supervisor_is_stale,
                     };
                     #[cfg(windows)]
                     let content_seq = detection_content_seq.load(Ordering::Relaxed);
@@ -2953,6 +3440,7 @@ impl PaneRuntime {
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
             full_lifecycle_hook_blocked,
+            supervisor_stale,
             detect_reset_notify,
             detect_screen_rescan_notify,
             pending_release,
@@ -3018,6 +3506,15 @@ impl PaneRuntime {
         }
     }
 
+    /// Mirror the supervisor-stale mark into the detection task.
+    ///
+    /// While the mark is set the process probe has to keep running even under a
+    /// full-lifecycle hook: the hook is the source that went silent, and the
+    /// probe is what tells a finished agent apart from a wedged one.
+    pub fn set_supervisor_stale(&self, stale: bool) {
+        self.supervisor_stale.store(stale, Ordering::Release);
+    }
+
     pub fn rebaseline_hook_authority_output(&self) {
         self.rebaseline_full_lifecycle_hook_content();
     }
@@ -3060,6 +3557,10 @@ impl PaneRuntime {
 
     /// Resize if the dimensions actually changed.
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+        self.resize_inner(rows, cols, cell_width_px, cell_height_px);
+    }
+
+    fn resize_inner(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         let rows = rows.max(2);
         let cols = cols.max(4);
         let size = (rows, cols, cell_width_px, cell_height_px);
@@ -3317,6 +3818,33 @@ impl PaneRuntime {
         self.io.try_send_bytes(bytes)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
+        self.io.try_acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(all(unix, test))]
+    pub(crate) fn acquire_remote_owner(&self, owner_id: u64) -> bool {
+        self.io.acquire_remote_owner(owner_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn release_remote_owner(&self, owner_id: u64) {
+        self.io.release_remote_owner(owner_id);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_send_controlled_bytes(
+        &self,
+        owner_id: u64,
+        bytes: &[u8],
+    ) -> ControlledWriteResult {
+        if self.suspended {
+            return ControlledWriteResult::Refused;
+        }
+        self.io.try_send_controlled_bytes(owner_id, bytes)
+    }
+
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
         if self.suspended {
             return;
@@ -3458,10 +3986,15 @@ impl PaneRuntime {
     pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
-            let leader_cwd = self
-                .io
-                .foreground_process_group_id()
-                .and_then(usable_process_cwd);
+            // Runtimes without a child process (remote proxies) have no
+            // process tree to scan; the reported cwd fallback still applies.
+            let leader_cwd = if self.child_pid.load(Ordering::Acquire) == 0 {
+                None
+            } else {
+                self.io
+                    .foreground_process_group_id()
+                    .and_then(usable_process_cwd)
+            };
             leader_cwd.or_else(|| self.cwd())
         }
 
@@ -3476,6 +4009,9 @@ impl PaneRuntime {
         #[cfg(unix)]
         {
             let pid = self.child_pid.load(Ordering::Acquire);
+            if pid == 0 {
+                return None;
+            }
             let shell_cwd = absolute_process_cwd(pid);
             let foreground_pgid = self
                 .io
@@ -3547,8 +4083,11 @@ impl PaneRuntime {
                 runtime.detection_content_seq.clone(),
                 runtime.full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq,
-                runtime.full_lifecycle_authority_active.clone(),
-                runtime.full_lifecycle_hook_blocked.clone(),
+                DetectionAuthorityMirrors {
+                    full_lifecycle_active: runtime.full_lifecycle_authority_active.clone(),
+                    full_lifecycle_blocked: runtime.full_lifecycle_hook_blocked.clone(),
+                    supervisor_stale: runtime.supervisor_stale.clone(),
+                },
                 state_events,
                 Some(agent),
                 DetectionPublishState {
@@ -3607,6 +4146,7 @@ impl PaneRuntime {
                 io: PaneRuntimeIo::TestChannel {
                     sender: tx,
                     resize_tx,
+                    remote_owner: Arc::new(Mutex::new(None)),
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 resize_count: Cell::new(0),
@@ -3619,6 +4159,7 @@ impl PaneRuntime {
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                supervisor_stale: Arc::new(AtomicBool::new(false)),
                 full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 detect_screen_rescan_notify: Arc::new(Notify::new()),
@@ -3637,6 +4178,92 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn proxy_resize_queues_a_marker_only_when_geometry_changed() {
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+
+        // The Hello handshake carries the spawn geometry, so an unchanged
+        // resize does not queue a marker.
+        runtime.resize(24, 80, 0, 0);
+        assert!(
+            channels.outbound_rx.try_recv().is_err(),
+            "an unchanged proxy geometry must not touch the wire"
+        );
+
+        // A geometry change queues exactly one marker and updates the slot
+        // the writer reads.
+        runtime.resize(30, 100, 9, 18);
+        assert_eq!(
+            channels.outbound_rx.try_recv(),
+            Ok(ProxyOutbound::SyncResize)
+        );
+        assert_eq!(
+            *channels.resize_slot.lock().expect("resize slot lock"),
+            (30, 100, 9, 18)
+        );
+
+        // Steady state stays silent.
+        runtime.resize(30, 100, 9, 18);
+        assert!(
+            channels.outbound_rx.try_recv().is_err(),
+            "unchanged geometry must stay off the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_proxy_resize_queue_does_not_schedule_a_retry() {
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(RenderSignal::new());
+        let (runtime, channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::clone(&render_notify),
+            Arc::clone(&render_dirty),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        let mut channels = channels;
+        for _ in 0..REMOTE_PROXY_OUTBOUND_CAPACITY {
+            channels
+                .detach_tx
+                .try_send(ProxyOutbound::Input(Bytes::from_static(b"busy")))
+                .expect("queue has capacity");
+        }
+
+        let no_render_wakeup = render_notify.notified();
+        runtime.resize(30, 100, 9, 18);
+        assert_eq!(
+            *channels.resize_slot.lock().expect("resize slot lock"),
+            (30, 100, 9, 18)
+        );
+        assert!(!render_dirty.is_pending());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), no_render_wakeup)
+                .await
+                .is_err(),
+            "a full queue must not wake a render retry"
+        );
+        for _ in 0..REMOTE_PROXY_OUTBOUND_CAPACITY {
+            assert_eq!(
+                channels.outbound_rx.try_recv(),
+                Ok(ProxyOutbound::Input(Bytes::from_static(b"busy")))
+            );
+        }
+        assert!(channels.outbound_rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn suspended_runtime_discards_direct_try_and_delayed_input() {
@@ -3664,6 +4291,146 @@ mod tests {
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn remote_proxy_try_send_does_not_cross_terminal_loss() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+
+        assert!(runtime
+            .try_send_bytes(Bytes::from_static(b"racing try"))
+            .is_err());
+        assert!(channels.outbound_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_async_send_does_not_cross_terminal_loss() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+
+        assert!(runtime
+            .send_bytes(Bytes::from_static(b"racing async"))
+            .await
+            .is_err());
+        assert!(channels.outbound_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_async_send_wakes_if_loss_occurs_while_queue_is_full() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        for _ in 0..REMOTE_PROXY_OUTBOUND_CAPACITY {
+            runtime
+                .try_send_bytes(Bytes::from_static(b"queued"))
+                .expect("queue has capacity");
+        }
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+        operation_state.set_input_send_hook(Arc::new(move || {
+            if let Some(ready_tx) = ready_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = ready_tx.send(());
+            }
+        }));
+
+        let send = runtime.send_bytes(Bytes::from_static(b"blocked"));
+        tokio::pin!(send);
+        tokio::select! {
+            result = &mut send => assert!(result.is_err(), "input is rejected after loss"),
+            _ = ready_rx => {
+                assert!(operation_state.terminate(), "loss terminates the operation");
+                let result = tokio::time::timeout(Duration::from_secs(1), &mut send)
+                    .await
+                    .expect("terminal loss wakes a blocked send");
+                assert!(result.is_err(), "blocked input is rejected after loss");
+            }
+        }
+        assert_eq!(
+            (0..)
+                .take_while(|_| channels.outbound_rx.try_recv().is_ok())
+                .count(),
+            REMOTE_PROXY_OUTBOUND_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_proxy_delayed_send_does_not_cross_terminal_loss() {
+        let operation_state = crate::remote::RemoteFocusOperationState::new();
+        let (runtime, mut channels) = PaneRuntime::spawn_remote_proxy(
+            PaneId::alloc(),
+            24,
+            80,
+            0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+            Arc::clone(&operation_state),
+        )
+        .expect("proxy runtime");
+        runtime.set_remote_proxy_input_enabled(true);
+        let state_for_hook = Arc::clone(&operation_state);
+        operation_state.set_input_send_hook(Arc::new(move || {
+            assert!(
+                state_for_hook.terminate(),
+                "the hook must simulate first loss"
+            );
+        }));
+
+        runtime.send_bytes_after(
+            Bytes::from_static(b"racing delayed"),
+            Duration::from_millis(1),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(operation_state.is_terminal());
+        assert!(channels.outbound_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -4393,6 +5160,7 @@ mod tests {
             io: PaneRuntimeIo::TestChannel {
                 sender: tx,
                 resize_tx,
+                remote_owner: Arc::new(Mutex::new(None)),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
@@ -4405,6 +5173,7 @@ mod tests {
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            supervisor_stale: Arc::new(AtomicBool::new(false)),
             full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             detect_screen_rescan_notify: Arc::new(Notify::new()),
@@ -4432,6 +5201,7 @@ mod tests {
             io: PaneRuntimeIo::TestChannel {
                 sender: tx,
                 resize_tx,
+                remote_owner: Arc::new(Mutex::new(None)),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             resize_count: Cell::new(0),
@@ -4444,6 +5214,7 @@ mod tests {
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            supervisor_stale: Arc::new(AtomicBool::new(false)),
             full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             detect_screen_rescan_notify: Arc::new(Notify::new()),
@@ -4667,6 +5438,7 @@ mod tests {
             pending_foreground_shell_clear: false,
             pending_restore_probe: false,
             elapsed_since_process_check: std::time::Duration::from_secs(1),
+            supervisor_stale: false,
         }
     }
 
@@ -4829,6 +5601,28 @@ mod tests {
                 current_agent: Some(Agent::Pi),
                 elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
                 ..process_probe_input()
+            }
+        ));
+    }
+
+    /// A stale supervisor is the case the probe exists to answer. Skipping it
+    /// leaves `stale_resolution` empty, which keeps a finished pane from ever
+    /// reading quiet, so it never settles and gets nudged forever.
+    #[test]
+    fn a_stale_supervisor_keeps_the_probe_running_under_lifecycle_authority() {
+        let stable = ProcessProbeInput {
+            current_agent: Some(Agent::Pi),
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
+            ..process_probe_input()
+        };
+        assert!(should_skip_process_probe_for_lifecycle_authority(
+            true, stable
+        ));
+        assert!(!should_skip_process_probe_for_lifecycle_authority(
+            true,
+            ProcessProbeInput {
+                supervisor_stale: true,
+                ..stable
             }
         ));
     }

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, expected_version, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
@@ -174,10 +174,12 @@ fn client_handshake(
 
     // Encode Hello message using bincode v2 varint format.
     // ClientMessage::Hello is variant 0.
+    let build_version = expected_version();
     let hello_payload = encode_varint_enum(
         0,
         &[
             &encode_varint_u32(version),
+            &encode_string(&build_version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
             &encode_varint_u32(8),  // cell_width_px
@@ -231,6 +233,12 @@ fn encode_varint_u16(v: u16) -> Vec<u8> {
         buf.extend_from_slice(&v.to_le_bytes());
         buf
     }
+}
+
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut encoded = encode_varint_u32(value.len() as u32);
+    encoded.extend_from_slice(value.as_bytes());
+    encoded
 }
 
 /// Encode an enum variant with its fields.
@@ -325,6 +333,9 @@ fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
     // version: u32
     let (version, consumed) = decode_varint_u32(payload, offset)?;
     offset += consumed;
+
+    let (build_len, consumed) = decode_varint_u32(payload, offset)?;
+    offset += consumed + build_len as usize;
 
     // encoding: RenderEncoding
     let (_encoding, consumed) = decode_varint_u32(payload, offset)?;

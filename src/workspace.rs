@@ -20,6 +20,8 @@ mod git;
 mod tab;
 
 #[cfg(test)]
+pub(crate) use self::aggregate::take_aggregate_pane_visits;
+#[cfg(test)]
 use self::git::git_ahead_behind;
 use self::git::git_status_cache_key_for_space;
 #[cfg(test)]
@@ -1557,6 +1559,7 @@ impl Workspace {
             prio: false,
             pinned: false,
             starred: false,
+            subgroup: None,
             events,
             render_notify,
             render_dirty,
@@ -1619,6 +1622,7 @@ impl Workspace {
             prio: false,
             pinned: false,
             starred: false,
+            subgroup: None,
             events,
             render_notify,
             render_dirty,

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::detect::AgentState;
 
-use super::{TerminalState, TerminalStateMutation};
+use super::state::{TerminalState, TerminalStateMutation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentMetadata {
@@ -275,7 +275,7 @@ impl TerminalState {
         }
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
-        let previous_state = self.state;
+        let previous_state = self.raw_agent_state();
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let has_set_fields = report.title.is_some()
             || report.display_agent.is_some()
@@ -396,17 +396,17 @@ impl TerminalState {
         })
     }
     pub fn effective_title(&self) -> Option<String> {
-        self.effective_presentation_for_state_at(self.state, Instant::now())
+        self.effective_presentation_for_state_at(self.raw_agent_state(), Instant::now())
             .title
     }
 
     pub fn effective_display_agent(&self) -> Option<String> {
-        self.effective_presentation_for_state_at(self.state, Instant::now())
+        self.effective_presentation_for_state_at(self.raw_agent_state(), Instant::now())
             .display_agent
     }
 
     pub fn effective_presentation(&self) -> EffectivePresentation {
-        self.effective_presentation_for_state_at(self.state, Instant::now())
+        self.effective_presentation_for_state_at(self.raw_agent_state(), Instant::now())
     }
 
     pub fn next_agent_metadata_expiry(&self) -> Option<Instant> {
@@ -456,7 +456,7 @@ impl TerminalState {
 
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
-        let previous_state = self.state;
+        let previous_state = self.raw_agent_state();
         let previous_presentation =
             self.effective_presentation_for_state_at_ignoring_ttl(previous_state, now);
         for source in expired_sources {
@@ -744,7 +744,7 @@ mod tests {
             seq: None,
         });
 
-        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert_eq!(terminal.effective_agent_label(), Some("claude"));
         let presentation = terminal.effective_presentation();
         assert_eq!(presentation.title.as_deref(), Some("Refactor auth"));

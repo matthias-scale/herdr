@@ -3,6 +3,10 @@ use std::process::Command;
 
 use super::{ClipboardImage, ForegroundJob, Signal};
 
+pub(crate) fn effective_user_name() -> Option<String> {
+    None
+}
+
 fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }

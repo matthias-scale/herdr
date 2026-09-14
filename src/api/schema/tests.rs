@@ -1652,6 +1652,27 @@ fn closing_block_item_defaults_are_null_on_read_and_write() {
 }
 
 #[test]
+fn closing_item_blocking_defaults_true() {
+    let legacy: ClosingBlockItem = serde_json::from_value(serde_json::json!({
+        "n": 1,
+        "label": "Answer",
+        "text": "choose"
+    }))
+    .unwrap();
+    let nonblocking: ClosingBlockItem = serde_json::from_value(serde_json::json!({
+        "n": 2,
+        "label": "Verify",
+        "text": "optional check",
+        "blocking": false
+    }))
+    .unwrap();
+
+    assert!(legacy.blocking);
+    assert!(!nonblocking.blocking);
+    assert_eq!(serde_json::to_value(legacy).unwrap()["blocking"], true);
+}
+
+#[test]
 fn report_agent_params_with_foreign_version_arrays_still_parse() {
     let params: PaneReportAgentParams = serde_json::from_value(serde_json::json!({
         "pane_id": "w1:p1",

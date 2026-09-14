@@ -41,7 +41,6 @@ impl TerminalRuntimeRegistry {
         self.runtimes.values()
     }
 
-    #[cfg(unix)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&TerminalId, &TerminalRuntime)> {
         self.runtimes.iter()
     }

@@ -1653,6 +1653,7 @@ pub(crate) fn agent_launch_flags(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct HomeCounts {
     pub blocked: usize,
+    pub attention: usize,
     pub agents: usize,
     pub spaces: usize,
 }
@@ -1940,7 +1941,18 @@ impl crate::app::state::AppState {
             })
             .count();
         HomeCounts {
-            blocked: queue.len(),
+            blocked: queue
+                .iter()
+                .filter(|agent| {
+                    agent.attention_tier == crate::terminal::state::AttentionTier::Blocked
+                })
+                .count(),
+            attention: queue
+                .iter()
+                .filter(|agent| {
+                    agent.attention_tier == crate::terminal::state::AttentionTier::Attention
+                })
+                .count(),
             agents,
             spaces: self.workspaces.len(),
         }
@@ -2757,13 +2769,13 @@ impl crate::app::state::AppState {
 
 impl crate::app::App {
     pub(crate) fn reply_to_selected_home_agent(&mut self) {
-        let queue = self.state.blocked_agents();
+        let queue = self.state.home_attention_agents();
         let Some((ws_idx, pane_id, reply)) = self.state.home.as_ref().and_then(|home| {
             home.current(&queue)
                 .map(|agent| (agent.ws_idx, agent.pane_id, home.reply.clone()))
         }) else {
             if let Some(home) = self.state.home.as_mut() {
-                home.reply_error = Some("no blocked pane is selected".into());
+                home.reply_error = Some("no waiting pane is selected".into());
             }
             return;
         };
@@ -2885,6 +2897,7 @@ mod tests {
                 agent_label: format!("agent{i}"),
                 blocked_since: None,
                 seq: None,
+                attention_tier: crate::terminal::state::AttentionTier::Blocked,
             })
             .collect()
     }

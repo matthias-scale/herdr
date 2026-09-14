@@ -56,7 +56,10 @@ impl App {
                     },
                 ),
             (None, Some(agent_ref)) => {
-                if !self.configured_remote_focus_hosts.contains(&agent_ref.host) {
+                if !self
+                    .remote_focus_transport
+                    .accepts_remote_host(&agent_ref.host)
+                {
                     return encode_error(
                         id,
                         "unknown_host",
@@ -148,7 +151,7 @@ impl App {
         let closing_block_hook = terminal.hook_authority.as_ref().is_some_and(|authority| {
             crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         });
-        if terminal.state == crate::detect::AgentState::Blocked && !closing_block_hook {
+        if terminal.raw_agent_state() == crate::detect::AgentState::Blocked && !closing_block_hook {
             return encode_error(
                 id,
                 "agent_blocked",
@@ -286,7 +289,7 @@ impl App {
         let mut value = crate::detect::manifest::explain_to_json_value(&explain);
         if let Some(object) = value.as_object_mut() {
             let screen_state = crate::detect::manifest::agent_state_label(explain.state);
-            let effective_state = terminal.state;
+            let effective_state = terminal.raw_agent_state();
             let arbitration = terminal.effective_state_arbitration();
             object.insert("screen_state".into(), serde_json::json!(screen_state));
             object.insert(
@@ -414,11 +417,16 @@ mod tests {
     struct FakeRemoteFocusTransport;
 
     impl crate::app::remote_focus::RemoteFocusTransport for FakeRemoteFocusTransport {
+        fn accepts_remote_host(&self, _host: &str) -> bool {
+            true
+        }
+
         fn start(
             &mut self,
             operation_id: &str,
             agent_ref: &AgentRef,
             _proxy_pane_id: &str,
+            _channels: crate::pane::RemoteProxyChannels,
             event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
         ) -> Result<(), ErrorBody> {
             let transition = if agent_ref.agent.ends_with("p3") {
@@ -441,10 +449,6 @@ mod tests {
         }
     }
 
-    fn configure_remote_host(app: &mut App, name: &str) {
-        app.configured_remote_focus_hosts.insert(name.into());
-    }
-
     fn remote_context() -> RemoteControlContext {
         RemoteControlContext {
             host: "buildbox".into(),
@@ -463,6 +467,7 @@ mod tests {
                 argv: vec!["agent".into(), "run".into()],
                 cwd: "/work/repo".into(),
             },
+            detected_agent: "claude".into(),
             interactive_ready: true,
             human_draft: false,
             state_change_seq: 9,
@@ -842,7 +847,10 @@ mod tests {
         assert_eq!(explain["screen_state"], "blocked");
         assert_eq!(explain["effective_state"], "working");
         assert_eq!(explain["arbitration"], "closing_block_report");
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Working);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Working
+        );
         assert_eq!(
             app.agent_info(0, pane_id).unwrap().agent_status,
             AgentStatus::Working
@@ -1462,7 +1470,10 @@ mod tests {
             ResponseResult::AgentPrompted { .. }
         ));
         assert!(rx.try_recv().is_ok());
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
@@ -1497,7 +1508,10 @@ mod tests {
 
         assert!(matches!(success.result, ResponseResult::Ok {}));
         assert!(rx.try_recv().is_ok());
-        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
@@ -1698,38 +1712,19 @@ mod tests {
     }
 
     #[test]
-    fn remote_focus_default_stub_reports_failure_without_activation() {
+    fn production_remote_focus_rejects_hosts_absent_from_transport_snapshot() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
-        configure_remote_host(&mut app, "buildbox");
-        let request = |method| Request {
+        let response = app.handle_api_request(Request {
             id: "remote-focus".into(),
-            method,
-        };
-        let started = app.handle_api_request(request(Method::AgentFocus(AgentFocusParams {
-            target: None,
-            agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
-        })));
-        let started: serde_json::Value = serde_json::from_str(&started).expect("started response");
-        assert_eq!(started["result"]["type"], "agent_focus_started");
-        assert_eq!(started["result"]["state"], "connecting");
-        let operation_id = started["result"]["operation_id"]
-            .as_str()
-            .expect("operation id")
-            .to_string();
-        assert!(started["result"]["proxy_pane_id"].as_str().is_some());
-
-        let status =
-            app.handle_api_request(request(Method::AgentFocusStatus(AgentFocusStatusParams {
-                operation_id,
-            })));
-        let status: serde_json::Value = serde_json::from_str(&status).expect("status response");
-        assert_eq!(status["result"]["state"], "failed");
-        assert_eq!(status["result"]["error"]["code"], "host_unreachable");
-        assert!(status["result"]["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("not implemented")));
-        assert!(status["result"].get("context").is_none());
+            method: Method::AgentFocus(AgentFocusParams {
+                target: None,
+                agent_ref: Some(AgentRef::new("buildbox", "w1:p3").expect("valid agent reference")),
+            }),
+        });
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "unknown_host");
+        assert_eq!(app.remote_focus_operations.len(), 0);
     }
 
     #[test]
@@ -1749,7 +1744,6 @@ mod tests {
     fn injected_transport_can_drive_remote_focus_active_closed_and_failed() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".into();
-        configure_remote_host(&mut app, "buildbox");
         app.remote_focus_transport = Box::new(FakeRemoteFocusTransport);
 
         let started = app.handle_api_request(Request {
