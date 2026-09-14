@@ -627,19 +627,22 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         if snapshot.config_generation != self.config_generation {
             return;
         }
+        let mut observations = std::collections::HashMap::with_capacity(snapshot.hosts.len());
+        for observed in &snapshot.hosts {
+            match observations.entry(observed.name.as_str()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(observed));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
         for (name, configured) in &self.hosts {
-            let mut observations = snapshot
-                .hosts
-                .iter()
-                .filter(|observed| observed.name == *name);
-            let Some(observed) = observations.next() else {
+            let Some(Some(observed)) = observations.get(name.as_str()) else {
                 self.remote_identities.remove(name);
                 continue;
             };
-            if observations.next().is_some() {
-                self.remote_identities.remove(name);
-                continue;
-            }
             let Some(remote_name) = observed_remote_identity(configured, observed) else {
                 self.remote_identities.remove(name);
                 continue;
@@ -2273,6 +2276,30 @@ mod tests {
         assert!(transport.remote_host_ready("ub1"));
         transport.observe_fleet_snapshot(&crate::fleet::Snapshot::default());
         assert!(!transport.remote_host_ready("ub1"));
+    }
+
+    #[test]
+    fn duplicate_host_rows_clear_remote_focus_readiness() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        let first = remote_identity_snapshot("ub1", "operator@ub1", "ubuntu-direct");
+        transport.observe_fleet_snapshot(&first);
+        assert!(transport.remote_host_ready("ub1"));
+
+        let mut duplicate = first.clone();
+        duplicate.hosts.push(first.hosts[0].clone());
+        transport.observe_fleet_snapshot(&duplicate);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        transport.observe_fleet_snapshot(&first);
+        assert!(transport.remote_host_ready("ub1"));
     }
 
     #[test]
