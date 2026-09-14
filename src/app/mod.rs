@@ -272,6 +272,8 @@ pub struct App {
     pub(crate) last_dock_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
+    pub(crate) pending_pomodoro_send_off_mouse_releases:
+        HashMap<InputSourceId, crossterm::event::MouseButton>,
     pub(crate) contract_false_positive_burst_panes: HashSet<crate::layout::PaneId>,
     pub(crate) contract_false_positive_log_path_override: Option<std::path::PathBuf>,
     pub(crate) next_resize_poll: Instant,
@@ -1463,6 +1465,7 @@ impl App {
             last_dock_divider_click: None,
             last_pane_click: None,
             pending_url_click_sources: HashSet::new(),
+            pending_pomodoro_send_off_mouse_releases: HashMap::new(),
             contract_false_positive_burst_panes: HashSet::new(),
             contract_false_positive_log_path_override: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
@@ -2950,7 +2953,7 @@ impl App {
     ) {
         self.begin_contract_false_positive_input_burst();
         for event in events {
-            if self.intercept_pomodoro_send_off_raw_input(&event) {
+            if self.intercept_pomodoro_send_off_raw_input(source_id, &event) {
                 continue;
             }
             let previous_mode = self.state.mode;

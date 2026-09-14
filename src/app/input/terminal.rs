@@ -463,6 +463,8 @@ impl App {
 
     pub(crate) fn release_input_source_headless(&mut self, source_id: crate::app::InputSourceId) {
         // Pending URL clicks survive this call; see clear_input_source.
+        self.pending_pomodoro_send_off_mouse_releases
+            .remove(&source_id);
         self.state.clear_chrome_gesture(source_id);
         for pressed in self.take_pressed_keys_for_source(source_id) {
             let release = pressed
@@ -474,6 +476,8 @@ impl App {
 
     pub(crate) async fn release_input_source(&mut self, source_id: crate::app::InputSourceId) {
         // Pending URL clicks survive this call; see clear_input_source.
+        self.pending_pomodoro_send_off_mouse_releases
+            .remove(&source_id);
         self.state.clear_chrome_gesture(source_id);
         for pressed in self.take_pressed_keys_for_source(source_id) {
             let release = pressed

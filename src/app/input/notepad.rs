@@ -232,11 +232,30 @@ impl AppState {
 impl crate::app::App {
     pub(crate) fn intercept_pomodoro_send_off_raw_input(
         &mut self,
+        source_id: crate::app::InputSourceId,
         event: &crate::raw_input::RawInputEvent,
     ) -> bool {
+        if let crate::raw_input::RawInputEvent::Mouse(mouse) = event {
+            if let Some(button) = self
+                .pending_pomodoro_send_off_mouse_releases
+                .get(&source_id)
+                .copied()
+            {
+                if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(released) if released == button)
+                {
+                    self.pending_pomodoro_send_off_mouse_releases
+                        .remove(&source_id);
+                }
+                return true;
+            }
+        }
         if self.state.pomodoro.send_off.is_none() {
             return false;
         }
+        if !crate::ui::pomodoro::send_off_fits(self.state.screen_rect()) {
+            return false;
+        }
+
         let dismisses = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 !matches!(key.kind, crossterm::event::KeyEventKind::Release)
@@ -244,19 +263,23 @@ impl crate::app::App {
             crate::raw_input::RawInputEvent::Text(_)
             | crate::raw_input::RawInputEvent::Paste(_) => true,
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_))
+                if let crossterm::event::MouseEventKind::Down(button) = mouse.kind {
+                    self.pending_pomodoro_send_off_mouse_releases
+                        .insert(source_id, button);
+                    true
+                } else {
+                    return true;
+                }
             }
             _ => false,
         };
         if !dismisses {
             return false;
         }
-
-        let now = std::time::Instant::now();
-        if !crate::ui::pomodoro::send_off_fits(self.state.screen_rect()) {
-            return false;
-        }
-        self.state.pomodoro.dismiss_send_off_at(now)
+        self.state
+            .pomodoro
+            .dismiss_send_off_at(std::time::Instant::now());
+        true
     }
 
     /// The one rule for when the break prompt or the notepad owns a key.

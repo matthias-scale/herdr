@@ -206,7 +206,7 @@ impl App {
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
-        if self.intercept_pomodoro_send_off_raw_input(&event) {
+        if self.intercept_pomodoro_send_off_raw_input(super::LOCAL_INPUT_SOURCE, &event) {
             return true;
         }
         let previous_mode = self.state.mode;
@@ -1232,7 +1232,9 @@ mod tests {
 
     #[tokio::test]
     async fn monolithic_raw_text_paste_and_uncaptured_click_close_send_off_without_pane_input() {
-        fn app_with_send_off() -> (super::super::App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        fn app_with_send_off(
+            mouse_capture: bool,
+        ) -> (super::super::App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
             let (mut app, pane_id) = test_app_with_pane();
             app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
             app.state.ensure_test_terminals();
@@ -1245,8 +1247,8 @@ mod tests {
                     80,
                     24,
                     0,
-                    b"\x1b[?1000h\x1b[?1006h",
-                    4,
+                    b"\x1b[?1003h\x1b[?1006h",
+                    16,
                 );
             assert!(
                 runtime.mouse_reporting_enabled(),
@@ -1258,7 +1260,7 @@ mod tests {
                 started: crate::pomodoro::PomodoroPhase::ShortBreak,
                 shown_at: Instant::now(),
             });
-            app.state.mouse_capture = false;
+            app.state.mouse_capture = mouse_capture;
             (app, pane_input)
         }
 
@@ -1266,7 +1268,7 @@ mod tests {
             crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new("committed")),
             crate::raw_input::RawInputEvent::Paste("pasted".into()),
         ] {
-            let (mut app, mut pane_input) = app_with_send_off();
+            let (mut app, mut pane_input) = app_with_send_off(false);
             assert!(app.handle_raw_input_event(event).await);
             assert!(app.state.pomodoro.send_off.is_none());
             assert!(
@@ -1275,25 +1277,46 @@ mod tests {
             );
         }
 
-        let (mut app, mut pane_input) = app_with_send_off();
+        let mouse = |kind| {
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 40,
+                row: 12,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+        };
+        for mouse_capture in [false, true] {
+            let (mut app, mut pane_input) = app_with_send_off(mouse_capture);
+            for event in [
+                mouse(crossterm::event::MouseEventKind::Moved),
+                mouse(crossterm::event::MouseEventKind::ScrollDown),
+                mouse(crossterm::event::MouseEventKind::Down(
+                    crossterm::event::MouseButton::Left,
+                )),
+                mouse(crossterm::event::MouseEventKind::Drag(
+                    crossterm::event::MouseButton::Left,
+                )),
+                mouse(crossterm::event::MouseEventKind::Up(
+                    crossterm::event::MouseButton::Left,
+                )),
+            ] {
+                assert!(app.handle_raw_input_event(event).await);
+            }
+            assert!(app.state.pomodoro.send_off.is_none());
+            assert!(
+                pane_input.try_recv().is_err(),
+                "send-off mouse events reached the pane with capture={mouse_capture}"
+            );
+        }
+
+        let (mut app, mut pane_input) = app_with_send_off(false);
+        app.state.pomodoro.send_off = None;
         let click = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: 40,
             row: 12,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        assert!(
-            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(click))
-                .await
-        );
-        assert!(app.state.pomodoro.send_off.is_none());
-        assert!(
-            pane_input.try_recv().is_err(),
-            "the closing click must not reach the mouse-reporting pane"
-        );
-
-        let (mut app, mut pane_input) = app_with_send_off();
-        app.state.pomodoro.send_off = None;
         assert!(
             app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(click))
                 .await
@@ -1468,6 +1491,21 @@ mod tests {
             now + crate::pomodoro::SEND_OFF_DURATION - Duration::from_millis(1);
         assert!(skipped_send_off.tick_pomodoro(now + crate::pomodoro::SEND_OFF_DURATION, true));
         assert!(skipped_send_off.state.pomodoro.send_off.is_none());
+
+        let mut compact_send_off = app_without_other_deadlines();
+        compact_send_off.state.pomodoro.enabled = true;
+        compact_send_off.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: now,
+        });
+        compact_send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 60, 16);
+
+        assert_eq!(
+            compact_send_off.next_headless_loop_deadline_with_client_refresh(now, false, true),
+            Some(now + crate::pomodoro::ANIMATION_FRAME_INTERVAL)
+        );
+        assert!(compact_send_off.tick_pomodoro(now + crate::pomodoro::SEND_OFF_DURATION, true));
+        assert!(compact_send_off.state.pomodoro.send_off.is_none());
     }
 
     #[test]

@@ -6080,7 +6080,7 @@ enabled = true
 
     #[tokio::test]
     async fn headless_raw_text_paste_and_uncaptured_click_close_send_off_without_pane_input() {
-        fn app_with_send_off() -> (App, tokio::sync::mpsc::Receiver<Bytes>) {
+        fn app_with_send_off(mouse_capture: bool) -> (App, tokio::sync::mpsc::Receiver<Bytes>) {
             let mut app = hidden_sidebar_config_app();
             let pane_id = app.state.workspaces[0].tabs[0].root_pane;
             let (runtime, pane_input) =
@@ -6088,8 +6088,8 @@ enabled = true
                     80,
                     24,
                     0,
-                    b"\x1b[?1000h\x1b[?1006h",
-                    4,
+                    b"\x1b[?1003h\x1b[?1006h",
+                    16,
                 );
             assert!(
                 runtime.mouse_reporting_enabled(),
@@ -6100,7 +6100,7 @@ enabled = true
                 started: crate::pomodoro::PomodoroPhase::ShortBreak,
                 shown_at: std::time::Instant::now(),
             });
-            app.state.mouse_capture = false;
+            app.state.mouse_capture = mouse_capture;
             compute_hidden_sidebar(&mut app);
             (app, pane_input)
         }
@@ -6109,7 +6109,7 @@ enabled = true
             crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new("committed")),
             crate::raw_input::RawInputEvent::Paste("pasted".into()),
         ] {
-            let (mut app, mut pane_input) = app_with_send_off();
+            let (mut app, mut pane_input) = app_with_send_off(false);
             app.route_client_events(vec![event], true);
 
             assert!(app.state.pomodoro.send_off.is_none());
@@ -6119,28 +6119,41 @@ enabled = true
             );
         }
 
-        let (mut app, mut pane_input) = app_with_send_off();
-        let pane = app
-            .state
-            .view
-            .pane_infos
-            .iter()
-            .find(|pane| pane.is_focused)
-            .expect("focused pane");
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: pane.inner_rect.x,
-            row: pane.inner_rect.y,
-            modifiers: KeyModifiers::empty(),
-        };
-        app.route_client_events(vec![crate::raw_input::RawInputEvent::Mouse(click)], true);
-        assert!(app.state.pomodoro.send_off.is_none());
-        assert!(
-            pane_input.try_recv().is_err(),
-            "the closing click must not reach the mouse-reporting pane"
-        );
+        for mouse_capture in [false, true] {
+            let (mut app, mut pane_input) = app_with_send_off(mouse_capture);
+            let pane = app
+                .state
+                .view
+                .pane_infos
+                .iter()
+                .find(|pane| pane.is_focused)
+                .expect("focused pane");
+            let mouse = |kind| {
+                crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+                    kind,
+                    column: pane.inner_rect.x,
+                    row: pane.inner_rect.y,
+                    modifiers: KeyModifiers::empty(),
+                })
+            };
+            app.route_client_events(
+                vec![
+                    mouse(MouseEventKind::Moved),
+                    mouse(MouseEventKind::ScrollDown),
+                    mouse(MouseEventKind::Down(MouseButton::Left)),
+                    mouse(MouseEventKind::Drag(MouseButton::Left)),
+                    mouse(MouseEventKind::Up(MouseButton::Left)),
+                ],
+                true,
+            );
+            assert!(app.state.pomodoro.send_off.is_none());
+            assert!(
+                pane_input.try_recv().is_err(),
+                "send-off mouse events reached the pane with capture={mouse_capture}"
+            );
+        }
 
-        let (mut app, mut pane_input) = app_with_send_off();
+        let (mut app, mut pane_input) = app_with_send_off(false);
         app.state.pomodoro.send_off = None;
         let pane = app
             .state
@@ -6163,7 +6176,7 @@ enabled = true
             "without the send-off, the same click reaches the mouse-reporting pane"
         );
 
-        let (mut app, mut pane_input) = app_with_send_off();
+        let (mut app, mut pane_input) = app_with_send_off(false);
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 18, 30));
         app.route_client_events(
             vec![crate::raw_input::RawInputEvent::Text(

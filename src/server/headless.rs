@@ -14676,6 +14676,109 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn compact_foreground_keeps_a_wide_background_send_off_fresh_and_modal() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"\x1b[?1003h\x1b[?1006h");
+        let (wide_tx, _wide_control_rx, wide_rx) = test_client_writer();
+        let (compact_tx, _compact_control_rx, compact_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(wide_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (60, 16),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(compact_tx),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        let shown_at = Instant::now();
+        server.app.state.pomodoro.enabled = true;
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at,
+        });
+        server.render_and_stream();
+
+        let wide_frame = read_server_frame(wide_rx.recv().expect("wide frame"));
+        let compact_frame = read_server_frame(compact_rx.recv().expect("compact frame"));
+        assert!(frame_text(&wide_frame).contains("enjoy the break"));
+        assert!(frame_text(&compact_frame).contains("enjoy the break"));
+        assert_eq!(server.app.state.screen_rect(), Rect::new(0, 0, 60, 16));
+        assert!(crate::ui::pomodoro::animation_visible_at(
+            &server.app.state,
+            server.app.state.screen_rect(),
+            shown_at,
+        ));
+
+        assert!(server
+            .app
+            .tick_pomodoro(shown_at + crate::pomodoro::SEND_OFF_DURATION, true,));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+        server.render_and_stream();
+        assert!(!frame_text(&read_server_frame(
+            wide_rx.recv().expect("wide expiry frame")
+        ))
+        .contains("enjoy the break"));
+        assert!(!frame_text(&read_server_frame(
+            compact_rx.recv().expect("compact expiry frame")
+        ))
+        .contains("enjoy the break"));
+
+        let stale_shown_at = Instant::now();
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: stale_shown_at,
+        });
+        server.render_and_stream();
+        assert!(frame_text(&read_server_frame(
+            wide_rx.recv().expect("wide stale frame")
+        ))
+        .contains("enjoy the break"));
+        let _ = compact_rx.recv().expect("compact stale frame");
+        server
+            .app
+            .state
+            .pomodoro
+            .send_off
+            .as_mut()
+            .expect("send-off")
+            .shown_at = stale_shown_at - crate::pomodoro::SEND_OFF_DURATION;
+
+        assert!(server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    KeyModifiers::empty(),
+                ),
+            )],
+        ));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the first key after an unpainted expiry reached the pane"
+        );
+    }
+
+    #[tokio::test]
     async fn resize_shared_runtime_resizes_background_tabs() {
         let mut server = test_headless_server();
         let mut workspace = crate::workspace::Workspace::test_new("test");
