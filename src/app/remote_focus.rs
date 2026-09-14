@@ -101,6 +101,9 @@ pub(crate) struct RemoteFocusOperation {
     /// Local proxy pane and its terminal, once the pane exists.
     proxy: Option<(PaneId, TerminalId)>,
     first_frame_processed: bool,
+    /// The error came from lifecycle reconciliation, not from the transport.
+    /// A later detailed failure replaces it.
+    error_is_placeholder: bool,
     created_at: Instant,
     completed_at: Option<Instant>,
 }
@@ -206,6 +209,7 @@ impl RemoteFocusOperations {
                 operation_state: crate::remote::RemoteFocusOperationState::new(),
                 proxy: None,
                 first_frame_processed: false,
+                error_is_placeholder: false,
                 created_at: now,
                 completed_at: None,
             },
@@ -270,6 +274,7 @@ impl RemoteFocusOperations {
                     code: "connection_lost".into(),
                     message: "remote focus connection terminated".into(),
                 });
+                operation.error_is_placeholder = true;
                 operation.completed_at = Some(now);
                 reconciled.push(operation_id.clone());
             }
@@ -290,15 +295,10 @@ impl RemoteFocusOperations {
             operation.state,
             RemoteFocusState::Failed | RemoteFocusState::Closed
         ) {
-            if operation.state == RemoteFocusState::Failed
-                && matches!(&transition, RemoteFocusTransition::Failed(_))
-                && operation.error.as_ref().is_some_and(|error| {
-                    error.code == "connection_lost"
-                        && error.message == "remote focus connection terminated"
-                })
-            {
+            if operation.state == RemoteFocusState::Failed && operation.error_is_placeholder {
                 if let RemoteFocusTransition::Failed(error) = transition {
                     operation.error = Some(error);
+                    operation.error_is_placeholder = false;
                     return true;
                 }
             }
@@ -333,6 +333,7 @@ impl RemoteFocusOperations {
                 operation.state = RemoteFocusState::Failed;
                 operation.context = None;
                 operation.error = Some(error);
+                operation.error_is_placeholder = false;
                 operation.completed_at = Some(now);
             }
             RemoteFocusTransition::Closed => {
