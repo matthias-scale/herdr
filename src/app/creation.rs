@@ -973,6 +973,7 @@ mod tests {
             version: None,
             protocol: None,
             error: Some("ssh: connection refused".to_string()),
+            remote_identity: None,
             entries: Vec::new(),
         }];
 

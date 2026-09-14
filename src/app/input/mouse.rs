@@ -4189,6 +4189,7 @@ mod tests {
                 version: None,
                 protocol: None,
                 error: None,
+                remote_identity: None,
                 entries: Vec::new(),
             }],
             ..crate::fleet::Snapshot::default()

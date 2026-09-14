@@ -239,6 +239,12 @@ pub(crate) struct HostSnapshot {
     pub(crate) protocol: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// The host identity reported by the remote server's agent inventory.
+    /// This is deliberately not part of the public fleet response: rows keep
+    /// the configured alias, while remote focus uses this fact only on the
+    /// wire after checking that the connection tuple still matches.
+    #[serde(skip)]
+    pub(crate) remote_identity: Option<String>,
     pub(crate) entries: Vec<FleetRow>,
 }
 
@@ -298,6 +304,7 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
                         version: None,
                         protocol: None,
                         error: Some(error.clone()),
+                        remote_identity: None,
                         entries: Vec::new(),
                     })
                     .collect(),
@@ -358,14 +365,22 @@ fn remote_attach_command(socket: Option<&str>, session: Option<&str>, agent: &st
     format!("{socket}{session}herdr agent attach {}", shell_quote(agent))
 }
 
+pub(crate) type FleetPollerConfig = Arc<std::sync::Mutex<FleetConfig>>;
+
 pub(crate) fn start_poller(
     fleet: FleetConfig,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-) {
+) -> FleetPollerConfig {
+    let poller_config = Arc::new(std::sync::Mutex::new(fleet));
     if cfg!(test) {
-        return;
+        return poller_config;
     }
+    let poller_config_for_thread = Arc::clone(&poller_config);
     std::thread::spawn(move || loop {
+        let fleet = poller_config_for_thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let snapshot = poll(&fleet);
         match event_tx.try_send(crate::events::AppEvent::FleetRefreshed { snapshot }) {
             Ok(()) => {}
@@ -378,6 +393,7 @@ pub(crate) fn start_poller(
             fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS),
         ));
     });
+    poller_config
 }
 
 #[derive(Debug)]
@@ -445,6 +461,10 @@ fn snapshot_from_evidence(
     let mut hosts = Vec::with_capacity(evidence.len());
     for evidence in evidence {
         let error = evidence.agents.as_ref().err().cloned();
+        let remote_identity = (!evidence.host.local)
+            .then(|| evidence.agents.as_ref().ok())
+            .flatten()
+            .and_then(|agents| remote_self_name(agents));
         let mut entries = Vec::new();
         match evidence.agents {
             Ok(agents) => {
@@ -500,6 +520,7 @@ fn snapshot_from_evidence(
             version: evidence.runtime.version,
             protocol: evidence.runtime.protocol,
             error,
+            remote_identity,
             entries,
         });
     }
@@ -528,6 +549,24 @@ fn snapshot_from_evidence(
             .collect(),
         hosts,
     }
+}
+
+/// Resolve a remote server's self identity from a complete agent inventory.
+/// Every returned agent must carry the same host identity; an empty, legacy,
+/// or mixed inventory is not safe enough to authorize a later control request.
+fn remote_self_name(agents: &[AgentInfo]) -> Option<String> {
+    let mut names = agents
+        .iter()
+        .map(|agent| {
+            agent
+                .agent_ref
+                .as_ref()
+                .map(|agent_ref| agent_ref.host.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    names.sort_unstable();
+    names.dedup();
+    (names.len() == 1).then(|| names.remove(0))
 }
 
 trait HostReader: Sync {
@@ -1951,6 +1990,38 @@ mod tests {
             crate::api::schema::AgentRef::new("office", "p1")
                 .expect("valid configured agent reference")
         );
+        assert_eq!(snapshot.hosts[0].remote_identity.as_deref(), Some("laptop"));
+    }
+
+    #[test]
+    fn remote_identity_requires_a_complete_unambiguous_inventory() {
+        let hosts = vec![host("office", false)];
+
+        let legacy = collect_snapshot_with(
+            &fake_reader(
+                Ok(vec![agent(AgentStatus::Idle, serde_json::json!([]))]),
+                HostRuntime::default(),
+            ),
+            &hosts,
+            &FleetConfig::default(),
+        );
+        assert!(legacy.hosts[0].remote_identity.is_none());
+
+        let mut first = agent(AgentStatus::Idle, serde_json::json!([]));
+        first.agent_ref = Some(
+            crate::api::schema::AgentRef::new("laptop", "p1").expect("valid first remote identity"),
+        );
+        let mut second = agent(AgentStatus::Working, serde_json::json!([]));
+        second.agent_ref = Some(
+            crate::api::schema::AgentRef::new("other-laptop", "p2")
+                .expect("valid second remote identity"),
+        );
+        let ambiguous = collect_snapshot_with(
+            &fake_reader(Ok(vec![first, second]), HostRuntime::default()),
+            &hosts,
+            &FleetConfig::default(),
+        );
+        assert!(ambiguous.hosts[0].remote_identity.is_none());
     }
 
     #[test]
@@ -2078,6 +2149,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
 
@@ -2112,6 +2184,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
 
@@ -2130,6 +2203,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
         assert_eq!(

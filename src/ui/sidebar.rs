@@ -8797,6 +8797,7 @@ pub(crate) mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries,
         }
     }

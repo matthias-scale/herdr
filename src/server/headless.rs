@@ -7068,6 +7068,7 @@ fn init_logging() {
 mod tests {
     use super::*;
 
+    use crate::app::remote_focus::RemoteFocusTransport;
     use crate::app::AppState;
     use crate::protocol::{CellData, CursorState, PROTOCOL_VERSION};
     use unicode_width::UnicodeWidthStr;
@@ -9694,6 +9695,22 @@ next_tab = ""
                 socket_path: server.client_socket_path.clone(),
             }),
         );
+        transport.observe_fleet_snapshot(&crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: agent_ref.host.clone(),
+                target: "local-test-control-socket".to_owned(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: Some(agent_ref.host.clone()),
+                entries: Vec::new(),
+            }],
+            ..Default::default()
+        });
         let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(8);
         let channels = crate::pane::RemoteProxyChannels {
             outbound_rx,
@@ -9844,9 +9861,10 @@ next_tab = ""
     // complete frame, typed input reaches the remote PTY, the answer comes
     // back as frames, and closing the pane releases the remote lease.
     async fn real_control_session_streams_to_proxy_pane_and_back() {
-        let (mut remote, agent_ref, _context) = guarded_control_handshake_test_server_with_command(
-            "while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done",
-        );
+        let (mut remote, agent_ref, remote_context) =
+            guarded_control_handshake_test_server_with_command(
+                "while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done",
+            );
         let remote_terminal_id = remote.app.state.workspaces[0]
             .terminal_id(remote.app.state.workspaces[0].tabs[0].root_pane)
             .expect("remote terminal")
@@ -9881,6 +9899,24 @@ next_tab = ""
                     socket_path: remote.client_socket_path.clone(),
                 }),
             ));
+        client
+            .remote_focus_transport
+            .observe_fleet_snapshot(&crate::fleet::Snapshot {
+                hosts: vec![crate::fleet::HostSnapshot {
+                    name: "buildbox".into(),
+                    target: "local-test-control-socket".to_owned(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state: crate::fleet::HostState::Reachable,
+                    version: None,
+                    protocol: None,
+                    error: None,
+                    remote_identity: Some(remote_context.host),
+                    entries: Vec::new(),
+                }],
+                ..Default::default()
+            });
         let started = client
             .start_remote_focus_operation(agent_ref.clone())
             .expect("remote focus operation starts");

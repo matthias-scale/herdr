@@ -53,6 +53,8 @@ impl App {
     }
 
     fn install_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+        self.remote_focus_transport
+            .observe_fleet_snapshot(&snapshot);
         let changed = self.state.fleet_snapshot != snapshot;
         self.state.fleet_snapshot = snapshot;
         self.refresh_remote_agent_panel_entries();

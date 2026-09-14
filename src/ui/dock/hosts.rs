@@ -286,6 +286,7 @@ mod tests {
             version: Some("0.8.2".to_string()),
             protocol: Some(crate::protocol::PROTOCOL_VERSION),
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         }
     }

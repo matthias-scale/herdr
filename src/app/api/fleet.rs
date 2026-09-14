@@ -112,6 +112,7 @@ mod tests {
                 version: Some("0.8.2".to_string()),
                 protocol: Some(crate::protocol::PROTOCOL_VERSION),
                 error: None,
+                remote_identity: None,
                 entries,
             }],
         };
@@ -167,6 +168,7 @@ mod tests {
                         version: Some("0.8.2".to_string()),
                         protocol: Some(crate::protocol::PROTOCOL_VERSION),
                         error: None,
+                        remote_identity: None,
                         entries: vec![entry],
                     }
                 })
@@ -211,6 +213,7 @@ mod tests {
                 version: None,
                 protocol: None,
                 error: None,
+                remote_identity: None,
                 entries: vec![crate::fleet::FleetRow::test_local_agent_info_row(
                     "local",
                     agents[0].clone(),
