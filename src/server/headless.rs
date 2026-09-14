@@ -11347,7 +11347,7 @@ next_tab = ""
             sent.push_str(&String::from_utf8_lossy(&bytes));
         }
         assert!(
-            sent.contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."),
+            sent.contains("Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."),
             "expected the auto-nudge to reach the pane, got {sent:?}"
         );
     }
