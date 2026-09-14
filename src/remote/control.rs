@@ -303,6 +303,7 @@ struct SessionHandle {
     host: String,
     outbound_tx: tokio::sync::mpsc::Sender<ProxyOutbound>,
     detach_requested: Arc<AtomicBool>,
+    writer_decision: Arc<Mutex<()>>,
     termination: Arc<ControlSessionTermination>,
 }
 
@@ -377,6 +378,10 @@ impl SshRemoteFocusTransport {
                 .collect::<Vec<_>>()
         };
         for (_, handle) in &revoked {
+            let _decision = handle
+                .writer_decision
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             handle.detach_requested.store(true, Ordering::Release);
             handle.termination.terminate();
             let _ = handle.outbound_tx.try_send(ProxyOutbound::Detach);
@@ -411,6 +416,7 @@ impl SshRemoteFocusTransport {
         let runner = Arc::clone(&self.runner);
         let detached = Arc::new(AtomicBool::new(false));
         let detach_requested = Arc::new(AtomicBool::new(false));
+        let writer_decision = Arc::new(Mutex::new(()));
         let input_enabled = Arc::clone(&channels.input_enabled);
         let sessions = Arc::clone(&self.sessions);
         let termination = Arc::new(ControlSessionTermination {
@@ -432,6 +438,7 @@ impl SshRemoteFocusTransport {
                     host: agent_ref.host.clone(),
                     outbound_tx: channels.detach_tx.clone(),
                     detach_requested: Arc::clone(&detach_requested),
+                    writer_decision: Arc::clone(&writer_decision),
                     termination: Arc::clone(&termination),
                 },
             );
@@ -457,6 +464,7 @@ impl SshRemoteFocusTransport {
                         channels,
                         cleanup_detached,
                         detach_requested,
+                        writer_decision,
                         failure_reported,
                         Arc::clone(&cleanup.termination),
                         #[cfg(test)]
@@ -603,6 +611,10 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
             let Some(handle) = handle else {
                 return;
             };
+            let _decision = handle
+                .writer_decision
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             handle.detach_requested.store(true, Ordering::Release);
             handle.termination.terminate();
             // The flag is the urgent side channel. If the normal queue is
@@ -779,6 +791,7 @@ fn run_control_writer(
     initial_resize: Option<(u16, u16, u32, u32)>,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
+    writer_decision: Arc<Mutex<()>>,
     failure_reported: Arc<AtomicBool>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     operation_id: String,
@@ -786,13 +799,6 @@ fn run_control_writer(
 ) {
     let mut last_sent_resize = initial_resize;
     while let Some(message) = outbound_rx.blocking_recv() {
-        if detach_requested.load(Ordering::Acquire) {
-            let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
-            return;
-        }
-        if detached.load(Ordering::Acquire) {
-            return;
-        }
         let is_input = matches!(message, ProxyOutbound::Input(_));
         let is_detach = matches!(message, ProxyOutbound::Detach);
         let wire = match message {
@@ -803,28 +809,39 @@ fn run_control_writer(
             ProxyOutbound::Detach => Some(ClientMessage::Detach),
         };
         if let Some(wire) = wire {
-            if is_input {
-                termination.operation_state.before_input_send();
-                let _admission = termination.operation_state.lock_input_admission();
-                if termination.operation_state.is_terminal() {
+            match write_control_message(
+                &mut writer,
+                &wire,
+                is_input,
+                is_detach,
+                &detached,
+                &detach_requested,
+                &writer_decision,
+                &termination.operation_state,
+            ) {
+                WriterWriteOutcome::Skipped => return,
+                WriterWriteOutcome::Sent { stop } if stop => return,
+                WriterWriteOutcome::Sent { stop: _ } => {}
+                WriterWriteOutcome::Failed {
+                    detail,
+                    intentional,
+                } => {
+                    termination.terminate();
+                    if !intentional {
+                        SshRemoteFocusTransport::fail_once(
+                            &failure_reported,
+                            &event_tx,
+                            &operation_id,
+                            "connection_lost",
+                            format!(
+                                "remote control writer failed; delivery of the last accepted batch is unknown: {detail}"
+                            ),
+                        );
+                    } else {
+                        detached.store(true, Ordering::Release);
+                    }
                     return;
                 }
-            };
-            let write_result = protocol::write_message(&mut writer, &wire);
-            if write_result.is_err() {
-                termination.terminate();
-                if !is_detach {
-                    SshRemoteFocusTransport::fail_once(
-                        &failure_reported,
-                        &event_tx,
-                        &operation_id,
-                        "connection_lost",
-                        "remote control writer failed; delivery of the last accepted batch is unknown",
-                    );
-                } else {
-                    detached.store(true, Ordering::Release);
-                }
-                return;
             }
         }
         if is_detach {
@@ -838,22 +855,114 @@ fn run_control_writer(
                 cell_width_px: resize.2,
                 cell_height_px: resize.3,
             };
-            if protocol::write_message(&mut writer, &resize_message).is_err() {
-                termination.terminate();
+            match write_control_message(
+                &mut writer,
+                &resize_message,
+                false,
+                false,
+                &detached,
+                &detach_requested,
+                &writer_decision,
+                &termination.operation_state,
+            ) {
+                WriterWriteOutcome::Skipped => return,
+                WriterWriteOutcome::Sent { stop } if stop => return,
+                WriterWriteOutcome::Sent { stop: _ } => {}
+                WriterWriteOutcome::Failed {
+                    detail,
+                    intentional,
+                } => {
+                    termination.terminate();
+                    if !intentional {
+                        SshRemoteFocusTransport::fail_once(
+                            &failure_reported,
+                            &event_tx,
+                            &operation_id,
+                            "connection_lost",
+                            format!(
+                                "remote control writer failed; delivery of the last accepted batch is unknown: {detail}"
+                            ),
+                        );
+                    }
+                    return;
+                }
+            }
+            last_sent_resize = Some(resize);
+        }
+    }
+    match write_control_message(
+        &mut writer,
+        &ClientMessage::Detach,
+        false,
+        true,
+        &detached,
+        &detach_requested,
+        &writer_decision,
+        &termination.operation_state,
+    ) {
+        WriterWriteOutcome::Failed {
+            detail,
+            intentional,
+        } => {
+            termination.terminate();
+            if !intentional {
                 SshRemoteFocusTransport::fail_once(
                     &failure_reported,
                     &event_tx,
                     &operation_id,
                     "connection_lost",
-                    "remote control writer failed; delivery of the last accepted batch is unknown",
+                    format!(
+                        "remote control writer failed; delivery of the last accepted batch is unknown: {detail}"
+                    ),
                 );
-                return;
             }
-            last_sent_resize = Some(resize);
         }
+        WriterWriteOutcome::Skipped | WriterWriteOutcome::Sent { .. } => {}
     }
-    if detach_requested.load(Ordering::Acquire) || !detached.load(Ordering::Acquire) {
-        let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
+}
+
+#[cfg(unix)]
+enum WriterWriteOutcome {
+    Skipped,
+    Sent { stop: bool },
+    Failed { detail: String, intentional: bool },
+}
+
+#[cfg(unix)]
+fn write_control_message(
+    writer: &mut Box<dyn Write + Send>,
+    message: &ClientMessage,
+    is_input: bool,
+    stop: bool,
+    detached: &AtomicBool,
+    detach_requested: &AtomicBool,
+    writer_decision: &Mutex<()>,
+    operation_state: &crate::remote::RemoteFocusOperationState,
+) -> WriterWriteOutcome {
+    let _decision = writer_decision
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (message, stop, intentional) = if detach_requested.load(Ordering::Acquire) {
+        (&ClientMessage::Detach, true, true)
+    } else if detached.load(Ordering::Acquire) {
+        return WriterWriteOutcome::Skipped;
+    } else {
+        (message, stop, false)
+    };
+    if is_input && !intentional {
+        operation_state.before_input_send();
+        let admission = operation_state.lock_input_admission();
+        if operation_state.is_terminal() {
+            return WriterWriteOutcome::Skipped;
+        }
+        drop(admission);
+    }
+    match protocol::write_message(writer, message) {
+        Ok(()) => WriterWriteOutcome::Sent { stop },
+        Err(error) => WriterWriteOutcome::Failed {
+            detail: error.to_string(),
+            intentional,
+        },
     }
 }
 
@@ -870,6 +979,7 @@ fn run_control_session(
     channels: RemoteProxyChannels,
     detached: Arc<AtomicBool>,
     detach_requested: Arc<AtomicBool>,
+    writer_decision: Arc<Mutex<()>>,
     failure_reported: Arc<AtomicBool>,
     termination: Arc<ControlSessionTermination>,
     #[cfg(test)] writer_start_gate: Option<Arc<std::sync::Barrier>>,
@@ -1012,6 +1122,7 @@ fn run_control_session(
     let (mut reader, writer) = stream.split();
     let writer_detached = Arc::clone(&detached);
     let writer_detach_requested = Arc::clone(&detach_requested);
+    let writer_decision = Arc::clone(&writer_decision);
     let writer_resize_slot = Arc::clone(&resize_slot);
     let writer_failure_reported = Arc::clone(&failure_reported);
     let writer_event_tx = event_tx.clone();
@@ -1037,6 +1148,7 @@ fn run_control_session(
                 writer_initial_resize,
                 writer_detached,
                 writer_detach_requested,
+                writer_decision,
                 writer_failure_reported,
                 writer_event_tx,
                 writer_operation_id,
@@ -1117,20 +1229,6 @@ fn run_control_session(
                     break;
                 }
             }
-            ServerMessage::ControlContext { context } => {
-                if active
-                    && event_tx
-                        .blocking_send(crate::events::AppEvent::RemoteFocusTransition {
-                            operation_id: operation_id.clone(),
-                            transition: Box::new(RemoteFocusTransition::ContextUpdated(context)),
-                        })
-                        .is_err()
-                {
-                    termination.terminate();
-                    let _ = detach_tx.try_send(ProxyOutbound::Detach);
-                    break;
-                }
-            }
             ServerMessage::Terminal(frame) => {
                 // Frames are an ordered diff stream: block on a full event
                 // channel rather than drop one and corrupt later diffs.
@@ -1199,6 +1297,8 @@ mod tests {
         fail_at: Option<u64>,
         panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
+        write_error: Option<String>,
+        input_write_gate: Option<Arc<InputWriteGate>>,
         diagnostic: Option<String>,
     }
 
@@ -1251,6 +1351,8 @@ mod tests {
                 }),
                 Box::new(FakeWriter {
                     output: this.output,
+                    write_error: this.write_error,
+                    input_write_gate: this.input_write_gate,
                 }),
             )
         }
@@ -1325,10 +1427,21 @@ mod tests {
 
     struct FakeWriter {
         output: Arc<Mutex<Vec<u8>>>,
+        write_error: Option<String>,
+        input_write_gate: Option<Arc<InputWriteGate>>,
     }
 
     impl Write for FakeWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if let Some(gate) = &self.input_write_gate {
+                gate.wait_until_released();
+            }
+            if let Some(error) = &self.write_error {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    error.clone(),
+                ));
+            }
             self.output
                 .lock()
                 .expect("fake output lock")
@@ -1338,6 +1451,46 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct InputWriteGate {
+        started: AtomicBool,
+        released: Mutex<bool>,
+        wake: std::sync::Condvar,
+    }
+
+    impl InputWriteGate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                started: AtomicBool::new(false),
+                released: Mutex::new(false),
+                wake: std::sync::Condvar::new(),
+            })
+        }
+
+        fn wait_until_started(&self) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !self.started.load(Ordering::Acquire) {
+                assert!(
+                    Instant::now() < deadline,
+                    "writer did not reach the write gate"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn wait_until_released(&self) {
+            self.started.store(true, Ordering::Release);
+            let mut released = self.released.lock().expect("write gate lock");
+            while !*released {
+                released = self.wake.wait(released).expect("write gate wait");
+            }
+        }
+
+        fn release(&self) {
+            *self.released.lock().expect("write gate lock") = true;
+            self.wake.notify_all();
         }
     }
 
@@ -1496,6 +1649,52 @@ mod tests {
         panic_at: Option<u64>,
         read_gate: Option<Arc<AtomicBool>>,
     ) -> SshRemoteFocusTransport {
+        transport_with_writer_options(input, output, fail_at, panic_at, read_gate, None, None)
+    }
+
+    fn transport_with_write_error(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        read_gate: Option<Arc<AtomicBool>>,
+        write_error: &str,
+    ) -> SshRemoteFocusTransport {
+        transport_with_writer_options(
+            input,
+            output,
+            None,
+            None,
+            read_gate,
+            Some(write_error.to_owned()),
+            None,
+        )
+    }
+
+    fn transport_with_input_write_gate(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        read_gate: Option<Arc<AtomicBool>>,
+        input_write_gate: Arc<InputWriteGate>,
+    ) -> SshRemoteFocusTransport {
+        transport_with_writer_options(
+            input,
+            output,
+            None,
+            None,
+            read_gate,
+            None,
+            Some(input_write_gate),
+        )
+    }
+
+    fn transport_with_writer_options(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        fail_at: Option<u64>,
+        panic_at: Option<u64>,
+        read_gate: Option<Arc<AtomicBool>>,
+        write_error: Option<String>,
+        input_write_gate: Option<Arc<InputWriteGate>>,
+    ) -> SshRemoteFocusTransport {
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
                 name: "buildbox".into(),
@@ -1513,6 +1712,8 @@ mod tests {
                     fail_at,
                     panic_at,
                     read_gate,
+                    write_error,
+                    input_write_gate,
                     diagnostic: None,
                 })),
                 connect_error: None,
@@ -1712,6 +1913,8 @@ mod tests {
                 fail_at: None,
                 panic_at: None,
                 read_gate: None,
+                write_error: None,
+                input_write_gate: None,
                 diagnostic: Some("buildbox: Permission denied (publickey).".into()),
             })),
             connect_error: None,
@@ -1737,6 +1940,44 @@ mod tests {
             result,
             Err(error) if error.kind() == io::ErrorKind::InvalidInput
         ));
+    }
+
+    #[test]
+    fn close_diagnostic_kills_a_stalled_remote_process_before_reading_stderr() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "printf diagnostic >&2; exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("diagnostic child");
+        let pid = child.id();
+        let stdout = child.stdout.take().expect("diagnostic stdout");
+        let stderr = child.stderr.take().expect("diagnostic stderr");
+        let mut reader = ProcessControlReader {
+            child,
+            stdout,
+            stderr: Some(stderr),
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let (diagnostic_tx, diagnostic_rx) = std::sync::mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            diagnostic_tx
+                .send(reader.close_diagnostic())
+                .expect("diagnostic result");
+        });
+
+        match diagnostic_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(diagnostic) => {
+                assert!(diagnostic.is_some_and(|text| text.contains("diagnostic")));
+            }
+            Err(error) => {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                panic!("close_diagnostic stalled: {error}");
+            }
+        }
+        reader_thread.join().expect("diagnostic thread");
     }
 
     #[test]
@@ -1886,6 +2127,8 @@ mod tests {
                 fail_at: None,
                 panic_at: None,
                 read_gate: None,
+                write_error: None,
+                input_write_gate: None,
                 diagnostic: None,
             })),
             connect_error: None,
@@ -1960,6 +2203,8 @@ mod tests {
             fail_at: None,
             panic_at: None,
             read_gate: Some(read_gate),
+            write_error: None,
+            input_write_gate: None,
             diagnostic: None,
         };
         let started = Instant::now();
@@ -2126,6 +2371,123 @@ mod tests {
     }
 
     #[test]
+    fn writer_failure_releases_the_session_and_reports_unknown_delivery() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut transport = transport_with_write_error(
+            input,
+            Arc::clone(&output),
+            Some(Arc::clone(&read_gate)),
+            "injected writer failure",
+        );
+        let (channels, outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let first = event_rx.blocking_recv().expect("active event");
+        assert!(matches!(
+            first,
+            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"answer")))
+            .expect("input queued");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let error = loop {
+            match event_rx.try_recv() {
+                Ok(crate::events::AppEvent::RemoteFocusTransition { transition, .. }) => {
+                    if let RemoteFocusTransition::Failed(error) = *transition {
+                        break error;
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "writer failure did not reach the app"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("event channel closed before writer failure");
+                }
+            }
+        };
+        assert_eq!(error.code, "connection_lost");
+        assert!(error.message.contains("injected writer failure"));
+        assert!(transport.sessions.lock().expect("sessions lock").is_empty());
+        read_gate.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn detach_cannot_complete_while_a_dequeued_input_is_being_written() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(control_context()),
+        }));
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let write_gate = InputWriteGate::new();
+        let transport = transport_with_input_write_gate(
+            input,
+            Arc::clone(&output),
+            Some(Arc::clone(&read_gate)),
+            Arc::clone(&write_gate),
+        );
+        let transport = Arc::new(Mutex::new(transport));
+        let (channels, outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        transport
+            .lock()
+            .expect("transport lock")
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        let first = event_rx.blocking_recv().expect("active event");
+        assert!(matches!(
+            first,
+            crate::events::AppEvent::RemoteFocusTransition { transition, .. }
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        outbound_tx
+            .blocking_send(ProxyOutbound::Input(bytes::Bytes::from_static(b"answer")))
+            .expect("input queued");
+        write_gate.wait_until_started();
+
+        let detach_done = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let detach_transport = Arc::clone(&transport);
+        let detach_done_for_thread = Arc::clone(&detach_done);
+        let detach_thread = std::thread::spawn(move || {
+            started_tx.send(()).expect("detach start notification");
+            detach_transport
+                .lock()
+                .expect("transport lock")
+                .detach("operation");
+            detach_done_for_thread.store(true, Ordering::Release);
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("detach started");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !detach_done.load(Ordering::Acquire),
+            "detach completed before the dequeued input write finished"
+        );
+
+        write_gate.release();
+        detach_thread.join().expect("detach thread");
+        read_gate.store(true, Ordering::Release);
+        drop(event_rx);
+    }
+
+    #[test]
     fn cancellable_reader_stops_between_partial_frame_reads_after_detach() {
         let detached = AtomicBool::new(false);
         let mut reader = FakeReader {
@@ -2212,12 +2574,15 @@ mod tests {
         run_control_writer(
             Box::new(FakeWriter {
                 output: Arc::clone(&output),
+                write_error: None,
+                input_write_gate: None,
             }),
             outbound_rx,
             resize_slot,
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
             Arc::new(AtomicBool::new(false)),
             tokio::sync::mpsc::channel(1).0,
             "writer-test".into(),
@@ -2260,6 +2625,7 @@ mod tests {
             None,
             Arc::clone(&detached),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
             Arc::new(AtomicBool::new(false)),
             event_tx,
             "operation".into(),
@@ -2309,12 +2675,15 @@ mod tests {
         run_control_writer(
             Box::new(FakeWriter {
                 output: Arc::clone(&output),
+                write_error: None,
+                input_write_gate: None,
             }),
             outbound_rx,
             Arc::new(Mutex::new((24, 80, 0, 0))),
             None,
             detached,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
             Arc::new(AtomicBool::new(false)),
             tokio::sync::mpsc::channel(1).0,
             "operation".into(),
@@ -2355,6 +2724,7 @@ mod tests {
                 None,
                 detached,
                 Arc::new(AtomicBool::new(false)),
+                Arc::new(Mutex::new(())),
                 Arc::new(AtomicBool::new(false)),
                 tokio::sync::mpsc::channel(1).0,
                 "operation".into(),
@@ -2408,12 +2778,15 @@ mod tests {
         run_control_writer(
             Box::new(FakeWriter {
                 output: Arc::clone(&output),
+                write_error: None,
+                input_write_gate: None,
             }),
             outbound_rx,
             resize_slot,
             Some((24, 80, 0, 0)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
             Arc::new(AtomicBool::new(false)),
             tokio::sync::mpsc::channel(1).0,
             "writer-test".into(),

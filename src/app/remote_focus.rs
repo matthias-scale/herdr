@@ -50,10 +50,6 @@ pub(crate) enum RemoteFocusTransition {
     // path reaches Active yet.
     #[cfg_attr(not(unix), allow(dead_code))]
     Active(Box<RemoteControlContext>),
-    /// The server's authoritative identity or process context changed while
-    /// the control lease remained active.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    ContextUpdated(Box<RemoteControlContext>),
     Failed(ErrorBody),
     Closed,
 }
@@ -305,10 +301,7 @@ impl RemoteFocusOperations {
             return false;
         }
         if operation.operation_state.is_terminal()
-            && matches!(
-                &transition,
-                RemoteFocusTransition::Active(_) | RemoteFocusTransition::ContextUpdated(_)
-            )
+            && matches!(&transition, RemoteFocusTransition::Active(_))
         {
             return false;
         }
@@ -320,11 +313,6 @@ impl RemoteFocusOperations {
                     RemoteFocusState::Connecting | RemoteFocusState::Active
                 ) {
                     operation.state = RemoteFocusState::Active;
-                    operation.context = Some(*context);
-                }
-            }
-            RemoteFocusTransition::ContextUpdated(context) => {
-                if operation.state == RemoteFocusState::Active {
                     operation.context = Some(*context);
                 }
             }
@@ -764,7 +752,6 @@ impl crate::app::App {
         })?;
         let cwd = self.state.workspaces[ws_idx].identity_cwd.clone();
         let mut terminal = crate::terminal::TerminalState::new(terminal_id.clone(), cwd);
-        terminal.remote_proxy = true;
         // Until ControlReady, the client-supplied agent_ref is not an
         // identity claim. Keep the tab visibly provisional instead of
         // allowing chrome to fall back to an unlabeled numeric tab.
@@ -775,7 +762,7 @@ impl crate::app::App {
         // No custom tab name: the requested agent_ref is client-supplied
         // identity that tab chrome would show first and never replace. The
         // tab falls back to the pane label, which activate_remote_proxy sets
-        // from the server's authoritative ControlContext.
+        // from the server's authoritative ControlReady context.
         let tab_idx = workspace.create_tab_from_existing_pane(
             crate::workspace::MovedPane {
                 pane_id,
@@ -832,8 +819,7 @@ impl crate::app::App {
         transition: RemoteFocusTransition,
     ) {
         let activation = match &transition {
-            RemoteFocusTransition::Active(context)
-            | RemoteFocusTransition::ContextUpdated(context) => Some((**context).clone()),
+            RemoteFocusTransition::Active(context) => Some((**context).clone()),
             _ => None,
         };
         let applied =
@@ -1072,7 +1058,6 @@ mod tests {
             .terminals
             .get(&terminal_id)
             .expect("proxy terminal state");
-        assert!(terminal.remote_proxy);
         assert!(
             terminal.manual_label.as_deref() == Some(REMOTE_PROXY_PENDING_LABEL),
             "the connecting proxy must show a provisional label"
@@ -1183,6 +1168,32 @@ mod tests {
     }
 
     #[test]
+    fn remote_frame_marks_the_proxy_dirty_without_full_render_impact() {
+        let (mut app, _recording) = proxy_app();
+        let started = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("operation starts");
+        app.apply_remote_focus_transition(
+            &started.operation_id,
+            RemoteFocusTransition::Active(Box::new(context())),
+        );
+
+        assert!(!app.handle_internal_event_with_render_impact(
+            crate::events::AppEvent::RemoteFocusFrame {
+                operation_id: started.operation_id.clone(),
+                frame: Box::new(full_frame(b"remote frame")),
+            }
+        ));
+        assert_eq!(
+            app.handle_internal_event(crate::events::AppEvent::RemoteFocusFrame {
+                operation_id: started.operation_id,
+                frame: Box::new(full_frame(b"remote frame 2")),
+            }),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn connection_loss_keeps_late_frames_and_context_updates_terminal() {
         let (mut app, recording) = proxy_app();
         let started = app
@@ -1231,19 +1242,6 @@ mod tests {
             .expect("proxy runtime")
             .try_send_bytes(bytes::Bytes::from_static(b"after loss"))
             .is_err());
-
-        let mut late_context = context();
-        late_context.cwd = "/work/late".into();
-        late_context.foreground_cwd = "/work/late".into();
-        late_context.foreground_process.cwd = "/work/late".into();
-        app.apply_remote_focus_transition(
-            &operation_id,
-            RemoteFocusTransition::Active(Box::new(late_context.clone())),
-        );
-        app.apply_remote_focus_transition(
-            &operation_id,
-            RemoteFocusTransition::ContextUpdated(Box::new(late_context)),
-        );
 
         let snapshot = app
             .remote_focus_status(&operation_id)
@@ -1505,71 +1503,6 @@ mod tests {
             .expect("outbound channel")
             .try_recv()
             .is_err());
-    }
-
-    #[test]
-    fn authoritative_context_updates_replace_the_proxy_identity_line() {
-        let (mut app, _recording) = proxy_app();
-        let started = app
-            .start_remote_focus_operation(agent_ref())
-            .expect("operation starts");
-        let (pane_id, terminal_id) = app
-            .remote_focus_operations
-            .proxy_location(&started.operation_id)
-            .expect("proxy location");
-        let (workspace_idx, tab_idx) = app
-            .state
-            .workspaces
-            .iter()
-            .enumerate()
-            .find_map(|(workspace_idx, workspace)| {
-                workspace
-                    .find_tab_index_for_pane(pane_id)
-                    .map(|tab_idx| (workspace_idx, tab_idx))
-            })
-            .expect("proxy tab");
-        let initial = context();
-
-        app.apply_remote_focus_transition(
-            &started.operation_id,
-            RemoteFocusTransition::Active(Box::new(initial.clone())),
-        );
-        app.apply_remote_focus_frame(&started.operation_id, &full_frame(b"ready"));
-
-        let mut updated = initial;
-        updated.cwd = "/work/other".into();
-        updated.foreground_cwd = "/work/other".into();
-        updated.foreground_process.cwd = "/work/other".into();
-        updated.foreground_process.name = "other-agent".into();
-        // The wire transport delivers post-activation context through
-        // ServerMessage::ControlContext as ContextUpdated, never as a second
-        // Active; the test has to exercise that variant.
-        app.apply_remote_focus_transition(
-            &started.operation_id,
-            RemoteFocusTransition::ContextUpdated(Box::new(updated.clone())),
-        );
-
-        let terminal = app
-            .state
-            .terminals
-            .get(&terminal_id)
-            .expect("proxy terminal");
-        assert_eq!(
-            terminal.manual_label.as_deref(),
-            Some("buildbox::w1:p3 · operator · /work/other · /dev/pts/4 · other-agent")
-        );
-        assert_eq!(
-            app.state.workspaces[workspace_idx]
-                .tab_display_name_from(&app.state.terminals, tab_idx)
-                .as_deref(),
-            Some("buildbox::w1:p3 · operator · /work/other · /dev/pts/4 · other-agent")
-        );
-        assert_eq!(
-            app.remote_focus_status(&started.operation_id)
-                .expect("operation status")
-                .context,
-            Some(updated)
-        );
     }
 
     #[test]
