@@ -968,13 +968,13 @@ mod tests {
     #[test]
     fn unreachable_fleet_host_surfaces_error_without_spawning() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "ub2".into(),
+            target: "ub2".into(),
+            ..Default::default()
+        }];
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
         app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
             name: "ub2".to_string(),
             target: "ub2".to_string(),
