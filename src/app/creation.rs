@@ -1075,6 +1075,101 @@ mod tests {
         );
     }
 
+    fn app_with_fleet_attach_tuple(
+        configured_socket: Option<&str>,
+        configured_session: Option<&str>,
+        observed_socket: Option<&str>,
+        observed_session: Option<&str>,
+    ) -> App {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "current-target".into(),
+            socket: configured_socket.map(str::to_string),
+            session: configured_session.map(str::to_string),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![Workspace::test_new("existing-space")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "office".into(),
+            target: "current-target".into(),
+            local: false,
+            socket: observed_socket.map(str::to_string),
+            session: observed_session.map(str::to_string),
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+        app
+    }
+
+    #[tokio::test]
+    // A8: a matching snapshot tuple attaches with argv built from current config.
+    async fn matching_fleet_tuple_attaches_with_current_config_argv() {
+        let mut app = app_with_fleet_attach_tuple(
+            Some("/tmp/current.sock"),
+            Some("current-session"),
+            Some("/tmp/current.sock"),
+            Some("current-session"),
+        );
+
+        app.open_fleet_host("office");
+
+        let added_tab = &app.state.workspaces[0].tabs[1];
+        let added_terminal = added_tab
+            .terminal_id(added_tab.root_pane)
+            .and_then(|terminal_id| app.state.terminals.get(terminal_id))
+            .expect("matching tuple should attach a host tab");
+        let expected_argv = vec![
+            "herdr".to_string(),
+            "--remote".to_string(),
+            "current-target".to_string(),
+            "--session".to_string(),
+            "current-session".to_string(),
+        ];
+        assert_eq!(
+            added_terminal.launch_argv.as_deref(),
+            Some(expected_argv.as_slice())
+        );
+        assert!(app.state.toast.is_none(), "{:?}", app.state.toast);
+    }
+
+    #[test]
+    // A8: socket-only and session-only snapshot tuple drift both refuse attach.
+    fn socket_or_session_tuple_disagreement_refuses_attach() {
+        for mut app in [
+            app_with_fleet_attach_tuple(
+                Some("/tmp/current.sock"),
+                Some("current-session"),
+                Some("/tmp/stale.sock"),
+                Some("current-session"),
+            ),
+            app_with_fleet_attach_tuple(
+                Some("/tmp/current.sock"),
+                Some("current-session"),
+                Some("/tmp/current.sock"),
+                Some("stale-session"),
+            ),
+        ] {
+            app.open_fleet_host("office");
+
+            assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+            let toast = app.state.toast.expect("tuple drift should refuse attach");
+            assert_eq!(toast.title, "host launch failed");
+            assert_eq!(
+                toast.context,
+                "host configuration changed; wait for a fresh fleet poll"
+            );
+        }
+    }
+
     fn fixed_home_dispatch_plan(
         target: crate::app::home::HomeTarget,
     ) -> crate::app::home::HomeDispatchPlan {
