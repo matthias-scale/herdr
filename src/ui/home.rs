@@ -77,6 +77,9 @@ fn header_line(app: &AppState, counts: HomeCounts, width: u16) -> Line<'static> 
     Line::from(spans)
 }
 
+/// Narrowest title fragment worth keeping the provider cell for.
+const MIN_ROW_TITLE_WIDTH: usize = 6;
+
 /// `○ workspace        session title                 cc >_  18m`
 ///
 /// Dot, title and provider come from the sidebar row for the same pane, so the
@@ -102,24 +105,26 @@ fn agent_line(
 
     let lead = format!(" {dot} ");
     let age = waited_label(agent);
-    let label_width = 16usize;
-    let workspace = truncate(&agent.workspace_label, label_width);
-    let provider_cell = if provider.is_empty() {
+    // Dot and age are always drawn; the rest of the row splits what is left.
+    let available = (width as usize).saturating_sub(display_width(&lead) + display_width(&age) + 2);
+    // The workspace column gives way first on a narrow Home so the session title
+    // stays readable.
+    let label_width = (available / 3).min(16);
+    let workspace = truncate_end(&agent.workspace_label, label_width);
+    let workspace_pad = label_width.saturating_sub(display_width(&workspace));
+    let after_workspace = available.saturating_sub(label_width + 1);
+    // The provider is dropped before it could squeeze the title below a fragment.
+    let provider_cell = if provider.is_empty()
+        || after_workspace < display_width(provider) + 2 + MIN_ROW_TITLE_WIDTH
+    {
         String::new()
     } else {
         format!("{provider}  ")
     };
     // Whatever the title consumes, provider and age keep their columns: the list
     // is sorted by age, so a ragged right edge would hide the ordering.
-    let title_width = (width as usize).saturating_sub(
-        display_width(&lead)
-            + label_width
-            + 1
-            + display_width(&provider_cell)
-            + display_width(&age)
-            + 2,
-    );
-    let title = truncate(title, title_width);
+    let title_width = after_workspace.saturating_sub(display_width(&provider_cell));
+    let title = truncate_end(title, title_width);
     let title_pad = title_width.saturating_sub(display_width(&title));
     // A filled row is the cursor, the same surface the sidebar uses.
     let base = if selected {
@@ -144,7 +149,10 @@ fn agent_line(
             base.fg(dot_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ", base),
-        Span::styled(format!("{workspace:<label_width$} "), text_style),
+        Span::styled(
+            format!("{workspace}{} ", " ".repeat(workspace_pad)),
+            text_style,
+        ),
         Span::styled(format!("{title}{}", " ".repeat(title_pad)), text_style),
         Span::styled(provider_cell, base.fg(provider_color)),
         Span::styled(
@@ -1856,6 +1864,43 @@ mod tests {
         assert!(!row.contains("claude"), "{row}");
         assert_eq!(buffer[(1, 2)].symbol(), "○");
         assert_eq!(buffer[(1, 2)].fg, app.palette.red);
+    }
+
+    #[test]
+    fn home_rows_fit_their_width_with_wide_titles_and_narrow_frames() {
+        let app = AppState::test_new();
+        let agent = blocked(0);
+        let cells = crate::ui::sidebar::AgentRowCells {
+            dot: "○".into(),
+            dot_color: app.palette.red,
+            title: "界界界界界界界界界界".into(),
+            provider: "cc".into(),
+            provider_color: app.palette.peach,
+        };
+        for width in [18u16, 27, 40, 80] {
+            let line = agent_line(&app, &agent, Some(&cells), false, width);
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(
+                display_width(&text),
+                width as usize,
+                "width {width}: {text:?}"
+            );
+            assert!(
+                text.contains('界'),
+                "width {width} lost the title: {text:?}"
+            );
+        }
+        let wide = agent_line(&app, &agent, Some(&cells), false, 40);
+        let text: String = wide
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains(" cc "), "{text:?}");
     }
 
     #[test]
