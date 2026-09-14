@@ -136,7 +136,10 @@ impl App {
             AppEvent::RemoteFocusFrame {
                 operation_id,
                 frame,
-            } => self.apply_remote_focus_frame(&operation_id, &frame),
+            } => {
+                self.apply_remote_focus_frame(&operation_id, &frame);
+                false
+            }
             AppEvent::ConnectivityProbed { reachable } => {
                 self.connectivity_probe_in_flight = false;
                 self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
@@ -335,7 +338,8 @@ impl App {
             frame,
         } = ev
         {
-            return Some(self.apply_remote_focus_frame(&operation_id, &frame));
+            self.apply_remote_focus_frame(&operation_id, &frame);
+            return Some(false);
         }
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
