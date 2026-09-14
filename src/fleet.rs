@@ -307,8 +307,8 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
 }
 
 /// The fleet host a local pane was attached to, read back from its launch
-/// argv. Both attach shapes put the SSH target third, which is all a row needs
-/// to name the machine without keeping a second record of the attach.
+/// argv. Hosts may share an SSH target under different sessions or sockets, so
+/// a match compares everything the attach encoded, not the target alone.
 pub(crate) fn attached_host_name<'a>(snapshot: &'a Snapshot, argv: &[String]) -> Option<&'a str> {
     let target = match argv {
         [ssh, flag, target, _] if ssh == "ssh" && flag == "-t" => target,
@@ -318,7 +318,15 @@ pub(crate) fn attached_host_name<'a>(snapshot: &'a Snapshot, argv: &[String]) ->
     snapshot
         .hosts
         .iter()
-        .find(|host| !host.local && host.target == *target)
+        .filter(|host| !host.local && host.target == *target)
+        .find(|host| match argv {
+            [ssh, _, _, command] if ssh == "ssh" => {
+                let agent_prefix =
+                    remote_attach_command(host.socket.as_deref(), host.session.as_deref(), "");
+                command.starts_with(agent_prefix.trim_end_matches("''"))
+            }
+            _ => host_attach_argv(host).is_ok_and(|expected| expected == argv),
+        })
         .map(|host| host.name.as_str())
 }
 
@@ -2138,6 +2146,21 @@ mod tests {
             None
         );
         assert_eq!(attached_host_name(&snapshot, &["zsh".into()]), None);
+
+        // A second alias on the same target under another session keeps its
+        // own name instead of borrowing the first host's.
+        let mut sibling = host.clone();
+        sibling.name = "workbox-b".to_string();
+        sibling.session = Some("batch".to_string());
+        let both = Snapshot {
+            hosts: vec![host.clone(), sibling.clone()],
+            ..Snapshot::default()
+        };
+        let sibling_agent = agent_attach_argv(&sibling, "w1:p2").expect("attach argv");
+        let sibling_whole = host_attach_argv(&sibling).expect("host argv");
+        assert_eq!(attached_host_name(&both, &agent), Some("workbox"));
+        assert_eq!(attached_host_name(&both, &sibling_agent), Some("workbox-b"));
+        assert_eq!(attached_host_name(&both, &sibling_whole), Some("workbox-b"));
     }
 
     #[test]

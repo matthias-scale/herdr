@@ -1657,6 +1657,11 @@ fn aggregate_tab_entries(
                         (current, candidate) => current.or(candidate),
                     };
                     tab_entry.holds_shell |= entry.holds_shell;
+                    // Like a mixed provider, a machine name only labels a tab
+                    // whose panes all sit on that machine.
+                    if tab_entry.remote_host != entry.remote_host {
+                        tab_entry.remote_host = None;
+                    }
                     tab_entry.gate_count = tab_entry.gate_count.saturating_add(entry.gate_count);
                     tab_entry.active_subagents =
                         match (tab_entry.active_subagents, entry.active_subagents) {
@@ -8991,6 +8996,18 @@ pub(crate) mod tests {
         assert_eq!(sidebar_filtered_agent_entries_from(&app, None).len(), 1);
         app.sidebar_work_filter.query = "ub9".into();
         assert!(sidebar_filtered_agent_entries_from(&app, None).is_empty());
+
+        // A tab that mixes the attached pane with a local one names no machine.
+        let mut local = entry.clone();
+        local.pane_id = crate::layout::PaneId::from_raw(entry.pane_id.raw() + 1);
+        local.remote_host = None;
+        let same = aggregate_tab_entries(&[entry.clone(), entry.clone()]);
+        assert_eq!(
+            same.values().next().unwrap().remote_host.as_deref(),
+            Some("ub1")
+        );
+        let mixed = aggregate_tab_entries(&[entry, local]);
+        assert_eq!(mixed.values().next().unwrap().remote_host, None);
     }
 
     #[test]
