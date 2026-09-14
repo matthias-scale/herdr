@@ -307,6 +307,14 @@ struct SessionHandle {
     termination: Arc<ControlSessionTermination>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteHostIdentity {
+    remote_name: String,
+    target: String,
+    socket: Option<String>,
+    session: Option<String>,
+}
+
 pub(crate) struct SshRemoteFocusTransport {
     #[cfg(unix)]
     runner: Arc<dyn SshRunner>,
@@ -315,6 +323,8 @@ pub(crate) struct SshRemoteFocusTransport {
     #[cfg(all(test, unix))]
     writer_start_gate: Option<Arc<std::sync::Barrier>>,
     hosts: std::collections::HashMap<String, crate::config::FleetHostConfig>,
+    remote_identities: std::collections::HashMap<String, RemoteHostIdentity>,
+    config_generation: u64,
 }
 
 impl SshRemoteFocusTransport {
@@ -328,6 +338,8 @@ impl SshRemoteFocusTransport {
             #[cfg(all(test, unix))]
             writer_start_gate: None,
             hosts,
+            remote_identities: std::collections::HashMap::new(),
+            config_generation: 0,
         }
     }
 
@@ -388,7 +400,15 @@ impl SshRemoteFocusTransport {
             handle.termination.terminate();
             let _ = handle.outbound_tx.try_send(ProxyOutbound::Detach);
         }
+        self.remote_identities.retain(|name, identity| {
+            next_hosts
+                .get(name)
+                .is_some_and(|host| host_matches_identity(host, identity))
+        });
         self.hosts = next_hosts;
+        // Advancing the generation rejects every in-flight observation, even
+        // when its connection tuple still matches an unchanged host.
+        self.config_generation = self.config_generation.saturating_add(1);
         revoked
             .into_iter()
             .map(|(operation_id, _)| operation_id)
@@ -413,8 +433,42 @@ impl SshRemoteFocusTransport {
                 message: format!("remote host alias {} is not configured", agent_ref.host),
             });
         };
+        let Some(identity) = self.remote_identities.get(&agent_ref.host).cloned() else {
+            return Err(ErrorBody {
+                code: "host_unreachable".to_owned(),
+                message: format!(
+                    "remote host {} has no unambiguous identity from a successful fleet poll",
+                    agent_ref.host
+                ),
+            });
+        };
+        if !host_matches_identity(&host, &identity) {
+            return Err(ErrorBody {
+                code: "host_unreachable".to_owned(),
+                message: format!(
+                    "remote host {} identity is stale for its configured connection",
+                    agent_ref.host
+                ),
+            });
+        }
+        let configured_host = agent_ref.host.clone();
+        let remote_host = identity.remote_name.clone();
+        let wire_agent_ref =
+            AgentRef::new(remote_host.clone(), agent_ref.agent.clone()).map_err(|_| ErrorBody {
+                code: "host_unreachable".to_owned(),
+                message: format!("remote host identity is invalid for {}", agent_ref.host),
+            })?;
+        let expected_context = expected_context
+            .map(|context| {
+                translate_context_host(
+                    &context,
+                    &[configured_host.as_str(), remote_host.as_str()],
+                    &remote_host,
+                )
+            })
+            .transpose()?;
         let operation_id = operation_id.to_owned();
-        let agent_ref = agent_ref.clone();
+        let agent_ref = wire_agent_ref;
         let runner = Arc::clone(&self.runner);
         let detached = Arc::new(AtomicBool::new(false));
         let detach_requested = Arc::new(AtomicBool::new(false));
@@ -437,7 +491,7 @@ impl SshRemoteFocusTransport {
             .insert(
                 operation_id.clone(),
                 SessionHandle {
-                    host: agent_ref.host.clone(),
+                    host: configured_host.clone(),
                     outbound_tx: channels.detach_tx.clone(),
                     detach_requested: Arc::clone(&detach_requested),
                     writer_decision: Arc::clone(&writer_decision),
@@ -460,6 +514,8 @@ impl SshRemoteFocusTransport {
                         host,
                         operation_id,
                         agent_ref,
+                        configured_host,
+                        remote_host,
                         version,
                         build_version,
                         expected_context,
@@ -559,6 +615,17 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         self.hosts.contains_key(host)
     }
 
+    fn remote_host_ready(&self, host: &str) -> bool {
+        self.hosts
+            .get(host)
+            .and_then(|configured| {
+                self.remote_identities
+                    .get(host)
+                    .filter(|identity| host_matches_identity(configured, identity))
+            })
+            .is_some()
+    }
+
     fn reload_fleet(&mut self, fleet: &crate::config::FleetConfig) -> Vec<String> {
         #[cfg(unix)]
         {
@@ -566,8 +633,51 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         }
         #[cfg(not(unix))]
         {
-            self.hosts = Self::admitted_hosts(fleet);
+            let next_hosts = Self::admitted_hosts(fleet);
+            self.remote_identities.retain(|name, identity| {
+                next_hosts
+                    .get(name)
+                    .is_some_and(|host| host_matches_identity(host, identity))
+            });
+            self.hosts = next_hosts;
+            self.config_generation = self.config_generation.saturating_add(1);
             Vec::new()
+        }
+    }
+
+    fn observe_fleet_snapshot(&mut self, snapshot: &crate::fleet::Snapshot) {
+        if snapshot.config_generation != self.config_generation {
+            return;
+        }
+        let mut observations = std::collections::HashMap::with_capacity(snapshot.hosts.len());
+        for observed in &snapshot.hosts {
+            match observations.entry(observed.name.as_str()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(observed));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
+        for (name, configured) in &self.hosts {
+            let Some(Some(observed)) = observations.get(name.as_str()) else {
+                self.remote_identities.remove(name);
+                continue;
+            };
+            let Some(remote_name) = observed_remote_identity(configured, observed) else {
+                self.remote_identities.remove(name);
+                continue;
+            };
+            self.remote_identities.insert(
+                name.clone(),
+                RemoteHostIdentity {
+                    remote_name: remote_name.to_owned(),
+                    target: observed.target.clone(),
+                    socket: observed.socket.clone(),
+                    session: observed.session.clone(),
+                },
+            );
         }
     }
 
@@ -631,6 +741,52 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
             let _ = operation_id;
         }
     }
+}
+
+fn observed_remote_identity<'a>(
+    configured: &crate::config::FleetHostConfig,
+    observed: &'a crate::fleet::HostSnapshot,
+) -> Option<&'a str> {
+    if configured.local
+        || observed.local
+        || observed.state != crate::fleet::HostState::Reachable
+        || configured.target != observed.target
+        || configured.socket != observed.socket
+        || configured.session != observed.session
+    {
+        return None;
+    }
+    observed
+        .remote_identity
+        .as_deref()
+        .filter(|remote_name| !remote_name.is_empty() && !remote_name.contains("::"))
+}
+
+fn host_matches_identity(
+    host: &crate::config::FleetHostConfig,
+    identity: &RemoteHostIdentity,
+) -> bool {
+    !host.local
+        && host.target == identity.target
+        && host.socket == identity.socket
+        && host.session == identity.session
+}
+
+#[cfg(unix)]
+fn translate_context_host(
+    context: &crate::api::schema::RemoteControlContext,
+    accepted_hosts: &[&str],
+    target_host: &str,
+) -> Result<Box<crate::api::schema::RemoteControlContext>, ErrorBody> {
+    if !accepted_hosts.contains(&context.host.as_str()) {
+        return Err(ErrorBody {
+            code: "refused_for_safety".to_owned(),
+            message: "remote control context host does not match the expected host".to_owned(),
+        });
+    }
+    let mut translated = context.clone();
+    translated.host = target_host.to_owned();
+    Ok(Box::new(translated))
 }
 
 #[cfg(unix)]
@@ -982,6 +1138,8 @@ fn run_control_session(
     host: crate::config::FleetHostConfig,
     operation_id: String,
     agent_ref: AgentRef,
+    configured_host: String,
+    remote_host: String,
     version: u32,
     build_version: String,
     expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
@@ -1109,7 +1267,17 @@ fn run_control_session(
         );
         return;
     }
-    if let Err(error) = protocol::write_message(
+    {
+        // Serialize the decision with reload revocation, but not the wire write:
+        // SSH stdin can block indefinitely while the app still needs to close.
+        let _decision = writer_decision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if detached.load(Ordering::Acquire) || detach_requested.load(Ordering::Acquire) {
+            return;
+        }
+    }
+    let control_write = protocol::write_message(
         &mut stream,
         &ClientMessage::ControlTerminal {
             target: agent_ref.to_string(),
@@ -1117,7 +1285,8 @@ fn run_control_session(
             expected_context,
             takeover: false,
         },
-    ) {
+    );
+    if let Err(error) = control_write {
         termination.terminate();
         SshRemoteFocusTransport::fail_once(
             &failure_reported,
@@ -1225,6 +1394,25 @@ fn run_control_session(
         }
         match message {
             ServerMessage::ControlReady { context } => {
+                let context = match translate_context_host(
+                    &context,
+                    &[remote_host.as_str()],
+                    &configured_host,
+                ) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        termination.terminate();
+                        let _ = detach_tx.try_send(ProxyOutbound::Detach);
+                        SshRemoteFocusTransport::fail_once(
+                            &failure_reported,
+                            &event_tx,
+                            &operation_id,
+                            &error.code,
+                            error.message,
+                        );
+                        break;
+                    }
+                };
                 active = true;
                 if event_tx
                     .blocking_send(crate::events::AppEvent::RemoteFocusTransition {
@@ -1309,6 +1497,15 @@ mod tests {
         write_error: Option<String>,
         write_gate: Option<Arc<WriteGate>>,
         diagnostic: Option<String>,
+        handshake_write_gate: Option<HandshakeWriteGate>,
+    }
+
+    /// Stalls one pre-split stream write so a test can revoke mid-request.
+    struct HandshakeWriteGate {
+        stalled_write: usize,
+        next_write: usize,
+        started_tx: std::sync::mpsc::Sender<()>,
+        release_rx: std::sync::mpsc::Receiver<()>,
     }
 
     impl Read for FakeStream {
@@ -1336,6 +1533,14 @@ mod tests {
 
     impl Write for FakeStream {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if let Some(gate) = &mut self.handshake_write_gate {
+                let write_index = gate.next_write;
+                gate.next_write += 1;
+                if write_index == gate.stalled_write {
+                    let _ = gate.started_tx.send(());
+                    let _ = gate.release_rx.recv();
+                }
+            }
             self.output
                 .lock()
                 .expect("fake output lock")
@@ -1574,6 +1779,12 @@ mod tests {
         connected_targets: Option<Arc<Mutex<Vec<String>>>>,
     }
 
+    struct BlockingRunner {
+        inner: FakeRunner,
+        connect_started_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        connect_release_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
     impl SshRunner for FakeRunner {
         fn connect(
             &self,
@@ -1597,6 +1808,29 @@ mod tests {
                 .take()
                 .map(|stream| Box::new(stream) as Box<dyn ControlStream>)
                 .ok_or_else(|| io::Error::other("no fake connection"))
+        }
+    }
+
+    impl SshRunner for BlockingRunner {
+        fn connect(
+            &self,
+            host: &crate::config::FleetHostConfig,
+        ) -> Result<Box<dyn ControlStream>, io::Error> {
+            self.connect_started_tx
+                .lock()
+                .expect("connect-started lock")
+                .take()
+                .expect("connect-started signal")
+                .send(())
+                .expect("connect-started receiver");
+            self.connect_release_rx
+                .lock()
+                .expect("connect-release lock")
+                .take()
+                .expect("connect-release signal")
+                .recv()
+                .expect("connect-release sender");
+            self.inner.connect(host)
         }
     }
 
@@ -1727,7 +1961,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        SshRemoteFocusTransport::with_runner(
+        let mut transport = SshRemoteFocusTransport::with_runner(
             &fleet,
             Arc::new(FakeRunner {
                 stream: Mutex::new(Some(FakeStream {
@@ -1739,11 +1973,16 @@ mod tests {
                     write_error,
                     write_gate,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: None,
             }),
-        )
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox", "buildbox", "buildbox",
+        ));
+        transport
     }
 
     fn transport_with_connect_error(error: &str) -> SshRemoteFocusTransport {
@@ -1755,14 +1994,41 @@ mod tests {
             }],
             ..Default::default()
         };
-        SshRemoteFocusTransport::with_runner(
+        let mut transport = SshRemoteFocusTransport::with_runner(
             &fleet,
             Arc::new(FakeRunner {
                 stream: Mutex::new(None),
                 connect_error: Some(error.to_owned()),
                 connected_targets: None,
             }),
-        )
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox", "buildbox", "buildbox",
+        ));
+        transport
+    }
+
+    fn remote_identity_snapshot(
+        configured_name: &str,
+        target: &str,
+        remote_name: &str,
+    ) -> crate::fleet::Snapshot {
+        crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: configured_name.to_owned(),
+                target: target.to_owned(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: Some(remote_name.to_owned()),
+                entries: Vec::new(),
+            }],
+            ..Default::default()
+        }
     }
 
     fn agent_ref() -> AgentRef {
@@ -1940,11 +2206,15 @@ mod tests {
                 write_error: None,
                 write_gate: None,
                 diagnostic: Some("buildbox: Permission denied (publickey).".into()),
+                handshake_write_gate: None,
             })),
             connect_error: None,
             connected_targets: None,
         });
         let mut transport = SshRemoteFocusTransport::with_runner(&fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox", "buildbox", "buildbox",
+        ));
         let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
@@ -2125,7 +2395,516 @@ mod tests {
     }
 
     #[test]
-    fn reloading_fleet_replaces_the_target_used_by_focus() {
+    fn configured_alias_is_translated_to_remote_identity_on_the_wire() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut remote_context = control_context();
+        remote_context.host = "ubuntu-direct".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(remote_context.clone()),
+        }));
+        let mut transport = SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(input),
+                    output: Arc::clone(&output),
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                    handshake_write_gate: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            }),
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+
+        let mut expected_context = control_context();
+        expected_context.host = "ub1".into();
+        let requested = AgentRef::new("ub1", "w1:pA").expect("configured agent reference");
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start_with_expected_context_and_version_for_test(
+                "operation",
+                &requested,
+                Some(expected_context),
+                PROTOCOL_VERSION,
+                channels,
+                event_tx,
+            )
+            .expect("thread starts");
+
+        let Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. }) =
+            event_rx.blocking_recv()
+        else {
+            panic!("expected active transition");
+        };
+        let RemoteFocusTransition::Active(context) = *transition else {
+            panic!("expected active transition");
+        };
+        assert_eq!(context.host, "ub1");
+
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(
+            messages.first(),
+            Some(ClientMessage::Hello { .. })
+        ));
+        assert!(matches!(
+            messages.get(1),
+            Some(ClientMessage::ControlTerminal {
+                target,
+                agent_ref: Some(wire_ref),
+                expected_context: Some(expected),
+                takeover: false,
+            }) if target == "ubuntu-direct::w1:pA"
+                && wire_ref == &AgentRef::new("ubuntu-direct", "w1:pA").expect("wire ref")
+                && expected.host == "ubuntu-direct"
+        ));
+    }
+
+    #[test]
+    fn unexpected_remote_context_host_is_refused_before_reaching_the_app() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut context = control_context();
+        context.host = "unexpected-host".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(context),
+        }));
+        let mut transport = SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(input),
+                    output,
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                    handshake_write_gate: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            }),
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start(
+                "operation",
+                &AgentRef::new("ub1", "w1:pA").expect("agent ref"),
+                "proxy",
+                channels,
+                event_tx,
+            )
+            .expect("thread starts");
+
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "refused_for_safety");
+    }
+
+    #[test]
+    // A6: the remote may return only the learned identity, not the configured alias.
+    fn configured_alias_from_remote_is_refused_when_identity_differs() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut context = control_context();
+        context.host = "ub1".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(context),
+        }));
+        let mut transport = SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(input),
+                    output,
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                    handshake_write_gate: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            }),
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start(
+                "operation",
+                &AgentRef::new("ub1", "w1:pA").expect("agent ref"),
+                "proxy",
+                channels,
+                event_tx,
+            )
+            .expect("thread starts");
+
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "refused_for_safety");
+    }
+
+    #[test]
+    // A3: a learned identity is valid only for its configured socket and session.
+    fn remote_identity_is_bound_to_socket_and_session() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                socket: Some("/run/herdr.sock".into()),
+                session: Some("agents".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        let mut valid = remote_identity_snapshot("ub1", "operator@ub1", "ubuntu-direct");
+        valid.hosts[0].socket = Some("/run/herdr.sock".into());
+        valid.hosts[0].session = Some("agents".into());
+        transport.observe_fleet_snapshot(&valid);
+        assert!(transport.remote_host_ready("ub1"));
+
+        for (socket, session) in [
+            (Some("/run/other.sock"), Some("agents")),
+            (Some("/run/herdr.sock"), Some("other-session")),
+        ] {
+            let mut mismatched = valid.clone();
+            mismatched.hosts[0].socket = socket.map(str::to_owned);
+            mismatched.hosts[0].session = session.map(str::to_owned);
+            transport.observe_fleet_snapshot(&mismatched);
+            assert!(!transport.remote_host_ready("ub1"));
+            transport.observe_fleet_snapshot(&valid);
+            assert!(transport.remote_host_ready("ub1"));
+        }
+    }
+
+    #[test]
+    fn failed_or_ambiguous_fleet_observations_clear_remote_focus_readiness() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        let mut valid = remote_identity_snapshot("ub1", "operator@ub1", "ubuntu-direct");
+        transport.observe_fleet_snapshot(&valid);
+        assert!(transport.remote_host_ready("ub1"));
+
+        for state in [
+            crate::fleet::HostState::VersionSkew,
+            crate::fleet::HostState::Unreachable,
+        ] {
+            valid.hosts[0].state = state;
+            transport.observe_fleet_snapshot(&valid);
+            assert!(
+                !transport.remote_host_ready("ub1"),
+                "{state:?} observations must clear readiness"
+            );
+            valid.hosts[0].state = crate::fleet::HostState::Reachable;
+            transport.observe_fleet_snapshot(&valid);
+            assert!(transport.remote_host_ready("ub1"));
+        }
+
+        valid.hosts[0].target = "different-target".into();
+        transport.observe_fleet_snapshot(&valid);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        valid.hosts[0].target = "operator@ub1".into();
+        valid.hosts[0].remote_identity = None;
+        transport.observe_fleet_snapshot(&valid);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+        assert!(transport.remote_host_ready("ub1"));
+        transport.observe_fleet_snapshot(&crate::fleet::Snapshot::default());
+        assert!(!transport.remote_host_ready("ub1"));
+    }
+
+    #[test]
+    fn duplicate_host_rows_clear_remote_focus_readiness() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        let first = remote_identity_snapshot("ub1", "operator@ub1", "ubuntu-direct");
+        transport.observe_fleet_snapshot(&first);
+        assert!(transport.remote_host_ready("ub1"));
+
+        let mut duplicate = first.clone();
+        duplicate.hosts.push(first.hosts[0].clone());
+        transport.observe_fleet_snapshot(&duplicate);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        transport.observe_fleet_snapshot(&first);
+        assert!(transport.remote_host_ready("ub1"));
+    }
+
+    #[test]
+    fn unchanged_fleet_reload_keeps_remote_focus_identity_without_poll() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "operator@buildbox".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let connected_targets = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut context = control_context();
+        context.host = "remote-buildbox".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(context),
+        }));
+        let runner = Arc::new(FakeRunner {
+            stream: Mutex::new(Some(FakeStream {
+                input: Cursor::new(input),
+                output: Arc::clone(&output),
+                fail_at: None,
+                panic_at: None,
+                read_gate: None,
+                write_error: None,
+                write_gate: None,
+                diagnostic: None,
+                handshake_write_gate: None,
+            })),
+            connect_error: None,
+            connected_targets: Some(Arc::clone(&connected_targets)),
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "operator@buildbox",
+            "remote-buildbox",
+        ));
+
+        assert!(transport.reload_fleet(&fleet).is_empty());
+        assert!(transport.remote_host_ready("buildbox"));
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("unchanged host remains focusable without another poll");
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. })
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        assert_eq!(receive_failure(&mut event_rx).code, "connection_lost");
+        assert_eq!(
+            connected_targets.lock().expect("targets lock").as_slice(),
+            ["operator@buildbox"]
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(
+            messages.get(1),
+            Some(ClientMessage::ControlTerminal {
+                agent_ref: Some(wire_ref), ..
+            }) if wire_ref.host == "remote-buildbox"
+        ));
+    }
+
+    #[test]
+    fn changed_or_removed_host_clears_remote_identity_on_reload() {
+        let original_host = crate::config::FleetHostConfig {
+            name: "ub1".into(),
+            target: "operator@ub1".into(),
+            socket: Some("/run/herdr.sock".into()),
+            session: Some("agents".into()),
+            ..Default::default()
+        };
+        let mut changed_hosts = Vec::new();
+        let mut renamed = original_host.clone();
+        renamed.name = "renamed".into();
+        changed_hosts.push(vec![renamed]);
+        let mut retargeted = original_host.clone();
+        retargeted.target = "operator@other".into();
+        changed_hosts.push(vec![retargeted]);
+        let mut resocketed = original_host.clone();
+        resocketed.socket = Some("/run/other.sock".into());
+        changed_hosts.push(vec![resocketed]);
+        let mut resessioned = original_host.clone();
+        resessioned.session = Some("other".into());
+        changed_hosts.push(vec![resessioned]);
+        changed_hosts.push(Vec::new());
+
+        for hosts in changed_hosts {
+            let original_fleet = crate::config::FleetConfig {
+                hosts: vec![original_host.clone()],
+                ..Default::default()
+            };
+            let mut transport = SshRemoteFocusTransport::new(&original_fleet);
+            let mut observed = remote_identity_snapshot("ub1", "operator@ub1", "remote-ub1");
+            observed.hosts[0].socket = Some("/run/herdr.sock".into());
+            observed.hosts[0].session = Some("agents".into());
+            transport.observe_fleet_snapshot(&observed);
+            assert!(transport.remote_host_ready("ub1"));
+
+            let changed_fleet = crate::config::FleetConfig {
+                hosts,
+                ..Default::default()
+            };
+            assert!(transport.reload_fleet(&changed_fleet).is_empty());
+            assert!(!transport.remote_host_ready("ub1"));
+            assert!(!transport.remote_host_ready("renamed"));
+        }
+    }
+
+    #[test]
+    fn stale_same_tuple_observation_cannot_restore_identity_after_reload() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "old-remote",
+        ));
+        assert!(transport.remote_host_ready("ub1"));
+
+        transport.reload_fleet(&fleet);
+        assert!(transport.remote_host_ready("ub1"));
+
+        let current_failed = crate::fleet::Snapshot {
+            config_generation: 1,
+            ..Default::default()
+        };
+        transport.observe_fleet_snapshot(&current_failed);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "old-remote",
+        ));
+        assert!(!transport.remote_host_ready("ub1"));
+
+        let mut current_snapshot = remote_identity_snapshot("ub1", "operator@ub1", "new-remote");
+        current_snapshot.config_generation = 1;
+        transport.observe_fleet_snapshot(&current_snapshot);
+        assert!(transport.remote_host_ready("ub1"));
+    }
+
+    #[test]
+    fn unknown_remote_identity_fails_before_connecting_or_writing_control() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let connected_targets = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut transport = SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(welcome_bytes()),
+                    output: Arc::clone(&output),
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                    handshake_write_gate: None,
+                })),
+                connect_error: None,
+                connected_targets: Some(Arc::clone(&connected_targets)),
+            }),
+        );
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(2);
+        let error = transport
+            .start(
+                "operation",
+                &AgentRef::new("ub1", "w1:pA").expect("agent ref"),
+                "proxy",
+                channels,
+                event_tx,
+            )
+            .expect_err("unknown identity must fail closed");
+
+        assert_eq!(error.code, "host_unreachable");
+        assert!(error.message.contains("no unambiguous identity"));
+        assert!(connected_targets.lock().expect("targets lock").is_empty());
+        assert!(output.lock().expect("fake output lock").is_empty());
+    }
+
+    #[test]
+    fn reloading_fleet_cannot_send_an_old_identity_to_a_new_target() {
         let old_fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
                 name: "buildbox".into(),
@@ -2147,31 +2926,209 @@ mod tests {
         let runner = Arc::new(FakeRunner {
             stream: Mutex::new(Some(FakeStream {
                 input: Cursor::new(welcome_bytes()),
-                output,
+                output: Arc::clone(&output),
                 fail_at: None,
                 panic_at: None,
                 read_gate: None,
                 write_error: None,
                 write_gate: None,
                 diagnostic: None,
+                handshake_write_gate: None,
             })),
             connect_error: None,
             connected_targets: Some(Arc::clone(&connected_targets)),
         });
         let mut transport = SshRemoteFocusTransport::with_runner(&old_fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "old-target",
+            "old-remote",
+        ));
         assert!(transport.accepts_remote_host("buildbox"));
         assert!(transport.reload_fleet(&new_fleet).is_empty());
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "old-target",
+            "old-remote",
+        ));
 
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(2);
+        let error = transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect_err("stale identity must fail closed");
+        assert_eq!(error.code, "host_unreachable");
+        assert!(error.message.contains("no unambiguous identity"));
+        assert!(connected_targets.lock().expect("targets lock").is_empty());
+        assert!(output.lock().expect("fake output lock").is_empty());
+
+        let mut current_snapshot = remote_identity_snapshot("buildbox", "new-target", "new-remote");
+        current_snapshot.config_generation = 1;
+        transport.observe_fleet_snapshot(&current_snapshot);
         let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport
-            .start("operation", &agent_ref(), "proxy", channels, event_tx)
-            .expect("thread starts");
-        let error = receive_failure(&mut event_rx);
-        assert_eq!(error.code, "host_unreachable");
+            .start("operation-2", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts after current identity is observed");
+        assert_eq!(receive_failure(&mut event_rx).code, "host_unreachable");
         assert_eq!(
             connected_targets.lock().expect("targets lock").as_slice(),
             ["new-target"]
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(
+            messages.get(1),
+            Some(ClientMessage::ControlTerminal {
+                agent_ref: Some(wire_ref), ..
+            }) if wire_ref.host == "new-remote"
+        ));
+    }
+
+    #[test]
+    fn reloading_changed_host_during_connect_does_not_request_old_control() {
+        let old_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "old-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let new_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "new-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (connect_started_tx, connect_started_rx) = std::sync::mpsc::channel();
+        let (connect_release_tx, connect_release_rx) = std::sync::mpsc::channel();
+        let runner = Arc::new(BlockingRunner {
+            inner: FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(welcome_bytes()),
+                    output: Arc::clone(&output),
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                    handshake_write_gate: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            },
+            connect_started_tx: Mutex::new(Some(connect_started_tx)),
+            connect_release_rx: Mutex::new(Some(connect_release_rx)),
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&old_fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "old-target",
+            "old-remote",
+        ));
+        let (channels, _outbound_tx) = test_channels();
+        let operation_state = Arc::clone(&channels.operation_state);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        connect_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("connect starts");
+        assert_eq!(transport.reload_fleet(&new_fleet), vec!["operation"]);
+        assert!(operation_state.is_terminal());
+        connect_release_tx.send(()).expect("release connect");
+
+        assert!(
+            event_rx.blocking_recv().is_none(),
+            "revoked connect must not report an active or duplicate failure transition"
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(messages.as_slice(), [ClientMessage::Hello { .. }]));
+    }
+
+    #[test]
+    fn reloading_changed_host_while_control_request_is_on_the_wire_detaches() {
+        let old_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "old-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let new_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "new-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (write_started_tx, write_started_rx) = std::sync::mpsc::channel();
+        let (write_release_tx, write_release_rx) = std::sync::mpsc::channel();
+        let runner = Arc::new(FakeRunner {
+            stream: Mutex::new(Some(FakeStream {
+                input: Cursor::new(welcome_bytes()),
+                output: Arc::clone(&output),
+                fail_at: None,
+                panic_at: None,
+                read_gate: None,
+                write_error: None,
+                write_gate: None,
+                diagnostic: None,
+                // Hello is writes 0-1; the ControlTerminal payload is write 3.
+                handshake_write_gate: Some(HandshakeWriteGate {
+                    stalled_write: 3,
+                    next_write: 0,
+                    started_tx: write_started_tx,
+                    release_rx: write_release_rx,
+                }),
+            })),
+            connect_error: None,
+            connected_targets: None,
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&old_fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "old-target",
+            "old-remote",
+        ));
+        let (channels, _outbound_tx) = test_channels();
+        let operation_state = Arc::clone(&channels.operation_state);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        write_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("control request write starts");
+        assert_eq!(transport.reload_fleet(&new_fleet), vec!["operation"]);
+        assert!(operation_state.is_terminal());
+        write_release_tx.send(()).expect("release write");
+
+        assert!(
+            event_rx.blocking_recv().is_none(),
+            "revoked request must not report an active or duplicate failure transition"
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    ClientMessage::Hello { .. },
+                    ClientMessage::ControlTerminal { .. },
+                    ClientMessage::Detach
+                ]
+            ),
+            "a lease granted to the revoked request must be released: {messages:?}"
         );
     }
 
@@ -2230,6 +3187,7 @@ mod tests {
             write_error: None,
             write_gate: None,
             diagnostic: None,
+            handshake_write_gate: None,
         };
         let started = Instant::now();
         let result = read_initial_welcome(&mut stream, started + Duration::from_millis(20));

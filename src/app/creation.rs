@@ -316,6 +316,12 @@ impl App {
     /// Without one it opens the whole remote session, which is what the Hosts
     /// surface asks for.
     pub(crate) fn open_fleet_host_focused(&mut self, name: &str, focus_agent: Option<&str>) {
+        let Some(configured_host) = self.fleet_poller_config.host(name) else {
+            self.show_fleet_launch_error(
+                "host is no longer in the fleet configuration".to_string(),
+            );
+            return;
+        };
         let Some(host) = self
             .state
             .fleet_snapshot
@@ -327,6 +333,12 @@ impl App {
             self.show_fleet_launch_error("host is no longer in the fleet inventory".to_string());
             return;
         };
+        if !host.matches_config(&configured_host) {
+            self.show_fleet_launch_error(
+                "host configuration changed; wait for a fresh fleet poll".to_string(),
+            );
+            return;
+        }
         if host.state == crate::fleet::HostState::Unreachable {
             self.show_fleet_launch_error(
                 host.error
@@ -336,8 +348,8 @@ impl App {
             return;
         }
         let argv = match focus_agent {
-            Some(agent) => crate::fleet::agent_attach_argv(&host, agent),
-            None => crate::fleet::host_attach_argv(&host),
+            Some(agent) => crate::fleet::agent_attach_argv_from_config(&configured_host, agent),
+            None => crate::fleet::host_attach_argv_from_config(&configured_host),
         };
         let argv = match argv {
             Ok(argv) => argv,
@@ -956,13 +968,13 @@ mod tests {
     #[test]
     fn unreachable_fleet_host_surfaces_error_without_spawning() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "ub2".into(),
+            target: "ub2".into(),
+            ..Default::default()
+        }];
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
         app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
             name: "ub2".to_string(),
             target: "ub2".to_string(),
@@ -973,6 +985,7 @@ mod tests {
             version: None,
             protocol: None,
             error: Some("ssh: connection refused".to_string()),
+            remote_identity: None,
             entries: Vec::new(),
         }];
 
@@ -982,6 +995,185 @@ mod tests {
         let toast = app.state.toast.expect("launch failure toast");
         assert_eq!(toast.title, "host launch failed");
         assert_eq!(toast.context, "ssh: connection refused");
+    }
+
+    #[test]
+    fn retargeted_fleet_host_is_not_attachable_before_a_fresh_poll() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["office".into()],
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "office".into(),
+                target: "machine-a".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: Vec::new(),
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts[0].target = "machine-b".into();
+        app.apply_live_config(&reloaded, &[], &[], false);
+        app.open_fleet_host("office");
+
+        assert!(app.state.workspaces.is_empty());
+        let toast = app.state.toast.expect("launch failure toast");
+        assert_eq!(toast.title, "host launch failed");
+        assert!(toast.context.contains("fleet inventory"));
+    }
+
+    #[test]
+    fn current_generation_row_with_old_connection_is_not_used_for_attach() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts[0].target = "machine-b".into();
+        app.apply_live_config(&reloaded, &[], &[], false);
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+
+        app.open_fleet_host("office");
+
+        assert!(app.state.workspaces.is_empty());
+        let toast = app.state.toast.expect("launch failure toast");
+        assert_eq!(
+            toast.context,
+            "host configuration changed; wait for a fresh fleet poll"
+        );
+    }
+
+    fn app_with_fleet_attach_tuple(
+        configured_socket: Option<&str>,
+        configured_session: Option<&str>,
+        observed_socket: Option<&str>,
+        observed_session: Option<&str>,
+    ) -> App {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "current-target".into(),
+            socket: configured_socket.map(str::to_string),
+            session: configured_session.map(str::to_string),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![Workspace::test_new("existing-space")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "office".into(),
+            target: "current-target".into(),
+            local: false,
+            socket: observed_socket.map(str::to_string),
+            session: observed_session.map(str::to_string),
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+        app
+    }
+
+    #[test]
+    // A8: a matching snapshot tuple attaches with argv built from current config.
+    fn matching_fleet_tuple_attaches_with_current_config_argv() {
+        let mut app = app_with_fleet_attach_tuple(
+            Some("/tmp/current.sock"),
+            Some("current-session"),
+            Some("/tmp/current.sock"),
+            Some("current-session"),
+        );
+        // Mark the existing pane as already attached with the argv current
+        // config produces. Attach reuses a pane only on an exact argv match,
+        // so reuse proves the tuple gate passed and the argv came from config
+        // without spawning a real ssh process.
+        let expected_argv = vec![
+            "herdr".to_string(),
+            "--remote".to_string(),
+            "current-target".to_string(),
+            "--session".to_string(),
+            "current-session".to_string(),
+        ];
+        let tab = &app.state.workspaces[0].tabs[0];
+        let terminal_id = tab
+            .terminal_id(tab.root_pane)
+            .expect("existing pane has a terminal")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("existing terminal")
+            .launch_argv = Some(expected_argv);
+
+        app.open_fleet_host("office");
+
+        assert!(app.state.toast.is_none(), "{:?}", app.state.toast);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    // A8: socket-only and session-only snapshot tuple drift both refuse attach.
+    fn socket_or_session_tuple_disagreement_refuses_attach() {
+        for mut app in [
+            app_with_fleet_attach_tuple(
+                Some("/tmp/current.sock"),
+                Some("current-session"),
+                Some("/tmp/stale.sock"),
+                Some("current-session"),
+            ),
+            app_with_fleet_attach_tuple(
+                Some("/tmp/current.sock"),
+                Some("current-session"),
+                Some("/tmp/current.sock"),
+                Some("stale-session"),
+            ),
+        ] {
+            app.open_fleet_host("office");
+
+            assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+            let toast = app.state.toast.expect("tuple drift should refuse attach");
+            assert_eq!(toast.title, "host launch failed");
+            assert_eq!(
+                toast.context,
+                "host configuration changed; wait for a fresh fleet poll"
+            );
+        }
     }
 
     fn fixed_home_dispatch_plan(

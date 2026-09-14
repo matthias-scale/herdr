@@ -239,6 +239,12 @@ pub(crate) struct HostSnapshot {
     pub(crate) protocol: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// The host identity reported by the remote server's agent inventory.
+    /// This is deliberately not part of the public fleet response: rows keep
+    /// the configured alias, while remote focus uses this fact only on the
+    /// wire after checking that the connection tuple still matches.
+    #[serde(skip)]
+    pub(crate) remote_identity: Option<String>,
     pub(crate) entries: Vec<FleetRow>,
 }
 
@@ -249,6 +255,11 @@ pub(crate) struct Snapshot {
     pub(crate) refreshed_at: Option<SystemTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) refreshed_at_unix_ms: Option<u64>,
+    /// Configuration generation used when this poll began. It is not part of
+    /// the public fleet response; consumers use it to reject observations
+    /// that raced a configuration reload.
+    #[serde(skip)]
+    pub(crate) config_generation: u64,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
 }
@@ -261,6 +272,38 @@ impl Snapshot {
         }
     }
 
+    pub(crate) fn reconcile_after_config_reload(
+        &self,
+        fleet: &FleetConfig,
+        config_generation: u64,
+    ) -> Self {
+        let previous_hosts = self
+            .hosts
+            .iter()
+            .map(|host| (host.name.as_str(), host))
+            .collect::<HashMap<_, _>>();
+        let hosts = fleet
+            .hosts
+            .iter()
+            .filter_map(|configured| {
+                previous_hosts
+                    .get(configured.name.as_str())
+                    .copied()
+                    .filter(|observed| observed.matches_config(configured))
+                    .cloned()
+            })
+            .collect();
+
+        Self {
+            polled: self.polled,
+            refreshed_at: self.refreshed_at,
+            refreshed_at_unix_ms: self.refreshed_at_unix_ms,
+            config_generation,
+            configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
+            hosts,
+        }
+    }
+
     pub(crate) fn into_rows(self) -> Vec<FleetRow> {
         self.hosts
             .into_iter()
@@ -269,7 +312,26 @@ impl Snapshot {
     }
 }
 
+impl HostSnapshot {
+    pub(crate) fn matches_config(&self, configured: &FleetHostConfig) -> bool {
+        self.local == configured.local
+            && self.target == configured.target
+            && self.socket == configured.socket
+            && self.session == configured.session
+    }
+}
+
 pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
+    poll_without_generation(fleet)
+}
+
+fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot {
+    let mut snapshot = poll(fleet);
+    snapshot.config_generation = config_generation;
+    snapshot
+}
+
+fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
     if fleet.hosts.is_empty() {
         return snapshot_from_evidence(&[], fleet, Vec::new(), SystemTime::now());
     }
@@ -284,6 +346,7 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
                     .duration_since(UNIX_EPOCH)
                     .ok()
                     .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+                config_generation: 0,
                 configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
                 hosts: fleet
                     .hosts
@@ -298,6 +361,7 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
                         version: None,
                         protocol: None,
                         error: Some(error.clone()),
+                        remote_identity: None,
                         entries: Vec::new(),
                     })
                     .collect(),
@@ -331,18 +395,31 @@ pub(crate) fn attached_host_name<'a>(snapshot: &'a Snapshot, argv: &[String]) ->
 }
 
 pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, String> {
-    if host.local {
-        return Err(format!("{} is the local host", host.name));
+    host_attach_argv_parts(&host.name, host.local, &host.target, host.session.as_ref())
+}
+
+pub(crate) fn host_attach_argv_from_config(host: &FleetHostConfig) -> Result<Vec<String>, String> {
+    host_attach_argv_parts(&host.name, host.local, &host.target, host.session.as_ref())
+}
+
+fn host_attach_argv_parts(
+    name: &str,
+    local: bool,
+    target: &str,
+    session: Option<&String>,
+) -> Result<Vec<String>, String> {
+    if local {
+        return Err(format!("{name} is the local host"));
     }
-    if host.target.trim().is_empty() {
-        return Err(format!("{} has no SSH target", host.name));
+    if target.trim().is_empty() {
+        return Err(format!("{name} has no SSH target"));
     }
     let mut argv = vec![
         "herdr".to_string(),
         "--remote".to_string(),
-        host.target.clone(),
+        target.to_string(),
     ];
-    if let Some(session) = host.session.as_ref().filter(|session| !session.is_empty()) {
+    if let Some(session) = session.filter(|session| !session.is_empty()) {
         argv.extend(["--session".to_string(), session.clone()]);
     }
     Ok(argv)
@@ -354,21 +431,54 @@ pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, Strin
 /// offers to sync binaries with the remote host, which would stop a server that
 /// is running live agents. Attaching a single agent instead streams that one
 /// remote terminal and touches nothing else on the host.
+#[cfg(test)]
 pub(crate) fn agent_attach_argv(host: &HostSnapshot, agent: &str) -> Result<Vec<String>, String> {
-    if host.local {
-        return Err(format!("{} is the local host", host.name));
+    agent_attach_argv_parts(
+        &host.name,
+        host.local,
+        &host.target,
+        host.socket.as_deref(),
+        host.session.as_deref(),
+        agent,
+    )
+}
+
+pub(crate) fn agent_attach_argv_from_config(
+    host: &FleetHostConfig,
+    agent: &str,
+) -> Result<Vec<String>, String> {
+    agent_attach_argv_parts(
+        &host.name,
+        host.local,
+        &host.target,
+        host.socket.as_deref(),
+        host.session.as_deref(),
+        agent,
+    )
+}
+
+fn agent_attach_argv_parts(
+    name: &str,
+    local: bool,
+    target: &str,
+    socket: Option<&str>,
+    session: Option<&str>,
+    agent: &str,
+) -> Result<Vec<String>, String> {
+    if local {
+        return Err(format!("{name} is the local host"));
     }
-    if host.target.trim().is_empty() {
-        return Err(format!("{} has no SSH target", host.name));
+    if target.trim().is_empty() {
+        return Err(format!("{name} has no SSH target"));
     }
     if agent.trim().is_empty() {
-        return Err(format!("{} has no agent target", host.name));
+        return Err(format!("{name} has no agent target"));
     }
     Ok(vec![
         "ssh".to_string(),
         "-t".to_string(),
-        host.target.clone(),
-        remote_attach_command(host.socket.as_deref(), host.session.as_deref(), agent),
+        target.to_string(),
+        remote_attach_command(socket, session, agent),
     ])
 }
 
@@ -382,15 +492,92 @@ fn remote_attach_command(socket: Option<&str>, session: Option<&str>, agent: &st
     format!("{socket}{session}herdr agent attach {}", shell_quote(agent))
 }
 
+#[derive(Debug, Clone)]
+struct FleetPollerState {
+    fleet: FleetConfig,
+    generation: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct FleetPollerConfig {
+    state: std::sync::Mutex<FleetPollerState>,
+    changed: std::sync::Condvar,
+}
+
+pub(crate) type FleetPollerHandle = Arc<FleetPollerConfig>;
+
+impl FleetPollerConfig {
+    fn new(fleet: FleetConfig) -> Self {
+        Self {
+            state: std::sync::Mutex::new(FleetPollerState {
+                fleet,
+                generation: 0,
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    pub(crate) fn replace(&self, fleet: FleetConfig) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.fleet = fleet;
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        self.changed.notify_all();
+        generation
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
+    pub(crate) fn host(&self, name: &str) -> Option<FleetHostConfig> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .fleet
+            .hosts
+            .iter()
+            .find(|host| host.name == name)
+            .cloned()
+    }
+
+    fn snapshot(&self) -> FleetPollerState {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn wait_for_change(&self, generation: u64, timeout: Duration) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _state = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| state.generation == generation)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+}
+
 pub(crate) fn start_poller(
     fleet: FleetConfig,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-) {
+) -> FleetPollerHandle {
+    let poller_config = Arc::new(FleetPollerConfig::new(fleet));
     if cfg!(test) {
-        return;
+        return poller_config;
     }
+    let poller_config_for_thread = Arc::clone(&poller_config);
     std::thread::spawn(move || loop {
-        let snapshot = poll(&fleet);
+        let state = poller_config_for_thread.snapshot();
+        let snapshot = poll_with_generation(&state.fleet, state.generation);
         match event_tx.try_send(crate::events::AppEvent::FleetRefreshed { snapshot }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
@@ -398,10 +585,12 @@ pub(crate) fn start_poller(
                 tracing::warn!("dropped fleet refresh because the event queue is full");
             }
         }
-        std::thread::sleep(Duration::from_millis(
-            fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS),
-        ));
+        poller_config_for_thread.wait_for_change(
+            state.generation,
+            Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS)),
+        );
     });
+    poller_config
 }
 
 #[derive(Debug)]
@@ -469,6 +658,10 @@ fn snapshot_from_evidence(
     let mut hosts = Vec::with_capacity(evidence.len());
     for evidence in evidence {
         let error = evidence.agents.as_ref().err().cloned();
+        let remote_identity = (!evidence.host.local)
+            .then(|| evidence.agents.as_ref().ok())
+            .flatten()
+            .and_then(|agents| remote_self_name(agents));
         let mut entries = Vec::new();
         match evidence.agents {
             Ok(agents) => {
@@ -524,6 +717,7 @@ fn snapshot_from_evidence(
             version: evidence.runtime.version,
             protocol: evidence.runtime.protocol,
             error,
+            remote_identity,
             entries,
         });
     }
@@ -546,12 +740,31 @@ fn snapshot_from_evidence(
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+        config_generation: 0,
         configured_hosts: configured_hosts
             .iter()
             .map(|host| host.name.clone())
             .collect(),
         hosts,
     }
+}
+
+/// Resolve a remote server's self identity from a complete agent inventory.
+/// Every returned agent must carry the same host identity; an empty, legacy,
+/// or mixed inventory is not safe enough to authorize a later control request.
+fn remote_self_name(agents: &[AgentInfo]) -> Option<String> {
+    let mut names = agents
+        .iter()
+        .map(|agent| {
+            agent
+                .agent_ref
+                .as_ref()
+                .map(|agent_ref| agent_ref.host.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    names.sort_unstable();
+    names.dedup();
+    (names.len() == 1).then(|| names.remove(0))
 }
 
 trait HostReader: Sync {
@@ -1993,6 +2206,52 @@ mod tests {
             crate::api::schema::AgentRef::new("office", "p1")
                 .expect("valid configured agent reference")
         );
+        assert_eq!(snapshot.hosts[0].remote_identity.as_deref(), Some("laptop"));
+    }
+
+    #[test]
+    fn remote_identity_requires_a_complete_unambiguous_inventory() {
+        let hosts = vec![host("office", false)];
+
+        let legacy = collect_snapshot_with(
+            &fake_reader(
+                Ok(vec![agent(AgentStatus::Idle, serde_json::json!([]))]),
+                HostRuntime::default(),
+            ),
+            &hosts,
+            &FleetConfig::default(),
+        );
+        assert!(legacy.hosts[0].remote_identity.is_none());
+
+        let mut first = agent(AgentStatus::Idle, serde_json::json!([]));
+        first.agent_ref = Some(
+            crate::api::schema::AgentRef::new("laptop", "p1").expect("valid first remote identity"),
+        );
+        let mut second = agent(AgentStatus::Working, serde_json::json!([]));
+        second.agent_ref = Some(
+            crate::api::schema::AgentRef::new("other-laptop", "p2")
+                .expect("valid second remote identity"),
+        );
+        let ambiguous = collect_snapshot_with(
+            &fake_reader(Ok(vec![first, second]), HostRuntime::default()),
+            &hosts,
+            &FleetConfig::default(),
+        );
+        assert!(ambiguous.hosts[0].remote_identity.is_none());
+    }
+
+    #[test]
+    // A2: an empty reachable inventory records no remote identity.
+    fn empty_remote_inventory_records_no_identity() {
+        let hosts = vec![host("office", false)];
+        let snapshot = collect_snapshot_with(
+            &fake_reader(Ok(Vec::new()), HostRuntime::default()),
+            &hosts,
+            &FleetConfig::default(),
+        );
+
+        assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
+        assert!(snapshot.hosts[0].remote_identity.is_none());
     }
 
     #[test]
@@ -2045,6 +2304,48 @@ mod tests {
         assert!(!unpolled.polled);
         assert!(polled.polled);
         assert!(polled.hosts.is_empty());
+    }
+
+    #[test]
+    fn replacing_fleet_wakes_a_poller_wait_and_publishes_new_config() {
+        let initial = FleetConfig {
+            refresh_interval_ms: 60_000,
+            ..FleetConfig::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(initial));
+        let initial_state = poller.snapshot();
+        let waiter = Arc::clone(&poller);
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let wait_thread = std::thread::spawn(move || {
+            waiter.wait_for_change(initial_state.generation, Duration::from_secs(60));
+            woke_tx.send(()).expect("woken poller receiver");
+        });
+
+        let replacement = FleetConfig {
+            refresh_interval_ms: 100,
+            hosts: vec![FleetHostConfig {
+                name: "new-host".into(),
+                target: "new-host".into(),
+                ..FleetHostConfig::default()
+            }],
+            ..FleetConfig::default()
+        };
+        poller.replace(replacement.clone());
+
+        woke_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fleet reload wakes the old interval wait");
+        wait_thread.join().expect("poller wait thread");
+        let state = poller.snapshot();
+        assert_eq!(state.generation, 1);
+        assert_eq!(
+            state.fleet.refresh_interval_ms,
+            replacement.refresh_interval_ms
+        );
+        assert_eq!(
+            state.fleet.hosts.first().map(|host| host.name.as_str()),
+            Some("new-host")
+        );
     }
 
     #[test]
@@ -2120,6 +2421,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
 
@@ -2146,6 +2448,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
         let snapshot = Snapshot {
@@ -2201,6 +2504,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
 
@@ -2219,6 +2523,7 @@ mod tests {
             version: None,
             protocol: None,
             error: None,
+            remote_identity: None,
             entries: Vec::new(),
         };
         assert_eq!(

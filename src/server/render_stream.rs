@@ -661,6 +661,7 @@ mod render_scale_benchmark {
                 version: None,
                 protocol: None,
                 error: None,
+                remote_identity: None,
                 entries: (0..remote_count)
                     .map(|index| {
                         crate::fleet::FleetRow::test_run_row(

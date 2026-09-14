@@ -74,6 +74,18 @@ pub(crate) trait RemoteFocusTransport: Send {
         Vec::new()
     }
 
+    /// Observe the last successful fleet inventory without doing I/O. The
+    /// transport may use it to bind a configured host alias to the identity
+    /// reported by that host's server.
+    fn observe_fleet_snapshot(&mut self, _snapshot: &crate::fleet::Snapshot) {}
+
+    /// Report whether a configured remote host has a current, unambiguous
+    /// identity observation. This is checked before creating a proxy pane so
+    /// the API does not report a connecting operation that cannot be started.
+    fn remote_host_ready(&self, _host: &str) -> bool {
+        false
+    }
+
     fn start(
         &mut self,
         operation_id: &str,
@@ -359,6 +371,12 @@ impl RemoteFocusOperations {
             .and_then(|operation| operation.proxy.clone())
     }
 
+    pub(crate) fn agent_ref(&self, operation_id: &str) -> Option<&AgentRef> {
+        self.operations
+            .get(operation_id)
+            .map(|operation| &operation.agent_ref)
+    }
+
     /// Removes the reverse index entry for a shutting-down proxy terminal and
     /// returns its operation.
     pub(crate) fn take_proxy_terminal(&mut self, terminal_id: &TerminalId) -> Option<String> {
@@ -424,11 +442,15 @@ impl RemoteFocusOperations {
 }
 
 /// The compact identity line a proxy pane shows once `ControlReady` arrives:
-/// `host::agent`, remote user, cwd, tty, and foreground process.
-pub(crate) fn remote_proxy_identity_line(context: &RemoteControlContext) -> String {
+/// configured host alias plus `agent`, remote user, cwd, tty, and foreground
+/// process.
+pub(crate) fn remote_proxy_identity_line(
+    configured_host: &str,
+    context: &RemoteControlContext,
+) -> String {
     format!(
         "{}::{} · {} · {} · {} · {}",
-        context.host,
+        configured_host,
         context.pane_id,
         context.user,
         context.cwd,
@@ -852,7 +874,12 @@ impl crate::app::App {
         else {
             return;
         };
-        let identity = remote_proxy_identity_line(context);
+        let configured_host = self
+            .remote_focus_operations
+            .agent_ref(operation_id)
+            .map(|agent_ref| agent_ref.host.as_str())
+            .unwrap_or(context.host.as_str());
+        let identity = remote_proxy_identity_line(configured_host, context);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.manual_label = Some(identity);
             terminal.cwd = std::path::PathBuf::from(&context.cwd);
@@ -1506,6 +1533,39 @@ mod tests {
     }
 
     #[test]
+    fn proxy_identity_line_uses_configured_alias_for_a_remote_context() {
+        let (mut app, _recording) = proxy_app();
+        let requested = AgentRef::new("ub1", "w1:p3").expect("valid agent reference");
+        let started = app
+            .start_remote_focus_operation(requested)
+            .expect("operation starts");
+        let terminal_id = proxy_terminal_id(&app, &started.operation_id);
+        let mut remote_context = context();
+        // The wire transport translates the remote server identity back to the
+        // configured alias before the app consumes this context.
+        remote_context.host = "ub1".into();
+
+        app.apply_remote_focus_transition(
+            &started.operation_id,
+            RemoteFocusTransition::Active(Box::new(remote_context.clone())),
+        );
+        app.apply_remote_focus_frame(&started.operation_id, &full_frame(b"ready"));
+
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .and_then(|terminal| terminal.manual_label.as_deref()),
+            Some("ub1::w1:p3 · operator · /work/repo · /dev/pts/4 · agent")
+        );
+        let status = app
+            .remote_focus_status(&started.operation_id)
+            .expect("operation status");
+        assert_eq!(status.agent_ref.host, "ub1");
+        assert_eq!(status.context, Some(remote_context));
+    }
+
+    #[test]
     fn failure_closes_the_proxy_pane_and_releases_the_lease() {
         let (mut app, recording) = proxy_app();
         let started = app
@@ -1594,6 +1654,7 @@ mod tests {
                 version: None,
                 protocol: None,
                 error: None,
+                remote_identity: None,
                 entries: vec![crate::fleet::FleetRow::test_run_row(
                     "buildbox", "w1:p3", false,
                 )],

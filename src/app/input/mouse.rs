@@ -3750,6 +3750,14 @@ mod tests {
     #[test]
     fn releasing_a_fleet_row_attaches_to_its_host_once() {
         let mut app = app_for_mouse_test();
+        app.fleet_poller_config.replace(crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub2".into(),
+                target: "ub2".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
@@ -4173,6 +4181,14 @@ mod tests {
     #[test]
     fn attaching_to_a_host_twice_returns_to_the_pane_already_open() {
         let mut app = app_for_mouse_test();
+        app.fleet_poller_config.replace(crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
@@ -4189,6 +4205,7 @@ mod tests {
                 version: None,
                 protocol: None,
                 error: None,
+                remote_identity: None,
                 entries: Vec::new(),
             }],
             ..crate::fleet::Snapshot::default()

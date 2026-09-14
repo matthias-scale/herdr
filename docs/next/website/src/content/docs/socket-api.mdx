@@ -135,9 +135,11 @@ host component.
 `agent.focus` keeps the existing `target` form for local focus and also accepts
 an `agent_ref`. A self-host reference follows the synchronous local path. A
 configured remote host returns an operation in `connecting` state; poll it with
-`agent.focus.status` using the returned `operation_id`. Remote transport is not
-available until the remote-control protocol slice lands, so the current stub
-settles those operations as `failed` with `host_unreachable`.
+`agent.focus.status` using the returned `operation_id`. Remote focus uses the
+configured host name in the API and UI, even when the remote server reports a
+different name for itself. Focus is unavailable with `host_unreachable` until a
+successful fleet poll has learned one unambiguous identity for that configured
+host; the poll itself remains read-only and does not wait for focus.
 
 ```json
 {"id":"fleet","method":"fleet.list","params":{}}
