@@ -323,6 +323,7 @@ pub(crate) struct SshRemoteFocusTransport {
     writer_start_gate: Option<Arc<std::sync::Barrier>>,
     hosts: std::collections::HashMap<String, crate::config::FleetHostConfig>,
     remote_identities: std::collections::HashMap<String, RemoteHostIdentity>,
+    config_generation: u64,
 }
 
 impl SshRemoteFocusTransport {
@@ -337,6 +338,7 @@ impl SshRemoteFocusTransport {
             writer_start_gate: None,
             hosts,
             remote_identities: std::collections::HashMap::new(),
+            config_generation: 0,
         }
     }
 
@@ -396,6 +398,7 @@ impl SshRemoteFocusTransport {
         // poll is rejected by observe_fleet_snapshot because its connection
         // tuple no longer matches the current host configuration.
         self.remote_identities.clear();
+        self.config_generation = self.config_generation.saturating_add(1);
         revoked
             .into_iter()
             .map(|(operation_id, _)| operation_id)
@@ -615,11 +618,15 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         {
             self.hosts = Self::admitted_hosts(fleet);
             self.remote_identities.clear();
+            self.config_generation = self.config_generation.saturating_add(1);
             Vec::new()
         }
     }
 
     fn observe_fleet_snapshot(&mut self, snapshot: &crate::fleet::Snapshot) {
+        if snapshot.config_generation != self.config_generation {
+            return;
+        }
         for (name, configured) in &self.hosts {
             let mut observations = snapshot
                 .hosts
@@ -2269,6 +2276,38 @@ mod tests {
     }
 
     #[test]
+    fn stale_same_tuple_observation_cannot_restore_identity_after_reload() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "old-remote",
+        ));
+        assert!(transport.remote_host_ready("ub1"));
+
+        transport.reload_fleet(&fleet);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "old-remote",
+        ));
+        assert!(!transport.remote_host_ready("ub1"));
+
+        let mut current_snapshot = remote_identity_snapshot("ub1", "operator@ub1", "new-remote");
+        current_snapshot.config_generation = 1;
+        transport.observe_fleet_snapshot(&current_snapshot);
+        assert!(transport.remote_host_ready("ub1"));
+    }
+
+    #[test]
     fn unknown_remote_identity_fails_before_connecting_or_writing_control() {
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
@@ -2369,11 +2408,9 @@ mod tests {
         assert!(connected_targets.lock().expect("targets lock").is_empty());
         assert!(output.lock().expect("fake output lock").is_empty());
 
-        transport.observe_fleet_snapshot(&remote_identity_snapshot(
-            "buildbox",
-            "new-target",
-            "new-remote",
-        ));
+        let mut current_snapshot = remote_identity_snapshot("buildbox", "new-target", "new-remote");
+        current_snapshot.config_generation = 1;
+        transport.observe_fleet_snapshot(&current_snapshot);
         let (channels, _outbound_tx) = test_channels();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
         transport

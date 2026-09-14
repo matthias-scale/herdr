@@ -101,6 +101,7 @@ mod tests {
             polled: true,
             refreshed_at: None,
             refreshed_at_unix_ms: Some(42),
+            config_generation: 0,
             configured_hosts: vec!["ub2".to_string()],
             hosts: vec![crate::fleet::HostSnapshot {
                 name: "ub2".to_string(),
@@ -151,6 +152,7 @@ mod tests {
             polled: true,
             refreshed_at: None,
             refreshed_at_unix_ms: Some(42),
+            config_generation: 0,
             configured_hosts: vec!["ub1".to_string(), "ub2".to_string()],
             hosts: ["ub1", "ub2"]
                 .into_iter()

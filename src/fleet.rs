@@ -255,6 +255,11 @@ pub(crate) struct Snapshot {
     pub(crate) refreshed_at: Option<SystemTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) refreshed_at_unix_ms: Option<u64>,
+    /// Configuration generation used when this poll began. It is not part of
+    /// the public fleet response; consumers use it to reject observations
+    /// that raced a configuration reload.
+    #[serde(skip)]
+    pub(crate) config_generation: u64,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
 }
@@ -276,6 +281,16 @@ impl Snapshot {
 }
 
 pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
+    poll_without_generation(fleet)
+}
+
+fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot {
+    let mut snapshot = poll(fleet);
+    snapshot.config_generation = config_generation;
+    snapshot
+}
+
+fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
     if fleet.hosts.is_empty() {
         return snapshot_from_evidence(&[], fleet, Vec::new(), SystemTime::now());
     }
@@ -290,6 +305,7 @@ pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
                     .duration_since(UNIX_EPOCH)
                     .ok()
                     .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+                config_generation: 0,
                 configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
                 hosts: fleet
                     .hosts
@@ -365,23 +381,58 @@ fn remote_attach_command(socket: Option<&str>, session: Option<&str>, agent: &st
     format!("{socket}{session}herdr agent attach {}", shell_quote(agent))
 }
 
-pub(crate) type FleetPollerConfig = Arc<std::sync::Mutex<FleetConfig>>;
+#[derive(Debug, Clone)]
+struct FleetPollerState {
+    fleet: FleetConfig,
+    generation: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct FleetPollerConfig {
+    state: std::sync::Mutex<FleetPollerState>,
+}
+
+pub(crate) type FleetPollerHandle = Arc<FleetPollerConfig>;
+
+impl FleetPollerConfig {
+    fn new(fleet: FleetConfig) -> Self {
+        Self {
+            state: std::sync::Mutex::new(FleetPollerState {
+                fleet,
+                generation: 0,
+            }),
+        }
+    }
+
+    pub(crate) fn replace(&self, fleet: FleetConfig) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.fleet = fleet;
+        state.generation = state.generation.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> FleetPollerState {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
 
 pub(crate) fn start_poller(
     fleet: FleetConfig,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-) -> FleetPollerConfig {
-    let poller_config = Arc::new(std::sync::Mutex::new(fleet));
+) -> FleetPollerHandle {
+    let poller_config = Arc::new(FleetPollerConfig::new(fleet));
     if cfg!(test) {
         return poller_config;
     }
     let poller_config_for_thread = Arc::clone(&poller_config);
     std::thread::spawn(move || loop {
-        let fleet = poller_config_for_thread
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let snapshot = poll(&fleet);
+        let state = poller_config_for_thread.snapshot();
+        let snapshot = poll_with_generation(&state.fleet, state.generation);
         match event_tx.try_send(crate::events::AppEvent::FleetRefreshed { snapshot }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
@@ -390,7 +441,7 @@ pub(crate) fn start_poller(
             }
         }
         std::thread::sleep(Duration::from_millis(
-            fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS),
+            state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS),
         ));
     });
     poller_config
@@ -543,6 +594,7 @@ fn snapshot_from_evidence(
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+        config_generation: 0,
         configured_hosts: configured_hosts
             .iter()
             .map(|host| host.name.clone())
