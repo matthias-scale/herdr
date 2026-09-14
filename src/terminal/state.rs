@@ -91,12 +91,12 @@ pub(crate) enum AttentionTier {
 pub(crate) fn attention_tier(
     state: AgentState,
     has_closing_gates: bool,
-    has_closing_items: bool,
+    has_blocking_closing_items: bool,
     usage_limited: bool,
 ) -> AttentionTier {
     if usage_limited || has_closing_gates {
         AttentionTier::Blocked
-    } else if has_closing_items && state != AgentState::Working {
+    } else if has_blocking_closing_items && state != AgentState::Working {
         AttentionTier::Attention
     } else if state == AgentState::Blocked {
         AttentionTier::Blocked
@@ -542,10 +542,6 @@ pub struct TerminalState {
     pub(super) recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
-    /// This terminal is the local surface of a remote focus proxy pane. It
-    /// has no local process, is excluded from session persistence and live
-    /// handoff, and its screen is fed by the wire transport.
-    pub(crate) remote_proxy: bool,
 }
 
 fn normalize_declared_wait(
@@ -625,7 +621,6 @@ impl TerminalState {
             recent_agent_process_exit: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
-            remote_proxy: false,
         }
     }
 
@@ -690,6 +685,10 @@ impl TerminalState {
         self.closing_decisions = decisions;
         self.revision = self.revision.saturating_add(1);
         true
+    }
+
+    pub(crate) fn has_blocking_closing_items(&self) -> bool {
+        self.closing_items.iter().any(|item| item.blocking)
     }
 
     pub(crate) fn apply_closing_contract_tokens(
@@ -4279,6 +4278,7 @@ mod tests {
         let mut source = test_terminal();
         source.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Choose the release path".into(),

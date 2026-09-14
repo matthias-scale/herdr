@@ -1430,6 +1430,32 @@ impl HeadlessServer {
     }
 
     #[cfg(unix)]
+    fn collect_handoff_panes(
+        &self,
+    ) -> HashMap<crate::terminal::TerminalId, (u32, bool, Option<std::time::Instant>)> {
+        let mut panes = HashMap::new();
+        for workspace in &self.app.state.workspaces {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    if self
+                        .app
+                        .terminal_runtimes
+                        .get(&pane.attached_terminal_id)
+                        .is_some_and(|runtime| runtime.is_remote_proxy())
+                    {
+                        continue;
+                    }
+                    panes.insert(
+                        pane.attached_terminal_id.clone(),
+                        (pane_id.raw(), pane.seen, pane.done_since),
+                    );
+                }
+            }
+        }
+        panes
+    }
+
+    #[cfg(unix)]
     fn perform_live_handoff(
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
@@ -1453,17 +1479,7 @@ impl HeadlessServer {
             }
         };
 
-        let mut pane_by_terminal = HashMap::new();
-        for ws in &self.app.state.workspaces {
-            for tab in &ws.tabs {
-                for (pane_id, pane) in &tab.panes {
-                    pane_by_terminal.insert(
-                        pane.attached_terminal_id.clone(),
-                        (pane_id.raw(), pane.seen, pane.done_since),
-                    );
-                }
-            }
-        }
+        let pane_by_terminal = self.collect_handoff_panes();
         let editor_terminals = self.app.dock_editor_handoff_terminals();
         if pane_by_terminal.len() + editor_terminals.len()
             > crate::server::handoff::MAX_FDS_PER_HANDOFF
@@ -1512,13 +1528,6 @@ impl HeadlessServer {
         let mut handoff_entries = Vec::new();
         let handoff_captured_at = Instant::now();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
-            if runtime.is_remote_proxy() {
-                // A proxy pane has no local PTY to hand over. Its wire
-                // transport dies with this server, the remote lease ends with
-                // it, and the pane is excluded from the session snapshot the
-                // new server restores.
-                continue;
-            }
             let Some((pane_id, pane_seen, pane_done_since)) =
                 pane_by_terminal.get(terminal_id).copied()
             else {
@@ -1713,10 +1722,9 @@ impl HeadlessServer {
     fn teardown_remote_focus_proxies(&mut self) {
         let proxy_terminal_ids = self
             .app
-            .state
-            .terminals
+            .terminal_runtimes
             .iter()
-            .filter(|(_, terminal)| terminal.remote_proxy)
+            .filter(|(_, runtime)| runtime.is_remote_proxy())
             .map(|(terminal_id, _)| terminal_id.clone())
             .collect::<Vec<_>>();
         if proxy_terminal_ids.is_empty() {
@@ -2390,61 +2398,6 @@ impl HeadlessServer {
         }
     }
 
-    /// Keep attached proxy identity lines synchronized with the server-owned
-    /// context. The lease's original context remains the safety baseline for
-    /// writes; a changed target is still rejected before input is delivered.
-    #[cfg(unix)]
-    fn refresh_remote_control_contexts(&mut self) {
-        let attached = self
-            .clients
-            .iter()
-            .filter_map(|(&client_id, client)| {
-                let ClientConnectionMode::TerminalAttach {
-                    control: Some(control),
-                    ..
-                } = &client.mode
-                else {
-                    return None;
-                };
-                Some((
-                    client_id,
-                    control.agent_ref.clone(),
-                    control.advertised_context.clone(),
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        for (client_id, agent_ref, advertised) in attached {
-            let current = match self.app.remote_control_context(&agent_ref) {
-                Ok(context) => context,
-                Err(error) => {
-                    self.reject_remote_control(client_id, error);
-                    continue;
-                }
-            };
-            if current == advertised {
-                continue;
-            }
-            if !self.send_to_client(
-                client_id,
-                ServerMessage::ControlContext {
-                    context: Box::new(current.clone()),
-                },
-            ) {
-                continue;
-            }
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                if let ClientConnectionMode::TerminalAttach {
-                    control: Some(control),
-                    ..
-                } = &mut client.mode
-                {
-                    control.advertised_context = current;
-                }
-            }
-        }
-    }
-
     #[cfg(all(test, unix))]
     fn forward_control_bytes_with_provider_for_test(
         &mut self,
@@ -2796,7 +2749,6 @@ impl HeadlessServer {
         }
         let lease = crate::server::remote_control::RemoteControlLease {
             agent_ref,
-            advertised_context: current.clone(),
             context: current.clone(),
         };
         let lease_for_attach = lease.clone();
@@ -6350,8 +6302,6 @@ impl HeadlessServer {
         }
         changed |= self.app.handle_loop_receipt_fallback(now);
         changed |= self.app.tick_notepad(now);
-        #[cfg(unix)]
-        self.refresh_remote_control_contexts();
         if has_app_client {
             let host_focused = self.app_clients_host_focused();
             changed |= self.app.tick_pomodoro(now, host_focused);
@@ -9417,6 +9367,80 @@ next_tab = ""
             .expect("controlled runtime")
             .acquire_remote_owner(client_id));
         (terminal_id_string, control_rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxy_panes_do_not_consume_live_handoff_fd_budget() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("handoff-proxy");
+        let local_terminal = workspace
+            .terminal_id(workspace.tabs[0].root_pane)
+            .expect("local terminal")
+            .clone();
+        let proxy_pane = crate::layout::PaneId::alloc();
+        let proxy_terminal = crate::terminal::TerminalId::alloc();
+        let (proxy_runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            proxy_pane,
+            24,
+            80,
+            0,
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(crate::render_signal::RenderSignal::default()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        let events = workspace.tabs[0].events.clone();
+        workspace.create_tab_from_existing_pane(
+            crate::workspace::MovedPane {
+                pane_id: proxy_pane,
+                pane_state: crate::pane::PaneState::new(proxy_terminal.clone()),
+            },
+            Some("remote-proxy".to_owned()),
+            events,
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(crate::render_signal::RenderSignal::default()),
+        );
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .terminal_runtimes
+            .insert(proxy_terminal.clone(), proxy_runtime);
+
+        let panes = server.collect_handoff_panes();
+        assert!(panes.contains_key(&local_terminal));
+        assert!(!panes.contains_key(&proxy_terminal));
+
+        server
+            .app
+            .terminal_runtimes
+            .remove(&proxy_terminal)
+            .expect("proxy runtime")
+            .shutdown();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_tasks_do_not_recompute_attached_control_context() {
+        let mut server = test_headless_server();
+        let (terminal_id, _control_rx, _input_rx) = install_controlled_test_client(&mut server, 7);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("controlled terminal");
+        server
+            .app
+            .terminal_runtimes
+            .remove(&real_terminal_id)
+            .expect("controlled runtime")
+            .shutdown();
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(
+            server.clients.contains_key(&7),
+            "scheduled work must not tear down a live control lease through a context mirror"
+        );
     }
 
     #[cfg(target_os = "linux")]

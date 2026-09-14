@@ -2130,6 +2130,7 @@ mod tests {
     fn agent_attention_projection_excludes_questions_and_settled_panes_from_blocked() {
         let mut answer = agent(AgentStatus::Blocked, serde_json::json!([]));
         answer.items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose a lane".into(),
@@ -2143,6 +2144,23 @@ mod tests {
             FleetRow::from_agent("ub1", false, answer, 1_777_000_000).expect("valid attention row");
         assert!(!answer_row.blocked);
         assert_eq!(answer_row.state, "attention");
+
+        let mut optional = agent(AgentStatus::Idle, serde_json::json!([]));
+        optional.items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Verify".into(),
+            text: "Optional check".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let optional_row = FleetRow::from_agent("ub1", false, optional, 1_777_000_000)
+            .expect("valid nonblocking row");
+        assert!(!optional_row.blocked);
+        assert_eq!(optional_row.state, "idle");
 
         let mut settled = agent(
             AgentStatus::Blocked,

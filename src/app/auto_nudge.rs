@@ -551,7 +551,7 @@ impl App {
                         nudge_after: self.state.nudge_after,
                         blocked: terminal.raw_agent_state() == crate::detect::AgentState::Blocked,
                         has_closing_block_items: !terminal.closing_gates.is_empty()
-                            || !terminal.closing_items.is_empty(),
+                            || terminal.has_blocking_closing_items(),
                         human_draft: self
                             .state
                             .pending_human_drafts
@@ -945,6 +945,49 @@ mod tests {
             out.push_str(&String::from_utf8_lossy(&bytes));
         }
         out
+    }
+
+    #[tokio::test]
+    async fn nonblocking_closing_items_do_not_suppress_auto_nudge() {
+        let now = Instant::now();
+        let (mut optional, _pane_id, terminal_id, mut optional_rx) = app_with_stalled_pane(now);
+        optional
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Verify".into(),
+            text: "Optional check".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert!(optional.tick_auto_nudges(now));
+        assert!(drain(&mut optional_rx).contains("Re-verify"));
+
+        let (mut owed, _pane_id, terminal_id, mut owed_rx) = app_with_stalled_pane(now);
+        owed.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Verify".into(),
+            text: "Required check".into(),
+            blocking: true,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert!(!owed.tick_auto_nudges(now));
+        assert!(drain(&mut owed_rx).is_empty());
     }
 
     #[tokio::test]

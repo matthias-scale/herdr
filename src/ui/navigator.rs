@@ -715,6 +715,7 @@ mod tests {
         terminal
             .closing_gates
             .push(crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Gate".into(),
                 text: "Approve the open Herdr PR".into(),

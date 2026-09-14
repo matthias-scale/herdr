@@ -1177,6 +1177,34 @@ mod tests {
     }
 
     #[test]
+    fn nonblocking_items_do_not_hold_quiet_settle() {
+        let now = Instant::now();
+        let quiet_since = now - Duration::from_secs(31 * 60);
+        let (mut state, pane_id) = done_state(true, quiet_since);
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Optional preference".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_031), 1);
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
     fn quiet_seen_pane_settles_after_focus_moves_elsewhere() {
         let (mut state, pane_id) = state_with_context(Default::default());
         let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
@@ -1444,6 +1472,7 @@ mod tests {
             .get_mut(&gated_terminal_id)
             .expect("gated terminal")
             .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Gate".into(),
             text: "Choose the release path".into(),
@@ -1454,6 +1483,30 @@ mod tests {
             default_at: None,
         }];
         assert_eq!(gated.refresh_settled_panes_at(None, now, 1_725_000_040), 0);
+
+        let (mut answered, answered_pane) = done_state(true, quiet_since);
+        let answered_terminal_id = answered.workspaces[0].tabs[0].panes[&answered_pane]
+            .attached_terminal_id
+            .clone();
+        answered
+            .terminals
+            .get_mut(&answered_terminal_id)
+            .expect("answered terminal")
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose the release path".into(),
+            blocking: true,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert_eq!(
+            answered.refresh_settled_panes_at(None, now, 1_725_000_041),
+            0
+        );
     }
 
     #[test]

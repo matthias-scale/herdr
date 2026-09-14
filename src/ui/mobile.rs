@@ -1483,6 +1483,7 @@ mod tests {
         terminal_state.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Answer".into(),
                 text: "Choose one".into(),
@@ -1608,6 +1609,7 @@ mod tests {
         terminal.detected_agent = Some(crate::detect::Agent::Claude);
         terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Verify".into(),
             text: "Confirm the preview".into(),

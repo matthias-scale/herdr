@@ -359,8 +359,160 @@ Done here.
     for count in (0, 1, 2, 99)
 }
 
+NONBLOCKING_ONLY = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** · non-blocking: Share any preference if useful.
+2. **Verify** · non-blocking: Confirm the optional visual detail.
+
+Done here.
+"""
+
+SUFFIX_NONBLOCKING_ITEMS = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** — Choose the release lane · non-blocking
+2. **Verify** — Confirm the optional visual detail · non-blocking.
+
+Done here.
+"""
+
+MID_SENTENCE_NONBLOCKING_WORD = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** — This is non-blocking until we hear from QA.
+
+Done here.
+"""
+
+BLOCKING_ANSWER = """\
+**Critical action points (0 blocking)**
+
+1. **Answer** — Choose the release lane.
+
+Done here.
+"""
+
+UNMARKED_VERIFY_BLOCKING_ANSWER = """\
+**Critical action points (0 blocking)**
+
+1. **Verify**: check the log
+
+Done here.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
+    def test_suffix_nonblocking_items(self):
+        block = closing_block.parse(SUFFIX_NONBLOCKING_ITEMS)
+
+        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(
+            [(item["label"], item["text"], item["blocking"]) for item in block.wire_items()],
+            [
+                ("Answer", "Choose the release lane", False),
+                ("Verify", "Confirm the optional visual detail", False),
+            ],
+        )
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertEqual(outcome["payload"]["state"], "idle")
+        self.assertEqual(
+            [item["blocking"] for item in outcome["payload"]["items"]],
+            [False, False],
+        )
+        metadata = rpc.call_args_list[-1].args[3]
+        self.assertEqual(metadata["tokens"]["closing_idle"], "1")
+
+    def test_nonblocking_word_in_middle_is_blocking(self):
+        block = closing_block.parse(MID_SENTENCE_NONBLOCKING_WORD)
+
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.wire_items()[0]["blocking"], True)
+        self.assertEqual(block.wire_items()[0]["text"], "This is non-blocking until we hear from QA.")
+
+    def test_nonblocking_only(self):
+        block = closing_block.parse(NONBLOCKING_ONLY)
+
+        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(
+            [(item["label"], item["text"], item["blocking"]) for item in block.wire_items()],
+            [
+                ("Answer", "Share any preference if useful.", False),
+                ("Verify", "Confirm the optional visual detail.", False),
+            ],
+        )
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertEqual(outcome["payload"]["state"], "idle")
+        self.assertEqual(
+            [item["blocking"] for item in outcome["payload"]["items"]],
+            [False, False],
+        )
+        metadata = rpc.call_args_list[-1].args[3]
+        self.assertEqual(metadata["tokens"]["closing_idle"], "1")
+
+    def test_blocking_answer(self):
+        block = closing_block.parse(BLOCKING_ANSWER)
+
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertTrue(block.wire_items()[0]["blocking"])
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc"):
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+        )
+        self.assertEqual(outcome["payload"]["state"], "blocked")
+
+    # MAT-147 AC2
+    def test_verify_not_marked_as_nonblocking(self):
+        block = closing_block.parse(UNMARKED_VERIFY_BLOCKING_ANSWER)
+
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertTrue(block.wire_items()[0]["blocking"])
+        self.assertEqual(block.wire_items()[0]["label"], "Verify")
+        with mock.patch.object(
+            herdr_status, "write_mirror", return_value=None
+        ), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertEqual(outcome["payload"]["state"], "blocked")
+        self.assertEqual(outcome["payload"]["items"][0]["blocking"], True)
+
     def test_contract_line_parses_met_and_unmet_states(self):
         met = closing_block.parse(CONTRACT_MET)
         unmet = closing_block.parse(CONTRACT_MET.replace("— met", "— unmet"))
@@ -398,6 +550,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 "n": 1,
                 "label": "Gate",
                 "text": "Approve PR #2606 for MAT-125 before production rollout.",
+                "blocking": True,
                 "pr": 2606,
                 "ticket": "MAT-125",
                 "url": None,

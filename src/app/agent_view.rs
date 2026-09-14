@@ -568,6 +568,7 @@ mod tests {
             .get_mut(&attention_terminal)
             .unwrap()
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose one".into(),
@@ -607,6 +608,7 @@ mod tests {
             .get_mut(&attention_terminal)
             .unwrap()
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Verify".into(),
             text: "Confirm one".into(),

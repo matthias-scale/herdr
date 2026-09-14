@@ -446,6 +446,7 @@ mod tests {
         terminal.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
                 n: 1,
                 label: "Answer".into(),
                 text: "Choose one".into(),

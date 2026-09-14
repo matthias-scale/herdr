@@ -897,7 +897,7 @@ impl crate::app::state::AppState {
         projection
     }
 
-    /// Every closing-block item currently raised, ordered by workspace and then
+    /// Every closing-block item currently owed, ordered by workspace and then
     /// by the item's own number so the list is stable across refreshes.
     fn dock_home_poll_rows(&self) -> Vec<DockHomePollRow> {
         let mut rows = Vec::new();
@@ -922,7 +922,13 @@ impl crate::app::state::AppState {
                         .closing_gates
                         .iter()
                         .map(|item| ("gate", item))
-                        .chain(terminal.closing_items.iter().map(|item| ("item", item)))
+                        .chain(
+                            terminal
+                                .closing_items
+                                .iter()
+                                .filter(|item| item.blocking)
+                                .map(|item| ("item", item)),
+                        )
                     {
                         rows.push(DockHomePollRow {
                             key: WorkItemKey {
@@ -1568,6 +1574,7 @@ mod tests {
 
     fn gate(n: u32, text: &str, default: Option<&str>) -> crate::api::schema::ClosingBlockItem {
         crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n,
             label: "Gate".to_string(),
             text: text.to_string(),
@@ -1639,6 +1646,7 @@ mod tests {
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
             n: 1,
             label: "Answer".into(),
             text: "Choose a lane".into(),
@@ -1664,6 +1672,32 @@ mod tests {
         assert!(
             state.dock_home_projection().poll_rows.is_empty(),
             "settled panes leave the attention projection"
+        );
+    }
+
+    #[test]
+    fn nonblocking_closing_items_do_not_create_poll_rows() {
+        let mut state = state_with_gates(&[("optional", Vec::new())]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Optional preference".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+
+        assert!(state.dock_home_projection().poll_rows.is_empty());
+        assert_eq!(
+            state.terminals[&terminal_id].closing_items[0].text,
+            "Optional preference"
         );
     }
 
