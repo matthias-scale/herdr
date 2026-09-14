@@ -1110,23 +1110,19 @@ mod tests {
         app
     }
 
-    #[tokio::test]
+    #[test]
     // A8: a matching snapshot tuple attaches with argv built from current config.
-    async fn matching_fleet_tuple_attaches_with_current_config_argv() {
+    fn matching_fleet_tuple_attaches_with_current_config_argv() {
         let mut app = app_with_fleet_attach_tuple(
             Some("/tmp/current.sock"),
             Some("current-session"),
             Some("/tmp/current.sock"),
             Some("current-session"),
         );
-
-        app.open_fleet_host("office");
-
-        let added_tab = &app.state.workspaces[0].tabs[1];
-        let added_terminal = added_tab
-            .terminal_id(added_tab.root_pane)
-            .and_then(|terminal_id| app.state.terminals.get(terminal_id))
-            .expect("matching tuple should attach a host tab");
+        // Mark the existing pane as already attached with the argv current
+        // config produces. Attach reuses a pane only on an exact argv match,
+        // so reuse proves the tuple gate passed and the argv came from config
+        // without spawning a real ssh process.
         let expected_argv = vec![
             "herdr".to_string(),
             "--remote".to_string(),
@@ -1134,11 +1130,21 @@ mod tests {
             "--session".to_string(),
             "current-session".to_string(),
         ];
-        assert_eq!(
-            added_terminal.launch_argv.as_deref(),
-            Some(expected_argv.as_slice())
-        );
+        let tab = &app.state.workspaces[0].tabs[0];
+        let terminal_id = tab
+            .terminal_id(tab.root_pane)
+            .expect("existing pane has a terminal")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("existing terminal")
+            .launch_argv = Some(expected_argv);
+
+        app.open_fleet_host("office");
+
         assert!(app.state.toast.is_none(), "{:?}", app.state.toast);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
     }
 
     #[test]
