@@ -303,6 +303,84 @@ async fn pixel_input_metadata_cannot_resize_authoritative_client_state() {
     );
 }
 
+#[tokio::test]
+async fn p3_pixel_mouse_uses_the_originating_clients_committed_pomodoro_gate() {
+    let mut server = test_headless_server();
+    let mut pane_input =
+        install_focused_test_runtime(&mut server, b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let (wide_tx, _wide_control_rx, wide_rx) = test_client_writer();
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (100, 30),
+            crate::kitty_graphics::HostCellSize {
+                width_px: 10,
+                height_px: 20,
+            },
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(wide_tx),
+        ),
+    );
+    let (compact_tx, _compact_control_rx, compact_rx) = test_client_writer();
+    server.clients.insert(
+        2,
+        ClientConnection::new(
+            (18, 30),
+            crate::kitty_graphics::HostCellSize {
+                width_px: 10,
+                height_px: 20,
+            },
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(compact_tx),
+        ),
+    );
+    for client_id in [1, 2] {
+        let client = server.clients.get_mut(&client_id).expect("app client");
+        client.pixel_mouse = true;
+        client.host_sgr_pixels_active = Some(true);
+    }
+    server.foreground_client_id = Some(1);
+    server.sync_foreground_client_state();
+    server.resize_shared_runtime_to_effective_size();
+    set_graphics_layer(&mut server, pane_id, vec![1]);
+    server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+        started: crate::pomodoro::PomodoroPhase::ShortBreak,
+        shown_at: std::time::Instant::now(),
+    });
+    server.render_and_stream();
+    let _ = read_server_frame(wide_rx.recv().expect("wide frame"));
+    let _ = read_server_frame(compact_rx.recv().expect("compact frame"));
+
+    let compact_geometry =
+        crate::input::mouse::HostGeometry::new(18, 30, 180, 600).expect("compact geometry");
+    assert!(server.handle_server_event(ServerEvent::ClientInputPixels {
+        client_id: 2,
+        data: b"\x1b[<0;90;300M".to_vec(),
+        geometry: compact_geometry,
+    }));
+    assert!(server.app.state.pomodoro.send_off.is_some());
+    pane_input
+        .recv()
+        .await
+        .expect("compact pixel input reaches the pane");
+
+    let wide_geometry =
+        crate::input::mouse::HostGeometry::new(100, 30, 1_000, 600).expect("wide geometry");
+    assert!(server.handle_server_event(ServerEvent::ClientInputPixels {
+        client_id: 1,
+        data: b"\x1b[<0;500;300M".to_vec(),
+        geometry: wide_geometry,
+    }));
+    assert!(server.app.state.pomodoro.send_off.is_none());
+}
+
 #[test]
 fn direct_eligibility_is_installed_with_the_client_connection() {
     let mut server = test_headless_server();

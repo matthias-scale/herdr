@@ -314,6 +314,8 @@ pub struct App {
     pub(crate) persist_pane_history: bool,
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
+    /// Pomodoro surfaces shown by the last frame committed to the local client.
+    pub(crate) local_pomodoro_presentation: Option<crate::ui::pomodoro::InputPresentation>,
     pub(crate) pending_first_frame_pane: Option<crate::layout::PaneId>,
     /// Last attempt that could update a connected presentation surface.
     pub(crate) last_presentation_at: Option<Instant>,
@@ -1498,6 +1500,7 @@ impl App {
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
+            local_pomodoro_presentation: None,
             pending_first_frame_pane: None,
             last_presentation_at: None,
             input_leases: input::InputLeaseTable::default(),
@@ -2073,6 +2076,12 @@ impl App {
                 }
                 self.status_metrics_visible =
                     self.state.view.status_bar_rect != ratatui::layout::Rect::default();
+                self.local_pomodoro_presentation =
+                    Some(crate::ui::pomodoro::input_presentation_at(
+                        &self.state,
+                        self.state.screen_rect(),
+                        self.state.view_observed_at,
+                    ));
                 self.sync_pending_agent_resume_deadline(now);
                 if self.start_pending_agent_resumes(self.pending_agent_resume_due(now)) {
                     self.render_dirty.request_generic();
@@ -2894,11 +2903,27 @@ impl App {
         self.route_client_events(events, true);
     }
 
+    #[cfg(test)]
     pub(crate) fn route_client_pixel_mouse(
         &mut self,
         source_id: InputSourceId,
         data: &[u8],
         geometry: crate::input::mouse::HostGeometry,
+    ) -> bool {
+        let presentation = crate::ui::pomodoro::input_presentation_at(
+            &self.state,
+            ratatui::layout::Rect::new(0, 0, geometry.cols, geometry.rows),
+            std::time::Instant::now(),
+        );
+        self.route_client_pixel_mouse_with_presentation(source_id, data, geometry, presentation)
+    }
+
+    pub(crate) fn route_client_pixel_mouse_with_presentation(
+        &mut self,
+        source_id: InputSourceId,
+        data: &[u8],
+        geometry: crate::input::mouse::HostGeometry,
+        presentation: crate::ui::pomodoro::InputPresentation,
     ) -> bool {
         let Some((x, y)) = crate::input::mouse::parse_report(data) else {
             return false;
@@ -2914,7 +2939,14 @@ impl App {
             return false;
         }
         self.state.host_mouse_pixels = Some(crate::input::mouse::HostPixels { x, y, geometry });
-        self.route_client_events_from(source_id, std::mem::take(&mut events), false);
+        self.route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
+            source_id,
+            std::mem::take(&mut events),
+            false,
+            &mut |_| {},
+            None,
+            presentation,
+        );
         self.state.host_mouse_pixels = None;
         true
     }
@@ -2928,21 +2960,23 @@ impl App {
         self.route_client_events_from(LOCAL_INPUT_SOURCE, events, apply_host_terminal_theme);
     }
 
+    #[cfg(test)]
     pub(crate) fn route_client_events_from(
         &mut self,
         source_id: InputSourceId,
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
-    ) {
+    ) -> bool {
         self.route_client_events_from_with_human_input_hook(
             source_id,
             events,
             apply_host_terminal_theme,
             &mut |_| {},
             None,
-        );
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn route_client_events_from_with_human_input_hook(
         &mut self,
         source_id: InputSourceId,
@@ -2950,20 +2984,26 @@ impl App {
         apply_host_terminal_theme: bool,
         before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
         controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
-    ) {
-        let pomodoro_send_off_visible = crate::ui::pomodoro::send_off_visible_at(
+    ) -> bool {
+        let mut pomodoro_presentation = crate::ui::pomodoro::input_presentation_at(
             &self.state,
             self.state.screen_rect(),
             std::time::Instant::now(),
         );
+        // These compatibility entry points predate committed client frames.
+        // Preserve their state-based keyboard ownership when a test or local
+        // caller has not computed render geometry yet.
+        if pomodoro_presentation.prompt.is_none() && self.state.pomodoro.prompt.is_some() {
+            pomodoro_presentation.prompt = Some(self.state.screen_rect());
+        }
         self.route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
             source_id,
             events,
             apply_host_terminal_theme,
             before_terminal_input,
             controlled_owners,
-            pomodoro_send_off_visible,
-        );
+            pomodoro_presentation,
+        )
     }
 
     pub(crate) fn route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
@@ -2973,12 +3013,11 @@ impl App {
         apply_host_terminal_theme: bool,
         before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
         controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
-        pomodoro_send_off_visible: bool,
-    ) {
+        pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
+    ) -> bool {
         self.begin_contract_false_positive_input_burst();
+        let mut pomodoro_changed = false;
         for event in events {
-            let send_off_visible =
-                pomodoro_send_off_visible && self.state.pomodoro.send_off.is_some();
             let previous_mode = self.state.mode;
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
@@ -2989,8 +3028,9 @@ impl App {
                     if self.intercept_pomodoro_send_off_raw_input_with_visibility(
                         source_id,
                         &normalized_event,
-                        send_off_visible,
+                        pomodoro_presentation.send_off.is_some(),
                     ) {
+                        pomodoro_changed = true;
                         if key.kind != crossterm::event::KeyEventKind::Release {
                             self.input_leases.insert_consumed(
                                 lease_key,
@@ -3003,7 +3043,11 @@ impl App {
                         crossterm::event::KeyEventKind::Press => {
                             // Before the pane-context decision below: a focused
                             // notepad and a due break reminder outrank the pane.
-                            if self.intercept_notepad_key(&key) {
+                            if self.intercept_notepad_key_with_prompt_visibility(
+                                &key,
+                                pomodoro_presentation.prompt.is_some(),
+                            ) {
+                                pomodoro_changed = true;
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
@@ -3128,12 +3172,17 @@ impl App {
                 _ if self.intercept_pomodoro_send_off_raw_input_with_visibility(
                     source_id,
                     &event,
-                    send_off_visible,
+                    pomodoro_presentation.send_off.is_some(),
                 ) =>
                 {
-                    continue
+                    pomodoro_changed = true;
+                    continue;
                 }
                 crate::raw_input::RawInputEvent::Text(text) => {
+                    if pomodoro_presentation.prompt.is_some() {
+                        pomodoro_changed = true;
+                        continue;
+                    }
                     self.state.clear_hovered_control();
                     self.handle_text_commit_headless_with_hook(
                         text.as_str(),
@@ -3142,9 +3191,22 @@ impl App {
                     );
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                    if self.state.popup_pane.is_some() || self.state.mouse_capture {
-                        self.handle_mouse_event_headless(source_id, mouse);
+                    if pomodoro_presentation.prompt.is_some()
+                        || self.state.popup_pane.is_some()
+                        || self.state.mouse_capture
+                    {
+                        if pomodoro_presentation.prompt.is_some() {
+                            pomodoro_changed = true;
+                        }
+                        self.handle_mouse_event_headless_with_pomodoro_presentation(
+                            source_id,
+                            mouse,
+                            pomodoro_presentation,
+                        );
                     } else {
+                        if pomodoro_presentation.prompt.is_some() {
+                            pomodoro_changed = true;
+                        }
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                         if let Some(pane_id) = self.state.take_forwarded_pane_input() {
@@ -3156,6 +3218,10 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
+                    if pomodoro_presentation.prompt.is_some() {
+                        pomodoro_changed = true;
+                        continue;
+                    }
                     self.state.clear_hovered_control();
                     if self.try_route_paste_to_overlay(&text)
                         || self.try_route_paste_to_popup(&text)
@@ -3231,6 +3297,7 @@ impl App {
             }
             self.sync_prefix_input_source(previous_mode);
         }
+        pomodoro_changed
     }
 
     pub(crate) fn clear_input_source(&mut self, source_id: InputSourceId) {
@@ -3345,17 +3412,17 @@ impl App {
         }
     }
 
-    /// Handles a mouse event for the headless server.
-    ///
-    /// Delegates to the same mouse handling logic used in the monolithic
-    /// mode (hit-testing against the rendered UI), which works because
-    /// the server's AppState maintains view geometry from virtual rendering.
-    fn handle_mouse_event_headless(
+    fn handle_mouse_event_headless_with_pomodoro_presentation(
         &mut self,
         source_id: InputSourceId,
         mouse: crossterm::event::MouseEvent,
+        presentation: crate::ui::pomodoro::InputPresentation,
     ) {
-        self.handle_mouse_from_input_source(source_id, mouse);
+        self.handle_mouse_from_input_source_with_pomodoro_presentation(
+            source_id,
+            mouse,
+            presentation,
+        );
     }
 }
 

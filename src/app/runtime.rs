@@ -40,6 +40,19 @@ fn retain_custom_command_after_wait(
 }
 
 impl App {
+    fn local_pomodoro_presentation_for_input(&mut self) -> crate::ui::pomodoro::InputPresentation {
+        if let Some(presentation) = self.local_pomodoro_presentation {
+            return presentation;
+        }
+        let presentation = crate::ui::pomodoro::input_presentation_at(
+            &self.state,
+            self.state.screen_rect(),
+            Instant::now(),
+        );
+        self.local_pomodoro_presentation = Some(presentation);
+        presentation
+    }
+
     pub(crate) fn reap_finished_custom_commands(&mut self) {
         self.detached_custom_command_children
             .retain_mut(|child| retain_custom_command_after_wait(child.id(), child.try_wait()));
@@ -127,11 +140,21 @@ impl App {
         first: crate::raw_input::RawInputEvent,
     ) -> bool {
         self.begin_contract_false_positive_input_burst();
-        let mut changed = self.handle_raw_input_event(first).await;
+        let pomodoro_presentation = self.local_pomodoro_presentation_for_input();
+        let mut changed = self
+            .handle_raw_input_event_with_pomodoro_presentation(first, pomodoro_presentation)
+            .await;
 
         while let Some(rx) = self.input_rx.as_mut() {
             match rx.try_recv() {
-                Ok(event) => changed |= self.handle_raw_input_event(event).await,
+                Ok(event) => {
+                    changed |= self
+                        .handle_raw_input_event_with_pomodoro_presentation(
+                            event,
+                            pomodoro_presentation,
+                        )
+                        .await;
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.input_rx = None;
@@ -148,6 +171,7 @@ impl App {
         lease_key: super::input::InputLeaseKey,
         key: crate::input::TerminalKey,
         plan: super::input::RepeatPlan,
+        pomodoro_prompt_visible: bool,
     ) -> bool {
         match plan {
             super::input::RepeatPlan::Forwarded(target) => {
@@ -185,7 +209,13 @@ impl App {
                     ) {
                         break;
                     }
-                    if let Some(target) = self.handle_key(key.clone()).await {
+                    if let Some(target) = self
+                        .handle_key_with_pomodoro_prompt_visibility(
+                            key.clone(),
+                            pomodoro_prompt_visible,
+                        )
+                        .await
+                    {
                         if tracked {
                             self.input_leases.insert_forwarded(
                                 lease_key,
@@ -202,12 +232,46 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn handle_raw_input_event(
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
+        let ends_input_lifecycle = matches!(
+            &event,
+            crate::raw_input::RawInputEvent::Key(key)
+                if key.kind == crossterm::event::KeyEventKind::Release
+        ) || matches!(
+            &event,
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Up(_),
+                ..
+            })
+        );
+        let mut pomodoro_presentation = self.local_pomodoro_presentation_for_input();
+        if pomodoro_presentation.prompt.is_none() && self.state.pomodoro.prompt.is_some() {
+            pomodoro_presentation.prompt = Some(self.state.screen_rect());
+        }
+        let changed = self
+            .handle_raw_input_event_with_pomodoro_presentation(event, pomodoro_presentation)
+            .await;
+        if ends_input_lifecycle {
+            self.local_pomodoro_presentation = None;
+        }
+        changed
+    }
+
+    async fn handle_raw_input_event_with_pomodoro_presentation(
+        &mut self,
+        event: crate::raw_input::RawInputEvent,
+        pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
+    ) -> bool {
         if !matches!(&event, crate::raw_input::RawInputEvent::Key(_))
-            && self.intercept_pomodoro_send_off_raw_input(super::LOCAL_INPUT_SOURCE, &event)
+            && self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                super::LOCAL_INPUT_SOURCE,
+                &event,
+                pomodoro_presentation.send_off.is_some(),
+            )
         {
             return true;
         }
@@ -217,10 +281,13 @@ impl App {
                 let lease_key = super::input::InputLeaseKey::new(super::LOCAL_INPUT_SOURCE, &key);
                 let key = self.input_leases.normalize_press(&lease_key, key);
                 let normalized_event = crate::raw_input::RawInputEvent::Key(key.clone());
-                if self.intercept_pomodoro_send_off_raw_input(
-                    super::LOCAL_INPUT_SOURCE,
-                    &normalized_event,
-                ) {
+                if !self.input_leases.contains(&lease_key)
+                    && self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                        super::LOCAL_INPUT_SOURCE,
+                        &normalized_event,
+                        pomodoro_presentation.send_off.is_some(),
+                    )
+                {
                     if key.kind != crossterm::event::KeyEventKind::Release {
                         self.input_leases.insert_consumed(
                             lease_key,
@@ -233,7 +300,12 @@ impl App {
                     crossterm::event::KeyEventKind::Press => {
                         let initial_context = self.terminal_input_context();
                         let proxy_input_gate_closed = self.focused_remote_proxy_input_gate_closed();
-                        let target = self.handle_key(key.clone()).await;
+                        let target = self
+                            .handle_key_with_pomodoro_prompt_visibility(
+                                key.clone(),
+                                pomodoro_presentation.prompt.is_some(),
+                            )
+                            .await;
                         let resulting_context = self.terminal_input_context();
                         let plan = self.input_leases.complete_press_with_reprocess(
                             lease_key,
@@ -243,7 +315,13 @@ impl App {
                             target,
                             !proxy_input_gate_closed,
                         );
-                        self.execute_repeat_plan(lease_key, key, plan).await;
+                        self.execute_repeat_plan(
+                            lease_key,
+                            key,
+                            plan,
+                            pomodoro_presentation.prompt.is_some(),
+                        )
+                        .await;
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
@@ -253,7 +331,13 @@ impl App {
                             &key,
                             current_context.as_ref(),
                         );
-                        self.execute_repeat_plan(lease_key, key, plan).await
+                        self.execute_repeat_plan(
+                            lease_key,
+                            key,
+                            plan,
+                            pomodoro_presentation.prompt.is_some(),
+                        )
+                        .await
                     }
                     crossterm::event::KeyEventKind::Release => {
                         if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
@@ -266,17 +350,30 @@ impl App {
                 }
             }
             crate::raw_input::RawInputEvent::Text(text) => {
+                if pomodoro_presentation.prompt.is_some() {
+                    return true;
+                }
                 self.handle_text_commit(text.into_string()).await;
                 true
             }
             crate::raw_input::RawInputEvent::Paste(text) => {
+                if pomodoro_presentation.prompt.is_some() {
+                    return true;
+                }
                 self.handle_paste(text).await;
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
                 let previous_hover = self.state.hovered_control;
-                if self.state.popup_pane.is_some() || self.state.mouse_capture {
-                    self.handle_mouse(mouse);
+                if pomodoro_presentation.prompt.is_some()
+                    || self.state.popup_pane.is_some()
+                    || self.state.mouse_capture
+                {
+                    self.handle_mouse_from_input_source_with_pomodoro_presentation(
+                        super::LOCAL_INPUT_SOURCE,
+                        mouse,
+                        pomodoro_presentation,
+                    );
                 } else {
                     self.state
                         .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
@@ -1315,6 +1412,27 @@ mod tests {
         assert!(
             pane_input.try_recv().is_ok(),
             "without the send-off, the same click reaches the mouse-reporting pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_monolithic_raw_input_batch_uses_its_starting_pomodoro_gate() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+        app.input_rx = Some(input_rx);
+        let key = |ch| {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::empty(),
+            ))
+        };
+        input_tx.send(key('y')).await.expect("batch follow-up key");
+
+        assert!(app.handle_raw_input_batch(key('x')).await);
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "an event after dismissal escaped the batch's starting gate"
         );
     }
 

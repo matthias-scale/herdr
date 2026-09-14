@@ -35,6 +35,16 @@ const SEND_OFF_WIDTH: u16 = 52;
 const SEND_OFF_HEIGHT: u16 = 7;
 pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(125);
+
+/// The Pomodoro surfaces that a client actually received in its last committed
+/// frame. Input routing must use this snapshot instead of rebuilding visibility
+/// from the current shared state and the client's announced size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct InputPresentation {
+    pub(crate) area: Rect,
+    pub(crate) send_off: Option<Rect>,
+    pub(crate) prompt: Option<Rect>,
+}
 const BREAK_TIPS: [&str; 3] = [
     "stand up · look at something far away",
     "unclench your jaw · drop your shoulders",
@@ -198,10 +208,36 @@ fn send_off_rect(area: Rect) -> Option<Rect> {
         .filter(|popup| popup.width == SEND_OFF_WIDTH && popup.height == SEND_OFF_HEIGHT)
 }
 
+pub(crate) fn input_presentation_at(
+    app: &AppState,
+    area: Rect,
+    now: std::time::Instant,
+) -> InputPresentation {
+    let prompt = app.pomodoro.prompt.as_ref().and_then(|_| {
+        let (width, height) = prompt_size(area);
+        let popup = centered_popup_rect(area, width, height)?;
+        let inner = Rect::new(
+            popup.x.saturating_add(1),
+            popup.y.saturating_add(1),
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        (inner.height >= 9).then_some(popup)
+    });
+    let send_off = app.pomodoro.send_off.as_ref().and_then(|send_off| {
+        (now < send_off.shown_at + SEND_OFF_DURATION)
+            .then(|| send_off_rect(area))
+            .flatten()
+    });
+    InputPresentation {
+        area,
+        send_off,
+        prompt,
+    }
+}
+
 pub(crate) fn send_off_visible_at(app: &AppState, area: Rect, now: std::time::Instant) -> bool {
-    app.pomodoro.send_off.is_some_and(|send_off| {
-        now < send_off.shown_at + SEND_OFF_DURATION && send_off_rect(area).is_some()
-    })
+    input_presentation_at(app, area, now).send_off.is_some()
 }
 
 pub(crate) fn animation_visible_at(app: &AppState, area: Rect, now: std::time::Instant) -> bool {

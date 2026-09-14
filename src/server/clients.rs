@@ -58,6 +58,8 @@ pub(crate) struct ClientConnection {
     pub(crate) last_activity: u64,
     /// Render baseline for the negotiated client encoding.
     pub(crate) render_state: ClientRenderState,
+    /// Pomodoro surfaces shown by the last frame committed to this client.
+    pub(crate) pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
     /// Sidebar disclosure, projection escape, and scroll state for this attach.
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
     /// Dock layout and focus state for this attach; editor PTYs are server-owned.
@@ -148,6 +150,7 @@ impl ClientConnection {
             raw_input: crate::raw_input::RawInputFramer::default(),
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
+            pomodoro_presentation: crate::ui::pomodoro::InputPresentation::default(),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
             dock_presentation: crate::app::state::DockPresentationState::default(),
             loop_run_history_detail: None,

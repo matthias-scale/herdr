@@ -1343,17 +1343,14 @@ impl HeadlessServer {
             })
     }
 
-    fn pomodoro_send_off_visible_for_input(&self, source_id: u64, now: Instant) -> bool {
+    fn pomodoro_input_presentation_for_input(
+        &self,
+        source_id: u64,
+    ) -> crate::ui::pomodoro::InputPresentation {
         self.clients
             .get(&source_id)
             .filter(|client| client.writer.is_some() && client.is_full_app_client())
-            .is_some_and(|client| {
-                crate::ui::pomodoro::send_off_visible_at(
-                    &self.app.state,
-                    Self::pomodoro_client_area(client),
-                    now,
-                )
-            })
+            .map_or_else(Default::default, |client| client.pomodoro_presentation)
     }
 
     fn resize_shared_runtime_to_effective_size_with_pending_agent_resumes(
@@ -4015,9 +4012,8 @@ impl HeadlessServer {
         source_id: u64,
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
-    ) {
-        let pomodoro_send_off_visible =
-            self.pomodoro_send_off_visible_for_input(source_id, Instant::now());
+    ) -> bool {
+        let pomodoro_presentation = self.pomodoro_input_presentation_for_input(source_id);
         #[cfg(unix)]
         {
             let controlled_owners = self.controlled_remote_owners();
@@ -4027,14 +4023,15 @@ impl HeadlessServer {
                     human_controlled_owner = controlled_owners.get(target.terminal_id()).copied();
                 }
             };
-            self.app
+            let pomodoro_changed = self
+                .app
                 .route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
                     source_id,
                     events,
                     apply_host_terminal_theme,
                     &mut before_terminal_input,
                     Some(&controlled_owners),
-                    pomodoro_send_off_visible,
+                    pomodoro_presentation,
                 );
             if let Some(owner_id) = human_controlled_owner {
                 self.reject_remote_control(
@@ -4045,6 +4042,7 @@ impl HeadlessServer {
                     },
                 );
             }
+            pomodoro_changed
         }
         #[cfg(not(unix))]
         {
@@ -4056,8 +4054,8 @@ impl HeadlessServer {
                     apply_host_terminal_theme,
                     &mut before_terminal_input,
                     None,
-                    pomodoro_send_off_visible,
-                );
+                    pomodoro_presentation,
+                )
         }
     }
 
@@ -4182,7 +4180,14 @@ impl HeadlessServer {
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
         }
-        self.route_full_app_human_events(client_id, events, false);
+        pomodoro_changed |= self.route_full_app_human_events(client_id, events, false);
+        if pomodoro_changed {
+            // A modal dismissal is a presentation change even for a plain
+            // mouse move, which is otherwise intentionally render-neutral.
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.request_repaint();
+            }
+        }
         self.app.start_usage_scan_if_requested();
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
@@ -4464,9 +4469,12 @@ impl HeadlessServer {
                 if foreground_changed {
                     self.resize_shared_runtime_to_effective_size_before_input();
                 }
-                self.app
-                    .route_client_pixel_mouse(client_id, &data, geometry)
-                    || foreground_changed
+                self.app.route_client_pixel_mouse_with_presentation(
+                    client_id,
+                    &data,
+                    geometry,
+                    self.pomodoro_input_presentation_for_input(client_id),
+                ) || foreground_changed
             }
             ServerEvent::ClientInput { client_id, data } => {
                 if !self.clients.contains_key(&client_id) {
@@ -6174,6 +6182,13 @@ impl HeadlessServer {
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
+            let pomodoro_presentation = is_app_client.then(|| {
+                crate::ui::pomodoro::input_presentation_at(
+                    &self.app.state,
+                    area,
+                    self.app.state.view_observed_at,
+                )
+            });
             let mut next_graphics_cache = client.graphics_cache.clone();
             let mut reset_graphics = Vec::new();
             let mut encoded = if is_app_client
@@ -6304,6 +6319,9 @@ impl HeadlessServer {
                         client.graphics_surface_reset_pending = false;
                     }
                     client.render_state.commit_sent_frame(prepared);
+                    if let Some(presentation) = pomodoro_presentation {
+                        client.pomodoro_presentation = presentation;
+                    }
                     if encoded.incomplete {
                         client.defer_full_render();
                         deferred_frame = true;
@@ -14849,6 +14867,11 @@ next_tab = ""
             started: crate::pomodoro::PomodoroPhase::ShortBreak,
             shown_at: before_expiry,
         });
+        server.render_and_stream();
+        assert!(frame_text(&read_server_frame(
+            wide_rx.recv().expect("wide second send-off frame")
+        ))
+        .contains("enjoy the break"));
         assert!(server.handle_client_input_events(
             2,
             vec![
@@ -14861,9 +14884,9 @@ next_tab = ""
         ));
         assert!(server.app.state.pomodoro.send_off.is_some());
         assert_eq!(
-            pane_input
-                .recv()
+            tokio::time::timeout(Duration::from_secs(1), pane_input.recv())
                 .await
+                .expect("compact-client key timed out")
                 .expect("compact-client key reaches pane"),
             Bytes::from_static(b"x")
         );
@@ -14883,6 +14906,11 @@ next_tab = ""
             pane_input.try_recv().is_err(),
             "wide-client dismissal key reached the pane"
         );
+        server.render_and_stream();
+        assert!(!frame_text(&read_server_frame(
+            wide_rx.recv().expect("wide dismissal frame")
+        ))
+        .contains("enjoy the break"));
 
         let expired_at = Instant::now();
         server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
@@ -14897,14 +14925,190 @@ next_tab = ""
                 vec![crate::raw_input::RawInputEvent::Key(key.clone())],
             ));
             assert_eq!(
-                pane_input
-                    .recv()
+                tokio::time::timeout(Duration::from_secs(1), pane_input.recv())
                     .await
+                    .expect("post-expiry key timed out")
                     .expect("post-expiry key reaches pane"),
                 Bytes::from_static(b"x"),
                 "post-expiry key from client {client_id}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn p1_headless_input_batch_uses_its_starting_pomodoro_gate() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let (client_tx, _control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("committed send-off frame"));
+
+        let key = |ch| {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char(ch),
+                KeyModifiers::empty(),
+            ))
+        };
+        assert!(server.handle_client_input_events(1, vec![key('x'), key('y')]));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "an event after dismissal escaped the batch's starting gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn p2_headless_moved_send_off_dismissal_requests_repaint() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let (client_tx, _control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("committed send-off frame"));
+        assert!(
+            server.clients[&1].pomodoro_presentation.send_off.is_some(),
+            "committed presentation: {:?}",
+            server.clients[&1].pomodoro_presentation
+        );
+        assert!(server.clients[&1].render_state.last_frame().is_some());
+
+        let moved = crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(server.handle_client_input_events(1, vec![moved]));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+        assert!(server.clients[&1].render_state.last_frame().is_none());
+        assert!(pane_input.try_recv().is_err());
+
+        server.render_and_stream();
+        let frame = read_server_frame(client_rx.recv().expect("repaint after dismissal"));
+        assert!(!frame_text(&frame).contains("enjoy the break"));
+    }
+
+    #[tokio::test]
+    async fn p4_headless_resize_before_render_keeps_the_committed_pomodoro_gate() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let (wide_tx, _wide_control_rx, wide_rx) = test_client_writer();
+        let (compact_tx, _compact_control_rx, compact_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(wide_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (18, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(compact_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        server.render_and_stream();
+        assert!(
+            frame_text(&read_server_frame(wide_rx.recv().expect("wide frame")))
+                .contains("enjoy the break")
+        );
+        assert!(!frame_text(&read_server_frame(
+            compact_rx.recv().expect("compact frame")
+        ))
+        .contains("enjoy the break"));
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 1,
+            cols: 18,
+            rows: 30,
+            cell_width_px: 0,
+            cell_height_px: 0,
+        }));
+        let key = |ch| {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char(ch),
+                KeyModifiers::empty(),
+            ))
+        };
+        assert!(server.handle_client_input_events(1, vec![key('x')]));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+        assert!(pane_input.try_recv().is_err());
+
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 2,
+            cols: 100,
+            rows: 30,
+            cell_width_px: 0,
+            cell_height_px: 0,
+        }));
+        assert!(server.handle_client_input_events(2, vec![key('y')]));
+        assert!(server.app.state.pomodoro.send_off.is_some());
+        assert_eq!(
+            pane_input
+                .recv()
+                .await
+                .expect("unseen-card key reaches pane"),
+            Bytes::from_static(b"y")
+        );
     }
 
     #[tokio::test]
@@ -14931,6 +15135,15 @@ next_tab = ""
             started: crate::pomodoro::PomodoroPhase::ShortBreak,
             shown_at: Instant::now(),
         });
+        server
+            .clients
+            .get_mut(&1)
+            .expect("client")
+            .pomodoro_presentation = crate::ui::pomodoro::input_presentation_at(
+            &server.app.state,
+            Rect::new(0, 0, 100, 30),
+            Instant::now(),
+        );
         let key = crate::input::TerminalKey::new(
             crossterm::event::KeyCode::Char('x'),
             KeyModifiers::empty(),
@@ -14962,6 +15175,14 @@ next_tab = ""
         assert!(pane_input.try_recv().is_err());
 
         server.app.state.pomodoro.send_off = None;
+        server
+            .clients
+            .get_mut(&1)
+            .expect("client")
+            .pomodoro_presentation = crate::ui::pomodoro::InputPresentation {
+            area: Rect::new(0, 0, 100, 30),
+            ..Default::default()
+        };
         assert!(
             server.handle_client_input_events(1, vec![crate::raw_input::RawInputEvent::Key(key)],)
         );
@@ -15012,6 +15233,15 @@ next_tab = ""
             started: crate::pomodoro::PomodoroPhase::ShortBreak,
             shown_at: Instant::now(),
         });
+        server
+            .clients
+            .get_mut(&1)
+            .expect("client")
+            .pomodoro_presentation = crate::ui::pomodoro::input_presentation_at(
+            &server.app.state,
+            Rect::new(0, 0, 100, 30),
+            Instant::now(),
+        );
         assert!(server.handle_client_input_events(
             1,
             vec![mouse(MouseEventKind::Up(

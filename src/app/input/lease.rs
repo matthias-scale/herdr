@@ -189,7 +189,6 @@ impl InputLeaseTable {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn contains(&self, key: &InputLeaseKey) -> bool {
         self.leases.contains_key(key)
     }

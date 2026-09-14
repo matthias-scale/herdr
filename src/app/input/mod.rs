@@ -151,22 +151,46 @@ enum PullRequestAction {
 }
 
 impl App {
+    #[cfg(test)]
     pub(super) async fn handle_key(
         &mut self,
         key: TerminalKey,
     ) -> Option<super::TerminalInputTarget> {
+        let prompt_visible = self.state.pomodoro.prompt.is_some();
+        self.handle_key_with_pomodoro_prompt_visibility(key, prompt_visible)
+            .await
+    }
+
+    pub(super) async fn handle_key_with_pomodoro_prompt_visibility(
+        &mut self,
+        key: TerminalKey,
+        prompt_visible: bool,
+    ) -> Option<super::TerminalInputTarget> {
         self.state.clear_hovered_control();
-        let target = self.handle_key_inner(key).await;
+        let target = self
+            .handle_key_inner_with_pomodoro_prompt_visibility(key, prompt_visible)
+            .await;
         // Every keyboard path that can enter a probed settings section runs
         // through here, so the probes start once from one place.
         self.start_requested_tool_probes();
         target
     }
 
+    #[cfg(test)]
     async fn handle_key_inner(&mut self, key: TerminalKey) -> Option<super::TerminalInputTarget> {
+        let prompt_visible = self.state.pomodoro.prompt.is_some();
+        self.handle_key_inner_with_pomodoro_prompt_visibility(key, prompt_visible)
+            .await
+    }
+
+    async fn handle_key_inner_with_pomodoro_prompt_visibility(
+        &mut self,
+        key: TerminalKey,
+        prompt_visible: bool,
+    ) -> Option<super::TerminalInputTarget> {
         // A due break reminder outranks every other surface, panes included:
         // an overlay that can be typed past is not a reminder.
-        if self.intercept_notepad_key(&key) {
+        if self.intercept_notepad_key_with_prompt_visibility(&key, prompt_visible) {
             return None;
         }
         if self.state.popup_pane.is_some() {
@@ -4693,21 +4717,41 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
         self.handle_mouse_from_input_source(super::LOCAL_INPUT_SOURCE, mouse);
     }
 
+    #[cfg(test)]
     pub(super) fn handle_mouse_from_input_source(
         &mut self,
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        let presentation = crate::ui::pomodoro::input_presentation_at(
+            &self.state,
+            self.state.screen_rect(),
+            std::time::Instant::now(),
+        );
+        self.handle_mouse_from_input_source_with_pomodoro_presentation(
+            source_id,
+            mouse,
+            presentation,
+        );
+    }
+
+    pub(super) fn handle_mouse_from_input_source_with_pomodoro_presentation(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+        presentation: crate::ui::pomodoro::InputPresentation,
+    ) {
         // A due break reminder is the topmost modal and must decide the click
         // before hover, pane focus, or any underlying control can react.
-        if self.state.pomodoro.prompt.is_some() {
+        if presentation.prompt.is_some() {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some((confirm, snooze)) =
-                    crate::ui::pomodoro::prompt_button_rects(self.state.screen_rect())
+                    crate::ui::pomodoro::prompt_button_rects(presentation.area)
                 {
                     let hit = |rect: ratatui::layout::Rect| {
                         mouse.column >= rect.x

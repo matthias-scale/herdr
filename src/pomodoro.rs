@@ -256,6 +256,11 @@ impl PomodoroState {
             changed: self.expire_send_off_at(now),
             phase_ended: false,
         };
+        // The countdown deadline keeps advancing behind the send-off, but its
+        // covered timer does not need redraws until the card expires.
+        if self.send_off.is_some() {
+            return tick;
+        }
         if self.held {
             tick.changed |= host_focused && self.resume_held(now);
             return tick;

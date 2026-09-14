@@ -230,19 +230,6 @@ impl AppState {
 }
 
 impl crate::app::App {
-    pub(crate) fn intercept_pomodoro_send_off_raw_input(
-        &mut self,
-        source_id: crate::app::InputSourceId,
-        event: &crate::raw_input::RawInputEvent,
-    ) -> bool {
-        let visible = crate::ui::pomodoro::send_off_visible_at(
-            &self.state,
-            self.state.screen_rect(),
-            std::time::Instant::now(),
-        );
-        self.intercept_pomodoro_send_off_raw_input_with_visibility(source_id, event, visible)
-    }
-
     pub(crate) fn intercept_pomodoro_send_off_raw_input_with_visibility(
         &mut self,
         source_id: crate::app::InputSourceId,
@@ -285,7 +272,7 @@ impl crate::app::App {
                         .insert(source_id, button);
                     true
                 } else {
-                    return !matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_));
+                    !matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_))
                 }
             }
             _ => false,
@@ -299,18 +286,18 @@ impl crate::app::App {
         true
     }
 
-    /// The one rule for when the break prompt or the notepad owns a key.
-    ///
-    /// Both the in-process TUI loop and the headless server route keys through
-    /// here before anything else sees them, including the focused pane. Wiring
-    /// this into only one of the two paths is what made the panel look focused
-    /// while every keystroke went to the pane behind it.
-    pub(crate) fn intercept_notepad_key(&mut self, key: &crate::input::TerminalKey) -> bool {
+    pub(crate) fn intercept_notepad_key_with_prompt_visibility(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        prompt_visible: bool,
+    ) -> bool {
         let now = std::time::Instant::now();
-        if self.state.pomodoro.prompt.is_some() {
-            self.state
-                .handle_pomodoro_prompt_key(key.as_key_event(), now);
-            self.apply_notepad_request();
+        if prompt_visible {
+            if self.state.pomodoro.prompt.is_some() {
+                self.state
+                    .handle_pomodoro_prompt_key(key.as_key_event(), now);
+                self.apply_notepad_request();
+            }
             return true;
         }
         if self.state.notepad.focused && self.state.handle_notepad_key(key.as_key_event(), now) {
