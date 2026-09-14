@@ -106,32 +106,39 @@ fn agent_line(
     let lead = format!(" {dot} ");
     let age = waited_label(agent);
     let available = (width as usize).saturating_sub(display_width(&lead) + 1);
-    let provider_cell = if provider.is_empty() {
-        String::new()
-    } else {
-        format!(" {provider} ")
-    };
+    // The provider's own name, without subagent counts or the background-shell
+    // marker, which yield before it does.
+    let bare_provider = provider.split(['+', ' ']).next().unwrap_or_default();
     // The repo row contract keeps, in order, the dot, a title fragment and the
-    // provider; workspace and age give way first on a narrow Home.
-    let (label_width, show_provider, show_age) = [(true, true), (false, true), (false, false)]
-        .into_iter()
-        .map(|(workspace, age_shown)| {
-            let age_width = if age_shown {
-                display_width(&age) + 1
-            } else {
-                0
-            };
-            let rest = available.saturating_sub(display_width(&provider_cell) + age_width);
-            let label_width = if workspace { (rest / 3).min(16) } else { 0 };
-            (label_width, rest.saturating_sub(label_width + 1), age_shown)
-        })
-        .find(|(_, title_width, _)| *title_width >= MIN_ROW_TITLE_WIDTH)
-        .map(|(label_width, _, age_shown)| (label_width, true, age_shown))
-        .unwrap_or_else(|| ((available / 3).min(16), false, true));
-    let provider_cell = if show_provider {
-        provider_cell
-    } else {
+    // provider; workspace, shell details and age give way first on a narrow Home.
+    let (label_width, provider_text, show_age) = [
+        (true, provider, true),
+        (false, provider, true),
+        (false, bare_provider, true),
+        (false, bare_provider, false),
+    ]
+    .into_iter()
+    .find_map(|(workspace, provider_text, age_shown)| {
+        let provider_width = if provider_text.is_empty() {
+            0
+        } else {
+            display_width(provider_text) + 2
+        };
+        let age_width = if age_shown {
+            display_width(&age) + 1
+        } else {
+            0
+        };
+        let rest = available.saturating_sub(provider_width + age_width);
+        let label_width = if workspace { (rest / 3).min(16) } else { 0 };
+        let title_width = rest.saturating_sub(if workspace { label_width + 1 } else { 0 });
+        (title_width >= MIN_ROW_TITLE_WIDTH).then_some((label_width, provider_text, age_shown))
+    })
+    .unwrap_or((0, "", false));
+    let provider_cell = if provider_text.is_empty() {
         String::new()
+    } else {
+        format!(" {provider_text} ")
     };
     let age_cell = if show_age {
         format!(" {age}")
@@ -148,6 +155,12 @@ fn agent_line(
     let title_width = available.saturating_sub(
         display_width(&workspace_cell) + display_width(&provider_cell) + display_width(&age_cell),
     );
+    // Like the sidebar, a PR or ticket prefix goes before the title it names.
+    let title = if display_width(title) > title_width {
+        crate::ui::sidebar::title_without_object_identifier(title).unwrap_or(title)
+    } else {
+        title
+    };
     let title = truncate_end(title, title_width);
     let title_pad = title_width.saturating_sub(display_width(&title));
     // A filled row is the cursor, the same surface the sidebar uses.
@@ -1906,6 +1919,22 @@ mod tests {
             .collect();
         assert_eq!(display_width(&text), 18, "{text:?}");
         assert!(text.contains('界') && text.contains("cc"), "{text:?}");
+        let decorated = crate::ui::sidebar::AgentRowCells {
+            provider: "cc+2 >_".into(),
+            title: "#159 · sample-pr".into(),
+            ..cells.clone()
+        };
+        let narrow = agent_line(&app, &aged, Some(&decorated), false, 18);
+        let text: String = narrow
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(display_width(&text), 18, "{text:?}");
+        assert!(
+            text.contains(" cc ") && text.contains("sampl") && !text.contains("#159"),
+            "{text:?}"
+        );
         for width in [18u16, 27, 40, 80] {
             let line = agent_line(&app, &agent, Some(&cells), false, width);
             let text: String = line

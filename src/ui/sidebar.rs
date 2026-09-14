@@ -328,7 +328,7 @@ fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
     candidate.unwrap_or(DEFAULT_THREAD_TITLE)
 }
 
-fn title_without_object_identifier(title: &str) -> Option<&str> {
+pub(crate) fn title_without_object_identifier(title: &str) -> Option<&str> {
     let (identifier, title) = title.split_once(" · ")?;
     let github_identifier = identifier
         .strip_prefix('#')
@@ -407,6 +407,7 @@ fn compact_row_layout(
 
 /// The sidebar's own vocabulary for one agent row, for surfaces that list the
 /// same agents elsewhere and must not drift from it.
+#[derive(Clone)]
 pub(crate) struct AgentRowCells {
     pub dot: String,
     pub dot_color: Color,
