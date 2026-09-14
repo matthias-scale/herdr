@@ -104,6 +104,12 @@ fn agent_line(
     let provider_color = cells.map_or(app.palette.overlay0, |cells| cells.provider_color);
 
     let lead = format!(" {dot} ");
+    if (width as usize) <= display_width(&lead) {
+        return Line::from(Span::styled(
+            truncate_end(&lead, width as usize),
+            Style::default().fg(dot_color),
+        ));
+    }
     let age = waited_label(agent);
     let available = (width as usize).saturating_sub(display_width(&lead) + 1);
     // The provider's own name, without subagent counts or the background-shell
@@ -1935,7 +1941,7 @@ mod tests {
             text.contains(" cc ") && text.contains("sampl") && !text.contains("#159"),
             "{text:?}"
         );
-        for width in [18u16, 27, 40, 80] {
+        for width in 0u16..=80 {
             let line = agent_line(&app, &agent, Some(&cells), false, width);
             let text: String = line
                 .spans
@@ -1948,7 +1954,7 @@ mod tests {
                 "width {width}: {text:?}"
             );
             assert!(
-                text.contains('界'),
+                width < 18 || text.contains('界'),
                 "width {width} lost the title: {text:?}"
             );
         }
