@@ -2152,8 +2152,9 @@ fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool 
     let workspace = app.workspaces.get(entry.ws_idx);
     let context = entry_work_context(app, entry);
     let haystack = format!(
-        "{} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {}",
         entry.primary_label,
+        entry.remote_host.as_deref().unwrap_or_default(),
         entry.primary_tab_label.as_deref().unwrap_or_default(),
         entry.pane_label.as_deref().unwrap_or_default(),
         entry.terminal_title.as_deref().unwrap_or_default(),
@@ -8984,6 +8985,12 @@ pub(crate) mod tests {
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), 0, width);
         assert!(rendered.contains(&provider), "{rendered:?}");
+
+        // The machine name is on the row, so searching for it must keep the row.
+        app.sidebar_work_filter.query = "ub1".into();
+        assert_eq!(sidebar_filtered_agent_entries_from(&app, None).len(), 1);
+        app.sidebar_work_filter.query = "ub9".into();
+        assert!(sidebar_filtered_agent_entries_from(&app, None).is_empty());
     }
 
     #[test]
