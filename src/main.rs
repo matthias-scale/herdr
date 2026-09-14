@@ -586,7 +586,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # nudge_after_minutes = 5
 # max_nudges = 3
 # The plain-text prompt sent to a stalled agent.
-# stall_nudge_message = "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue."
+# stall_nudge_message = "Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue."
 # Harnesses with the herdr-status skill installed can use this sharper alternative:
 # stall_nudge_message = "/status"
 
@@ -1194,7 +1194,7 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 5"));
         assert!(DEFAULT_CONFIG.contains("# max_nudges = 3"));
         assert!(DEFAULT_CONFIG.contains(
-            "# stall_nudge_message = \"Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one word. If it is done or something changed, say so and continue.\""
+            "# stall_nudge_message = \"Re-verify what you are working on now; do not answer from memory. If you have subagents, poll them and restart any that are stalled. If everything is still progressing, reply with one line: Progressing, plus the count and names of running subagents if any (e.g. Progressing, 2 subagents: build, review). If it is done or something changed, say so and continue.\""
         ));
         assert!(DEFAULT_CONFIG.contains(
             "Harnesses with the herdr-status skill installed can use this sharper alternative"
