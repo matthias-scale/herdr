@@ -58,7 +58,7 @@ pub(crate) struct ClientConnection {
     pub(crate) last_activity: u64,
     /// Render baseline for the negotiated client encoding.
     pub(crate) render_state: ClientRenderState,
-    /// Pomodoro surfaces shown by the last frame committed to this client.
+    /// Pomodoro input ownership from the last frame plus overlays raised since it.
     pub(crate) pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
     /// Sidebar disclosure, projection escape, and scroll state for this attach.
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,

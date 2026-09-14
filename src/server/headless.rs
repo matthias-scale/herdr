@@ -1350,7 +1350,13 @@ impl HeadlessServer {
         self.clients
             .get(&source_id)
             .filter(|client| client.writer.is_some() && client.is_full_app_client())
-            .map_or_else(Default::default, |client| client.pomodoro_presentation)
+            .map_or_else(Default::default, |client| {
+                crate::ui::pomodoro::input_gate_at(
+                    &self.app.state,
+                    client.pomodoro_presentation,
+                    Instant::now(),
+                )
+            })
     }
 
     fn resize_shared_runtime_to_effective_size_with_pending_agent_resumes(
@@ -4013,7 +4019,7 @@ impl HeadlessServer {
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
     ) -> bool {
-        let pomodoro_presentation = self.pomodoro_input_presentation_for_input(source_id);
+        let mut pomodoro_presentation = self.pomodoro_input_presentation_for_input(source_id);
         #[cfg(unix)]
         {
             let controlled_owners = self.controlled_remote_owners();
@@ -4031,7 +4037,7 @@ impl HeadlessServer {
                     apply_host_terminal_theme,
                     &mut before_terminal_input,
                     Some(&controlled_owners),
-                    pomodoro_presentation,
+                    &mut pomodoro_presentation,
                 );
             if let Some(owner_id) = human_controlled_owner {
                 self.reject_remote_control(
@@ -4042,20 +4048,28 @@ impl HeadlessServer {
                     },
                 );
             }
+            if let Some(client) = self.clients.get_mut(&source_id) {
+                client.pomodoro_presentation = pomodoro_presentation;
+            }
             pomodoro_changed
         }
         #[cfg(not(unix))]
         {
             let mut before_terminal_input = |_: &crate::app::TerminalInputTarget| {};
-            self.app
+            let pomodoro_changed = self
+                .app
                 .route_client_events_from_with_human_input_hook_and_pomodoro_visibility(
                     source_id,
                     events,
                     apply_host_terminal_theme,
                     &mut before_terminal_input,
                     None,
-                    pomodoro_presentation,
-                )
+                    &mut pomodoro_presentation,
+                );
+            if let Some(client) = self.clients.get_mut(&source_id) {
+                client.pomodoro_presentation = pomodoro_presentation;
+            }
+            pomodoro_changed
         }
     }
 
@@ -4469,12 +4483,18 @@ impl HeadlessServer {
                 if foreground_changed {
                     self.resize_shared_runtime_to_effective_size_before_input();
                 }
-                self.app.route_client_pixel_mouse_with_presentation(
+                let mut pomodoro_presentation =
+                    self.pomodoro_input_presentation_for_input(client_id);
+                let changed = self.app.route_client_pixel_mouse_with_presentation(
                     client_id,
                     &data,
                     geometry,
-                    self.pomodoro_input_presentation_for_input(client_id),
-                ) || foreground_changed
+                    &mut pomodoro_presentation,
+                );
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.pomodoro_presentation = pomodoro_presentation;
+                }
+                changed || foreground_changed
             }
             ServerEvent::ClientInput { client_id, data } => {
                 if !self.clients.contains_key(&client_id) {
@@ -5777,6 +5797,9 @@ impl HeadlessServer {
         let Some(client) = self.clients.get(&client_id) else {
             retained_fallback!("client_missing");
         };
+        if client.pomodoro_presentation.owns_input() {
+            retained_fallback!("pomodoro_overlay");
+        }
         if client.deferred_render() != DeferredRender::None {
             retained_fallback!("render_pending");
         }
@@ -8568,6 +8591,65 @@ esac
             surface: crate::app::DockSurface::Linear,
             key: "SCA-1".into(),
         });
+    }
+
+    #[tokio::test]
+    async fn presented_pomodoro_overlays_reject_retained_pty_updates() {
+        for overlay in ["prompt", "send-off"] {
+            let (mut server, client_rx, pane_id) = retained_test_server(b"tiled pane");
+            let now = Instant::now();
+            match overlay {
+                "prompt" => {
+                    server.app.state.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
+                        ended: crate::pomodoro::PomodoroPhase::Work,
+                        next: crate::pomodoro::PomodoroPhase::ShortBreak,
+                        raised_at: now,
+                        input: String::new(),
+                        error: None,
+                    });
+                }
+                "send-off" => {
+                    server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+                        started: crate::pomodoro::PomodoroPhase::ShortBreak,
+                        shown_at: now,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            server.render_and_stream();
+            let overlay_frame = read_server_frame(
+                client_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("overlay frame"),
+            );
+            let presentation = server.clients[&1].pomodoro_presentation;
+            assert!(
+                presentation.prompt.is_some() || presentation.send_off.is_some(),
+                "{overlay} must own input"
+            );
+            let runtime = server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+                .expect("runtime");
+            runtime.test_process_pty_bytes(b"\rZ");
+
+            assert!(
+                !server.render_retained_pty_update_and_stream(),
+                "{overlay} accepted a retained pane patch"
+            );
+            assert_frame_data_eq(
+                server.clients[&1]
+                    .render_state
+                    .last_frame()
+                    .expect("overlay frame retained"),
+                &overlay_frame,
+            );
+            assert!(
+                client_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "{overlay} received a retained pane patch"
+            );
+        }
     }
 
     #[tokio::test]
@@ -15023,6 +15105,171 @@ next_tab = ""
             pane_input.try_recv().is_err(),
             "a key after focus return must not reach the pane"
         );
+    }
+
+    #[tokio::test]
+    async fn p1_headless_focus_return_gate_survives_until_a_frame_is_committed() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let now = Instant::now();
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            now,
+        );
+        let (client_tx, _control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.handle_scheduled_tasks_headless(now + Duration::from_secs(60), false);
+        assert!(server.app.state.pomodoro.held());
+        server.resize_shared_runtime_to_effective_size();
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("committed pre-focus frame"));
+
+        assert!(server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::OuterFocusGained],
+        ));
+        assert!(server.app.state.pomodoro.prompt.is_some());
+        let key = crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+        assert!(server.handle_client_input_events(1, vec![key]));
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the prompt raised between frames must gate the next batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_headless_focus_refresh_cannot_remove_another_clients_visible_gate() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let (client_one_tx, _client_one_control_rx, client_one_rx) = test_client_writer();
+        let (client_two_tx, _client_two_control_rx, client_two_rx) = test_client_writer();
+        for (client_id, writer) in [(1, client_one_tx), (2, client_two_tx)] {
+            server.clients.insert(
+                client_id,
+                ClientConnection::new(
+                    (100, 30),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    client_id,
+                    RenderEncoding::SemanticFrame,
+                    Some(writer),
+                ),
+            );
+        }
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        server.render_and_stream();
+        let _ = read_server_frame(client_one_rx.recv().expect("client one send-off frame"));
+        let _ = read_server_frame(client_two_rx.recv().expect("client two send-off frame"));
+
+        let key = |ch| {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char(ch),
+                KeyModifiers::empty(),
+            ))
+        };
+        assert!(server.handle_client_input_events(2, vec![key('x')]));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+        assert!(server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::OuterFocusGained, key('y')],
+        ));
+        assert!(
+            pane_input.try_recv().is_err(),
+            "client two cannot clear the gate still visible to client one"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_headless_send_off_repeat_preserves_the_forwarded_release_lease() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"\x1b[>15u");
+        let (client_tx, _control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("initial frame"));
+
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        );
+        assert!(server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::Key(key.clone())],
+        ));
+        assert_eq!(
+            pane_input.recv().await.expect("forwarded press"),
+            Bytes::from_static(b"\x1b[120;1:1u")
+        );
+
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("send-off frame"));
+        assert!(server.handle_client_input_events(
+            1,
+            vec![
+                crate::raw_input::RawInputEvent::Key(
+                    key.clone()
+                        .with_kind(crossterm::event::KeyEventKind::Repeat),
+                ),
+                crate::raw_input::RawInputEvent::Key(
+                    key.with_kind(crossterm::event::KeyEventKind::Release),
+                ),
+            ],
+        ));
+        assert_eq!(
+            pane_input.try_recv().expect("forwarded repeat"),
+            Bytes::from_static(b"\x1b[120;1:2u")
+        );
+        assert_eq!(
+            pane_input.try_recv().expect("forwarded release"),
+            Bytes::from_static(b"\x1b[120;1:3u")
+        );
+        assert!(server.app.input_leases.is_empty());
+        assert!(server.app.state.pomodoro.send_off.is_some());
     }
 
     #[tokio::test]

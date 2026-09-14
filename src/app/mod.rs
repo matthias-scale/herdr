@@ -2910,12 +2910,17 @@ impl App {
         data: &[u8],
         geometry: crate::input::mouse::HostGeometry,
     ) -> bool {
-        let presentation = crate::ui::pomodoro::input_presentation_at(
+        let mut presentation = crate::ui::pomodoro::input_presentation_at(
             &self.state,
             ratatui::layout::Rect::new(0, 0, geometry.cols, geometry.rows),
             std::time::Instant::now(),
         );
-        self.route_client_pixel_mouse_with_presentation(source_id, data, geometry, presentation)
+        self.route_client_pixel_mouse_with_presentation(
+            source_id,
+            data,
+            geometry,
+            &mut presentation,
+        )
     }
 
     pub(crate) fn route_client_pixel_mouse_with_presentation(
@@ -2923,7 +2928,7 @@ impl App {
         source_id: InputSourceId,
         data: &[u8],
         geometry: crate::input::mouse::HostGeometry,
-        presentation: crate::ui::pomodoro::InputPresentation,
+        presentation: &mut crate::ui::pomodoro::InputPresentation,
     ) -> bool {
         let Some((x, y)) = crate::input::mouse::parse_report(data) else {
             return false;
@@ -3002,7 +3007,7 @@ impl App {
             apply_host_terminal_theme,
             before_terminal_input,
             controlled_owners,
-            pomodoro_presentation,
+            &mut pomodoro_presentation,
         )
     }
 
@@ -3013,25 +3018,30 @@ impl App {
         apply_host_terminal_theme: bool,
         before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
         controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
-        mut pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
+        pomodoro_presentation: &mut crate::ui::pomodoro::InputPresentation,
     ) -> bool {
         self.begin_contract_false_positive_input_burst();
         let mut pomodoro_changed = false;
         for event in events {
+            *pomodoro_presentation = crate::ui::pomodoro::input_gate_at(
+                &self.state,
+                *pomodoro_presentation,
+                std::time::Instant::now(),
+            );
             let previous_mode = self.state.mode;
-            let refresh_pomodoro_presentation =
-                matches!(&event, crate::raw_input::RawInputEvent::OuterFocusGained);
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
                     let lease_key = input::InputLeaseKey::new(source_id, &key);
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     let normalized_event = crate::raw_input::RawInputEvent::Key(key.clone());
-                    if self.intercept_pomodoro_send_off_raw_input_with_visibility(
-                        source_id,
-                        &normalized_event,
-                        pomodoro_presentation.send_off.is_some(),
-                    ) {
+                    if !self.input_leases.contains(&lease_key)
+                        && self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                            source_id,
+                            &normalized_event,
+                            pomodoro_presentation.send_off.is_some(),
+                        )
+                    {
                         pomodoro_changed = true;
                         if key.kind != crossterm::event::KeyEventKind::Release {
                             self.input_leases.insert_consumed(
@@ -3203,7 +3213,7 @@ impl App {
                         self.handle_mouse_event_headless_with_pomodoro_presentation(
                             source_id,
                             mouse,
-                            pomodoro_presentation,
+                            *pomodoro_presentation,
                         );
                     } else {
                         if pomodoro_presentation.prompt.is_some() {
@@ -3298,14 +3308,12 @@ impl App {
                 crate::raw_input::RawInputEvent::Unsupported => {}
             }
             self.sync_prefix_input_source(previous_mode);
-            if refresh_pomodoro_presentation {
-                pomodoro_presentation = crate::ui::pomodoro::input_presentation_at(
-                    &self.state,
-                    pomodoro_presentation.area,
-                    std::time::Instant::now(),
-                );
-            }
         }
+        *pomodoro_presentation = crate::ui::pomodoro::input_gate_at(
+            &self.state,
+            *pomodoro_presentation,
+            std::time::Instant::now(),
+        );
         pomodoro_changed
     }
 

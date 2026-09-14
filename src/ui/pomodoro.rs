@@ -36,14 +36,19 @@ const SEND_OFF_HEIGHT: u16 = 7;
 pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(125);
 
-/// The Pomodoro surfaces that a client actually received in its last committed
-/// frame. Input routing must use this snapshot instead of rebuilding visibility
-/// from the current shared state and the client's announced size.
+/// Pomodoro input ownership for one client. A committed frame replaces this
+/// snapshot; between frames, newly presentable overlays can only add ownership.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct InputPresentation {
     pub(crate) area: Rect,
     pub(crate) send_off: Option<Rect>,
     pub(crate) prompt: Option<Rect>,
+}
+
+impl InputPresentation {
+    pub(crate) fn owns_input(self) -> bool {
+        self.send_off.is_some() || self.prompt.is_some()
+    }
 }
 const BREAK_TIPS: [&str; 3] = [
     "stand up · look at something far away",
@@ -233,6 +238,21 @@ pub(crate) fn input_presentation_at(
         area,
         send_off,
         prompt,
+    }
+}
+
+/// Adds overlays raised since the last committed frame without clearing any
+/// ownership that frame established. Only a later frame commit may narrow it.
+pub(crate) fn input_gate_at(
+    app: &AppState,
+    gate: InputPresentation,
+    now: std::time::Instant,
+) -> InputPresentation {
+    let current = input_presentation_at(app, gate.area, now);
+    InputPresentation {
+        area: gate.area,
+        send_off: gate.send_off.or(current.send_off),
+        prompt: gate.prompt.or(current.prompt),
     }
 }
 
