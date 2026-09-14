@@ -752,6 +752,12 @@ impl HeadlessServer {
                 needs_graphics_render = false;
                 crate::render_prof::event("full_render_cause.internal_events");
             }
+            if self.app.reconcile_remote_focus_lifecycle() {
+                needs_render = true;
+                needs_full_render = true;
+                needs_graphics_render = false;
+                crate::render_prof::event("full_render_cause.remote_focus_lifecycle");
+            }
             if self.should_quit.load(Ordering::Acquire) {
                 continue;
             }
@@ -7238,6 +7244,24 @@ mod tests {
         terminal_id: &crate::terminal::TerminalId,
         detached: &Arc<std::sync::Mutex<Vec<String>>>,
     ) {
+        assert_remote_focus_proxy_torn_down_with_state(
+            server,
+            operation_id,
+            pane_id,
+            terminal_id,
+            detached,
+            api::schema::RemoteFocusState::Closed,
+        );
+    }
+
+    fn assert_remote_focus_proxy_torn_down_with_state(
+        server: &mut HeadlessServer,
+        operation_id: &str,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        detached: &Arc<std::sync::Mutex<Vec<String>>>,
+        expected_state: api::schema::RemoteFocusState,
+    ) {
         assert!(!server
             .app
             .state
@@ -7256,7 +7280,7 @@ mod tests {
                 .remote_focus_status(operation_id)
                 .expect("proxy operation status")
                 .state,
-            api::schema::RemoteFocusState::Closed
+            expected_state
         );
     }
 
@@ -7291,6 +7315,52 @@ mod tests {
             pane_id,
             &terminal_id,
             &detached,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_loop_reconciles_remote_focus_transport_termination_without_event() {
+        let (mut server, operation_id, pane_id, terminal_id, detached) =
+            server_with_remote_focus_proxy();
+        let operation_state = server
+            .app
+            .remote_focus_operations
+            .operation_state(&operation_id)
+            .expect("remote focus operation state");
+        assert!(operation_state.terminate());
+
+        // Let the test server stop only after the reconciliation path has
+        // detached the proxy. A shutdown-triggered teardown cannot make this
+        // test pass when the headless loop misses reconciliation.
+        let should_quit = Arc::clone(&server.should_quit);
+        let detached_for_watcher = Arc::clone(&detached);
+        let watcher = tokio::spawn(async move {
+            loop {
+                if !detached_for_watcher
+                    .lock()
+                    .expect("detach recording lock")
+                    .is_empty()
+                {
+                    should_quit.store(true, Ordering::Release);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), server.run())
+            .await
+            .expect("headless server reconciles and exits")
+            .expect("headless server run");
+        watcher.await.expect("detach watcher");
+
+        assert_remote_focus_proxy_torn_down_with_state(
+            &mut server,
+            &operation_id,
+            pane_id,
+            &terminal_id,
+            &detached,
+            api::schema::RemoteFocusState::Failed,
         );
     }
 
@@ -9399,6 +9469,17 @@ next_tab = ""
     }
 
     #[cfg(unix)]
+    impl crate::remote::TimedRead for LocalSocketControlStream {
+        fn read_with_timeout(
+            &mut self,
+            buffer: &mut [u8],
+            _timeout: std::time::Duration,
+        ) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
     impl std::io::Write for LocalSocketControlStream {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
             std::io::Write::write(&mut self.0, buffer)
@@ -9437,6 +9518,17 @@ next_tab = ""
     }
 
     #[cfg(unix)]
+    impl crate::remote::TimedRead for LocalSocketControlReader {
+        fn read_with_timeout(
+            &mut self,
+            buffer: &mut [u8],
+            _timeout: std::time::Duration,
+        ) -> io::Result<usize> {
+            std::io::Read::read(&mut self.0, buffer)
+        }
+    }
+
+    #[cfg(unix)]
     impl crate::remote::ControlReadHalf for LocalSocketControlReader {}
 
     #[cfg(unix)]
@@ -9460,7 +9552,10 @@ next_tab = ""
 
     #[cfg(unix)]
     impl crate::remote::SshRunner for LocalSocketControlRunner {
-        fn connect(&self, _target: &str) -> io::Result<Box<dyn crate::remote::ControlStream>> {
+        fn connect(
+            &self,
+            _host: &crate::config::FleetHostConfig,
+        ) -> io::Result<Box<dyn crate::remote::ControlStream>> {
             Ok(Box::new(LocalSocketControlStream(
                 crate::ipc::connect_local_stream(&self.socket_path)?,
             )))
@@ -9604,6 +9699,8 @@ next_tab = ""
             outbound_rx,
             detach_tx: outbound_tx,
             resize_slot: Arc::new(std::sync::Mutex::new((24, 80, 0, 0))),
+            input_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            operation_state: crate::remote::RemoteFocusOperationState::new(),
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
         transport

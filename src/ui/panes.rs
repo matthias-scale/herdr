@@ -1024,6 +1024,7 @@ mod tests {
             0,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
         )
         .expect("proxy runtime");
         workspace.tabs[0].runtimes.insert(pane_id, runtime);

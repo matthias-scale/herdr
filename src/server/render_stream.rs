@@ -685,6 +685,7 @@ mod render_scale_benchmark {
             1024 * 1024,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            crate::remote::RemoteFocusOperationState::new(),
         )
         .expect("proxy runtime");
         runtime.process_remote_frame(history.as_bytes());
