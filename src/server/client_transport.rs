@@ -86,7 +86,7 @@ impl ClientWriter {
             while let Some(item) = drain.recv() {
                 let sent = match item {
                     ClientWriteItem::Control(data) => control.send(data).is_ok(),
-                    ClientWriteItem::Render(data) => render.send(data).is_ok(),
+                    ClientWriteItem::Render { data, .. } => render.send(data).is_ok(),
                 };
                 if !sent {
                     break;
@@ -159,10 +159,11 @@ impl ClientRenderWriter {
         }
     }
 
-    pub(crate) fn try_send(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
+    pub(crate) fn try_send(&self, data: Vec<u8>) -> Result<u64, TrySendError<Vec<u8>>> {
         #[cfg(test)]
         if let Some(sender) = &self.test_render {
-            return sender.try_send(data);
+            sender.try_send(data)?;
+            return Ok(self.queue.next_render_sequence());
         }
         self.queue.try_send_render(data)
     }
@@ -181,8 +182,9 @@ struct ClientWriterQueue {
 #[derive(Debug, Default)]
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
-    ordered: VecDeque<Vec<u8>>,
-    render: Option<Vec<u8>>,
+    ordered: VecDeque<(u64, Vec<u8>)>,
+    render: Option<(u64, Vec<u8>)>,
+    next_render_sequence: u64,
     senders: usize,
     writer_alive: bool,
 }
@@ -190,7 +192,7 @@ struct ClientWriterQueueState {
 #[derive(Debug, PartialEq, Eq)]
 enum ClientWriteItem {
     Control(Vec<u8>),
-    Render(Vec<u8>),
+    Render { sequence: u64, data: Vec<u8> },
 }
 
 impl ClientWriterQueue {
@@ -225,7 +227,7 @@ impl ClientWriterQueue {
         Ok(())
     }
 
-    fn try_send_render(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
+    fn try_send_render(&self, data: Vec<u8>) -> Result<u64, TrySendError<Vec<u8>>> {
         let mut state = self.lock_state();
         if !state.writer_alive {
             return Err(TrySendError::Disconnected(data));
@@ -233,9 +235,10 @@ impl ClientWriterQueue {
         if state.render.is_some() {
             return Err(TrySendError::Full(data));
         }
-        state.render = Some(data);
+        let sequence = Self::allocate_render_sequence(&mut state);
+        state.render = Some((sequence, data));
         self.ready.notify_one();
-        Ok(())
+        Ok(sequence)
     }
 
     fn send_ordered(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
@@ -249,7 +252,8 @@ impl ClientWriterQueue {
         if let Some(older) = state.render.take() {
             state.ordered.push_back(older);
         }
-        state.ordered.push_back(data);
+        let sequence = Self::allocate_render_sequence(&mut state);
+        state.ordered.push_back((sequence, data));
         self.ready.notify_one();
         Ok(())
     }
@@ -270,12 +274,12 @@ impl ClientWriterQueue {
             if let Some(data) = state.control.pop_front() {
                 return Some(ClientWriteItem::Control(data));
             }
-            if let Some(data) = state.ordered.pop_front() {
+            if let Some((sequence, data)) = state.ordered.pop_front() {
                 self.ready.notify_one();
-                return Some(ClientWriteItem::Render(data));
+                return Some(ClientWriteItem::Render { sequence, data });
             }
-            if let Some(data) = state.render.take() {
-                return Some(ClientWriteItem::Render(data));
+            if let Some((sequence, data)) = state.render.take() {
+                return Some(ClientWriteItem::Render { sequence, data });
             }
             if state.senders == 0 {
                 return None;
@@ -299,6 +303,17 @@ impl ClientWriterQueue {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(test)]
+    fn next_render_sequence(&self) -> u64 {
+        let mut state = self.lock_state();
+        Self::allocate_render_sequence(&mut state)
+    }
+
+    fn allocate_render_sequence(state: &mut ClientWriterQueueState) -> u64 {
+        state.next_render_sequence = state.next_render_sequence.saturating_add(1);
+        state.next_render_sequence
     }
 }
 
@@ -395,8 +410,11 @@ pub(crate) enum ServerEvent {
     ClientDetach { client_id: u64 },
     /// A client connection was lost.
     ClientDisconnected { client_id: u64 },
-    /// A client writer drained its render slot and can accept another render.
-    ClientWriterDrained { client_id: u64 },
+    /// A client writer flushed a render frame to its socket.
+    ClientWriterDrained {
+        client_id: u64,
+        render_sequence: u64,
+    },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
 }
@@ -750,10 +768,15 @@ fn client_writer_loop(
     while let Some(item) = writer_queue.recv() {
         let written = match item {
             ClientWriteItem::Control(data) => write_framed_bytes(&mut stream, &data),
-            ClientWriteItem::Render(data) => {
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientWriterDrained { client_id });
-                write_framed_bytes(&mut stream, &data)
+            ClientWriteItem::Render { sequence, data } => {
+                let written = write_framed_bytes(&mut stream, &data);
+                if written {
+                    let _ = server_event_tx.blocking_send(ServerEvent::ClientWriterDrained {
+                        client_id,
+                        render_sequence: sequence,
+                    });
+                }
+                written
             }
         };
         if !written {
@@ -1156,10 +1179,10 @@ mod tests {
         writer.render.try_send(b"new".to_vec()).unwrap();
 
         for expected in [b"old".as_slice(), b"direct", b"new"] {
-            assert_eq!(
-                queue.recv(),
-                Some(ClientWriteItem::Render(expected.to_vec()))
-            );
+            let Some(ClientWriteItem::Render { data, .. }) = queue.recv() else {
+                panic!("expected render item");
+            };
+            assert_eq!(data, expected);
         }
         queue.close_writer();
         assert!(matches!(
@@ -1200,7 +1223,7 @@ mod tests {
             .blocking_recv()
             .expect("writer drained render slot")
         {
-            ServerEvent::ClientWriterDrained { client_id } => assert_eq!(client_id, 9),
+            ServerEvent::ClientWriterDrained { client_id, .. } => assert_eq!(client_id, 9),
             other => panic!("expected writer drained event, got {other:?}"),
         }
 

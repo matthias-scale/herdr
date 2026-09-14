@@ -230,18 +230,74 @@ impl AppState {
 }
 
 impl crate::app::App {
-    /// The one rule for when the break prompt or the notepad owns a key.
-    ///
-    /// Both the in-process TUI loop and the headless server route keys through
-    /// here before anything else sees them, including the focused pane. Wiring
-    /// this into only one of the two paths is what made the panel look focused
-    /// while every keystroke went to the pane behind it.
-    pub(crate) fn intercept_notepad_key(&mut self, key: &crate::input::TerminalKey) -> bool {
+    pub(crate) fn intercept_pomodoro_send_off_raw_input_with_visibility(
+        &mut self,
+        source_id: crate::app::InputSourceId,
+        event: &crate::raw_input::RawInputEvent,
+        visible: bool,
+    ) -> bool {
+        if let crate::raw_input::RawInputEvent::Mouse(mouse) = event {
+            if let Some(button) = self
+                .pending_pomodoro_send_off_mouse_releases
+                .get(&source_id)
+                .copied()
+            {
+                if let crossterm::event::MouseEventKind::Up(released) = mouse.kind {
+                    if released == button {
+                        self.pending_pomodoro_send_off_mouse_releases
+                            .remove(&source_id);
+                        return true;
+                    }
+                    return false;
+                }
+                return true;
+            }
+        }
+        if !visible {
+            return false;
+        }
+
+        let dismisses = match event {
+            crate::raw_input::RawInputEvent::Key(key) => {
+                if key.kind == crossterm::event::KeyEventKind::Release {
+                    return false;
+                }
+                true
+            }
+            crate::raw_input::RawInputEvent::Text(_)
+            | crate::raw_input::RawInputEvent::Paste(_) => true,
+            crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                if let crossterm::event::MouseEventKind::Down(button) = mouse.kind {
+                    self.pending_pomodoro_send_off_mouse_releases
+                        .insert(source_id, button);
+                    true
+                } else {
+                    !matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_))
+                }
+            }
+            _ => false,
+        };
+        if !dismisses {
+            return false;
+        }
+        self.state
+            .pomodoro
+            .dismiss_send_off_at(std::time::Instant::now());
+        true
+    }
+
+    pub(crate) fn intercept_notepad_key_with_prompt_visibility(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        prompt_visible: bool,
+    ) -> bool {
         let now = std::time::Instant::now();
-        if self.state.pomodoro.prompt.is_some() {
-            self.state
-                .handle_pomodoro_prompt_key(key.as_key_event(), now);
-            self.apply_notepad_request();
+        if prompt_visible {
+            if self.state.pomodoro.prompt.is_some() {
+                self.state
+                    .handle_pomodoro_prompt_key(key.as_key_event(), now);
+                self.apply_notepad_request();
+            }
             return true;
         }
         if self.state.notepad.focused && self.state.handle_notepad_key(key.as_key_event(), now) {

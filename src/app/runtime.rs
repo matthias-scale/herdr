@@ -40,6 +40,21 @@ fn retain_custom_command_after_wait(
 }
 
 impl App {
+    fn local_pomodoro_presentation_for_input(&mut self) -> crate::ui::pomodoro::InputPresentation {
+        let presentation = self.local_pomodoro_presentation.map_or_else(
+            || {
+                crate::ui::pomodoro::input_presentation_at(
+                    &self.state,
+                    self.state.screen_rect(),
+                    Instant::now(),
+                )
+            },
+            |gate| crate::ui::pomodoro::input_gate_at(&self.state, gate, Instant::now()),
+        );
+        self.local_pomodoro_presentation = Some(presentation);
+        presentation
+    }
+
     pub(crate) fn reap_finished_custom_commands(&mut self) {
         self.detached_custom_command_children
             .retain_mut(|child| retain_custom_command_after_wait(child.id(), child.try_wait()));
@@ -127,11 +142,30 @@ impl App {
         first: crate::raw_input::RawInputEvent,
     ) -> bool {
         self.begin_contract_false_positive_input_burst();
-        let mut changed = self.handle_raw_input_event(first).await;
+        let mut pomodoro_presentation = self.local_pomodoro_presentation_for_input();
+        let mut changed = self
+            .handle_raw_input_event_with_pomodoro_presentation(first, pomodoro_presentation)
+            .await;
+        pomodoro_presentation =
+            crate::ui::pomodoro::input_gate_at(&self.state, pomodoro_presentation, Instant::now());
+        self.local_pomodoro_presentation = Some(pomodoro_presentation);
 
         while let Some(rx) = self.input_rx.as_mut() {
             match rx.try_recv() {
-                Ok(event) => changed |= self.handle_raw_input_event(event).await,
+                Ok(event) => {
+                    changed |= self
+                        .handle_raw_input_event_with_pomodoro_presentation(
+                            event,
+                            pomodoro_presentation,
+                        )
+                        .await;
+                    pomodoro_presentation = crate::ui::pomodoro::input_gate_at(
+                        &self.state,
+                        pomodoro_presentation,
+                        Instant::now(),
+                    );
+                    self.local_pomodoro_presentation = Some(pomodoro_presentation);
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.input_rx = None;
@@ -148,6 +182,7 @@ impl App {
         lease_key: super::input::InputLeaseKey,
         key: crate::input::TerminalKey,
         plan: super::input::RepeatPlan,
+        pomodoro_prompt_visible: bool,
     ) -> bool {
         match plan {
             super::input::RepeatPlan::Forwarded(target) => {
@@ -185,7 +220,13 @@ impl App {
                     ) {
                         break;
                     }
-                    if let Some(target) = self.handle_key(key.clone()).await {
+                    if let Some(target) = self
+                        .handle_key_with_pomodoro_prompt_visibility(
+                            key.clone(),
+                            pomodoro_prompt_visible,
+                        )
+                        .await
+                    {
                         if tracked {
                             self.input_leases.insert_forwarded(
                                 lease_key,
@@ -202,20 +243,86 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn handle_raw_input_event(
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
+        let ends_input_lifecycle = matches!(
+            &event,
+            crate::raw_input::RawInputEvent::Key(key)
+                if key.kind == crossterm::event::KeyEventKind::Release
+        ) || matches!(
+            &event,
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Up(_),
+                ..
+            })
+        );
+        let mut pomodoro_presentation = self.local_pomodoro_presentation_for_input();
+        if pomodoro_presentation.prompt.is_none() && self.state.pomodoro.prompt.is_some() {
+            pomodoro_presentation.prompt = Some(self.state.screen_rect());
+        }
+        let changed = self
+            .handle_raw_input_event_with_pomodoro_presentation(event, pomodoro_presentation)
+            .await;
+        self.local_pomodoro_presentation = if ends_input_lifecycle {
+            None
+        } else {
+            Some(crate::ui::pomodoro::input_gate_at(
+                &self.state,
+                pomodoro_presentation,
+                Instant::now(),
+            ))
+        };
+        changed
+    }
+
+    async fn handle_raw_input_event_with_pomodoro_presentation(
+        &mut self,
+        event: crate::raw_input::RawInputEvent,
+        pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
+    ) -> bool {
+        if !matches!(&event, crate::raw_input::RawInputEvent::Key(_))
+            && self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                super::LOCAL_INPUT_SOURCE,
+                &event,
+                pomodoro_presentation.send_off.is_some(),
+            )
+        {
+            return true;
+        }
         let previous_mode = self.state.mode;
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let lease_key = super::input::InputLeaseKey::new(super::LOCAL_INPUT_SOURCE, &key);
                 let key = self.input_leases.normalize_press(&lease_key, key);
+                let normalized_event = crate::raw_input::RawInputEvent::Key(key.clone());
+                if !self.input_leases.contains(&lease_key)
+                    && self.intercept_pomodoro_send_off_raw_input_with_visibility(
+                        super::LOCAL_INPUT_SOURCE,
+                        &normalized_event,
+                        pomodoro_presentation.send_off.is_some(),
+                    )
+                {
+                    if key.kind != crossterm::event::KeyEventKind::Release {
+                        self.input_leases.insert_consumed(
+                            lease_key,
+                            super::input::ConsumedInputLease::SuppressRepeats,
+                        );
+                    }
+                    return true;
+                }
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
                         let initial_context = self.terminal_input_context();
                         let proxy_input_gate_closed = self.focused_remote_proxy_input_gate_closed();
-                        let target = self.handle_key(key.clone()).await;
+                        let target = self
+                            .handle_key_with_pomodoro_prompt_visibility(
+                                key.clone(),
+                                pomodoro_presentation.prompt.is_some(),
+                            )
+                            .await;
                         let resulting_context = self.terminal_input_context();
                         let plan = self.input_leases.complete_press_with_reprocess(
                             lease_key,
@@ -225,7 +332,13 @@ impl App {
                             target,
                             !proxy_input_gate_closed,
                         );
-                        self.execute_repeat_plan(lease_key, key, plan).await;
+                        self.execute_repeat_plan(
+                            lease_key,
+                            key,
+                            plan,
+                            pomodoro_presentation.prompt.is_some(),
+                        )
+                        .await;
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
@@ -235,7 +348,13 @@ impl App {
                             &key,
                             current_context.as_ref(),
                         );
-                        self.execute_repeat_plan(lease_key, key, plan).await
+                        self.execute_repeat_plan(
+                            lease_key,
+                            key,
+                            plan,
+                            pomodoro_presentation.prompt.is_some(),
+                        )
+                        .await
                     }
                     crossterm::event::KeyEventKind::Release => {
                         if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
@@ -248,17 +367,30 @@ impl App {
                 }
             }
             crate::raw_input::RawInputEvent::Text(text) => {
+                if pomodoro_presentation.prompt.is_some() {
+                    return true;
+                }
                 self.handle_text_commit(text.into_string()).await;
                 true
             }
             crate::raw_input::RawInputEvent::Paste(text) => {
+                if pomodoro_presentation.prompt.is_some() {
+                    return true;
+                }
                 self.handle_paste(text).await;
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
                 let previous_hover = self.state.hovered_control;
-                if self.state.popup_pane.is_some() || self.state.mouse_capture {
-                    self.handle_mouse(mouse);
+                if pomodoro_presentation.prompt.is_some()
+                    || self.state.popup_pane.is_some()
+                    || self.state.mouse_capture
+                {
+                    self.handle_mouse_from_input_source_with_pomodoro_presentation(
+                        super::LOCAL_INPUT_SOURCE,
+                        mouse,
+                        pomodoro_presentation,
+                    );
                 } else {
                     self.state
                         .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
@@ -350,11 +482,21 @@ impl App {
             .flatten()
     }
 
+    fn pomodoro_animation_due(&self, now: Instant) -> bool {
+        crate::ui::pomodoro::animation_due_at(
+            &self.state,
+            self.state.screen_rect(),
+            now,
+            self.last_render_at,
+        )
+    }
+
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = self.take_due_agent_activity_refresh(now);
         changed |= self.handle_loop_receipt_fallback(now);
         changed |= self.tick_notepad(now);
         changed |= self.tick_pomodoro(now, self.state.outer_terminal_focus != Some(false));
+        changed |= self.pomodoro_animation_due(now);
         changed |= self.tick_sidebar_animation(now);
         let mut resized = false;
 
@@ -1025,7 +1167,14 @@ impl App {
     }
 
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
+        let deadline = self.next_loop_deadline_with_resize_poll(now, needs_render, true, true);
+        [
+            deadline,
+            crate::ui::pomodoro::animation_deadline_at(&self.state, self.state.screen_rect(), now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub(crate) fn next_headless_loop_deadline_with_client_refresh(
@@ -1067,7 +1216,8 @@ impl App {
             self.state.next_done_settle_deadline(now),
             self.copy_feedback_deadline,
             // Presentation only: an unattached headless server draws no
-            // sidebar, so the animation must never be what wakes it.
+            // sidebar, so client-specific animation deadlines are handled by
+            // the headless server instead of this shared App scheduler.
             include_client_refresh
                 .then(|| self.sidebar_animation_deadline())
                 .flatten(),
@@ -1216,6 +1366,346 @@ mod tests {
         assert!(!app.state.pomodoro.held());
     }
 
+    #[tokio::test]
+    async fn monolithic_raw_text_paste_and_uncaptured_click_close_send_off_without_pane_input() {
+        for event in [
+            crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new("committed")),
+            crate::raw_input::RawInputEvent::Paste("pasted".into()),
+        ] {
+            let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+            assert!(app.handle_raw_input_event(event).await);
+            assert!(app.state.pomodoro.send_off.is_none());
+            assert!(
+                pane_input.try_recv().is_err(),
+                "the closing raw input must not reach the pane"
+            );
+        }
+
+        let mouse = |kind| {
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 40,
+                row: 12,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+        };
+        for mouse_capture in [false, true] {
+            let (mut app, mut pane_input) =
+                test_app_with_send_off_and_mouse_reporting(mouse_capture);
+            for event in [
+                mouse(crossterm::event::MouseEventKind::Moved),
+                mouse(crossterm::event::MouseEventKind::ScrollDown),
+                mouse(crossterm::event::MouseEventKind::Down(
+                    crossterm::event::MouseButton::Left,
+                )),
+                mouse(crossterm::event::MouseEventKind::Drag(
+                    crossterm::event::MouseButton::Left,
+                )),
+                mouse(crossterm::event::MouseEventKind::Up(
+                    crossterm::event::MouseButton::Left,
+                )),
+            ] {
+                assert!(app.handle_raw_input_event(event).await);
+            }
+            assert!(app.state.pomodoro.send_off.is_none());
+            assert!(
+                pane_input.try_recv().is_err(),
+                "send-off mouse events reached the pane with capture={mouse_capture}"
+            );
+        }
+
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        app.state.pomodoro.send_off = None;
+        let click = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 40,
+            row: 12,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(click))
+                .await
+        );
+        assert!(
+            pane_input.try_recv().is_ok(),
+            "without the send-off, the same click reaches the mouse-reporting pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_monolithic_raw_input_batch_uses_its_starting_pomodoro_gate() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+        app.input_rx = Some(input_rx);
+        let key = |ch| {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::empty(),
+            ))
+        };
+        input_tx.send(key('y')).await.expect("batch follow-up key");
+
+        assert!(app.handle_raw_input_batch(key('x')).await);
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "an event after dismissal escaped the batch's starting gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_monolithic_focus_return_batch_refreshes_the_pomodoro_gate() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        let started_at = Instant::now();
+        app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            started_at,
+        );
+
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert!(app.handle_scheduled_tasks(started_at + Duration::from_secs(60), false));
+        assert!(app.state.pomodoro.held());
+
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+        app.input_rx = Some(input_rx);
+        input_tx
+            .send(crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            ))
+            .await
+            .expect("batch follow-up key");
+
+        assert!(
+            app.handle_raw_input_batch(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert!(app.state.pomodoro.prompt.is_some());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "a key after focus return must not reach the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_monolithic_focus_return_gate_survives_until_a_frame_is_committed() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        let started_at = Instant::now();
+        app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            started_at,
+        );
+
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert!(app.handle_scheduled_tasks(started_at + Duration::from_secs(60), false));
+        assert!(app.state.pomodoro.held());
+        assert!(
+            app.handle_raw_input_batch(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert!(app.state.pomodoro.prompt.is_some());
+
+        let key = crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert!(app.handle_raw_input_batch(key).await);
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the prompt raised between frames must gate the next batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_monolithic_focus_refresh_cannot_remove_a_visible_send_off_gate() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        let area = app.state.screen_rect();
+        app.local_pomodoro_presentation = Some(crate::ui::pomodoro::input_presentation_at(
+            &app.state,
+            area,
+            Instant::now(),
+        ));
+        app.state.pomodoro.send_off = None;
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(2);
+        app.input_rx = Some(input_rx);
+        input_tx
+            .send(crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            ))
+            .await
+            .expect("batch follow-up key");
+
+        assert!(
+            app.handle_raw_input_batch(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert!(
+            pane_input.try_recv().is_err(),
+            "shared state cannot clear a send-off still visible in the committed frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn f2_monolithic_send_off_release_clears_the_dismissal_key_lease() {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        );
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(key.clone()))
+                .await
+        );
+        assert!(app.state.pomodoro.send_off.is_none());
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(
+                key.clone()
+                    .with_kind(crossterm::event::KeyEventKind::Repeat),
+            ))
+            .await
+        );
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(
+                key.clone()
+                    .with_kind(crossterm::event::KeyEventKind::Release),
+            ))
+            .await
+        );
+        assert!(app.input_leases.is_empty());
+        assert!(app.state.pomodoro.send_off.is_some());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "the dismissal key lifecycle must not reach the pane"
+        );
+        app.state.pomodoro.send_off = None;
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Key(key))
+                .await
+        );
+        assert_eq!(
+            pane_input.recv().await.expect("second press reaches pane"),
+            bytes::Bytes::from_static(b"x")
+        );
+    }
+
+    #[tokio::test]
+    async fn f3_monolithic_send_off_only_swallows_mouse_up_after_its_down() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        app.state.pomodoro.send_off = None;
+        let mouse = |kind| {
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 40,
+                row: 12,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+        };
+
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Down(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        pane_input.recv().await.expect("mouse down reaches pane");
+
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Up(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        pane_input.recv().await.expect("mouse up reaches pane");
+        assert!(app.state.pomodoro.send_off.is_some());
+
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Down(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        assert!(
+            app.handle_raw_input_event(mouse(crossterm::event::MouseEventKind::Up(
+                crossterm::event::MouseButton::Left,
+            )))
+            .await
+        );
+        assert!(pane_input.try_recv().is_err());
+    }
+
+    fn test_app_with_send_off_and_mouse_reporting(
+        mouse_capture: bool,
+    ) -> (super::super::App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let (runtime, pane_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1003h\x1b[?1006h",
+                16,
+            );
+        assert!(
+            runtime.mouse_reporting_enabled(),
+            "reproduction requires a mouse-reporting pane"
+        );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+        app.state.mouse_capture = mouse_capture;
+        (app, pane_input)
+    }
+
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {
         let mut app = super::super::App::new(
             &crate::config::Config::default(),
@@ -1318,6 +1808,75 @@ mod tests {
             app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             None
         );
+    }
+
+    #[test]
+    fn pomodoro_animation_deadline_uses_the_visible_client_geometry() {
+        fn app_without_other_deadlines() -> super::super::App {
+            let mut config = crate::config::Config::default();
+            config.ui.status_bar.enabled = false;
+            super::super::App::new(
+                &config,
+                true,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                crate::api::EventHub::default(),
+            )
+        }
+
+        let now = Instant::now();
+        let mut app = app_without_other_deadlines();
+        app.next_resize_poll = now + Duration::from_secs(5);
+        app.state.pomodoro.enabled = true;
+        app.state.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
+            ended: crate::pomodoro::PomodoroPhase::Work,
+            next: crate::pomodoro::PomodoroPhase::ShortBreak,
+            raised_at: now,
+            input: String::new(),
+            error: None,
+        });
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 18, 30);
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
+            None
+        );
+        assert_eq!(
+            app.next_loop_deadline_with_resize_poll(now, false, false, true),
+            None
+        );
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            Some(now + Duration::from_secs(5))
+        );
+
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            Some(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL)
+        );
+        assert!(!app.tick_pomodoro(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL, true));
+        assert!(app.pomodoro_animation_due(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL));
+
+        let mut send_off = app_without_other_deadlines();
+        send_off.state.pomodoro.enabled = true;
+        send_off.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: now,
+        });
+        send_off.next_resize_poll = now + Duration::from_secs(5);
+        send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 18, 30);
+        assert_eq!(
+            send_off.next_loop_deadline(now, false),
+            Some(now + Duration::from_secs(5))
+        );
+        send_off.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        assert_eq!(
+            send_off.next_loop_deadline(now, false),
+            Some(now + crate::ui::pomodoro::ANIMATION_FRAME_INTERVAL)
+        );
+        assert!(send_off.tick_pomodoro(now + crate::pomodoro::SEND_OFF_DURATION, true));
+        assert!(send_off.state.pomodoro.send_off.is_none());
     }
 
     #[test]

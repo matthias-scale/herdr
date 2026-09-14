@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 /// How much text the operator has to type before a due prompt can be dismissed.
 /// A bare Enter is what makes a reminder ignorable, so the prompt refuses one.
 pub const DEFAULT_MIN_CONFIRM_CHARS: usize = 3;
+pub(crate) const SEND_OFF_DURATION: Duration = Duration::from_secs(6);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PomodoroPhase {
@@ -38,9 +39,17 @@ impl PomodoroPhase {
 pub struct PomodoroPrompt {
     pub ended: PomodoroPhase,
     pub next: PomodoroPhase,
+    pub raised_at: Instant,
     pub input: String,
     /// Set when the operator tried to dismiss the prompt without typing enough.
     pub error: Option<String>,
+}
+
+/// The short acknowledgment shown after a prompt is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PomodoroSendOff {
+    pub started: PomodoroPhase,
+    pub shown_at: Instant,
 }
 
 /// What a confirmed prompt hands back for logging.
@@ -51,8 +60,8 @@ pub struct PomodoroConfirmation {
     pub note: String,
 }
 
-/// The outcome of one tick: whether the rendered timer changed, and whether the
-/// tick is the one that ended a phase.
+/// The outcome of one tick: whether shared timer lifecycle state changed, and
+/// whether the tick is the one that ended a phase.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PomodoroTick {
     pub changed: bool,
@@ -72,6 +81,7 @@ pub struct PomodoroState {
     pub phase: PomodoroPhase,
     pub completed_work_intervals: u32,
     pub prompt: Option<PomodoroPrompt>,
+    pub send_off: Option<PomodoroSendOff>,
     /// The current phase expired while every attached host terminal was unfocused.
     /// It stays at zero until focus returns or the operator changes the timer.
     held: bool,
@@ -98,6 +108,7 @@ impl Default for PomodoroState {
             phase: PomodoroPhase::Work,
             completed_work_intervals: 0,
             prompt: None,
+            send_off: None,
             held: false,
             deadline: None,
             remaining: work,
@@ -139,6 +150,7 @@ impl PomodoroState {
         if !self.enabled {
             self.deadline = None;
             self.prompt = None;
+            self.send_off = None;
             self.held = false;
         } else if !was_enabled {
             self.reset(now);
@@ -209,6 +221,7 @@ impl PomodoroState {
         self.rendered_secs = self.remaining.as_secs();
         self.deadline = None;
         self.prompt = None;
+        self.send_off = None;
         self.held = false;
         if self.enabled {
             self.start(now);
@@ -222,6 +235,7 @@ impl PomodoroState {
             return;
         }
         self.prompt = None;
+        self.send_off = None;
         self.enter(self.next_phase(), now);
     }
 
@@ -238,38 +252,42 @@ impl PomodoroState {
         if !self.enabled {
             return PomodoroTick::default();
         }
+        let mut tick = PomodoroTick {
+            changed: self.expire_send_off_at(now),
+            phase_ended: false,
+        };
+        // The countdown deadline keeps advancing behind the send-off, but its
+        // covered timer does not need redraws until the card expires.
+        if self.send_off.is_some() {
+            return tick;
+        }
         if self.held {
-            return PomodoroTick {
-                changed: host_focused && self.resume_held(now),
-                phase_ended: false,
-            };
+            tick.changed |= host_focused && self.resume_held(now);
+            return tick;
         }
         let Some(deadline) = self.deadline else {
-            return PomodoroTick::default();
+            return tick;
         };
         if now >= deadline {
             self.deadline = None;
             self.remaining = Duration::ZERO;
             self.rendered_secs = 0;
             if host_focused {
-                self.raise_prompt();
+                self.raise_prompt(now);
             } else {
                 self.held = true;
             }
-            return PomodoroTick {
-                changed: true,
-                phase_ended: true,
-            };
+            tick.changed = true;
+            tick.phase_ended = true;
+            return tick;
         }
         let secs = deadline.saturating_duration_since(now).as_secs();
         if secs == self.rendered_secs {
-            return PomodoroTick::default();
+            return tick;
         }
         self.rendered_secs = secs;
-        PomodoroTick {
-            changed: true,
-            phase_ended: false,
-        }
+        tick.changed = true;
+        tick
     }
 
     /// Resolves a phase that expired while all host terminals were unfocused.
@@ -283,7 +301,7 @@ impl PomodoroState {
         if self.phase.is_break() {
             self.enter(PomodoroPhase::Work, now);
         } else {
-            self.raise_prompt();
+            self.raise_prompt(now);
         }
         true
     }
@@ -304,6 +322,10 @@ impl PomodoroState {
         self.prompt = None;
         let started = self.next_phase();
         self.enter(started, now);
+        self.send_off = Some(PomodoroSendOff {
+            started,
+            shown_at: now,
+        });
         Some(PomodoroConfirmation {
             ended,
             started,
@@ -321,6 +343,28 @@ impl PomodoroState {
         let next = self.next_phase();
         self.enter(next, now);
         self.pause(now);
+    }
+
+    pub fn dismiss_send_off_at(&mut self, now: Instant) -> bool {
+        let visible = self
+            .send_off
+            .is_some_and(|send_off| now < send_off.shown_at + SEND_OFF_DURATION);
+        if visible || self.send_off.is_some() {
+            self.send_off = None;
+        }
+        visible
+    }
+
+    pub(crate) fn expire_send_off_at(&mut self, now: Instant) -> bool {
+        if self
+            .send_off
+            .is_some_and(|send_off| now >= send_off.shown_at + SEND_OFF_DURATION)
+        {
+            self.send_off = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// The phase that follows the current one. A long break replaces the short
@@ -351,10 +395,11 @@ impl PomodoroState {
         self.start(now);
     }
 
-    fn raise_prompt(&mut self) {
+    fn raise_prompt(&mut self, now: Instant) {
         self.prompt = Some(PomodoroPrompt {
             ended: self.phase,
             next: self.next_phase(),
+            raised_at: now,
             input: String::new(),
             error: None,
         });
@@ -467,10 +512,9 @@ mod tests {
         state.tick(now + Duration::from_secs(25 * 60));
         let prompt = state.prompt.clone();
 
-        assert_eq!(
-            state.tick_with_host_focus(now + Duration::from_secs(60 * 60), false),
-            PomodoroTick::default()
-        );
+        let tick = state.tick_with_host_focus(now + Duration::from_secs(60 * 60), false);
+        assert!(!tick.changed, "the timer state did not change");
+        assert!(!tick.phase_ended);
         assert_eq!(state.prompt, prompt);
         assert!(!state.held());
     }
@@ -547,6 +591,43 @@ mod tests {
         assert_eq!(state.completed_work_intervals, 1);
         assert!(state.running());
         assert_eq!(state.remaining_at(now), Duration::from_secs(5 * 60));
+        let send_off = state.send_off.expect("confirm raises the send-off");
+        assert_eq!(send_off.started, PomodoroPhase::ShortBreak);
+        assert_eq!(send_off.shown_at, now);
+    }
+
+    #[test]
+    fn send_off_expires_after_six_seconds_without_blocking_the_timer() {
+        let started = Instant::now();
+        let prompt_at = started + Duration::from_secs(25 * 60);
+        let mut state = enabled_state(started);
+        state.tick(prompt_at);
+        state.prompt.as_mut().expect("prompt").input = "water".into();
+        state.confirm(prompt_at).expect("confirm");
+
+        assert!(
+            !state
+                .tick(prompt_at + SEND_OFF_DURATION - Duration::from_millis(1))
+                .changed
+        );
+        assert!(state.send_off.is_some());
+        assert!(state.tick(prompt_at + SEND_OFF_DURATION).changed);
+        assert!(state.send_off.is_none());
+        assert!(state.running());
+    }
+
+    #[test]
+    fn send_off_can_be_dismissed_early() {
+        let started = Instant::now();
+        let prompt_at = started + Duration::from_secs(25 * 60);
+        let mut state = enabled_state(started);
+        state.tick(prompt_at);
+        state.prompt.as_mut().expect("prompt").input = "walk".into();
+        state.confirm(prompt_at).expect("confirm");
+
+        assert!(state.dismiss_send_off_at(prompt_at));
+        assert!(state.send_off.is_none());
+        assert!(!state.dismiss_send_off_at(prompt_at));
     }
 
     #[test]

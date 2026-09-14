@@ -550,7 +550,7 @@ impl HeadlessServer {
             };
             let result = match (serialized, client.writer.as_ref()) {
                 (None, _) => Ok(()),
-                (Some(bytes), Some(writer)) => writer.render.try_send(bytes),
+                (Some(bytes), Some(writer)) => writer.render.try_send(bytes).map(|_| ()),
                 (Some(bytes), None) => Err(std::sync::mpsc::TrySendError::Disconnected(bytes)),
             };
             match result {
