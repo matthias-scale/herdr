@@ -4323,7 +4323,7 @@ impl HeadlessServer {
             | ServerEvent::ClientResize { client_id, .. }
             | ServerEvent::ClientDetach { client_id }
             | ServerEvent::ClientDisconnected { client_id }
-            | ServerEvent::ClientWriterDrained { client_id } => Some(*client_id),
+            | ServerEvent::ClientWriterDrained { client_id, .. } => Some(*client_id),
         };
         if stale_client_id.is_some_and(|client_id| !self.clients.contains_key(&client_id)) {
             return false;
@@ -4797,10 +4797,22 @@ impl HeadlessServer {
                 self.remove_client_and_resize_if_needed(client_id);
                 true
             }
-            ServerEvent::ClientWriterDrained { client_id } => {
+            ServerEvent::ClientWriterDrained {
+                client_id,
+                render_sequence,
+            } => {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;
                 };
+                if let Some(presentation) =
+                    client.take_flushed_pomodoro_presentation(render_sequence)
+                {
+                    client.pomodoro_presentation = crate::ui::pomodoro::input_gate_at(
+                        &self.app.state,
+                        presentation,
+                        Instant::now(),
+                    );
+                }
                 client.take_deferred_render() != DeferredRender::None
             }
             ServerEvent::QuitSignal => {
@@ -5965,7 +5977,7 @@ impl HeadlessServer {
 
         let send_started = crate::render_prof::timer();
         match writer.render.try_send(serialized) {
-            Ok(()) => {
+            Ok(_) => {
                 client.clear_deferred_render();
                 client.render_state.commit_sent_frame(prepared);
                 crate::render_prof::event("retained_send.sent");
@@ -6338,14 +6350,14 @@ impl HeadlessServer {
                 }
             };
             match writer.render.try_send(serialized) {
-                Ok(()) => {
+                Ok(render_sequence) => {
                     if commit_graphics_cache {
                         client.graphics_cache = next_graphics_cache;
                         client.graphics_surface_reset_pending = false;
                     }
                     client.render_state.commit_sent_frame(prepared);
                     if let Some(presentation) = pomodoro_presentation {
-                        client.pomodoro_presentation = presentation;
+                        client.queue_pomodoro_presentation(render_sequence, presentation);
                     }
                     if encoded.incomplete {
                         client.defer_full_render();
@@ -8393,6 +8405,16 @@ esac
             control_rx,
             render_rx,
         )
+    }
+
+    fn acknowledge_latest_test_render(server: &mut HeadlessServer, client_id: u64) {
+        let render_sequence = server.clients[&client_id]
+            .latest_pending_pomodoro_render_sequence()
+            .expect("pending test render");
+        let _ = server.handle_server_event(ServerEvent::ClientWriterDrained {
+            client_id,
+            render_sequence,
+        });
     }
 
     fn retained_test_server(
@@ -14948,6 +14970,8 @@ next_tab = ""
             !compact_text.contains("take a deep breath."),
             "compact prompt has no orb layout: {compact_text:?}"
         );
+        acknowledge_latest_test_render(&mut server, 1);
+        acknowledge_latest_test_render(&mut server, 2);
 
         let shown_at = Instant::now();
         server.app.state.pomodoro.prompt = None;
@@ -14968,6 +14992,8 @@ next_tab = ""
         let compact_send_off = read_server_frame(compact_rx.recv().expect("compact clear frame"));
         assert!(frame_text(&wide_send_off).contains("enjoy the break"));
         assert!(!frame_text(&compact_send_off).contains("enjoy the break"));
+        acknowledge_latest_test_render(&mut server, 1);
+        acknowledge_latest_test_render(&mut server, 2);
 
         let expiry = shown_at + crate::pomodoro::SEND_OFF_DURATION;
         assert!(server.handle_scheduled_tasks_headless(expiry, false));
@@ -14977,6 +15003,7 @@ next_tab = ""
             wide_rx.recv().expect("wide expiry frame")
         ))
         .contains("enjoy the break"));
+        acknowledge_latest_test_render(&mut server, 1);
 
         let key = crate::input::TerminalKey::new(
             crossterm::event::KeyCode::Char('x'),
@@ -14992,6 +15019,7 @@ next_tab = ""
             wide_rx.recv().expect("wide second send-off frame")
         ))
         .contains("enjoy the break"));
+        acknowledge_latest_test_render(&mut server, 1);
         assert!(server.handle_client_input_events(
             2,
             vec![
@@ -15031,6 +15059,7 @@ next_tab = ""
             wide_rx.recv().expect("wide dismissal frame")
         ))
         .contains("enjoy the break"));
+        acknowledge_latest_test_render(&mut server, 1);
 
         let expired_at = Instant::now();
         server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
@@ -15291,6 +15320,80 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn p1_headless_send_off_gate_stays_owned_until_clear_frame_flushes() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let (client_tx, _control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        server.app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
+            started: crate::pomodoro::PomodoroPhase::ShortBreak,
+            shown_at: Instant::now(),
+        });
+
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("send-off frame"));
+        let send_off_sequence = server.clients[&1]
+            .latest_pending_pomodoro_render_sequence()
+            .expect("pending send-off presentation");
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientWriterDrained {
+                client_id: 1,
+                render_sequence: send_off_sequence,
+            })
+        );
+
+        let key = |ch| {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char(ch),
+                KeyModifiers::empty(),
+            ))
+        };
+        assert!(server.handle_client_input_events(1, vec![key('x')]));
+        assert!(server.app.state.pomodoro.send_off.is_none());
+
+        server.render_and_stream();
+        let clear_sequence = server.clients[&1]
+            .latest_pending_pomodoro_render_sequence()
+            .expect("pending clear presentation");
+        assert!(server.clients[&1].pomodoro_presentation.send_off.is_some());
+        assert!(server.handle_client_input_events(1, vec![key('y')]));
+        assert!(pane_input.try_recv().is_err());
+
+        let clear_frame = read_server_frame(client_rx.recv().expect("clear frame"));
+        assert!(!frame_text(&clear_frame).contains("enjoy the break"));
+        assert!(
+            !server.handle_server_event(ServerEvent::ClientWriterDrained {
+                client_id: 1,
+                render_sequence: clear_sequence,
+            })
+        );
+        assert!(server.clients[&1].pomodoro_presentation.send_off.is_none());
+
+        assert!(server.handle_client_input_events(1, vec![key('z')]));
+        assert_eq!(
+            pane_input
+                .recv()
+                .await
+                .expect("post-flush key reaches pane"),
+            Bytes::from_static(b"z")
+        );
+    }
+
+    #[tokio::test]
     async fn p1_headless_send_off_repeat_preserves_the_forwarded_release_lease() {
         let mut server = test_headless_server();
         let mut pane_input = install_focused_test_runtime(&mut server, b"\x1b[>15u");
@@ -15451,6 +15554,8 @@ next_tab = ""
             compact_rx.recv().expect("compact frame")
         ))
         .contains("enjoy the break"));
+        acknowledge_latest_test_render(&mut server, 1);
+        acknowledge_latest_test_render(&mut server, 2);
 
         assert!(server.handle_server_event(ServerEvent::ClientResize {
             client_id: 1,
@@ -16065,7 +16170,12 @@ next_tab = ""
         assert!(!server.render_retained_pty_update_and_stream());
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
-        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientWriterDrained {
+                client_id: 1,
+                render_sequence: 1,
+            })
+        );
         server.render_and_stream();
 
         assert_eq!(
@@ -16231,7 +16341,12 @@ next_tab = ""
             ServerMessage::ReloadSoundConfig
         ));
 
-        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientWriterDrained {
+                client_id: 1,
+                render_sequence: 1,
+            })
+        );
         server.render_and_stream();
 
         match read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()) {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use crate::protocol::RenderEncoding;
@@ -60,6 +60,8 @@ pub(crate) struct ClientConnection {
     pub(crate) render_state: ClientRenderState,
     /// Pomodoro input ownership from the last frame plus overlays raised since it.
     pub(crate) pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
+    /// Pomodoro input ownership awaiting transport flush acknowledgements.
+    pending_pomodoro_presentations: VecDeque<(u64, crate::ui::pomodoro::InputPresentation)>,
     /// Sidebar disclosure, projection escape, and scroll state for this attach.
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
     /// Dock layout and focus state for this attach; editor PTYs are server-owned.
@@ -151,6 +153,7 @@ impl ClientConnection {
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
             pomodoro_presentation: crate::ui::pomodoro::InputPresentation::default(),
+            pending_pomodoro_presentations: VecDeque::new(),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
             dock_presentation: crate::app::state::DockPresentationState::default(),
             loop_run_history_detail: None,
@@ -174,6 +177,53 @@ impl ClientConnection {
 
     pub(crate) fn request_repaint(&mut self) {
         self.render_state.request_repaint();
+    }
+
+    pub(crate) fn queue_pomodoro_presentation(
+        &mut self,
+        render_sequence: u64,
+        presentation: crate::ui::pomodoro::InputPresentation,
+    ) {
+        let already_owned = self.pomodoro_presentation.owns_input();
+        self.pomodoro_presentation.send_off = self
+            .pomodoro_presentation
+            .send_off
+            .or(presentation.send_off);
+        self.pomodoro_presentation.prompt =
+            self.pomodoro_presentation.prompt.or(presentation.prompt);
+        if !already_owned && self.pomodoro_presentation.owns_input() {
+            self.pomodoro_presentation.area = presentation.area;
+        }
+        self.pending_pomodoro_presentations
+            .push_back((render_sequence, presentation));
+    }
+
+    pub(crate) fn take_flushed_pomodoro_presentation(
+        &mut self,
+        render_sequence: u64,
+    ) -> Option<crate::ui::pomodoro::InputPresentation> {
+        let mut flushed = None;
+        while self
+            .pending_pomodoro_presentations
+            .front()
+            .is_some_and(|(sequence, _)| *sequence <= render_sequence)
+        {
+            let Some((sequence, presentation)) = self.pending_pomodoro_presentations.pop_front()
+            else {
+                break;
+            };
+            if sequence == render_sequence {
+                flushed = Some(presentation);
+            }
+        }
+        flushed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latest_pending_pomodoro_render_sequence(&self) -> Option<u64> {
+        self.pending_pomodoro_presentations
+            .back()
+            .map(|(sequence, _)| *sequence)
     }
 
     pub(crate) fn deferred_render(&self) -> DeferredRender {
