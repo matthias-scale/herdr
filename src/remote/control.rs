@@ -620,35 +620,32 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
     }
 
     fn observe_fleet_snapshot(&mut self, snapshot: &crate::fleet::Snapshot) {
-        for observed in &snapshot.hosts {
-            let Some(configured) = self.hosts.get(&observed.name) else {
+        for (name, configured) in &self.hosts {
+            let mut observations = snapshot
+                .hosts
+                .iter()
+                .filter(|observed| observed.name == *name);
+            let Some(observed) = observations.next() else {
+                self.remote_identities.remove(name);
                 continue;
             };
-            if configured.local
-                || observed.local
-                || observed.state != crate::fleet::HostState::Reachable
-                || configured.target != observed.target
-                || configured.socket != observed.socket
-                || configured.session != observed.session
-            {
+            if observations.next().is_some() {
+                self.remote_identities.remove(name);
                 continue;
             }
-            match observed.remote_identity.as_deref() {
-                Some(remote_name) => {
-                    self.remote_identities.insert(
-                        observed.name.clone(),
-                        RemoteHostIdentity {
-                            remote_name: remote_name.to_owned(),
-                            target: observed.target.clone(),
-                            socket: observed.socket.clone(),
-                            session: observed.session.clone(),
-                        },
-                    );
-                }
-                None => {
-                    self.remote_identities.remove(&observed.name);
-                }
-            }
+            let Some(remote_name) = observed_remote_identity(configured, observed) else {
+                self.remote_identities.remove(name);
+                continue;
+            };
+            self.remote_identities.insert(
+                name.clone(),
+                RemoteHostIdentity {
+                    remote_name: remote_name.to_owned(),
+                    target: observed.target.clone(),
+                    socket: observed.socket.clone(),
+                    session: observed.session.clone(),
+                },
+            );
         }
     }
 
@@ -706,6 +703,25 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
             let _ = operation_id;
         }
     }
+}
+
+fn observed_remote_identity<'a>(
+    configured: &crate::config::FleetHostConfig,
+    observed: &'a crate::fleet::HostSnapshot,
+) -> Option<&'a str> {
+    if configured.local
+        || observed.local
+        || observed.state != crate::fleet::HostState::Reachable
+        || configured.target != observed.target
+        || configured.socket != observed.socket
+        || configured.session != observed.session
+    {
+        return None;
+    }
+    observed
+        .remote_identity
+        .as_deref()
+        .filter(|remote_name| !remote_name.is_empty() && !remote_name.contains("::"))
 }
 
 fn host_matches_identity(
@@ -2201,6 +2217,55 @@ mod tests {
 
         let error = receive_failure(&mut event_rx);
         assert_eq!(error.code, "refused_for_safety");
+    }
+
+    #[test]
+    fn failed_or_ambiguous_fleet_observations_clear_remote_focus_readiness() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        let mut valid = remote_identity_snapshot("ub1", "operator@ub1", "ubuntu-direct");
+        transport.observe_fleet_snapshot(&valid);
+        assert!(transport.remote_host_ready("ub1"));
+
+        for state in [
+            crate::fleet::HostState::VersionSkew,
+            crate::fleet::HostState::Unreachable,
+        ] {
+            valid.hosts[0].state = state;
+            transport.observe_fleet_snapshot(&valid);
+            assert!(
+                !transport.remote_host_ready("ub1"),
+                "{state:?} observations must clear readiness"
+            );
+            valid.hosts[0].state = crate::fleet::HostState::Reachable;
+            transport.observe_fleet_snapshot(&valid);
+            assert!(transport.remote_host_ready("ub1"));
+        }
+
+        valid.hosts[0].target = "different-target".into();
+        transport.observe_fleet_snapshot(&valid);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        valid.hosts[0].target = "operator@ub1".into();
+        valid.hosts[0].remote_identity = None;
+        transport.observe_fleet_snapshot(&valid);
+        assert!(!transport.remote_host_ready("ub1"));
+
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+        assert!(transport.remote_host_ready("ub1"));
+        transport.observe_fleet_snapshot(&crate::fleet::Snapshot::default());
+        assert!(!transport.remote_host_ready("ub1"));
     }
 
     #[test]
