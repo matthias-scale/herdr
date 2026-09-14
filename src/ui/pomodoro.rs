@@ -393,15 +393,15 @@ pub(crate) fn render_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_prompt(app: &AppState, frame: &mut Frame, area: Rect, prompt: &PomodoroPrompt) {
+    let Some(_) = prompt_inner_rect(area).filter(|inner| inner.height >= 9) else {
+        return;
+    };
     let palette = &app.palette;
     super::veil_background(frame, area, palette);
     let (width, height) = prompt_size(area);
     let Some(inner) = render_modal_shell(frame, area, width, height, palette) else {
         return;
     };
-    if inner.height < 9 {
-        return;
-    }
     if orb_layout_available(area) {
         render_orb_prompt(app, frame, area, inner, prompt);
     } else {
@@ -1098,6 +1098,24 @@ mod render_tests {
         assert_eq!(confirm.y, snooze.y);
         assert!(confirm.right() <= area.right());
         assert!(snooze.right() <= area.right());
+    }
+
+    #[test]
+    fn undersized_prompt_matches_its_input_visibility() {
+        let app = prompted();
+        let area = Rect::new(0, 0, 60, 10);
+        let buffer = veiled_frame(&app, area);
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(
+            text.contains("cargo test --all"),
+            "an unrenderable prompt must leave the pane visible: {text:?}"
+        );
+        assert_eq!(
+            input_presentation_at(&app, area, std::time::Instant::now()).prompt,
+            None,
+            "an unrenderable prompt must not claim input"
+        );
     }
 
     #[test]

@@ -140,20 +140,38 @@ impl App {
         first: crate::raw_input::RawInputEvent,
     ) -> bool {
         self.begin_contract_false_positive_input_burst();
-        let pomodoro_presentation = self.local_pomodoro_presentation_for_input();
+        let mut pomodoro_presentation = self.local_pomodoro_presentation_for_input();
+        let refresh_pomodoro_presentation =
+            |app: &Self, presentation: &mut crate::ui::pomodoro::InputPresentation| {
+                *presentation = crate::ui::pomodoro::input_presentation_at(
+                    &app.state,
+                    presentation.area,
+                    Instant::now(),
+                );
+            };
+        let first_raises_pomodoro_prompt =
+            matches!(&first, crate::raw_input::RawInputEvent::OuterFocusGained);
         let mut changed = self
             .handle_raw_input_event_with_pomodoro_presentation(first, pomodoro_presentation)
             .await;
+        if first_raises_pomodoro_prompt {
+            refresh_pomodoro_presentation(self, &mut pomodoro_presentation);
+        }
 
         while let Some(rx) = self.input_rx.as_mut() {
             match rx.try_recv() {
                 Ok(event) => {
+                    let raises_pomodoro_prompt =
+                        matches!(&event, crate::raw_input::RawInputEvent::OuterFocusGained);
                     changed |= self
                         .handle_raw_input_event_with_pomodoro_presentation(
                             event,
                             pomodoro_presentation,
                         )
                         .await;
+                    if raises_pomodoro_prompt {
+                        refresh_pomodoro_presentation(self, &mut pomodoro_presentation);
+                    }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -1433,6 +1451,49 @@ mod tests {
         assert!(
             pane_input.try_recv().is_err(),
             "an event after dismissal escaped the batch's starting gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn p1_monolithic_focus_return_batch_refreshes_the_pomodoro_gate() {
+        let (mut app, mut pane_input) = test_app_with_send_off_and_mouse_reporting(false);
+        let started_at = Instant::now();
+        app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            started_at,
+        );
+
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert!(app.handle_scheduled_tasks(started_at + Duration::from_secs(60), false));
+        assert!(app.state.pomodoro.held());
+
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+        app.input_rx = Some(input_rx);
+        input_tx
+            .send(crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            ))
+            .await
+            .expect("batch follow-up key");
+
+        assert!(
+            app.handle_raw_input_batch(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert!(app.state.pomodoro.prompt.is_some());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "a key after focus return must not reach the pane"
         );
     }
 

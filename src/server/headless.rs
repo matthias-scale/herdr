@@ -14977,6 +14977,55 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn p1_headless_focus_return_batch_refreshes_the_pomodoro_gate() {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        let now = Instant::now();
+        server.app.state.pomodoro = crate::pomodoro::PomodoroState::from_config(
+            &crate::config::PomodoroConfig {
+                enabled: true,
+                work_minutes: 1,
+                ..Default::default()
+            },
+            now,
+        );
+        let (client_tx, _control_rx, client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.handle_scheduled_tasks_headless(now + Duration::from_secs(60), false);
+        assert!(server.app.state.pomodoro.held());
+        server.resize_shared_runtime_to_effective_size();
+        server.render_and_stream();
+        let _ = read_server_frame(client_rx.recv().expect("committed pre-focus frame"));
+
+        let key = crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+        assert!(server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::OuterFocusGained, key],
+        ));
+        assert!(server.app.state.pomodoro.prompt.is_some());
+        assert!(
+            pane_input.try_recv().is_err(),
+            "a key after focus return must not reach the pane"
+        );
+    }
+
+    #[tokio::test]
     async fn p2_headless_moved_send_off_dismissal_requests_repaint() {
         let mut server = test_headless_server();
         let mut pane_input = install_focused_test_runtime(&mut server, b"");

@@ -3013,12 +3013,14 @@ impl App {
         apply_host_terminal_theme: bool,
         before_terminal_input: &mut impl FnMut(&TerminalInputTarget),
         controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
-        pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
+        mut pomodoro_presentation: crate::ui::pomodoro::InputPresentation,
     ) -> bool {
         self.begin_contract_false_positive_input_burst();
         let mut pomodoro_changed = false;
         for event in events {
             let previous_mode = self.state.mode;
+            let refresh_pomodoro_presentation =
+                matches!(&event, crate::raw_input::RawInputEvent::OuterFocusGained);
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
@@ -3296,6 +3298,13 @@ impl App {
                 crate::raw_input::RawInputEvent::Unsupported => {}
             }
             self.sync_prefix_input_source(previous_mode);
+            if refresh_pomodoro_presentation {
+                pomodoro_presentation = crate::ui::pomodoro::input_presentation_at(
+                    &self.state,
+                    pomodoro_presentation.area,
+                    std::time::Instant::now(),
+                );
+            }
         }
         pomodoro_changed
     }
