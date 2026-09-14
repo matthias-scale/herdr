@@ -457,7 +457,11 @@ impl SshRemoteFocusTransport {
             })?;
         let expected_context = expected_context
             .map(|context| {
-                translate_context_host(&context, &configured_host, &remote_host, &remote_host)
+                translate_context_host(
+                    &context,
+                    &[configured_host.as_str(), remote_host.as_str()],
+                    &remote_host,
+                )
             })
             .transpose()?;
         let operation_id = operation_id.to_owned();
@@ -763,15 +767,13 @@ fn host_matches_identity(
 #[cfg(unix)]
 fn translate_context_host(
     context: &crate::api::schema::RemoteControlContext,
-    configured_host: &str,
-    remote_host: &str,
+    accepted_hosts: &[&str],
     target_host: &str,
 ) -> Result<Box<crate::api::schema::RemoteControlContext>, ErrorBody> {
-    if context.host != configured_host && context.host != remote_host {
+    if !accepted_hosts.contains(&context.host.as_str()) {
         return Err(ErrorBody {
             code: "refused_for_safety".to_owned(),
-            message: "remote control context host is neither the configured alias nor the observed remote identity"
-                .to_owned(),
+            message: "remote control context host does not match the expected host".to_owned(),
         });
     }
     let mut translated = context.clone();
@@ -1375,8 +1377,7 @@ fn run_control_session(
             ServerMessage::ControlReady { context } => {
                 let context = match translate_context_host(
                     &context,
-                    &configured_host,
-                    &remote_host,
+                    &[remote_host.as_str()],
                     &configured_host,
                 ) {
                     Ok(context) => context,
@@ -2464,6 +2465,97 @@ mod tests {
 
         let error = receive_failure(&mut event_rx);
         assert_eq!(error.code, "refused_for_safety");
+    }
+
+    #[test]
+    // A6: the remote may return only the learned identity, not the configured alias.
+    fn configured_alias_from_remote_is_refused_when_identity_differs() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut context = control_context();
+        context.host = "ub1".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(context),
+        }));
+        let mut transport = SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(input),
+                    output,
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    write_error: None,
+                    write_gate: None,
+                    diagnostic: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            }),
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start(
+                "operation",
+                &AgentRef::new("ub1", "w1:pA").expect("agent ref"),
+                "proxy",
+                channels,
+                event_tx,
+            )
+            .expect("thread starts");
+
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "refused_for_safety");
+    }
+
+    #[test]
+    // A3: a learned identity is valid only for its configured socket and session.
+    fn remote_identity_is_bound_to_socket_and_session() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                socket: Some("/run/herdr.sock".into()),
+                session: Some("agents".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut transport = SshRemoteFocusTransport::new(&fleet);
+        let mut valid = remote_identity_snapshot("ub1", "operator@ub1", "ubuntu-direct");
+        valid.hosts[0].socket = Some("/run/herdr.sock".into());
+        valid.hosts[0].session = Some("agents".into());
+        transport.observe_fleet_snapshot(&valid);
+        assert!(transport.remote_host_ready("ub1"));
+
+        for (socket, session) in [
+            (Some("/run/other.sock"), Some("agents")),
+            (Some("/run/herdr.sock"), Some("other-session")),
+        ] {
+            let mut mismatched = valid.clone();
+            mismatched.hosts[0].socket = socket.map(str::to_owned);
+            mismatched.hosts[0].session = session.map(str::to_owned);
+            transport.observe_fleet_snapshot(&mismatched);
+            assert!(!transport.remote_host_ready("ub1"));
+            transport.observe_fleet_snapshot(&valid);
+            assert!(transport.remote_host_ready("ub1"));
+        }
     }
 
     #[test]
