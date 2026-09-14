@@ -27,10 +27,12 @@ const INDICATOR_WIDTH: u16 = 9;
 const FOOTER_ICON_COLUMNS: u16 = 13;
 const PROMPT_WIDTH: u16 = 62;
 const PROMPT_HEIGHT: u16 = 12;
-const ORB_PROMPT_WIDTH: u16 = 74;
-const ORB_PROMPT_HEIGHT: u16 = 17;
-const ORB_COLUMN_WIDTH: u16 = 29;
+const ORB_PROMPT_WIDTH: u16 = 82;
+const ORB_PROMPT_HEIGHT: u16 = 21;
+const ORB_COLUMN_WIDTH: u16 = 37;
 const ORB_CONTENT_WIDTH: u16 = 40;
+const ORB_MIN_RADIUS: f64 = 3.0;
+const ORB_MAX_RADIUS: f64 = 7.5;
 const SEND_OFF_WIDTH: u16 = 52;
 const SEND_OFF_HEIGHT: u16 = 7;
 pub(crate) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
@@ -562,17 +564,17 @@ fn render_orb_prompt(
     let tip = prompt_tip(prompt.ended, elapsed);
     frame.render_widget(
         Paragraph::new(Span::styled(tip, Style::default().fg(palette.subtext0))),
-        Rect::new(content.x, content.y + 13, content.width, 1),
+        Rect::new(content.x, content.y + 17, content.width, 1),
     );
     render_prompt_buttons(app, frame, area);
 }
 
 fn render_orb(app: &AppState, frame: &mut Frame, inner: Rect, breath: BreathFrame) {
     let palette = &app.palette;
-    let radius = 2.0 + 3.5 * breath.progress;
-    let center_x = inner.x + 14;
-    let center_y = inner.y + 6;
-    for row in 1..=11 {
+    let radius = ORB_MIN_RADIUS + (ORB_MAX_RADIUS - ORB_MIN_RADIUS) * breath.progress;
+    let center_x = inner.x + ORB_COLUMN_WIDTH / 2;
+    let center_y = inner.y + 8;
+    for row in 1..=15 {
         for column in 1..ORB_COLUMN_WIDTH.saturating_sub(1) {
             let x = inner.x + column;
             let y = inner.y + row;
@@ -618,7 +620,7 @@ fn render_orb(app: &AppState, frame: &mut Frame, inner: Rect, breath: BreathFram
             Style::default().fg(cue_color).add_modifier(Modifier::BOLD),
         ))
         .centered(),
-        Rect::new(inner.x, inner.y + 12, ORB_COLUMN_WIDTH, 1),
+        Rect::new(inner.x, inner.y + 16, ORB_COLUMN_WIDTH, 1),
     );
 }
 
@@ -901,28 +903,31 @@ mod tests {
     #[test]
     fn orb_geometry_is_elliptical_and_uses_all_density_bands() {
         assert_eq!(
-            orb_cell(0, 0, 5.5),
+            orb_cell(0, 0, ORB_MAX_RADIUS),
             Some(OrbCell::Fill {
                 symbol: "█",
                 color_band: 0,
             })
         );
         assert!(matches!(
-            orb_cell(4, 0, 5.5),
+            orb_cell(5, 0, ORB_MAX_RADIUS),
             Some(OrbCell::Fill { symbol: "▓", .. })
         ));
         assert!(matches!(
-            orb_cell(7, 0, 5.5),
+            orb_cell(8, 0, ORB_MAX_RADIUS),
             Some(OrbCell::Fill { symbol: "▒", .. })
         ));
         assert!(matches!(
-            orb_cell(9, 0, 5.5),
+            orb_cell(12, 0, ORB_MAX_RADIUS),
             Some(OrbCell::Fill { symbol: "░", .. })
         ));
-        assert!(matches!(orb_cell(11, 0, 5.5), Some(OrbCell::Halo)));
-        assert_eq!(orb_cell(14, 0, 5.5), None);
-        assert!(orb_cell(8, 0, 5.5).is_some());
-        assert!(orb_cell(0, 8, 5.5).is_none());
+        assert!(matches!(
+            orb_cell(17, 0, ORB_MAX_RADIUS),
+            Some(OrbCell::Halo)
+        ));
+        assert_eq!(orb_cell(18, 0, ORB_MAX_RADIUS), None);
+        assert!(orb_cell(16, 0, ORB_MAX_RADIUS).is_some());
+        assert!(orb_cell(0, 9, ORB_MAX_RADIUS).is_none());
     }
 
     #[test]
@@ -1081,8 +1086,16 @@ mod render_tests {
         let mut app = prompted();
         let raised_at = app.pomodoro.prompt.as_ref().expect("prompt").raised_at;
         app.view_observed_at = raised_at + std::time::Duration::from_secs(1);
+        app.palette.accent = ratatui::style::Color::Rgb(10, 20, 30);
+        app.palette.blue = ratatui::style::Color::Rgb(40, 50, 60);
+        app.palette.teal = ratatui::style::Color::Rgb(70, 80, 90);
+        app.palette.mauve = ratatui::style::Color::Rgb(100, 110, 120);
 
-        let buffer = veiled_frame(&app, Rect::new(0, 0, 100, 30));
+        let area = Rect::new(0, 0, 100, 30);
+        let inner = prompt_inner_rect(area).expect("orb prompt geometry");
+        assert_eq!(inner.width, ORB_PROMPT_WIDTH - 2);
+        assert_eq!(inner.height, ORB_PROMPT_HEIGHT - 2);
+        let buffer = veiled_frame(&app, area);
         let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
 
         assert!(text.contains('█'), "orb center: {text:?}");
@@ -1095,6 +1108,94 @@ mod render_tests {
             text.contains("stand up · look at something far away"),
             "tip: {text:?}"
         );
+
+        let center_x = inner.x + ORB_COLUMN_WIDTH / 2;
+        let center_y = inner.y + 8;
+        let center = &buffer[(center_x, center_y)];
+        assert_eq!(center.symbol(), "█");
+        assert_eq!(center.style().fg, Some(app.palette.teal));
+        assert!(center.style().add_modifier.contains(Modifier::BOLD));
+
+        let middle = &buffer[(center_x + 4, center_y)];
+        assert_eq!(middle.symbol(), "▒");
+        assert_eq!(middle.style().fg, Some(app.palette.blue));
+
+        let edge = &buffer[(center_x + 6, center_y)];
+        assert_eq!(edge.symbol(), "░");
+        assert_eq!(edge.style().fg, Some(app.palette.mauve));
+
+        let cue_cells: Vec<_> = (inner.x..inner.x + ORB_COLUMN_WIDTH)
+            .map(|x| &buffer[(x, inner.y + 16)])
+            .filter(|cell| cell.symbol() != " ")
+            .collect();
+        assert!(!cue_cells.is_empty(), "breathing cue is rendered");
+        assert!(cue_cells
+            .iter()
+            .all(|cell| cell.style().fg == Some(app.palette.teal)));
+
+        app.view_observed_at = raised_at + std::time::Duration::from_secs(4);
+        let hold_buffer = veiled_frame(&app, area);
+        let hold_cue_cells: Vec<_> = (inner.x..inner.x + ORB_COLUMN_WIDTH)
+            .map(|x| &hold_buffer[(x, inner.y + 16)])
+            .filter(|cell| cell.symbol() != " ")
+            .collect();
+        assert!(!hold_cue_cells.is_empty(), "hold cue is rendered");
+        assert!(hold_cue_cells
+            .iter()
+            .all(|cell| cell.style().fg == Some(app.palette.mauve)));
+    }
+
+    #[test]
+    fn orb_geometry_threshold_matches_the_drawn_layout_and_input_gate() {
+        let mut app = prompted();
+        let raised_at = app.pomodoro.prompt.as_ref().expect("prompt").raised_at;
+        app.view_observed_at = raised_at + std::time::Duration::from_secs(1);
+
+        let fallback_area = Rect::new(
+            0,
+            0,
+            ORB_PROMPT_WIDTH.saturating_add(3),
+            ORB_PROMPT_HEIGHT.saturating_add(2),
+        );
+        assert!(!orb_layout_available(fallback_area));
+        assert_eq!(prompt_size(fallback_area), (PROMPT_WIDTH, PROMPT_HEIGHT));
+        let fallback_buffer = veiled_frame(&app, fallback_area);
+        let fallback_text: String = fallback_buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!fallback_text.contains("take a deep breath."));
+        assert!(!fallback_text
+            .chars()
+            .any(|ch| matches!(ch, '█' | '▓' | '▒' | '░')));
+        assert!(
+            input_presentation_at(&app, fallback_area, app.view_observed_at)
+                .prompt
+                .is_some()
+        );
+
+        let orb_area = Rect::new(
+            0,
+            0,
+            ORB_PROMPT_WIDTH.saturating_add(4),
+            ORB_PROMPT_HEIGHT.saturating_add(2),
+        );
+        assert!(orb_layout_available(orb_area));
+        assert_eq!(prompt_size(orb_area), (ORB_PROMPT_WIDTH, ORB_PROMPT_HEIGHT));
+        let orb_buffer = veiled_frame(&app, orb_area);
+        let orb_text: String = orb_buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(orb_text.contains("take a deep breath."));
+        assert!(orb_text
+            .chars()
+            .any(|ch| matches!(ch, '█' | '▓' | '▒' | '░')));
+        assert!(input_presentation_at(&app, orb_area, app.view_observed_at)
+            .prompt
+            .is_some());
     }
 
     #[test]
