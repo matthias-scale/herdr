@@ -1608,7 +1608,9 @@ mod tests {
             .expect("operation starts");
         let terminal_id = proxy_terminal_id(&app, &started.operation_id);
         let mut remote_context = context();
-        remote_context.host = "ubuntu-direct".into();
+        // The wire transport translates the remote server identity back to the
+        // configured alias before the app consumes this context.
+        remote_context.host = "ub1".into();
 
         app.apply_remote_focus_transition(
             &started.operation_id,

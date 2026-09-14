@@ -446,7 +446,10 @@ impl SshRemoteFocusTransport {
                 message: format!("remote host identity is invalid for {}", agent_ref.host),
             })?;
         let expected_context = expected_context
-            .map(|context| translate_context_host(context, &configured_host, &remote_host));
+            .map(|context| {
+                translate_context_host(&context, &configured_host, &remote_host, &remote_host)
+            })
+            .transpose()?;
         let operation_id = operation_id.to_owned();
         let agent_ref = wire_agent_ref;
         let runner = Arc::clone(&self.runner);
@@ -492,6 +495,8 @@ impl SshRemoteFocusTransport {
                         host,
                         operation_id,
                         agent_ref,
+                        configured_host,
+                        remote_host,
                         version,
                         build_version,
                         expected_context,
@@ -715,14 +720,21 @@ fn host_matches_identity(
 
 #[cfg(unix)]
 fn translate_context_host(
-    mut context: Box<crate::api::schema::RemoteControlContext>,
-    from: &str,
-    to: &str,
-) -> Box<crate::api::schema::RemoteControlContext> {
-    if context.host == from {
-        context.host = to.to_owned();
+    context: &crate::api::schema::RemoteControlContext,
+    configured_host: &str,
+    remote_host: &str,
+    target_host: &str,
+) -> Result<Box<crate::api::schema::RemoteControlContext>, ErrorBody> {
+    if context.host != configured_host && context.host != remote_host {
+        return Err(ErrorBody {
+            code: "refused_for_safety".to_owned(),
+            message: "remote control context host is neither the configured alias nor the observed remote identity"
+                .to_owned(),
+        });
     }
-    context
+    let mut translated = context.clone();
+    translated.host = target_host.to_owned();
+    Ok(Box::new(translated))
 }
 
 #[cfg(unix)]
@@ -972,6 +984,8 @@ fn run_control_session(
     host: crate::config::FleetHostConfig,
     operation_id: String,
     agent_ref: AgentRef,
+    configured_host: String,
+    remote_host: String,
     version: u32,
     build_version: String,
     expected_context: Option<Box<crate::api::schema::RemoteControlContext>>,
@@ -1212,6 +1226,26 @@ fn run_control_session(
         }
         match message {
             ServerMessage::ControlReady { context } => {
+                let context = match translate_context_host(
+                    &context,
+                    &configured_host,
+                    &remote_host,
+                    &configured_host,
+                ) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        termination.terminate();
+                        let _ = detach_tx.try_send(ProxyOutbound::Detach);
+                        SshRemoteFocusTransport::fail_once(
+                            &failure_reported,
+                            &event_tx,
+                            &operation_id,
+                            &error.code,
+                            error.message,
+                        );
+                        break;
+                    }
+                };
                 active = true;
                 if event_tx
                     .blocking_send(crate::events::AppEvent::RemoteFocusTransition {
@@ -1226,6 +1260,26 @@ fn run_control_session(
                 }
             }
             ServerMessage::ControlContext { context } => {
+                let context = match translate_context_host(
+                    &context,
+                    &configured_host,
+                    &remote_host,
+                    &configured_host,
+                ) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        termination.terminate();
+                        let _ = detach_tx.try_send(ProxyOutbound::Detach);
+                        SshRemoteFocusTransport::fail_once(
+                            &failure_reported,
+                            &event_tx,
+                            &operation_id,
+                            &error.code,
+                            error.message,
+                        );
+                        break;
+                    }
+                };
                 if active
                     && event_tx
                         .blocking_send(crate::events::AppEvent::RemoteFocusTransition {
@@ -2016,6 +2070,9 @@ mod tests {
         remote_context.host = "ubuntu-direct".into();
         let mut input = welcome_bytes();
         input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(remote_context.clone()),
+        }));
+        input.extend(framed(&ServerMessage::ControlContext {
             context: Box::new(remote_context),
         }));
         let mut transport = SshRemoteFocusTransport::with_runner(
@@ -2063,7 +2120,16 @@ mod tests {
         let RemoteFocusTransition::Active(context) = *transition else {
             panic!("expected active transition");
         };
-        assert_eq!(context.host, "ubuntu-direct");
+        assert_eq!(context.host, "ub1");
+        let Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. }) =
+            event_rx.blocking_recv()
+        else {
+            panic!("expected context update");
+        };
+        let RemoteFocusTransition::ContextUpdated(context) = *transition else {
+            panic!("expected context update");
+        };
+        assert_eq!(context.host, "ub1");
 
         let messages = wire_messages(&output.lock().expect("fake output lock"));
         assert!(matches!(
@@ -2081,6 +2147,60 @@ mod tests {
                 && wire_ref == &AgentRef::new("ubuntu-direct", "w1:pA").expect("wire ref")
                 && expected.host == "ubuntu-direct"
         ));
+    }
+
+    #[test]
+    fn unexpected_remote_context_host_is_refused_before_reaching_the_app() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub1".into(),
+                target: "operator@ub1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut context = control_context();
+        context.host = "unexpected-host".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(context),
+        }));
+        let mut transport = SshRemoteFocusTransport::with_runner(
+            &fleet,
+            Arc::new(FakeRunner {
+                stream: Mutex::new(Some(FakeStream {
+                    input: Cursor::new(input),
+                    output,
+                    fail_at: None,
+                    panic_at: None,
+                    read_gate: None,
+                    diagnostic: None,
+                })),
+                connect_error: None,
+                connected_targets: None,
+            }),
+        );
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "ub1",
+            "operator@ub1",
+            "ubuntu-direct",
+        ));
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start(
+                "operation",
+                &AgentRef::new("ub1", "w1:pA").expect("agent ref"),
+                "proxy",
+                channels,
+                event_tx,
+            )
+            .expect("thread starts");
+
+        let error = receive_failure(&mut event_rx);
+        assert_eq!(error.code, "refused_for_safety");
     }
 
     #[test]
