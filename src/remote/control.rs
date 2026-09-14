@@ -400,11 +400,14 @@ impl SshRemoteFocusTransport {
             handle.termination.terminate();
             let _ = handle.outbound_tx.try_send(ProxyOutbound::Detach);
         }
+        self.remote_identities.retain(|name, identity| {
+            next_hosts
+                .get(name)
+                .is_some_and(|host| host_matches_identity(host, identity))
+        });
         self.hosts = next_hosts;
-        // A config reload invalidates every poll observation. A later stale
-        // poll is rejected by observe_fleet_snapshot because its connection
-        // tuple no longer matches the current host configuration.
-        self.remote_identities.clear();
+        // Advancing the generation rejects every in-flight observation, even
+        // when its connection tuple still matches an unchanged host.
         self.config_generation = self.config_generation.saturating_add(1);
         revoked
             .into_iter()
@@ -630,8 +633,13 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
         }
         #[cfg(not(unix))]
         {
-            self.hosts = Self::admitted_hosts(fleet);
-            self.remote_identities.clear();
+            let next_hosts = Self::admitted_hosts(fleet);
+            self.remote_identities.retain(|name, identity| {
+                next_hosts
+                    .get(name)
+                    .is_some_and(|host| host_matches_identity(host, identity))
+            });
+            self.hosts = next_hosts;
             self.config_generation = self.config_generation.saturating_add(1);
             Vec::new()
         }
@@ -2632,6 +2640,118 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_fleet_reload_keeps_remote_focus_identity_without_poll() {
+        let fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "operator@buildbox".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let connected_targets = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut context = control_context();
+        context.host = "remote-buildbox".into();
+        let mut input = welcome_bytes();
+        input.extend(framed(&ServerMessage::ControlReady {
+            context: Box::new(context),
+        }));
+        let runner = Arc::new(FakeRunner {
+            stream: Mutex::new(Some(FakeStream {
+                input: Cursor::new(input),
+                output: Arc::clone(&output),
+                fail_at: None,
+                panic_at: None,
+                read_gate: None,
+                write_error: None,
+                write_gate: None,
+                diagnostic: None,
+            })),
+            connect_error: None,
+            connected_targets: Some(Arc::clone(&connected_targets)),
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "operator@buildbox",
+            "remote-buildbox",
+        ));
+
+        assert!(transport.reload_fleet(&fleet).is_empty());
+        assert!(transport.remote_host_ready("buildbox"));
+
+        let (channels, _outbound_tx) = test_channels();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("unchanged host remains focusable without another poll");
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::events::AppEvent::RemoteFocusTransition { transition, .. })
+                if matches!(*transition, RemoteFocusTransition::Active(_))
+        ));
+        assert_eq!(receive_failure(&mut event_rx).code, "connection_lost");
+        assert_eq!(
+            connected_targets.lock().expect("targets lock").as_slice(),
+            ["operator@buildbox"]
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(matches!(
+            messages.get(1),
+            Some(ClientMessage::ControlTerminal {
+                agent_ref: Some(wire_ref), ..
+            }) if wire_ref.host == "remote-buildbox"
+        ));
+    }
+
+    #[test]
+    fn changed_or_removed_host_clears_remote_identity_on_reload() {
+        let original_host = crate::config::FleetHostConfig {
+            name: "ub1".into(),
+            target: "operator@ub1".into(),
+            socket: Some("/run/herdr.sock".into()),
+            session: Some("agents".into()),
+            ..Default::default()
+        };
+        let mut changed_hosts = Vec::new();
+        let mut renamed = original_host.clone();
+        renamed.name = "renamed".into();
+        changed_hosts.push(vec![renamed]);
+        let mut retargeted = original_host.clone();
+        retargeted.target = "operator@other".into();
+        changed_hosts.push(vec![retargeted]);
+        let mut resocketed = original_host.clone();
+        resocketed.socket = Some("/run/other.sock".into());
+        changed_hosts.push(vec![resocketed]);
+        let mut resessioned = original_host.clone();
+        resessioned.session = Some("other".into());
+        changed_hosts.push(vec![resessioned]);
+        changed_hosts.push(Vec::new());
+
+        for hosts in changed_hosts {
+            let original_fleet = crate::config::FleetConfig {
+                hosts: vec![original_host.clone()],
+                ..Default::default()
+            };
+            let mut transport = SshRemoteFocusTransport::new(&original_fleet);
+            let mut observed = remote_identity_snapshot("ub1", "operator@ub1", "remote-ub1");
+            observed.hosts[0].socket = Some("/run/herdr.sock".into());
+            observed.hosts[0].session = Some("agents".into());
+            transport.observe_fleet_snapshot(&observed);
+            assert!(transport.remote_host_ready("ub1"));
+
+            let changed_fleet = crate::config::FleetConfig {
+                hosts,
+                ..Default::default()
+            };
+            assert!(transport.reload_fleet(&changed_fleet).is_empty());
+            assert!(!transport.remote_host_ready("ub1"));
+            assert!(!transport.remote_host_ready("renamed"));
+        }
+    }
+
+    #[test]
     fn stale_same_tuple_observation_cannot_restore_identity_after_reload() {
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
@@ -2650,6 +2770,15 @@ mod tests {
         assert!(transport.remote_host_ready("ub1"));
 
         transport.reload_fleet(&fleet);
+        assert!(transport.remote_host_ready("ub1"));
+
+        let current_failed = crate::fleet::Snapshot {
+            config_generation: 1,
+            ..Default::default()
+        };
+        transport.observe_fleet_snapshot(&current_failed);
+        assert!(!transport.remote_host_ready("ub1"));
+
         transport.observe_fleet_snapshot(&remote_identity_snapshot(
             "ub1",
             "operator@ub1",
