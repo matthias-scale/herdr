@@ -1497,6 +1497,15 @@ mod tests {
         write_error: Option<String>,
         write_gate: Option<Arc<WriteGate>>,
         diagnostic: Option<String>,
+        handshake_write_gate: Option<HandshakeWriteGate>,
+    }
+
+    /// Stalls one pre-split stream write so a test can revoke mid-request.
+    struct HandshakeWriteGate {
+        stalled_write: usize,
+        next_write: usize,
+        started_tx: std::sync::mpsc::Sender<()>,
+        release_rx: std::sync::mpsc::Receiver<()>,
     }
 
     impl Read for FakeStream {
@@ -1524,6 +1533,14 @@ mod tests {
 
     impl Write for FakeStream {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if let Some(gate) = &mut self.handshake_write_gate {
+                let write_index = gate.next_write;
+                gate.next_write += 1;
+                if write_index == gate.stalled_write {
+                    let _ = gate.started_tx.send(());
+                    let _ = gate.release_rx.recv();
+                }
+            }
             self.output
                 .lock()
                 .expect("fake output lock")
@@ -1956,6 +1973,7 @@ mod tests {
                     write_error,
                     write_gate,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: None,
@@ -2188,6 +2206,7 @@ mod tests {
                 write_error: None,
                 write_gate: None,
                 diagnostic: Some("buildbox: Permission denied (publickey).".into()),
+                handshake_write_gate: None,
             })),
             connect_error: None,
             connected_targets: None,
@@ -2404,6 +2423,7 @@ mod tests {
                     write_error: None,
                     write_gate: None,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: None,
@@ -2488,6 +2508,7 @@ mod tests {
                     write_error: None,
                     write_gate: None,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: None,
@@ -2545,6 +2566,7 @@ mod tests {
                     write_error: None,
                     write_gate: None,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: None,
@@ -2707,6 +2729,7 @@ mod tests {
                 write_error: None,
                 write_gate: None,
                 diagnostic: None,
+                handshake_write_gate: None,
             })),
             connect_error: None,
             connected_targets: Some(Arc::clone(&connected_targets)),
@@ -2856,6 +2879,7 @@ mod tests {
                     write_error: None,
                     write_gate: None,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: Some(Arc::clone(&connected_targets)),
@@ -2909,6 +2933,7 @@ mod tests {
                 write_error: None,
                 write_gate: None,
                 diagnostic: None,
+                handshake_write_gate: None,
             })),
             connect_error: None,
             connected_targets: Some(Arc::clone(&connected_targets)),
@@ -2991,6 +3016,7 @@ mod tests {
                     write_error: None,
                     write_gate: None,
                     diagnostic: None,
+                    handshake_write_gate: None,
                 })),
                 connect_error: None,
                 connected_targets: None,
@@ -3024,6 +3050,86 @@ mod tests {
         );
         let messages = wire_messages(&output.lock().expect("fake output lock"));
         assert!(matches!(messages.as_slice(), [ClientMessage::Hello { .. }]));
+    }
+
+    #[test]
+    fn reloading_changed_host_while_control_request_is_on_the_wire_detaches() {
+        let old_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "old-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let new_fleet = crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "buildbox".into(),
+                target: "new-target".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (write_started_tx, write_started_rx) = std::sync::mpsc::channel();
+        let (write_release_tx, write_release_rx) = std::sync::mpsc::channel();
+        let runner = Arc::new(FakeRunner {
+            stream: Mutex::new(Some(FakeStream {
+                input: Cursor::new(welcome_bytes()),
+                output: Arc::clone(&output),
+                fail_at: None,
+                panic_at: None,
+                read_gate: None,
+                write_error: None,
+                write_gate: None,
+                diagnostic: None,
+                // Hello is writes 0-1; the ControlTerminal payload is write 3.
+                handshake_write_gate: Some(HandshakeWriteGate {
+                    stalled_write: 3,
+                    next_write: 0,
+                    started_tx: write_started_tx,
+                    release_rx: write_release_rx,
+                }),
+            })),
+            connect_error: None,
+            connected_targets: None,
+        });
+        let mut transport = SshRemoteFocusTransport::with_runner(&old_fleet, runner);
+        transport.observe_fleet_snapshot(&remote_identity_snapshot(
+            "buildbox",
+            "old-target",
+            "old-remote",
+        ));
+        let (channels, _outbound_tx) = test_channels();
+        let operation_state = Arc::clone(&channels.operation_state);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+
+        transport
+            .start("operation", &agent_ref(), "proxy", channels, event_tx)
+            .expect("thread starts");
+        write_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("control request write starts");
+        assert_eq!(transport.reload_fleet(&new_fleet), vec!["operation"]);
+        assert!(operation_state.is_terminal());
+        write_release_tx.send(()).expect("release write");
+
+        assert!(
+            event_rx.blocking_recv().is_none(),
+            "revoked request must not report an active or duplicate failure transition"
+        );
+        let messages = wire_messages(&output.lock().expect("fake output lock"));
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    ClientMessage::Hello { .. },
+                    ClientMessage::ControlTerminal { .. },
+                    ClientMessage::Detach
+                ]
+            ),
+            "a lease granted to the revoked request must be released: {messages:?}"
+        );
     }
 
     #[test]
@@ -3081,6 +3187,7 @@ mod tests {
             write_error: None,
             write_gate: None,
             diagnostic: None,
+            handshake_write_gate: None,
         };
         let started = Instant::now();
         let result = read_initial_welcome(&mut stream, started + Duration::from_millis(20));
