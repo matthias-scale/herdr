@@ -272,11 +272,52 @@ impl Snapshot {
         }
     }
 
+    pub(crate) fn reconcile_after_config_reload(
+        &self,
+        fleet: &FleetConfig,
+        config_generation: u64,
+    ) -> Self {
+        let previous_hosts = self
+            .hosts
+            .iter()
+            .map(|host| (host.name.as_str(), host))
+            .collect::<HashMap<_, _>>();
+        let hosts = fleet
+            .hosts
+            .iter()
+            .filter_map(|configured| {
+                previous_hosts
+                    .get(configured.name.as_str())
+                    .copied()
+                    .filter(|observed| observed.matches_config(configured))
+                    .cloned()
+            })
+            .collect();
+
+        Self {
+            polled: self.polled,
+            refreshed_at: self.refreshed_at,
+            refreshed_at_unix_ms: self.refreshed_at_unix_ms,
+            config_generation,
+            configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
+            hosts,
+        }
+    }
+
     pub(crate) fn into_rows(self) -> Vec<FleetRow> {
         self.hosts
             .into_iter()
             .flat_map(|host| host.entries)
             .collect()
+    }
+}
+
+impl HostSnapshot {
+    pub(crate) fn matches_config(&self, configured: &FleetHostConfig) -> bool {
+        self.local == configured.local
+            && self.target == configured.target
+            && self.socket == configured.socket
+            && self.session == configured.session
     }
 }
 
@@ -354,18 +395,31 @@ pub(crate) fn attached_host_name<'a>(snapshot: &'a Snapshot, argv: &[String]) ->
 }
 
 pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, String> {
-    if host.local {
-        return Err(format!("{} is the local host", host.name));
+    host_attach_argv_parts(&host.name, host.local, &host.target, host.session.as_ref())
+}
+
+pub(crate) fn host_attach_argv_from_config(host: &FleetHostConfig) -> Result<Vec<String>, String> {
+    host_attach_argv_parts(&host.name, host.local, &host.target, host.session.as_ref())
+}
+
+fn host_attach_argv_parts(
+    name: &str,
+    local: bool,
+    target: &str,
+    session: Option<&String>,
+) -> Result<Vec<String>, String> {
+    if local {
+        return Err(format!("{name} is the local host"));
     }
-    if host.target.trim().is_empty() {
-        return Err(format!("{} has no SSH target", host.name));
+    if target.trim().is_empty() {
+        return Err(format!("{name} has no SSH target"));
     }
     let mut argv = vec![
         "herdr".to_string(),
         "--remote".to_string(),
-        host.target.clone(),
+        target.to_string(),
     ];
-    if let Some(session) = host.session.as_ref().filter(|session| !session.is_empty()) {
+    if let Some(session) = session.filter(|session| !session.is_empty()) {
         argv.extend(["--session".to_string(), session.clone()]);
     }
     Ok(argv)
@@ -377,21 +431,54 @@ pub(crate) fn host_attach_argv(host: &HostSnapshot) -> Result<Vec<String>, Strin
 /// offers to sync binaries with the remote host, which would stop a server that
 /// is running live agents. Attaching a single agent instead streams that one
 /// remote terminal and touches nothing else on the host.
+#[cfg(test)]
 pub(crate) fn agent_attach_argv(host: &HostSnapshot, agent: &str) -> Result<Vec<String>, String> {
-    if host.local {
-        return Err(format!("{} is the local host", host.name));
+    agent_attach_argv_parts(
+        &host.name,
+        host.local,
+        &host.target,
+        host.socket.as_deref(),
+        host.session.as_deref(),
+        agent,
+    )
+}
+
+pub(crate) fn agent_attach_argv_from_config(
+    host: &FleetHostConfig,
+    agent: &str,
+) -> Result<Vec<String>, String> {
+    agent_attach_argv_parts(
+        &host.name,
+        host.local,
+        &host.target,
+        host.socket.as_deref(),
+        host.session.as_deref(),
+        agent,
+    )
+}
+
+fn agent_attach_argv_parts(
+    name: &str,
+    local: bool,
+    target: &str,
+    socket: Option<&str>,
+    session: Option<&str>,
+    agent: &str,
+) -> Result<Vec<String>, String> {
+    if local {
+        return Err(format!("{name} is the local host"));
     }
-    if host.target.trim().is_empty() {
-        return Err(format!("{} has no SSH target", host.name));
+    if target.trim().is_empty() {
+        return Err(format!("{name} has no SSH target"));
     }
     if agent.trim().is_empty() {
-        return Err(format!("{} has no agent target", host.name));
+        return Err(format!("{name} has no agent target"));
     }
     Ok(vec![
         "ssh".to_string(),
         "-t".to_string(),
-        host.target.clone(),
-        remote_attach_command(host.socket.as_deref(), host.session.as_deref(), agent),
+        target.to_string(),
+        remote_attach_command(socket, session, agent),
     ])
 }
 
@@ -430,14 +517,34 @@ impl FleetPollerConfig {
         }
     }
 
-    pub(crate) fn replace(&self, fleet: FleetConfig) {
+    pub(crate) fn replace(&self, fleet: FleetConfig) -> u64 {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.fleet = fleet;
         state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
         self.changed.notify_all();
+        generation
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
+    pub(crate) fn host(&self, name: &str) -> Option<FleetHostConfig> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .fleet
+            .hosts
+            .iter()
+            .find(|host| host.name == name)
+            .cloned()
     }
 
     fn snapshot(&self) -> FleetPollerState {

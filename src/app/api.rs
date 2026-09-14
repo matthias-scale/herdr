@@ -53,10 +53,14 @@ impl App {
     }
 
     fn install_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+        if snapshot.config_generation != self.fleet_poller_config.generation() {
+            return false;
+        }
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
         let changed = self.state.fleet_snapshot != snapshot;
         self.state.fleet_snapshot = snapshot;
+        self.state.reconcile_dock_hosts_selection();
         self.refresh_remote_agent_panel_entries();
         changed
     }
@@ -1971,6 +1975,114 @@ pub(super) mod test_support {
 mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
+
+    fn fleet_host(name: &str, target: &str) -> crate::fleet::HostSnapshot {
+        crate::fleet::HostSnapshot {
+            name: name.into(),
+            target: target.into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }
+    }
+
+    fn fleet_snapshot(hosts: Vec<crate::fleet::HostSnapshot>) -> crate::fleet::Snapshot {
+        crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: hosts.iter().map(|host| host.name.clone()).collect(),
+            hosts,
+            ..crate::fleet::Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn stale_fleet_snapshot_after_reload_is_not_installed() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            ..Default::default()
+        }];
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let stale = fleet_snapshot(vec![fleet_host("office", "machine-a")]);
+        assert!(app.handle_internal_event_with_render_impact(
+            crate::events::AppEvent::FleetRefreshed {
+                snapshot: stale.clone(),
+            }
+        ));
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts[0].target = "machine-b".into();
+        app.apply_live_config(&reloaded, &[], &[], false);
+        let after_reload = app.state.fleet_snapshot.clone();
+
+        assert!(!app.handle_internal_event_with_render_impact(
+            crate::events::AppEvent::FleetRefreshed { snapshot: stale }
+        ));
+        assert_eq!(app.state.fleet_snapshot, after_reload);
+        assert_eq!(app.state.fleet_snapshot.config_generation, 1);
+    }
+
+    #[test]
+    fn reload_keeps_unchanged_fleet_rows_until_the_next_poll() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![
+            crate::config::FleetHostConfig {
+                name: "office".into(),
+                target: "machine-a".into(),
+                ..Default::default()
+            },
+            crate::config::FleetHostConfig {
+                name: "home".into(),
+                target: "machine-home".into(),
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let snapshot = fleet_snapshot(vec![
+            fleet_host("office", "machine-a"),
+            fleet_host("home", "machine-home"),
+        ]);
+        app.handle_internal_event_with_render_impact(crate::events::AppEvent::FleetRefreshed {
+            snapshot,
+        });
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts[0].target = "machine-b".into();
+        app.apply_live_config(&reloaded, &[], &[], false);
+
+        assert_eq!(
+            app.state
+                .fleet_snapshot
+                .hosts
+                .iter()
+                .map(|host| (host.name.as_str(), host.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("home", "machine-home")]
+        );
+        assert_eq!(
+            app.state.fleet_snapshot.configured_hosts,
+            vec!["office", "home"]
+        );
+    }
 
     fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {
         crate::app::home_catalog::parse_codex_catalog(

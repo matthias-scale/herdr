@@ -316,6 +316,12 @@ impl App {
     /// Without one it opens the whole remote session, which is what the Hosts
     /// surface asks for.
     pub(crate) fn open_fleet_host_focused(&mut self, name: &str, focus_agent: Option<&str>) {
+        let Some(configured_host) = self.fleet_poller_config.host(name) else {
+            self.show_fleet_launch_error(
+                "host is no longer in the fleet configuration".to_string(),
+            );
+            return;
+        };
         let Some(host) = self
             .state
             .fleet_snapshot
@@ -327,6 +333,12 @@ impl App {
             self.show_fleet_launch_error("host is no longer in the fleet inventory".to_string());
             return;
         };
+        if !host.matches_config(&configured_host) {
+            self.show_fleet_launch_error(
+                "host configuration changed; wait for a fresh fleet poll".to_string(),
+            );
+            return;
+        }
         if host.state == crate::fleet::HostState::Unreachable {
             self.show_fleet_launch_error(
                 host.error
@@ -336,8 +348,8 @@ impl App {
             return;
         }
         let argv = match focus_agent {
-            Some(agent) => crate::fleet::agent_attach_argv(&host, agent),
-            None => crate::fleet::host_attach_argv(&host),
+            Some(agent) => crate::fleet::agent_attach_argv_from_config(&configured_host, agent),
+            None => crate::fleet::host_attach_argv_from_config(&configured_host),
         };
         let argv = match argv {
             Ok(argv) => argv,
@@ -983,6 +995,84 @@ mod tests {
         let toast = app.state.toast.expect("launch failure toast");
         assert_eq!(toast.title, "host launch failed");
         assert_eq!(toast.context, "ssh: connection refused");
+    }
+
+    #[test]
+    fn retargeted_fleet_host_is_not_attachable_before_a_fresh_poll() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["office".into()],
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "office".into(),
+                target: "machine-a".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: Vec::new(),
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts[0].target = "machine-b".into();
+        app.apply_live_config(&reloaded, &[], &[], false);
+        app.open_fleet_host("office");
+
+        assert!(app.state.workspaces.is_empty());
+        let toast = app.state.toast.expect("launch failure toast");
+        assert_eq!(toast.title, "host launch failed");
+        assert!(toast.context.contains("fleet inventory"));
+    }
+
+    #[test]
+    fn current_generation_row_with_old_connection_is_not_used_for_attach() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts[0].target = "machine-b".into();
+        app.apply_live_config(&reloaded, &[], &[], false);
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+
+        app.open_fleet_host("office");
+
+        assert!(app.state.workspaces.is_empty());
+        let toast = app.state.toast.expect("launch failure toast");
+        assert_eq!(
+            toast.context,
+            "host configuration changed; wait for a fresh fleet poll"
+        );
     }
 
     fn fixed_home_dispatch_plan(

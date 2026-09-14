@@ -2453,8 +2453,15 @@ impl App {
             let revoked_operations = self
                 .remote_focus_transport
                 .reload_fleet(&config.remote.fleet);
-            self.fleet_poller_config
+            let config_generation = self
+                .fleet_poller_config
                 .replace(config.remote.fleet.clone());
+            self.state.fleet_snapshot = self
+                .state
+                .fleet_snapshot
+                .reconcile_after_config_reload(&config.remote.fleet, config_generation);
+            self.state.reconcile_dock_hosts_selection();
+            self.refresh_remote_agent_panel_entries();
             for operation_id in revoked_operations {
                 self.apply_remote_focus_transition(
                     &operation_id,
