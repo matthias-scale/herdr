@@ -3250,7 +3250,7 @@ mod tests {
             .current_dir(asset_dir)
             .args([
                 "-c",
-                "import json, sys; import herdr_status; calls = []; herdr_status._rpc = lambda _sock, _source, method, params: calls.append({'method': method, 'params': params}); items = json.loads(sys.argv[1]); herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if items else 'complete', parse_status='ok', pane_id=sys.argv[2], sock_path='test.sock', session_id=sys.argv[3]); print(json.dumps(calls))",
+                "import json, sys; import herdr_status; calls = []; herdr_status.write_mirror = lambda _pane_id, _payload: None; herdr_status._rpc = lambda _sock, _source, method, params: calls.append({'method': method, 'params': params}); items = json.loads(sys.argv[1]); herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if items else 'complete', parse_status='ok', pane_id=sys.argv[2], sock_path='test.sock', session_id=sys.argv[3]); print(json.dumps(calls))",
                 &input,
                 pane_id,
                 session_id,
