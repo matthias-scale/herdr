@@ -1438,6 +1438,60 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(tokens["closing_parse"], "missing")
         self.assertEqual(tokens["closing_workers_unknown"], "0")
 
+    def test_report_does_not_honor_legacy_nonblocking_item_flags(self):
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                items=[
+                    {
+                        "label": "Answer",
+                        "text": "Choose the release lane.",
+                        "blocking": False,
+                    }
+                ],
+                completion="incomplete",
+                parse_status="ok",
+                pane_id="w9:p19",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(outcome["payload"]["blocking"], 1)
+        self.assertTrue(outcome["payload"]["items"][0]["blocking"])
+        self.assertEqual(outcome["payload"]["state"], "blocked")
+
+    def test_missing_report_mirror_retains_prior_structured_obligations(self):
+        with self._isolated():
+            herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                gates=[{"label": "Gate", "text": "Gate A"}],
+                completion="incomplete",
+                external_wait="CI watcher",
+                parse_status="ok",
+                pane_id="w9:p20",
+                sock_path="/tmp/herdr-test.sock",
+            )
+            herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                completion="missing",
+                parse_status="missing",
+                pane_id="w9:p20",
+                sock_path="/tmp/herdr-test.sock",
+            )
+            with open(herdr_status.mirror_path("w9:p20"), encoding="utf-8") as fh:
+                mirrored = herdr_status.json.load(fh)
+
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate A"])
+        self.assertEqual(mirrored["blocking"], 1)
+        self.assertEqual(mirrored["external_wait"], "CI watcher")
+        self.assertEqual(mirrored["completion"], "missing")
+        self.assertEqual(mirrored["parse_status"], "missing")
+
     def test_declared_wait_is_omitted_when_state_is_not_working(self):
         with self._isolated():
             outcome = herdr_status.report(
@@ -1958,6 +2012,31 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(reports[1]["state"], "working")
         self.assertEqual(reports[1]["gates"], [])
         self.assertGreater(reports[1]["seq"], reports[0]["seq"])
+
+    def test_answering_tool_question_restores_unrelated_pending_gate(self):
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._PRE)
+        self._run(self._POST)
+
+        reports = self._reports()
+        self.assertEqual(
+            [[gate["text"] for gate in report["gates"]] for report in reports],
+            [["Gate A", "Which color do you prefer? — Red / Green"], ["Gate A"]],
+        )
+        self.assertEqual(reports[1]["state"], "working")
+        self.assertEqual(reports[1]["completion"], "incomplete")
+        self.assertEqual(reports[1]["parse_status"], "ok")
 
     def test_a_prompt_submit_clears_a_dialog_cancelled_with_escape(self):
         self._run(self._PRE)

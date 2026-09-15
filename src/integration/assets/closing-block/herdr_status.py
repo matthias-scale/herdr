@@ -181,6 +181,7 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                     prior = json.load(fh)
                 prior_seq = prior.get("seq") if isinstance(prior, dict) else None
             except (OSError, ValueError):
+                prior = {}
                 prior_seq = None
             if (
                 isinstance(prior_seq, int)
@@ -188,9 +189,23 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                 and payload["seq"] <= prior_seq
             ):
                 return None
+            mirror_payload = dict(payload)
+            if payload.get("parse_status") == "missing" and isinstance(prior, dict):
+                for key in (
+                    "blocking",
+                    "agents",
+                    "gates",
+                    "items",
+                    "decisions",
+                    "agent_names",
+                    "external_wait",
+                    "workers_unknown",
+                ):
+                    if key in prior:
+                        mirror_payload[key] = prior[key]
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
+                json.dump(mirror_payload, fh)
             os.replace(tmp, path)
             return path
     except OSError:
@@ -257,11 +272,13 @@ def report(
         _normalize_item(value, index=index, label="Answer")
         for index, value in enumerate(items or [], start=1)
     ]
+    for item in [*gate_objects, *item_objects]:
+        if str(item.get("label") or "").lower() in {"gate", "answer", "verify"}:
+            item["blocking"] = True
     action_points = [
         item
         for item in item_objects
         if str(item.get("label") or "").lower() in {"answer", "verify"}
-        and item.get("blocking", True) is not False
     ]
     blocking = max(blocking, len(gate_objects) + len(action_points))
     decision_objects = [
