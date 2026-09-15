@@ -669,6 +669,13 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.sidebar_focused = false;
+        app.state.toggle_home();
+        let home_prompt_before = app
+            .state
+            .home
+            .as_ref()
+            .map(|home| home.prompt.clone())
+            .expect("home");
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
             ws_idx: 0,
             tab_idx: 0,
@@ -704,6 +711,10 @@ mod tests {
         assert!(
             pane_input.try_recv().is_err(),
             "picker-owned input must not reach the pane"
+        );
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some(home_prompt_before.as_str())
         );
 
         app.route_client_events(

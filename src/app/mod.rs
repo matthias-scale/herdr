@@ -3065,12 +3065,33 @@ impl App {
                     }
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
-                            // Before the pane-context decision below: a focused
-                            // notepad and a due break reminder outrank the pane.
-                            if self.intercept_notepad_key_with_prompt_visibility(
-                                &key,
-                                pomodoro_presentation.prompt.is_some(),
-                            ) {
+                            // A due break reminder still outranks every other
+                            // input surface visible beneath it.
+                            if pomodoro_presentation.prompt.is_some()
+                                && self.intercept_notepad_key_with_prompt_visibility(&key, true)
+                            {
+                                pomodoro_changed = true;
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            // Popup input is routed below by its terminal context.
+                            // The floating subgroup picker otherwise owns keys
+                            // before a stale notepad or sidebar focus can take them.
+                            if self.state.popup_pane.is_none()
+                                && self
+                                    .state
+                                    .handle_sidebar_subgroup_picker_key(key.as_key_event())
+                            {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
                                 pomodoro_changed = true;
                                 self.input_leases.insert_consumed(
                                     lease_key,
@@ -3247,9 +3268,10 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
-                    if self.try_route_paste_to_overlay(&text)
+                    if self.try_route_paste_to_overlay()
                         || self.try_route_paste_to_popup(&text)
                         || self.route_text_to_sidebar_subgroup_picker(&text)
+                        || self.try_route_text_to_home(&text)
                     {
                     } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
                         self.paste_into_active_text_input(&text);
@@ -8813,6 +8835,48 @@ last_pane = "prefix+tab"
             rx.try_recv().is_err(),
             "the pane must not see keys typed into the notepad"
         );
+    }
+
+    #[tokio::test]
+    async fn headless_subgroup_picker_takes_keys_before_focused_notepad() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut pane_input) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.notepad.enabled = true;
+        app.state.notepad.focused = true;
+        let note_before = app.state.notepad.body().to_string();
+        app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('a'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("a")
+        );
+        assert_eq!(app.state.notepad.body(), note_before);
+        assert!(pane_input.try_recv().is_err());
     }
 
     #[tokio::test]
