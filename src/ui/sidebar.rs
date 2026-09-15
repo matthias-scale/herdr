@@ -2288,6 +2288,9 @@ fn compact_sidebar_rows_inner(
             entry.space_label_redundant = true;
         }
     }
+    // Lifecycle sections count and render sessions, not split panes. Aggregate
+    // first so one tab has one canonical representative in exactly one section.
+    let entries = ordered_tab_entries(app, &entries);
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
@@ -2578,7 +2581,7 @@ fn append_legacy_space_rows(
                 }
             }
         } else {
-            let tab_entries = ordered_tab_entries(&member_entries);
+            let tab_entries = ordered_tab_entries(app, &member_entries);
             let parent_key = space_sort_key_for(app, ws_idx);
             append_subgrouped_tab_rows(
                 app,
@@ -2631,7 +2634,7 @@ fn unlinked_sort_key(group: &SidebarWorkGroup) -> (bool, bool) {
 
 fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<SidebarWorkGroup> {
     let mut groups = Vec::new();
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let Some((key, title)) = entry_repo_group(app, &entry) else {
             push_unlinked_entry(app, &mut groups, entry);
             continue;
@@ -3004,8 +3007,22 @@ struct SidebarTabGroup {
     unlinked: bool,
 }
 
-fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
+fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
+    let mut representatives = std::collections::HashMap::new();
+    for entry in entries {
+        let key = (entry.ws_idx, entry.tab_idx);
+        representatives
+            .entry(key)
+            .and_modify(|pane_id| {
+                if app.pane_is_settled(entry.ws_idx, *pane_id)
+                    && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
+                {
+                    *pane_id = entry.pane_id;
+                }
+            })
+            .or_insert(entry.pane_id);
+    }
     let mut seen = std::collections::HashSet::new();
     entries
         .iter()
@@ -3014,6 +3031,12 @@ fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
             seen.insert(tab)
                 .then(|| tab_entries.get(&tab).cloned())
                 .flatten()
+                .map(|mut entry| {
+                    if let Some(pane_id) = representatives.get(&tab) {
+                        entry.pane_id = *pane_id;
+                    }
+                    entry
+                })
         })
         .collect()
 }
@@ -3090,7 +3113,7 @@ fn sidebar_tab_groups(
     mode: SidebarGroupMode,
 ) -> Vec<SidebarTabGroup> {
     let mut groups = Vec::new();
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -3904,7 +3927,7 @@ pub(crate) fn sidebar_work_groups(
             });
         }
     }
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -10308,6 +10331,119 @@ pub(crate) mod tests {
         let style = terminal.backend().buffer()[(card.rect.x + 2, card.rect.y)].style();
         assert_eq!(style.fg, Some(app.palette.overlay0));
         assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn settled_count_matches_distinct_tab_rows() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("settled sessions");
+        workspace.test_split(Direction::Horizontal);
+        workspace.test_split(Direction::Vertical);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for pane in app.workspaces[0].tabs[0].panes.values_mut() {
+            pane.settled_at = Some(1_725_000_000);
+        }
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )),
+                "one tab must count as one settled session in {mode:?}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                    .count(),
+                1,
+                "one settled tab must render one session row in {mode:?}"
+            );
+        }
+
+        let second_tab = app.workspaces[0].test_add_tab(Some("second settled session"));
+        let second_pane = app.workspaces[0].tabs[second_tab].root_pane;
+        app.workspaces[0].tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .expect("second pane")
+            .settled_at = Some(1_725_000_001);
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 2,
+                        ..
+                    }
+                )),
+                "two tabs must count as two settled sessions in {mode:?}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                    .count(),
+                2,
+                "two settled tabs must render two session rows in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_settlement_tab_appears_in_one_lifecycle_section() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("mixed session");
+        let settled_root = workspace.tabs[0].root_pane;
+        let active_split = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_root)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            let tab_entries = rows
+                .iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some(entry.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tab_entries.len(), 1, "mixed tab duplicated in {mode:?}");
+            assert_eq!(
+                tab_entries[0].pane_id, active_split,
+                "the active pane must represent a mixed tab in {mode:?}"
+            );
+            assert!(
+                !rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        ..
+                    }
+                )),
+                "a tab with an active pane must not enter Settled in {mode:?}"
+            );
+        }
     }
 
     #[test]
