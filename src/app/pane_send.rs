@@ -68,8 +68,9 @@ impl App {
             return false;
         }
         runtime.send_bytes_after(Bytes::from(enter), SUBMIT_DELAY);
-        self.state
-            .note_pane_activity_at(pane_id, std::time::Instant::now());
+        // A submitted turn is explicit input: it releases a blocked closing gate
+        // the same way typing into the pane or `agent.prompt` does.
+        self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
         true
     }
 
@@ -340,5 +341,49 @@ mod tests {
             .pending_stall_nudge_submissions
             .contains_key(&terminal_id));
         assert!(!app.tick_auto_nudges(now + SUBMIT_DELAY));
+    }
+
+    #[tokio::test]
+    async fn pane_send_releases_a_blocked_closing_gate() {
+        let (mut app, panes) = app_with_agents(1);
+        let pane_id = panes[0];
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("pane terminal");
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            std::time::Instant::now(),
+        );
+        assert_eq!(
+            terminal.raw_agent_state(),
+            crate::detect::AgentState::Blocked
+        );
+        let (runtime, _rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 8,
+            );
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        assert!(app.send_text_to_agent_pane(0, pane_id, "answer to the gate"));
+
+        assert_ne!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            crate::detect::AgentState::Blocked
+        );
     }
 }
