@@ -2260,15 +2260,20 @@ fn sidebar_filtered_agent_entries_from(
     let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
-    }
-    .into_iter()
-    .filter(|entry| !app.sidebar_starred_only || entry.starred)
-    .filter(|entry| sidebar_entry_matches_query(app, entry))
-    .collect::<Vec<_>>();
-    if let Some(scope) = sidebar_project_scope(app) {
-        entries.retain(|entry| scope.holds(app, entry));
-    }
+    };
+    let scope = sidebar_project_scope(app);
+    entries.retain(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry));
     entries
+}
+
+fn sidebar_entry_matches_filters(
+    app: &AppState,
+    scope: Option<&ProjectScope<'_>>,
+    entry: &AgentPanelEntry,
+) -> bool {
+    (!app.sidebar_starred_only || entry.starred)
+        && sidebar_entry_matches_query(app, entry)
+        && scope.is_none_or(|scope| scope.holds(app, entry))
 }
 
 fn compact_sidebar_rows_inner(
@@ -2277,7 +2282,19 @@ fn compact_sidebar_rows_inner(
     expand_worktrees: bool,
     include_remote: bool,
 ) -> Vec<SidebarRow> {
-    let mut entries = sidebar_filtered_agent_entries_from(app, terminal_runtimes);
+    let mut entries = match terminal_runtimes {
+        Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
+        None => sidebar_thread_entries(app),
+    };
+    if sidebar_rows_are_filtered(app) {
+        let scope = sidebar_project_scope(app);
+        let visible_tabs = entries
+            .iter()
+            .filter(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry))
+            .map(|entry| (entry.ws_idx, entry.tab_idx))
+            .collect::<std::collections::HashSet<_>>();
+        entries.retain(|entry| visible_tabs.contains(&(entry.ws_idx, entry.tab_idx)));
+    }
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -10444,6 +10461,97 @@ pub(crate) mod tests {
                 "a tab with an active pane must not enter Settled in {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn filtered_mixed_settlement_tab_keeps_its_active_representative() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("filtered mixed session");
+        workspace.identity_cwd = "/tmp/outside-filtered-project".into();
+        let settled_root = workspace.tabs[0].root_pane;
+        let active_split = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_root)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        let settled_terminal = app.workspaces[0].tabs[0].panes[&settled_root]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&settled_terminal)
+            .expect("settled terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("owner/scoped-repo".into()),
+                work_title: Some("settled-only-needle".into()),
+                ..Default::default()
+            })
+            .expect("settled work context");
+        let active_terminal = app.workspaces[0].tabs[0].panes[&active_split]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&active_terminal)
+            .expect("active terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("owner/other-repo".into()),
+                work_title: Some("active sibling".into()),
+                ..Default::default()
+            })
+            .expect("active work context");
+        app.projects = vec![Project {
+            id: "scoped".into(),
+            label: "scoped".into(),
+            repos: vec![ProjectRepo {
+                name: "scoped-repo".into(),
+                path: "/tmp/filtered-project".into(),
+            }],
+        }];
+        app.reconcile_sidebar_presentation();
+
+        let assert_active_tab = |app: &mut AppState, filter: &str| {
+            for mode in SidebarGroupMode::ALL {
+                app.set_sidebar_group_mode(mode);
+                let rows = sidebar_rows(app);
+                let tab_entries = rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        SidebarRow::Tab { entry, .. } => Some(entry.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    tab_entries.len(),
+                    1,
+                    "filtered mixed tab duplicated for {filter} in {mode:?}"
+                );
+                assert_eq!(
+                    tab_entries[0].pane_id, active_split,
+                    "the active pane must represent {filter} in {mode:?}"
+                );
+                assert!(
+                    !rows.iter().any(|row| matches!(
+                        row,
+                        SidebarRow::SectionHeader {
+                            title: SETTLED_SECTION_TITLE,
+                            ..
+                        }
+                    )),
+                    "{filter} must not move a mixed tab into Settled in {mode:?}"
+                );
+            }
+        };
+
+        app.sidebar_work_filter.query = "settled-only-needle".into();
+        assert_active_tab(&mut app, "search");
+
+        app.sidebar_work_filter.query.clear();
+        app.sidebar_work_filter.project = Some("scoped".into());
+        assert_active_tab(&mut app, "project scope");
     }
 
     #[test]
