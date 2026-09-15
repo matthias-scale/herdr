@@ -4991,7 +4991,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(filtered, vec![panes[2]]);
+        assert_eq!(filtered, vec![panes[0], panes[2]]);
         state.assert_invariants_for_test();
         state.workspaces[0].assert_invariants_for_test();
     }

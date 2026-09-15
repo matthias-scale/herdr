@@ -418,10 +418,15 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
         .into_iter()
         .fold((0usize, 0usize), |(blocked, attention), entry| {
-            match crate::ui::sidebar::entry_attention_tier(&entry) {
-                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
-                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
-                crate::terminal::state::AttentionTier::None => (blocked, attention),
+            let tier = crate::ui::sidebar::entry_attention_tier(&entry);
+            let is_blocked = tier == crate::terminal::state::AttentionTier::Blocked
+                && (entry.state != AgentState::Working || entry.usage_limited);
+            if is_blocked {
+                (blocked + 1, attention)
+            } else if tier == crate::terminal::state::AttentionTier::Attention {
+                (blocked, attention + 1)
+            } else {
+                (blocked, attention)
             }
         });
     let specs = status_button_specs(app, blocked, attention);
@@ -2056,13 +2061,13 @@ mod tests {
             button_for(&attention, StatusButtonAction::BlockedFilter)
                 .label
                 .trim(),
-            "blocked"
+            "blocked 1"
         );
         assert_eq!(
             button_for(&attention, StatusButtonAction::Attention)
                 .label
                 .trim(),
-            "attention 1"
+            "attention"
         );
 
         app.workspaces[0].tabs[0]

@@ -72,7 +72,14 @@ impl Tab {
             record_aggregate_pane_visit();
             terminals.get(&pane.attached_terminal_id).map(|terminal| {
                 let projection = pane.agent_projection(terminal);
-                (projection.state, projection.seen, projection.attention_tier)
+                let attention_tier = if projection.counts_as_blocked() {
+                    AttentionTier::Blocked
+                } else if projection.attention_tier == AttentionTier::Attention {
+                    AttentionTier::Attention
+                } else {
+                    AttentionTier::None
+                };
+                (projection.state, projection.seen, attention_tier)
             })
         }))
     }
@@ -462,7 +469,7 @@ mod tests {
 
         assert_eq!(
             ws.pane_details(&terminals)[0].attention_tier,
-            AttentionTier::Attention
+            AttentionTier::Blocked
         );
 
         ws.tabs[0].panes.get_mut(&pane).unwrap().settled_at = Some(1);

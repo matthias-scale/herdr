@@ -1189,16 +1189,15 @@ impl GlobalAgentCounts {
 fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
     let mut counts = GlobalAgentCounts::default();
     for entry in crate::ui::all_agent_panel_entries(app) {
-        match super::sidebar::entry_attention_tier(&entry) {
-            crate::terminal::state::AttentionTier::Blocked => {
-                counts.blocked += 1;
-                continue;
-            }
-            crate::terminal::state::AttentionTier::Attention => {
-                counts.attention += 1;
-                continue;
-            }
-            crate::terminal::state::AttentionTier::None => {}
+        if super::sidebar::entry_is_blocked(&entry) {
+            counts.blocked += 1;
+            continue;
+        }
+        if super::sidebar::entry_attention_tier(&entry)
+            == crate::terminal::state::AttentionTier::Attention
+        {
+            counts.attention += 1;
+            continue;
         }
         match super::sidebar::agent_panel_status_key(entry.state, entry.seen) {
             "blocked" => counts.blocked += 1,
@@ -1599,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn global_agent_counts_separate_answer_only_attention_from_blocked() {
+    fn global_agent_counts_treat_verify_as_blocked() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("attention")];
         app.ensure_test_terminals();
@@ -1621,8 +1620,37 @@ mod tests {
         }];
 
         let counts = global_agent_counts(&app);
+        assert_eq!(counts.blocked, 1);
+        assert_eq!(counts.attention, 0);
+        assert_eq!(counts.total(), 1);
+    }
+
+    #[test]
+    fn global_agent_counts_keep_resumed_work_with_a_pending_cap_working() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("resumed")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose the independent release lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+
+        let counts = global_agent_counts(&app);
+        assert_eq!(counts.working, 1);
         assert_eq!(counts.blocked, 0);
-        assert_eq!(counts.attention, 1);
+        assert_eq!(counts.attention, 0);
         assert_eq!(counts.total(), 1);
     }
 

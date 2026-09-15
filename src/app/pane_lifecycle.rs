@@ -232,16 +232,13 @@ pub(crate) fn pane_is_done(
     if seen || terminal.supervisor_stale {
         return false;
     }
-    // Idle is not enough to close a pane. A latched closing item, a live sub-agent or a
-    // shell still running below the agent all mean the pane has something left
-    // in it, and an unanswered item is precisely what keeps a pane idle and
-    // unread for hours. Share the sidebar's definition so the pane the sidebar
-    // paints as blocking can never be reaped underneath it.
+    // Idle is not enough to close a pane. A latched human-action closing item,
+    // a live sub-agent or a shell still running below the agent all mean the
+    // pane has something left in it. Share the sidebar's definition so a pane
+    // painted as blocking can never be reaped underneath it.
     crate::terminal::state::session_is_quiet(
         state,
-        !terminal.closing_gates.is_empty()
-            || terminal.has_blocking_closing_items()
-            || terminal.usage_limited,
+        terminal.has_pending_human_input() || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
     )
@@ -257,9 +254,7 @@ pub(crate) fn pane_is_quiet(
     let state = terminal.sidebar_projection(pane.seen).0;
     crate::terminal::state::session_is_quiet(
         state,
-        !terminal.closing_gates.is_empty()
-            || terminal.has_blocking_closing_items()
-            || terminal.usage_limited,
+        terminal.has_pending_human_input() || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
     )

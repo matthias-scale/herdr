@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 """Claude Code `AskUserQuestion` hooks -> herdr blocked/working status.
 
 Installed beside `herdr-closing-block.py` and reporting through the same
@@ -57,6 +57,50 @@ def read_marker(pane_id: str) -> dict | None:
     return marker if isinstance(marker, dict) else None
 
 
+def read_prior_status(pane_id: str) -> dict:
+    """Read the last complete structured set before adding a tool question."""
+    try:
+        with open(mirror_path(pane_id), encoding="utf-8") as fh:
+            prior = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(prior, dict) or prior.get("v") != 2:
+        return {}
+    return {
+        "blocking": prior.get("blocking") if isinstance(prior.get("blocking"), int) else 0,
+        "agents": prior.get("agents") if isinstance(prior.get("agents"), int) else 0,
+        "gates": prior.get("gates") if isinstance(prior.get("gates"), list) else [],
+        "items": prior.get("items") if isinstance(prior.get("items"), list) else [],
+        "decisions": (
+            prior.get("decisions") if isinstance(prior.get("decisions"), list) else []
+        ),
+        "agent_names": (
+            prior.get("agent_names")
+            if isinstance(prior.get("agent_names"), list)
+            else []
+        ),
+        "external_wait": (
+            prior.get("external_wait")
+            if isinstance(prior.get("external_wait"), str)
+            else None
+        ),
+        "workers_unknown": prior.get("workers_unknown") is True,
+    }
+
+
+def read_status_seq(pane_id: str) -> int | None:
+    """Return the current mirror sequence, or none when it is not trustworthy."""
+    try:
+        with open(mirror_path(pane_id), encoding="utf-8") as fh:
+            status = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(status, dict) or status.get("v") != 2:
+        return None
+    seq = status.get("seq")
+    return seq if isinstance(seq, int) else None
+
+
 def write_marker(pane_id: str, marker: dict) -> None:
     path = marker_path(pane_id)
     try:
@@ -106,12 +150,20 @@ def gates_for(payload: dict) -> list[dict]:
 
 
 def open_gate(payload: dict, pane_id: str) -> dict:
-    gates = gates_for(payload)
+    prior = read_prior_status(pane_id)
+    gates = [*(prior.get("gates") or []), *gates_for(payload)]
     outcome = report(
         agent="claude",
-        blocking=len(gates),
-        agents=0,
+        blocking=max(int(prior.get("blocking") or 0), len(gates)),
+        agents=int(prior.get("agents") or 0),
         gates=gates,
+        items=prior.get("items"),
+        decisions=prior.get("decisions"),
+        agent_names=prior.get("agent_names"),
+        completion="incomplete",
+        external_wait=prior.get("external_wait"),
+        parse_status="ok",
+        workers_unknown=prior.get("workers_unknown") is True,
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
     )
@@ -121,6 +173,7 @@ def open_gate(payload: dict, pane_id: str) -> dict:
             "session_id": payload.get("session_id"),
             "tool_use_id": payload.get("tool_use_id"),
             "seq": outcome["payload"]["seq"],
+            "prior": prior,
         },
     )
     return outcome
@@ -133,26 +186,61 @@ def close_gate(payload: dict, pane_id: str, *, require_marker: bool) -> dict | N
     the model is still replying, so the state is named explicitly. The next
     `Stop` report supersedes this one with the real turn-end reading.
 
-    `PostToolUse` for this tool means a human just answered, which is true
-    whether or not the marker survived, so it reports unconditionally. A prompt
-    submit only means the turn resumed when a gate was actually outstanding.
+    A markerless `PostToolUse` still reports `working`, but its CAP arrays are
+    non-authoritative because the complete prior set is unknown. A matching,
+    current marker can restore its saved set; stale or mismatched events cannot.
+    A prompt submit only resumes a gate that was actually outstanding.
     """
     session_id = payload.get("session_id")
     marker = read_marker(pane_id)
+    prior: dict = {}
+    prior_available = False
     if marker is not None:
         # A gate opened by a different session must not be answered for by this
         # one; leave it to that session's own hooks.
         marked_session = marker.get("session_id")
         if marked_session and session_id and marked_session != session_id:
             return None
+        if not require_marker:
+            marked_tool = marker.get("tool_use_id")
+            answered_tool = payload.get("tool_use_id")
+            if not marked_tool or marked_tool != answered_tool:
+                return None
+
+        marker_seq = marker.get("seq")
+        current_seq = read_status_seq(pane_id)
+        if (
+            isinstance(marker_seq, int)
+            and isinstance(current_seq, int)
+            and current_seq > marker_seq
+        ):
+            # Another complete report superseded this question. Restoring its
+            # snapshot would erase the newer obligations.
+            clear_marker(pane_id)
+            return None
+        if (
+            isinstance(marker_seq, int)
+            and current_seq == marker_seq
+            and isinstance(marker.get("prior"), dict)
+        ):
+            prior = marker["prior"]
+            prior_available = True
         clear_marker(pane_id)
     elif require_marker:
         return None
     return report(
         agent="claude",
-        blocking=0,
-        agents=0,
+        blocking=int(prior.get("blocking") or 0),
+        agents=int(prior.get("agents") or 0),
+        gates=prior.get("gates"),
+        items=prior.get("items"),
+        decisions=prior.get("decisions"),
+        agent_names=prior.get("agent_names"),
         state="working",
+        completion="incomplete",
+        external_wait=prior.get("external_wait"),
+        parse_status="ok" if prior_available else "missing",
+        workers_unknown=prior.get("workers_unknown") is True,
         session_id=session_id,
         session_path=payload.get("transcript_path"),
     )

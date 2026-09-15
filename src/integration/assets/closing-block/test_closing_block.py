@@ -401,17 +401,207 @@ UNMARKED_VERIFY_BLOCKING_ANSWER = """\
 Done here.
 """
 
+MOVE_AND_RESIZE_CAP = """\
+**Critical action points (0 blocking)**
+
+1. https://github.com/scalable-so/scalablev2/pull/3401
+   In plain words: LaoZhang routing is restored.
+
+   Answer · non-blocking — What next for placement accuracy?
+
+Waiting on you — 1 item (1), 0 blocking.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
-    def test_suffix_nonblocking_items(self):
+    def test_url_first_later_label_retains_the_pending_decision(self):
+        block = closing_block.parse(MOVE_AND_RESIZE_CAP)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.parse_status, "malformed")
+        self.assertEqual(block.completion, "incomplete")
+        self.assertEqual(
+            [(item["label"], item["blocking"]) for item in block.wire_items()],
+            [("Answer", True)],
+        )
+        self.assertIn("What next for placement accuracy?", block.wire_items()[0]["text"])
+        self.assertIn("What next for placement accuracy?", block.message())
+        self.assertEqual(
+            block.wire_items()[0]["url"],
+            "https://github.com/scalable-so/scalablev2/pull/3401",
+        )
+
+    def test_bold_plain_and_url_first_labels_have_identical_decision_state(self):
+        presentations = (
+            "1. **Answer** — Choose the placement strategy.\n",
+            "1. Answer · non-blocking — Choose the placement strategy.\n",
+            "1. https://example.test/preview\n"
+            "   **Answer · non-blocking** — Choose the placement strategy.\n",
+        )
+
+        parsed = [
+            closing_block.parse(
+                "**Critical action points (1 blocking)**\n\n"
+                + presentation
+                + "\nWaiting on you — 1 item (1), 1 blocking.\n"
+            )
+            for presentation in presentations
+        ]
+
+        self.assertEqual([block.blocking for block in parsed], [1, 1, 1])
+        self.assertEqual([block.herdr_state for block in parsed], ["blocked"] * 3)
+        self.assertEqual(
+            [block.wire_items()[0]["label"] for block in parsed],
+            ["Answer"] * 3,
+        )
+        self.assertTrue(all(block.wire_items()[0]["blocking"] for block in parsed))
+
+    def test_final_done_outranks_an_earlier_agent_claim(self):
+        block = closing_block.parse(
+            "1 agent running: reviewer — checking the patch.\n\n"
+            "**Critical action points (0 blocking)**\n\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.agents_running, 0)
+        self.assertEqual(block.completion, "complete")
+        self.assertEqual(block.herdr_state, "idle")
+
+    def test_later_worker_claim_reopens_an_earlier_done_footer(self):
+        block = closing_block.parse(
+            "Done here.\n\n"
+            "**Critical action points (0 blocking)**\n\n"
+            "1 agent running: reviewer — checking the new turn.\n"
+        )
+
+        self.assertFalse(block.done_here)
+        self.assertEqual(block.completion, "incomplete")
+        self.assertTrue(block.workers_unknown)
+
+    def test_fenced_and_quoted_status_examples_are_not_authoritative(self):
+        block = closing_block.parse(
+            "> **Critical action points (1 blocking)**\n"
+            "> 1. **Answer** — Example question.\n\n"
+            "```markdown\n"
+            "Waiting on you — 1 item (1), 1 blocking.\n"
+            "1 agent running: example — not live.\n"
+            "```\n\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.agents_running, 0)
+        self.assertEqual(block.completion, "complete")
+
+    def test_named_external_wait_is_in_progress_without_becoming_a_human_blocker(self):
+        block = closing_block.parse(
+            "**Critical action points (0 blocking)**\n\n"
+            "Waiting for CI run 4123 via github-ci-watch.\n"
+        )
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.external_wait, "CI run 4123 via github-ci-watch")
+        self.assertEqual(block.herdr_state, "working")
+        self.assertEqual(block.completion, "incomplete")
+        self.assertEqual(block.parse_status, "ok")
+
+    def test_short_reply_has_missing_task_evidence_instead_of_clearing_state(self):
+        block = closing_block.parse("Progressing.\n")
+
+        self.assertFalse(block.present)
+        self.assertEqual(block.completion, "missing")
+        self.assertEqual(block.parse_status, "missing")
+        self.assertEqual(block.herdr_state, "idle")
+
+    def test_combined_worker_and_human_wait_footer_keeps_each_fact_separate(self):
+        block = closing_block.parse(
+            "**Critical action points (1 blocking)**\n\n"
+            "1. **Answer** — Choose the release lane.\n\n"
+            "1 agent running: reviewer — checking another lane · "
+            "Waiting on you — 1 item (1), 1 blocking.\n"
+        )
+
+        self.assertEqual(block.blocking, 1)
+        self.assertTrue(block.waiting_on_you)
+        self.assertEqual(block.agents_running, 0)
+        self.assertTrue(block.workers_unknown)
+        self.assertEqual(block.agents, ["reviewer — checking another lane"])
+        self.assertIsNone(block.external_wait)
+
+    def test_combined_worker_and_external_wait_footer_parses_named_wait(self):
+        block = closing_block.parse(
+            "**Critical action points (0 blocking)**\n\n"
+            "1 agent running: monitor — CI watcher · "
+            "Waiting for CI run 4123 via github-ci-watch.\n"
+        )
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.agents_running, 0)
+        self.assertTrue(block.workers_unknown)
+        self.assertEqual(block.agents, ["monitor — CI watcher"])
+        self.assertEqual(block.external_wait, "CI run 4123 via github-ci-watch")
+        self.assertEqual(block.herdr_state, "working")
+
+    def test_canonical_registered_external_wait_footer(self):
+        block = closing_block.parse(
+            "The CI watcher will resume this task when the required checks finish.\n\n"
+            "**Nothing to act on.**\n\n"
+            "Waiting: required CI checks, completion watcher registered\n"
+        )
+
+        self.assertEqual(
+            block.external_wait,
+            "required CI checks, completion watcher registered",
+        )
+        self.assertEqual(block.herdr_state, "working")
+        self.assertEqual(block.completion, "incomplete")
+
+    def test_canonical_mixed_label_footer(self):
+        block = closing_block.parse(
+            "**Critical action points (2 blocking)**\n\n"
+            "1. **Gate** — Should the agent publish the synthetic changelog post "
+            "to the public site? `y/n`\n"
+            "2. **Verify** — Approve the tested mobile layout for publication, as "
+            "the release requires your visual sign-off? `y/n`\n\n"
+            "1 agent running: next-slice — dashboard filters · "
+            "Waiting on you — 2 items (1, 2), 2 blocking.\n"
+        )
+
+        self.assertEqual(block.blocking, 2)
+        self.assertEqual([item.label for item in block.items], ["Gate", "Verify"])
+        self.assertEqual(block.agents, ["next-slice — dashboard filters"])
+        self.assertEqual(block.agents_running, 0)
+        self.assertTrue(block.workers_unknown)
+        self.assertTrue(block.waiting_on_you)
+
+    def test_combined_agents_external_wait_and_human_wait_split_cleanly(self):
+        block = closing_block.parse(
+            "**Critical action points (1 blocking)**\n\n"
+            "1. **Answer** — Choose the next lane.\n\n"
+            "2 agents running: reviewer — patch review · verifier — focused tests · "
+            "Waiting: required CI checks, completion watcher registered · "
+            "Waiting on you — 1 item (1), 1 blocking.\n"
+        )
+
+        self.assertEqual(block.agents, ["reviewer — patch review", "verifier — focused tests"])
+        self.assertEqual(
+            block.external_wait,
+            "required CI checks, completion watcher registered",
+        )
+        self.assertTrue(block.waiting_on_you)
+        self.assertEqual(block.blocking, 1)
+
+    def test_legacy_suffix_nonblocking_marker_does_not_exempt_decisions(self):
         block = closing_block.parse(SUFFIX_NONBLOCKING_ITEMS)
 
-        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.blocking, 2)
         self.assertEqual(
             [(item["label"], item["text"], item["blocking"]) for item in block.wire_items()],
             [
-                ("Answer", "Choose the release lane", False),
-                ("Verify", "Confirm the optional visual detail", False),
+                ("Answer", "Choose the release lane", True),
+                ("Verify", "Confirm the optional visual detail", True),
             ],
         )
         with mock.patch.object(
@@ -426,13 +616,13 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 pane_id="w1:p1",
                 sock_path="/tmp/herdr-test.sock",
             )
-        self.assertEqual(outcome["payload"]["state"], "idle")
+        self.assertEqual(outcome["payload"]["state"], "blocked")
         self.assertEqual(
             [item["blocking"] for item in outcome["payload"]["items"]],
-            [False, False],
+            [True, True],
         )
         metadata = rpc.call_args_list[-1].args[3]
-        self.assertEqual(metadata["tokens"]["closing_idle"], "1")
+        self.assertEqual(metadata["tokens"]["closing_idle"], "0")
 
     def test_nonblocking_word_in_middle_is_blocking(self):
         block = closing_block.parse(MID_SENTENCE_NONBLOCKING_WORD)
@@ -441,15 +631,16 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(block.wire_items()[0]["blocking"], True)
         self.assertEqual(block.wire_items()[0]["text"], "This is non-blocking until we hear from QA.")
 
-    def test_nonblocking_only(self):
+    def test_legacy_prefix_nonblocking_marker_does_not_exempt_decisions(self):
         block = closing_block.parse(NONBLOCKING_ONLY)
 
-        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.blocking, 2)
         self.assertEqual(
             [(item["label"], item["text"], item["blocking"]) for item in block.wire_items()],
             [
-                ("Answer", "Share any preference if useful.", False),
-                ("Verify", "Confirm the optional visual detail.", False),
+                ("Answer", "Share any preference if useful.", True),
+                ("Verify", "Confirm the optional visual detail.", True),
             ],
         )
         with mock.patch.object(
@@ -464,13 +655,13 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 pane_id="w1:p1",
                 sock_path="/tmp/herdr-test.sock",
             )
-        self.assertEqual(outcome["payload"]["state"], "idle")
+        self.assertEqual(outcome["payload"]["state"], "blocked")
         self.assertEqual(
             [item["blocking"] for item in outcome["payload"]["items"]],
-            [False, False],
+            [True, True],
         )
         metadata = rpc.call_args_list[-1].args[3]
-        self.assertEqual(metadata["tokens"]["closing_idle"], "1")
+        self.assertEqual(metadata["tokens"]["closing_idle"], "0")
 
     def test_blocking_answer(self):
         block = closing_block.parse(BLOCKING_ANSWER)
@@ -542,7 +733,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
     def test_cap_gate_becomes_nonempty_object_gate(self):
         block = closing_block.parse(REALISTIC_CAP)
 
-        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.blocking, 2)
         self.assertEqual(len(block.wire_gates()), 1)
         self.assertEqual(
             block.wire_gates()[0],
@@ -563,18 +754,20 @@ class ClosingBlockV2Tests(unittest.TestCase):
         block = closing_block.parse(ZERO_COUNT_GATE)
 
         self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.completion, "incomplete")
+        self.assertEqual(block.parse_status, "malformed")
         self.assertEqual(block.wire_gates()[0]["text"], "Approve the zero-count correction.")
 
-    def test_declared_blocking_without_items_still_blocks(self):
+    def test_declared_blocking_without_items_is_malformed_attention(self):
         block = closing_block.parse(DECLARED_BLOCKING_WITHOUT_ITEMS)
 
-        self.assertEqual(block.blocking, 2)
+        self.assertEqual(block.blocking, 0)
         self.assertEqual(block.herdr_state, "blocked")
-        # No parseable items means no gate detail, only the declared count.
+        self.assertEqual(block.parse_status, "malformed")
         self.assertEqual(block.wire_gates(), [])
-        self.assertEqual(block.message(), "2 blocking")
+        self.assertIsNone(block.message())
 
-    def test_answer_and_what_to_test_are_nonblocking_items(self):
+    def test_answer_and_informational_notes_remain_separate_items(self):
         block = closing_block.parse(REALISTIC_CAP)
         items = block.wire_items()
 
@@ -779,16 +972,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
         self.assertEqual(block.wire_decisions(), [])
 
-    def test_labeled_items_outrank_the_declared_count_and_keep_their_labels(self):
-        # Reverses the previous "declared count floors blocking" contract.
-        # Answer and Verify do not count as Gates, so a header that over-declares
-        # above them is a miscounted header, not a hidden Gate. They still block
-        # the pane once no agent work remains.
+    def test_retained_items_define_the_count_and_keep_their_labels(self):
         for count, text in DECLARED_COUNT_WITH_ONLY_NONBLOCKING_ITEMS.items():
             with self.subTest(count=count):
                 block = closing_block.parse(text)
 
-                self.assertEqual(block.blocking, 0)
+                self.assertEqual(block.blocking, 2)
                 self.assertEqual(block.wire_gates(), [])
                 self.assertEqual(
                     [item["label"] for item in block.wire_items()],
@@ -812,7 +1001,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
                     "Done here.\n"
                 )
 
-                self.assertEqual(block.blocking, 1)
+                self.assertEqual(block.blocking, 2)
                 self.assertEqual(
                     [item["label"] for item in block.wire_gates()], ["Gate"]
                 )
@@ -829,16 +1018,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.blocking, 1)
         self.assertEqual(
             [item["label"] for item in block.wire_items()], ["Answer"]
         )
 
-    def test_an_incomplete_unlabeled_parse_keeps_the_declared_floor(self):
-        # Promotion labels what it finds, but finding fewer lines than the
-        # header declared means a gate was lost in parsing, not that the
-        # header was wrong. The promoted label must not be read back as proof
-        # the author labeled anything.
+    def test_an_incomplete_unlabeled_parse_reports_only_retained_items(self):
         block = closing_block.parse(
             "**Critical action points (2 blocking)**\n"
             "\n"
@@ -847,13 +1032,11 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(block.blocking, 2)
+        self.assertEqual(block.blocking, 1)
         self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.parse_status, "malformed")
 
-    def test_a_discarded_line_beside_a_label_keeps_the_declared_floor(self):
-        # An unlabeled line dropped next to a real label is the one case where
-        # labels are present but the parse is still incomplete. Trusting the
-        # labels there retires a human decision the author did declare.
+    def test_a_discarded_line_beside_a_label_marks_the_parse_malformed(self):
         for body in (
             "1. Approve the production rollout.\n2. Answer — which lane?\n",
             "1. **Gate:** Merge approval for PR #3078\n2. Answer — which lane?\n",
@@ -867,6 +1050,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
                 self.assertEqual(block.blocking, 1)
                 self.assertEqual(block.herdr_state, "blocked")
+                self.assertEqual(block.parse_status, "malformed")
 
     def test_a_complete_labeled_answer_blocks_because_no_agent_is_running(self):
         # The Part 2 fix itself: nothing was discarded and the author labeled
@@ -879,7 +1063,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.blocking, 1)
         self.assertEqual(block.herdr_state, "blocked")
 
         # A real gate beside an answer is unaffected.
@@ -892,15 +1076,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(mixed.blocking, 1)
+        self.assertEqual(mixed.blocking, 2)
         self.assertEqual(
             [item["label"] for item in mixed.wire_gates()], ["Gate"]
         )
 
-    def test_declared_count_still_floors_blocking_with_nothing_labeled(self):
-        # The header remains the only evidence when no label parsed at all, so
-        # it keeps flooring the count there: under-reporting a gate is the
-        # failure mode that guard exists for.
+    def test_declared_count_promotes_matching_unlabeled_items(self):
         block = closing_block.parse(
             "**Critical action points (2 blocking)**\n"
             "\n"
@@ -911,6 +1092,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         )
 
         self.assertEqual(block.blocking, 2)
+        self.assertEqual(block.parse_status, "malformed")
         self.assertEqual(
             [item["label"] for item in block.wire_gates()], ["Gate", "Gate"]
         )
@@ -920,11 +1102,8 @@ class ClosingBlockV2Tests(unittest.TestCase):
         # unlabeled line is not promoted into a gate -- its text is prose and
         # must never be published as a decision the human owes.
         #
-        # The count is a separate question. Dropping that line means the parse
-        # did not account for everything the header declared, so the header
-        # keeps flooring the count: a pane parked at "2 blocking" with no gate
-        # text is visible and self-correcting, while a silently retired gate is
-        # neither.
+        # The dropped line makes the parse malformed, while the displayed count
+        # still derives only from the retained pending decision.
         block = closing_block.parse(
             "**Critical action points (2 blocking)**\n"
             "\n"
@@ -934,7 +1113,8 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(block.blocking, 2)
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.parse_status, "malformed")
         self.assertEqual(block.wire_gates(), [])
         self.assertEqual(
             [item["label"] for item in block.wire_items()], ["Answer"]
@@ -1049,7 +1229,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
 
         self.assertEqual(outcome["payload"]["v"], 2)
-        self.assertEqual(outcome["payload"]["state"], "blocked")
+        self.assertEqual(outcome["payload"]["state"], "working")
         self.assertIsInstance(outcome["payload"]["gates"][0], dict)
         self.assertEqual(len(outcome["payload"]["items"]), 2)
         self.assertTrue(outcome["payload"]["decisions"][0]["reversible"])
@@ -1064,9 +1244,53 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(metadata[2], "pane.report_metadata")
         params = metadata[3]
         # The state label names the state; the gate body stays in the token.
-        self.assertEqual(params["state_labels"]["blocked"], "gate")
+        self.assertEqual(params["state_labels"]["blocked"], "2 action points")
         self.assertNotIn("Approve PR #2606", params["state_labels"]["blocked"])
         self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
+
+    def test_report_binds_every_rpc_to_the_provider_session(self):
+        with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            herdr_status.report(
+                agent="codex",
+                blocking=0,
+                agents=0,
+                session_id="thread-native-1",
+                pane_id="w1:p2",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(
+            [call.args[2] for call in rpc.call_args_list],
+            ["pane.report_agent_session", "pane.report_agent", "pane.report_metadata"],
+        )
+        self.assertTrue(
+            all(
+                call.args[3]["agent_session_id"] == "thread-native-1"
+                for call in rpc.call_args_list
+            )
+        )
+        metadata = rpc.call_args_list[-1].args[3]
+        self.assertEqual(metadata["agent"], "codex")
+        self.assertEqual(
+            metadata["applies_to_source"], "herdr:codex-closing-block"
+        )
+
+    def test_report_uses_a_sequence_reserved_by_the_caller(self):
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                seq=123456,
+                pane_id="w1:p3",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(outcome["payload"]["seq"], 123456)
 
     def test_non_gate_action_points_block_only_when_no_agent_is_running(self):
         cases = [
@@ -1199,6 +1423,118 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(report_params["reported_at"], payload["reported_at"])
         self.assertEqual(report_params["wait"], "CI run 4123")
         self.assertEqual(report_params["eta_s"], 720)
+
+    def test_report_emits_additive_lifecycle_fields_and_clearing_tokens(self):
+        with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=2,
+                items=[{"label": "Answer", "text": "Choose the lane."}],
+                completion="incomplete",
+                external_wait="CI run 4123 via watcher",
+                parse_status="ok",
+                workers_unknown=False,
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        payload = outcome["payload"]
+        self.assertEqual(payload["state"], "working")
+        self.assertEqual(payload["completion"], "incomplete")
+        self.assertEqual(payload["external_wait"], "CI run 4123 via watcher")
+        self.assertEqual(payload["parse_status"], "ok")
+        self.assertFalse(payload["workers_unknown"])
+        report_params = rpc.call_args_list[1].args[3]
+        self.assertEqual(report_params["completion"], "incomplete")
+        self.assertEqual(report_params["external_wait"], "CI run 4123 via watcher")
+        tokens = rpc.call_args_list[-1].args[3]["tokens"]
+        self.assertEqual(tokens["closing_completion"], "incomplete")
+        self.assertEqual(tokens["closing_wait"], "CI run 4123 via watcher")
+        self.assertEqual(tokens["closing_parse"], "ok")
+        self.assertEqual(tokens["closing_workers_unknown"], "0")
+
+    def test_report_always_clears_absent_lifecycle_values(self):
+        with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            outcome = herdr_status.report(
+                agent="codex",
+                blocking=0,
+                agents=0,
+                completion="missing",
+                parse_status="missing",
+                pane_id="w9:p18",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertIsNone(outcome["payload"]["external_wait"])
+        self.assertFalse(outcome["payload"]["workers_unknown"])
+        tokens = rpc.call_args_list[-1].args[3]["tokens"]
+        self.assertEqual(tokens["closing_completion"], "missing")
+        self.assertEqual(tokens["closing_wait"], "")
+        self.assertEqual(tokens["closing_parse"], "missing")
+        self.assertEqual(tokens["closing_workers_unknown"], "0")
+
+    def test_report_does_not_honor_legacy_nonblocking_item_flags(self):
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                items=[
+                    {
+                        "label": "Answer",
+                        "text": "Choose the release lane.",
+                        "blocking": False,
+                    }
+                ],
+                completion="incomplete",
+                parse_status="ok",
+                pane_id="w9:p19",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(outcome["payload"]["blocking"], 1)
+        self.assertTrue(outcome["payload"]["items"][0]["blocking"])
+        self.assertEqual(outcome["payload"]["state"], "blocked")
+
+    def test_missing_report_mirror_retains_prior_structured_obligations(self):
+        with self._isolated():
+            herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                gates=[{"label": "Gate", "text": "Gate A"}],
+                completion="incomplete",
+                external_wait="CI watcher",
+                parse_status="ok",
+                pane_id="w9:p20",
+                sock_path="/tmp/herdr-test.sock",
+            )
+            herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                completion="missing",
+                parse_status="missing",
+                pane_id="w9:p20",
+                sock_path="/tmp/herdr-test.sock",
+            )
+            with open(herdr_status.mirror_path("w9:p20"), encoding="utf-8") as fh:
+                mirrored = herdr_status.json.load(fh)
+
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate A"])
+        self.assertEqual(mirrored["blocking"], 1)
+        self.assertEqual(mirrored["external_wait"], "CI watcher")
+        self.assertEqual(mirrored["completion"], "missing")
+        self.assertEqual(mirrored["parse_status"], "missing")
 
     def test_declared_wait_is_omitted_when_state_is_not_working(self):
         with self._isolated():
@@ -1361,18 +1697,20 @@ class PlainFormTests(unittest.TestCase):
         ):
             with self.subTest(header=header):
                 block = closing_block.parse(header + "\n")
-                self.assertEqual(block.blocking, 3)
+                self.assertEqual(block.blocking, 0)
                 self.assertEqual(block.herdr_state, "blocked")
+                self.assertEqual(block.parse_status, "malformed")
 
     def test_counted_header_with_trailing_suffix_latches(self):
         block = closing_block.parse(SUFFIXED_PLAIN_FORM_CAP)
 
         self.assertEqual(block.blocking, 1)
         self.assertEqual(block.herdr_state, "blocked")
-        gates = block.wire_gates()
-        self.assertEqual(len(gates), 1)
-        self.assertIn("noopnutrition", gates[0]["text"])
-        self.assertIn("(a-rec)", gates[0]["text"])
+        items = block.wire_items()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["label"], "Answer")
+        self.assertIn("noopnutrition", items[0]["text"])
+        self.assertIn("(a-rec)", items[0]["text"])
 
     def test_counted_header_suffix_variants_latch(self):
         for header in (
@@ -1383,8 +1721,9 @@ class PlainFormTests(unittest.TestCase):
         ):
             with self.subTest(header=header):
                 block = closing_block.parse(header + "\n")
-                self.assertEqual(block.blocking, 2)
+                self.assertEqual(block.blocking, 0)
                 self.assertEqual(block.herdr_state, "blocked")
+                self.assertEqual(block.parse_status, "malformed")
 
     def test_countless_header_stays_full_line_only(self):
         # Without an explicit count the anchor keeps its strict form so prose
@@ -1401,17 +1740,19 @@ class PlainFormTests(unittest.TestCase):
 
         self.assertEqual(block.blocking, 1)
         self.assertEqual(block.herdr_state, "blocked")
-        gates = block.wire_gates()
-        self.assertEqual(len(gates), 1)
-        self.assertIn("copy-approval-linear-lane", gates[0]["text"])
-        self.assertEqual(gates[0]["pr"], 921)
+        items = block.wire_items()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["label"], "Answer")
+        self.assertIn("copy-approval-linear-lane", items[0]["text"])
+        self.assertEqual(items[0]["pr"], 921)
 
     def test_unlabeled_cap_before_agents_line_stays_blocked(self):
         block = closing_block.parse(UNLABELED_CAP_BEFORE_AGENTS_LINE)
 
         self.assertEqual(block.blocking, 1)
         self.assertEqual(block.herdr_state, "blocked")
-        self.assertEqual(block.agents_running, 3)
+        self.assertEqual(block.agents_running, 0)
+        self.assertTrue(block.workers_unknown)
         gates = block.wire_gates()
         self.assertEqual(len(gates), 1)
         self.assertIn("ship-critical-skill", gates[0]["text"])
@@ -1433,7 +1774,7 @@ class PlainFormTests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.blocking, 2)
         self.assertEqual(block.wire_gates()[0]["text"], "approve the rollout")
         labels = [item["label"] for item in block.wire_items()]
         self.assertEqual(labels, ["Verify"])
@@ -1529,6 +1870,419 @@ class StopHookTranscriptTests(unittest.TestCase):
         hook = self._hook_module()
         hook.FLUSH_WAIT_SECONDS = 0.2
         self.assertIsNone(hook.last_assistant_text("/nonexistent/transcript.jsonl"))
+
+    def test_short_reply_reports_missing_lifecycle_evidence(self):
+        import io
+
+        hook = self._hook_module()
+        with mock.patch.object(
+            hook, "last_assistant_text", return_value="Progressing."
+        ), mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": None, "socket": False},
+        ) as report, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ), mock.patch.object(
+            hook.sys, "stdin", io.StringIO('{"transcript_path":"/tmp/t.jsonl"}')
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        kwargs = report.call_args.kwargs
+        self.assertEqual(kwargs["completion"], "missing")
+        self.assertEqual(kwargs["parse_status"], "missing")
+        self.assertIsNone(kwargs["external_wait"])
+        self.assertFalse(kwargs["workers_unknown"])
+
+    def test_reserves_report_sequence_before_reading_the_transcript(self):
+        import io
+
+        hook = self._hook_module()
+        calls = []
+
+        def reserve():
+            calls.append("reserve")
+            return 101
+
+        def read(_path):
+            calls.append("read")
+            return "Done here."
+
+        with mock.patch.object(hook, "reserve_sequence", side_effect=reserve), mock.patch.object(
+            hook, "last_assistant_text", side_effect=read
+        ), mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": None, "socket": False},
+        ) as report, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ), mock.patch.object(
+            hook.sys,
+            "stdin",
+            io.StringIO(
+                '{"session_id":"claude-session-1",'
+                '"transcript_path":"/tmp/native-transcript.jsonl"}'
+            ),
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(calls, ["reserve", "read"])
+        self.assertEqual(report.call_args.kwargs["seq"], 101)
+
+    def test_reserved_old_stop_cannot_restore_a_newer_done_report(self):
+        gate = closing_block.parse(
+            "**Critical action points (1 blocking)**\n\n"
+            "1. **Gate** — Approve A.\n\nDone here."
+        )
+        done = closing_block.parse(
+            "**Critical action points (0 blocking)**\n\nDone here."
+        )
+        import tempfile
+
+        state_dir = tempfile.mkdtemp(prefix="herdr-stop-order-test-")
+        with mock.patch.dict(
+            herdr_status.os.environ, {"XDG_STATE_HOME": state_dir}, clear=False
+        ), mock.patch.object(herdr_status, "_rpc"):
+            for block, seq in ((done, 202), (gate, 101)):
+                herdr_status.report(
+                    agent="claude",
+                    blocking=block.blocking,
+                    agents=block.agents_running,
+                    gates=block.wire_gates(),
+                    items=block.wire_items(),
+                    decisions=block.wire_decisions(),
+                    completion=block.completion,
+                    parse_status=block.parse_status,
+                    seq=seq,
+                    pane_id="w1:p1",
+                    sock_path="/tmp/herdr-test.sock",
+                )
+            mirror = herdr_status.mirror_path("w1:p1")
+
+        with open(mirror, encoding="utf-8") as fh:
+            latest = herdr_status.json.load(fh)
+        self.assertEqual(latest["seq"], 202)
+        self.assertEqual(latest["completion"], "complete")
+        self.assertEqual(latest["gates"], [])
+
+
+class CodexNotifyHookTests(unittest.TestCase):
+    @staticmethod
+    def _hook_module():
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "herdr-codex-notify.py")
+        spec = importlib.util.spec_from_file_location("herdr_codex_notify_hook", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_short_reply_reports_missing_lifecycle_evidence(self):
+        import json
+
+        hook = self._hook_module()
+        payload = json.dumps(
+            {
+                "v": 2,
+                "type": "agent-turn-complete",
+                "last-assistant-message": "Progressing.",
+            }
+        )
+        with mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": None, "socket": False},
+        ) as report, mock.patch.object(
+            hook, "title_from", return_value="Task title"
+        ), mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ), mock.patch.object(
+            hook.sys, "argv", ["herdr-codex-notify.py", payload]
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        kwargs = report.call_args.kwargs
+        self.assertEqual(kwargs["completion"], "missing")
+        self.assertEqual(kwargs["parse_status"], "missing")
+        self.assertIsNone(kwargs["external_wait"])
+        self.assertFalse(kwargs["workers_unknown"])
+
+    def test_documented_thread_id_is_the_session_identity(self):
+        import json
+
+        hook = self._hook_module()
+        payload = json.dumps(
+            {
+                "type": "agent-turn-complete",
+                "thread-id": "01a0a5ef-d376-7630-ab2e-1df07874247c",
+                "turn-id": "01a0a5ef-d39c-7bc2-a807-265792464411",
+                "last-assistant-message": "Done here.",
+                "input-messages": ["Finish the adapter."],
+            }
+        )
+        with mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": "/tmp/mirror", "socket": False},
+        ) as report, mock.patch.object(
+            hook, "claim_unreported_turn", return_value=True
+        ), mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ), mock.patch.object(
+            hook.sys, "argv", ["herdr-codex-notify.py", payload]
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(
+            report.call_args.kwargs["session_id"],
+            "01a0a5ef-d376-7630-ab2e-1df07874247c",
+        )
+
+    def test_reserves_sequence_before_loading_and_parsing_the_notification(self):
+        hook = self._hook_module()
+        calls = []
+        payload = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "last-assistant-message": "Done here.",
+        }
+
+        def reserve():
+            calls.append("reserve")
+            return 303
+
+        def load(_argv):
+            calls.append("load")
+            return payload
+
+        with mock.patch.object(hook, "reserve_sequence", side_effect=reserve), mock.patch.object(
+            hook, "load_payload", side_effect=load
+        ), mock.patch.object(
+            hook, "claim_unreported_turn", return_value=True
+        ), mock.patch.object(
+            hook, "title_from", return_value="Task title"
+        ), mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": "/tmp/mirror", "socket": False},
+        ) as report, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(calls, ["reserve", "load"])
+        self.assertEqual(report.call_args.kwargs["seq"], 303)
+
+    def test_empty_notification_does_not_consume_the_replay_key(self):
+        hook = self._hook_module()
+        payload = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+        }
+        with mock.patch.object(hook, "load_payload", return_value=payload), mock.patch.object(
+            hook, "claim_unreported_turn"
+        ) as claim, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        claim.assert_not_called()
+
+    def test_duplicate_old_turn_cannot_restore_a_resolved_gate(self):
+        import json
+        import tempfile
+
+        hook = self._hook_module()
+        old = {
+            "type": "agent-turn-complete",
+            "thread-id": "01a0a5ef-d376-7630-ab2e-1df07874247c",
+            "turn-id": "01a0a5ef-d39c-7bc2-a807-265792464411",
+            "last-assistant-message": (
+                "**Critical action points (1 blocking)**\n\n"
+                "1. **Gate** — Approve A.\n\nDone here."
+            ),
+        }
+        done = {
+            **old,
+            "turn-id": "01a0a5f4-9f04-7101-843e-d46c286d65f4",
+            "last-assistant-message": (
+                "**Critical action points (0 blocking)**\n\nDone here."
+            ),
+        }
+        state_dir = tempfile.mkdtemp(prefix="herdr-codex-replay-test-")
+        reports = []
+
+        def report(**kwargs):
+            reports.append(kwargs)
+            return {"payload": {}, "mirror": "/tmp/mirror", "socket": False}
+
+        with mock.patch.object(hook, "report", side_effect=report), mock.patch.object(
+            hook, "title_from", return_value="Task title"
+        ), mock.patch.dict(
+            hook.os.environ,
+            {
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "XDG_STATE_HOME": state_dir,
+            },
+            clear=False,
+        ):
+            for native in (old, done, old):
+                with mock.patch.object(
+                    hook.sys,
+                    "argv",
+                    ["herdr-codex-notify.py", json.dumps(native)],
+                ):
+                    self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[0]["blocking"], 1)
+        self.assertEqual(reports[1]["blocking"], 0)
+
+    def test_competing_processes_claim_one_turn_only_once(self):
+        import multiprocessing
+        import tempfile
+
+        hook = self._hook_module()
+        state_dir = tempfile.mkdtemp(prefix="herdr-codex-claim-test-")
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        results = context.Queue()
+
+        def claim():
+            ready.wait(2)
+            with mock.patch.dict(
+                hook.os.environ, {"XDG_STATE_HOME": state_dir}, clear=False
+            ):
+                results.put(
+                    hook.claim_unreported_turn("w1:p1", "thread-1", "turn-1")
+                )
+
+        processes = [context.Process(target=claim) for _ in range(6)]
+        for process in processes:
+            process.start()
+        ready.set()
+        for process in processes:
+            process.join(2)
+            self.assertFalse(process.is_alive())
+
+        claimed = [results.get(timeout=1) for _ in processes]
+        self.assertEqual(claimed.count(True), 1)
+
+
+class BundleInstallerTests(unittest.TestCase):
+    RUNTIME_FILES = (
+        "closing_block.py",
+        "herdr_status.py",
+        "herdr-closing-block.py",
+        "herdr-codex-notify.py",
+        "herdr-question-gate.py",
+    )
+
+    @staticmethod
+    def _installer_module():
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "install.py")
+        spec = importlib.util.spec_from_file_location("closing_block_installer", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def setUp(self):
+        import pathlib
+        import shutil
+        import tempfile
+
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="herdr-closing-install-test-"))
+        self.addCleanup(shutil.rmtree, self.root)
+        self.source = pathlib.Path(__file__).parent
+        self.target = self.root / "share" / "herdr-closing-block"
+        self.target.mkdir(parents=True)
+        for name in self.RUNTIME_FILES:
+            (self.target / name).write_text(
+                "# HERDR_INTEGRATION_VERSION=1\nSTALE = True\n",
+                encoding="utf-8",
+            )
+        (self.target / "codex-notify-chain.sh").write_text(
+            "preserve existing notify wiring\n", encoding="utf-8"
+        )
+
+    def test_install_replaces_the_five_modules_as_one_verified_bundle(self):
+        installer = self._installer_module()
+
+        result = installer.install_bundle(self.source, self.target, dry_run=False)
+
+        self.assertEqual(result["mode"], "installed")
+        self.assertEqual(set(result["files"]), set(self.RUNTIME_FILES))
+        for name in self.RUNTIME_FILES:
+            self.assertEqual(
+                (self.target / name).read_bytes(),
+                (self.source / name).read_bytes(),
+            )
+            self.assertEqual(result["files"][name]["version"], 2)
+            self.assertRegex(result["files"][name]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            (self.target / "codex-notify-chain.sh").read_text(encoding="utf-8"),
+            "preserve existing notify wiring\n",
+        )
+        backup = self.root / "share" / result["backup"]
+        self.assertTrue(backup.is_dir())
+        self.assertIn("STALE = True", (backup / "closing_block.py").read_text())
+
+    def test_dry_run_validates_without_writing_target_or_backup(self):
+        installer = self._installer_module()
+        before = {
+            path.relative_to(self.target): path.read_bytes()
+            for path in self.target.iterdir()
+        }
+
+        result = installer.install_bundle(self.source, self.target, dry_run=True)
+
+        after = {
+            path.relative_to(self.target): path.read_bytes()
+            for path in self.target.iterdir()
+        }
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(after, before)
+        self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
+        self.assertEqual(list(self.target.parent.glob(".herdr-closing-block.stage-*")), [])
+
+    def test_invalid_source_bundle_leaves_existing_install_untouched(self):
+        import shutil
+
+        installer = self._installer_module()
+        invalid_source = self.root / "invalid-source"
+        invalid_source.mkdir()
+        for name in self.RUNTIME_FILES:
+            shutil.copy2(self.source / name, invalid_source / name)
+        (invalid_source / "closing_block.py").write_text(
+            "# HERDR_INTEGRATION_VERSION=2\nthis is not valid python !\n",
+            encoding="utf-8",
+        )
+        before = (self.target / "closing_block.py").read_bytes()
+
+        with self.assertRaises(installer.BundleValidationError):
+            installer.install_bundle(invalid_source, self.target, dry_run=False)
+
+        self.assertEqual((self.target / "closing_block.py").read_bytes(), before)
+        self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
 
 
 class QuestionGateHookTests(unittest.TestCase):
@@ -1645,6 +2399,102 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(reports[1]["state"], "working")
         self.assertEqual(reports[1]["gates"], [])
         self.assertGreater(reports[1]["seq"], reports[0]["seq"])
+
+    def test_answering_tool_question_restores_unrelated_pending_gate(self):
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._PRE)
+        self._run(self._POST)
+
+        reports = self._reports()
+        self.assertEqual(
+            [[gate["text"] for gate in report["gates"]] for report in reports],
+            [["Gate A", "Which color do you prefer? — Red / Green"], ["Gate A"]],
+        )
+        self.assertEqual(reports[1]["state"], "working")
+        self.assertEqual(reports[1]["completion"], "incomplete")
+        self.assertEqual(reports[1]["parse_status"], "ok")
+
+    def test_post_without_a_marker_cannot_clear_an_unrelated_pending_gate(self):
+        import json
+
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._POST)
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["state"], "working")
+        self.assertEqual(reports[0]["parse_status"], "missing")
+        with open(self.hook.mirror_path(self.pane_id), encoding="utf-8") as fh:
+            mirrored = json.load(fh)
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate A"])
+
+    def test_late_post_cannot_restore_over_a_newer_authoritative_report(self):
+        import json
+
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self._run(self._PRE)
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 8, "label": "Gate", "text": "Gate B"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._POST)
+
+        self.assertEqual(self._reports(), [])
+        self.assertIsNone(self.hook.read_marker(self.pane_id))
+        with open(self.hook.mirror_path(self.pane_id), encoding="utf-8") as fh:
+            mirrored = json.load(fh)
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate B"])
+
+    def test_mismatched_post_cannot_clear_another_tool_question(self):
+        self._run(self._PRE)
+        self.rpc.reset_mock()
+
+        self._run(dict(self._POST, tool_use_id="toolu_other"))
+
+        self.assertEqual(self._reports(), [])
+        self.assertIsNotNone(self.hook.read_marker(self.pane_id))
+        self._run(self._POST)
+        self.assertEqual(len(self._reports()), 1)
+        self.assertIsNone(self.hook.read_marker(self.pane_id))
 
     def test_a_prompt_submit_clears_a_dialog_cancelled_with_escape(self):
         self._run(self._PRE)

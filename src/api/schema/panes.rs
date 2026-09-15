@@ -378,6 +378,22 @@ pub struct PaneGraphicsStreamParams {
 
 pub const CLOSING_BLOCK_VERSION: u8 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosingCompletion {
+    Complete,
+    Incomplete,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosingParseStatus {
+    Ok,
+    Missing,
+    Malformed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PaneReportAgentParams {
     pub pane_id: String,
@@ -406,6 +422,18 @@ pub struct PaneReportAgentParams {
     pub items: Option<Vec<ClosingBlockItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decisions: Option<Vec<ClosingBlockDecision>>,
+    /// Explicit task completion from the authoritative final report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<ClosingCompletion>,
+    /// Registered external dependency with a wake mechanism.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_wait: Option<String>,
+    /// Whether the adapter parsed an authoritative closing report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<ClosingParseStatus>,
+    /// A previously reported worker disappeared without terminal evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_unknown: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for PaneReportAgentParams {
@@ -445,6 +473,14 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             items: Option<serde_json::Value>,
             #[serde(default)]
             decisions: Option<serde_json::Value>,
+            #[serde(default)]
+            completion: Option<ClosingCompletion>,
+            #[serde(default)]
+            external_wait: Option<String>,
+            #[serde(default)]
+            parse_status: Option<ClosingParseStatus>,
+            #[serde(default)]
+            workers_unknown: Option<bool>,
         }
 
         fn typed<T, E>(value: Option<serde_json::Value>, strict: bool) -> Result<Option<T>, E>
@@ -482,6 +518,10 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             });
         }
 
@@ -504,6 +544,10 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             gates: typed(raw.gates, strict)?,
             items: typed(raw.items, strict)?,
             decisions: typed(raw.decisions, strict)?,
+            completion: raw.completion,
+            external_wait: raw.external_wait,
+            parse_status: raw.parse_status,
+            workers_unknown: raw.workers_unknown,
         })
     }
 }
@@ -525,6 +569,15 @@ pub struct ClosingBlockItem {
     pub default: Option<String>,
     #[serde(default)]
     pub default_at: Option<String>,
+}
+
+impl ClosingBlockItem {
+    pub(crate) fn requires_human_input(&self) -> bool {
+        matches!(
+            self.label.trim().to_ascii_lowercase().as_str(),
+            "gate" | "answer" | "verify"
+        )
+    }
 }
 
 impl<'de> Deserialize<'de> for ClosingBlockItem {

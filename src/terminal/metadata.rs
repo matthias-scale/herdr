@@ -159,6 +159,18 @@ impl TerminalState {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }
 
+    pub(crate) fn closing_metadata_not_older_than_report(
+        &self,
+        source: &str,
+        seq: Option<u64>,
+    ) -> bool {
+        match (self.hook_report_sequences.get(source), seq) {
+            (Some(latest), Some(seq)) => seq >= *latest,
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    }
+
     pub(crate) fn metadata_report_agent(
         source: &str,
         agent_label: Option<&str>,

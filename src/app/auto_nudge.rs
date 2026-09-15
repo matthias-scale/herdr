@@ -948,18 +948,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonblocking_closing_items_do_not_suppress_auto_nudge() {
+    async fn informational_items_allow_auto_nudge_but_verify_suppresses_it() {
         let now = Instant::now();
-        let (mut optional, _pane_id, terminal_id, mut optional_rx) = app_with_stalled_pane(now);
-        optional
+        let (mut informational, _pane_id, terminal_id, mut informational_rx) =
+            app_with_stalled_pane(now);
+        informational
             .state
             .terminals
             .get_mut(&terminal_id)
             .unwrap()
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
             n: 1,
-            label: "Verify".into(),
-            text: "Optional check".into(),
+            label: "What to test".into(),
+            text: "Run the smoke test".into(),
             blocking: false,
             pr: None,
             ticket: None,
@@ -967,8 +968,8 @@ mod tests {
             default: None,
             default_at: None,
         }];
-        assert!(optional.tick_auto_nudges(now));
-        assert!(drain(&mut optional_rx).contains("Re-verify"));
+        assert!(informational.tick_auto_nudges(now));
+        assert!(drain(&mut informational_rx).contains("Re-verify"));
 
         let (mut owed, _pane_id, terminal_id, mut owed_rx) = app_with_stalled_pane(now);
         owed.state
@@ -979,7 +980,7 @@ mod tests {
             n: 1,
             label: "Verify".into(),
             text: "Required check".into(),
-            blocking: true,
+            blocking: false,
             pr: None,
             ticket: None,
             url: None,

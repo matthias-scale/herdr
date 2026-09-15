@@ -3,6 +3,8 @@
 The closing-block adapter writes one payload:
 
     {"v": 2, "agent": "claude", "blocking": 1, "agents": 0,
+     "completion": "incomplete", "external_wait": null,
+     "parse_status": "ok", "workers_unknown": false,
      "gates": [{"n": 1, "label": "Gate", "text": "...", "blocking": true,
                 "pr": null,
                 "ticket": null, "url": null, "default": null,
@@ -33,12 +35,15 @@ VERSION = 2
 STATES = ("idle", "working", "blocked")
 
 
-def state_for(blocking: int, agents: int, action_points: int = 0) -> str:
-    if blocking > 0:
-        return "blocked"
-    if agents > 0:
+def state_for(
+    blocking: int,
+    agents: int,
+    action_points: int = 0,
+    external_wait: str | None = None,
+) -> str:
+    if agents > 0 or external_wait:
         return "working"
-    if action_points > 0:
+    if blocking > 0 or action_points > 0:
         return "blocked"
     return "idle"
 
@@ -48,6 +53,7 @@ def resolve_state(
     agents: int,
     override: str | None,
     action_points: int = 0,
+    external_wait: str | None = None,
 ) -> str:
     """Counts imply the state unless a caller names one it knows better.
 
@@ -58,7 +64,7 @@ def resolve_state(
     """
     if isinstance(override, str) and override in STATES:
         return override
-    return state_for(blocking, agents, action_points)
+    return state_for(blocking, agents, action_points, external_wait)
 
 
 def _item_text(item: dict[str, Any]) -> str:
@@ -123,13 +129,15 @@ def blocked_state_label(
     Full Gate text stays in `closing_gates` and `gates[]`; Answer and Verify
     text stays in `items[]`.
     """
+    action_points = action_points or []
+    if len(action_points) == blocking == 1:
+        return str(action_points[0].get("label") or "action point").lower()
+    if action_points and len(action_points) == blocking:
+        return f"{blocking} action points"
     if blocking <= 0:
-        action_points = action_points or []
-        if len(action_points) == 1:
-            return str(action_points[0].get("label") or "action point").lower()
-        if action_points:
-            return f"{len(action_points)} action points"
         return "blocked"
+    if action_points:
+        return f"{blocking} action points"
     return "gate" if blocking == 1 else f"{blocking} gates"
 
 
@@ -140,7 +148,8 @@ def message_for(
     action_points: list[dict[str, Any]] | None = None,
 ) -> str | None:
     if blocking > 0:
-        head = _item_text(gates[0]) if gates else ""
+        pending = [*gates, *(action_points or [])]
+        head = _item_text(pending[0]) if pending else ""
         extra = f" (+{blocking - 1})" if blocking > 1 else ""
         return ((head or f"{blocking} blocking")[:80]) + extra
     if agents > 0:
@@ -172,6 +181,7 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                     prior = json.load(fh)
                 prior_seq = prior.get("seq") if isinstance(prior, dict) else None
             except (OSError, ValueError):
+                prior = {}
                 prior_seq = None
             if (
                 isinstance(prior_seq, int)
@@ -179,9 +189,23 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                 and payload["seq"] <= prior_seq
             ):
                 return None
+            mirror_payload = dict(payload)
+            if payload.get("parse_status") == "missing" and isinstance(prior, dict):
+                for key in (
+                    "blocking",
+                    "agents",
+                    "gates",
+                    "items",
+                    "decisions",
+                    "agent_names",
+                    "external_wait",
+                    "workers_unknown",
+                ):
+                    if key in prior:
+                        mirror_payload[key] = prior[key]
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
+                json.dump(mirror_payload, fh)
             os.replace(tmp, path)
             return path
     except OSError:
@@ -215,6 +239,11 @@ def accepts_payload(payload: object) -> bool:
     return version is None or version == VERSION
 
 
+def reserve_sequence() -> int:
+    """Reserve report ordering before a caller performs a fallible slow read."""
+    return time.time_ns()
+
+
 def report(
     *,
     agent: str,
@@ -228,12 +257,17 @@ def report(
     agent_names: list[str] | None = None,
     contract: str | None = None,
     contract_met: bool | None = None,
+    completion: str = "missing",
+    external_wait: str | None = None,
+    parse_status: str = "missing",
+    workers_unknown: bool = False,
     session_id: str | None = None,
     session_path: str | None = None,
     title: str | None = None,
     pane_id: str | None = None,
     sock_path: str | None = None,
     state: str | None = None,
+    seq: int | None = None,
 ) -> dict:
     """Push one v2 turn-end status. Never raises; returns what it did."""
     gate_objects = [
@@ -244,12 +278,15 @@ def report(
         _normalize_item(value, index=index, label="Answer")
         for index, value in enumerate(items or [], start=1)
     ]
+    for item in [*gate_objects, *item_objects]:
+        if str(item.get("label") or "").lower() in {"gate", "answer", "verify"}:
+            item["blocking"] = True
     action_points = [
         item
         for item in item_objects
         if str(item.get("label") or "").lower() in {"answer", "verify"}
-        and item.get("blocking", True) is not False
     ]
+    blocking = max(blocking, len(gate_objects) + len(action_points))
     decision_objects = [
         _normalize_decision(value, index=index)
         for index, value in enumerate(decisions or [], start=1)
@@ -258,9 +295,20 @@ def report(
     pane_id = pane_id or os.environ.get("HERDR_PANE_ID") or ""
     sock_path = sock_path or os.environ.get("HERDR_SOCKET_PATH") or ""
 
-    seq = time.time_ns()
+    seq = seq if isinstance(seq, int) else reserve_sequence()
     reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    state = resolve_state(blocking, agents, state, len(action_points))
+    completion = (
+        completion if completion in {"complete", "incomplete", "missing"} else "missing"
+    )
+    parse_status = (
+        parse_status if parse_status in {"ok", "missing", "malformed"} else "malformed"
+    )
+    external_wait = external_wait.strip() if isinstance(external_wait, str) else None
+    external_wait = external_wait or None
+    workers_unknown = workers_unknown is True
+    state = resolve_state(
+        blocking, agents, state, len(action_points), external_wait
+    )
     payload = {
         "v": VERSION,
         "agent": agent,
@@ -273,6 +321,10 @@ def report(
         "items": item_objects,
         "decisions": decision_objects,
         "agent_names": agent_names,
+        "completion": completion,
+        "external_wait": external_wait,
+        "parse_status": parse_status,
+        "workers_unknown": workers_unknown,
     }
     if title:
         payload["title"] = title
@@ -302,7 +354,11 @@ def report(
                     "state": state, "seq": seq, "v": VERSION,
                     "reported_at": reported_at,
                     "gates": gate_objects, "items": item_objects,
-                    "decisions": decision_objects}
+                    "decisions": decision_objects,
+                    "completion": completion,
+                    "external_wait": external_wait,
+                    "parse_status": parse_status,
+                    "workers_unknown": workers_unknown}
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
         agent_params["wait"] = wait
         agent_params["eta_s"] = eta_s
@@ -317,6 +373,10 @@ def report(
         "closing_idle": "1" if state == "idle" else "0",
         "closing_agent_names": "; ".join(agent_names)[:200],
         "closing_gates": "; ".join(gate_texts)[:200],
+        "closing_completion": completion,
+        "closing_wait": (external_wait or "")[:200],
+        "closing_parse": parse_status,
+        "closing_workers_unknown": "1" if workers_unknown else "0",
         "session_title": (title or "")[:120],
     }
     if contract and isinstance(contract_met, bool):
@@ -325,6 +385,7 @@ def report(
     meta_params = {
         "pane_id": pane_id,
         "source": source,
+        "agent": agent,
         "applies_to_source": source,
         "tokens": tokens,
         "state_labels": {
@@ -333,6 +394,9 @@ def report(
         },
         "seq": seq,
     }
+    if session_id:
+        agent_params["agent_session_id"] = session_id
+        meta_params["agent_session_id"] = session_id
 
     try:
         _rpc(sock_path, source, "pane.report_agent_session", session_params)

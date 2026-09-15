@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_sort_ranks_yellow_attention_before_stale_lifecycle() {
+    fn priority_sort_ranks_pending_human_input_before_stale_lifecycle() {
         let mut state = state_with_agents();
         let attention_pane = state.workspaces[0].tabs[0].root_pane;
         let attention_terminal = state.workspaces[0].tabs[0].panes[&attention_pane]
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(entries[0].ws_idx, 0);
         assert_eq!(
             crate::ui::sidebar::entry_attention_tier(&entries[0]),
-            crate::terminal::state::AttentionTier::Attention
+            crate::terminal::state::AttentionTier::Blocked
         );
     }
 
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(entries[0].ws_idx, 0);
         assert_eq!(
             crate::ui::sidebar::entry_attention_tier(&entries[0]),
-            crate::terminal::state::AttentionTier::Attention
+            crate::terminal::state::AttentionTier::Blocked
         );
     }
 

@@ -136,9 +136,11 @@ impl crate::app::AppState {
                     };
                     let projection = pane.agent_projection(terminal);
                     let attention_tier = projection.attention_tier;
-                    let included = projection.needs_human_attention()
-                        && (include_yellow
-                            || attention_tier == crate::terminal::state::AttentionTier::Blocked);
+                    let included = if include_yellow {
+                        attention_tier != crate::terminal::state::AttentionTier::None
+                    } else {
+                        projection.counts_as_blocked()
+                    };
                     if !included {
                         continue;
                     }
@@ -260,23 +262,22 @@ mod tests {
             terminal.set_raw_agent_state_for_test(AgentState::Blocked);
             terminal.closing_items = vec![item.clone()];
         }
-        assert!(
-            app.blocked_agents().is_empty(),
-            "yellow is not inbox-blocked"
-        );
+        assert_eq!(app.blocked_agents().len(), 1);
         assert_eq!(
             app.home_attention_agents()[0].attention_tier,
-            crate::terminal::state::AttentionTier::Attention
+            crate::terminal::state::AttentionTier::Blocked
         );
 
         app.terminals
             .get_mut(&terminal_id)
             .unwrap()
             .set_raw_agent_state_for_test(AgentState::Working);
-        assert!(
-            app.home_attention_agents().is_empty(),
-            "working clears yellow"
+        assert_eq!(
+            app.home_attention_agents().len(),
+            1,
+            "independent work must not erase pending human input"
         );
+        assert!(app.blocked_agents().is_empty());
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
@@ -285,7 +286,7 @@ mod tests {
         }
         assert!(
             app.home_attention_agents().is_empty(),
-            "an empty next turn clears yellow"
+            "an empty next turn clears the retained obligation"
         );
 
         {
@@ -300,7 +301,7 @@ mod tests {
             .settled_at = Some(1);
         assert!(
             app.home_attention_agents().is_empty(),
-            "settling clears yellow"
+            "settling clears the retained obligation"
         );
     }
 

@@ -97,19 +97,24 @@ impl PaneState {
             };
         }
         let (state, seen) = terminal.sidebar_projection(self.seen);
-        let open_blockers = !terminal.closing_gates.is_empty();
+        let open_blockers = terminal.has_pending_human_input();
+        let blocking_item_count = terminal
+            .closing_items
+            .iter()
+            .filter(|item| item.requires_human_input())
+            .count();
         PaneAgentProjection {
             state,
             seen,
             stale: terminal.supervisor_stale,
             attention_tier: attention_tier(
                 state,
-                open_blockers,
-                terminal.has_blocking_closing_items(),
+                !terminal.closing_gates.is_empty(),
+                blocking_item_count > 0,
                 terminal.usage_limited,
             ),
             open_blockers,
-            gate_count: terminal.closing_gates.len(),
+            gate_count: terminal.closing_gates.len() + blocking_item_count,
             usage_limited: terminal.usage_limited,
         }
     }
@@ -148,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_tier_ignores_nonblocking_items() {
+    fn action_point_items_have_no_nonblocking_attention_category() {
         let terminal_id = TerminalId::alloc();
         let mut terminal = TerminalState::new(terminal_id.clone(), "/tmp".into());
         terminal.set_raw_agent_state_for_test(AgentState::Idle);
@@ -167,7 +172,7 @@ mod tests {
 
         assert_eq!(
             pane.agent_projection(&terminal).attention_tier,
-            AttentionTier::None
+            AttentionTier::Blocked
         );
     }
 
@@ -192,7 +197,7 @@ mod tests {
         }];
         assert_eq!(
             pane.agent_projection(&terminal).attention_tier,
-            AttentionTier::Attention
+            AttentionTier::Blocked
         );
 
         terminal.closing_items = vec![];

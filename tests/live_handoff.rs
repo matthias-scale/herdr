@@ -1138,6 +1138,9 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
                 "state": "working",
                 "seq": 1,
                 "v": 2,
+                "completion": "incomplete",
+                "parse_status": "ok",
+                "workers_unknown": false,
                 "gates": [],
                 "items": [],
                 "decisions": []
@@ -1156,6 +1159,9 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
                 "state": "idle",
                 "seq": 2,
                 "v": 2,
+                "completion": "complete",
+                "parse_status": "ok",
+                "workers_unknown": false,
                 "gates": [],
                 "items": [],
                 "decisions": []
@@ -1175,6 +1181,9 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
                 "state": "blocked",
                 "seq": 1,
                 "v": 2,
+                "completion": "incomplete",
+                "parse_status": "ok",
+                "workers_unknown": false,
                 "gates": [{"n": 1, "label": "Gate", "text": "Choose the release path"}],
                 "items": [],
                 "decisions": []

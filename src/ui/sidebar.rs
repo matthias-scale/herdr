@@ -114,9 +114,8 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 
 /// Runtime severity shared by dots and the sidebar filter.
 ///
-/// `entry_is_blocked` narrows this for navigation and the inbox, where a
-/// working pane is not yet a stop. The sidebar filter instead follows the dot
-/// exactly, so a latched Gate remains visible while work resumes.
+/// `entry_is_blocked` narrows this for navigation, the inbox, and the sidebar
+/// filter, where active work remains blue even with a retained action point.
 pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     #[cfg(test)]
     ENTRY_ATTENTION_TIER_VISITS.with(|visits| visits.set(visits.get() + 1));
@@ -131,6 +130,13 @@ pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
 }
 
 pub(crate) fn entry_attention_rank(entry: &AgentPanelEntry) -> u8 {
+    if !entry_is_blocked(entry) {
+        return if entry_attention_tier(entry) == AttentionTier::Attention {
+            1
+        } else {
+            0
+        };
+    }
     match entry_attention_tier(entry) {
         AttentionTier::None => 0,
         AttentionTier::Attention => 1,
@@ -158,12 +164,12 @@ pub(crate) fn entry_needs_human_attention(entry: &AgentPanelEntry) -> bool {
 }
 
 pub(crate) fn entry_has_red_dot(entry: &AgentPanelEntry) -> bool {
-    entry_attention_tier(entry) == AttentionTier::Blocked
+    entry_is_blocked(entry)
 }
 
-/// A working pane keeps its blue lifecycle label while a human gate is latched.
-/// Once work stops, the gate becomes blocking and supplies the blocked label.
-/// Usage limits still override every lifecycle label.
+/// Whether a retained action point must supply a blocked label over a
+/// non-working lifecycle state. Working stays blue, and a projected Blocked
+/// state already owns its label. Usage limits override both.
 #[cfg(test)]
 pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
     entry.usage_limited
@@ -494,10 +500,11 @@ fn compact_row_widths(
 }
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
-    match entry_attention_tier(entry) {
-        AttentionTier::Blocked => return p.red,
-        AttentionTier::Attention => return p.peach,
-        AttentionTier::None => {}
+    if entry_is_blocked(entry) {
+        return p.red;
+    }
+    if entry_attention_tier(entry) == AttentionTier::Attention {
+        return p.peach;
     }
     // A session that declared a contract and reported it met is the one kind of
     // done you can act on without reading the pane: close it. That earns its own
@@ -1335,17 +1342,7 @@ fn collect_agent_panel_entries_with_runtimes(
                     let thread_title = ws
                         .tab_display_name_from(&app.terminals, detail.tab_idx)
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
-                    // Prefer the live count; fall back to the reported token so
-                    // panes without a live source keep a count.
-                    let active_subagents = detail
-                        .active_subagents
-                        .or_else(|| {
-                            detail
-                                .tokens
-                                .get("closing_agents")
-                                .and_then(|value| value.parse::<u32>().ok())
-                        })
-                        .filter(|count| *count > 0);
+                    let active_subagents = detail.active_subagents.filter(|count| *count > 0);
                     let has_closing_block_tokens =
                         detail.tokens.keys().any(|key| key.starts_with("closing_"));
                     let completion_tier = derive_completion_tier(
@@ -1491,7 +1488,12 @@ pub(crate) fn remote_agent_panel_entries(
                         projection.open_blockers,
                         Some(projection.attention_tier),
                         projection.usage_limited,
-                        usize::from(projection.open_blockers) * info.gates.len(),
+                        info.gates.len()
+                            + info
+                                .items
+                                .iter()
+                                .filter(|item| item.requires_human_input())
+                                .count(),
                         Some(info.state_change_seq),
                         info.state_labels.clone(),
                         info.tokens.clone(),
@@ -2020,11 +2022,14 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
 /// Status buckets for the Status group sort: whoever waits on a human first,
 /// then active work, then everything finished or idle.
 fn sidebar_sort_status_rank(entry: &AgentPanelEntry) -> u8 {
-    match entry_attention_tier(entry) {
-        AttentionTier::Blocked => 0,
-        AttentionTier::Attention => 1,
-        AttentionTier::None if entry.state == AgentState::Working => 2,
-        AttentionTier::None => 3,
+    if entry_is_blocked(entry) {
+        0
+    } else if entry_attention_tier(entry) == AttentionTier::Attention {
+        1
+    } else if entry.state == AgentState::Working {
+        2
+    } else {
+        3
     }
 }
 
@@ -5513,11 +5518,14 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     // pane, only the reset window.
     let key = if entry.usage_limited {
         "usage"
+    } else if entry_is_blocked(entry) {
+        "blocked"
     } else {
         match entry_attention_tier(entry) {
-            AttentionTier::Blocked => "blocked",
             AttentionTier::Attention => return "Needs attention".to_string(),
-            AttentionTier::None => agent_panel_status_key(entry.state, entry.seen),
+            AttentionTier::Blocked | AttentionTier::None => {
+                agent_panel_status_key(entry.state, entry.seen)
+            }
         }
     };
     if let Some(label) = entry.state_labels.get(key) {
@@ -9337,12 +9345,12 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["pane/1", "pane/2", "pane/4", "ra-windowless"]
+            ["pane/2", "pane/4", "ra-windowless"]
         );
     }
 
     #[test]
-    fn remote_answer_only_entry_uses_the_yellow_attention_tier() {
+    fn remote_answer_only_entry_uses_the_blocked_attention_tier() {
         let mut info = remote_agent_info(
             "pane/attention",
             "remote question",
@@ -9377,11 +9385,11 @@ pub(crate) mod tests {
 
         let entries = remote_agent_panel_entries(&snapshot);
         let entry = &entries[0].entry;
-        assert_eq!(entry.attention_tier, Some(AttentionTier::Attention));
+        assert_eq!(entry.attention_tier, Some(AttentionTier::Blocked));
         assert!(entry_needs_human_attention(entry));
-        assert!(!entry_is_blocked(entry));
+        assert!(entry_is_blocked(entry));
         let palette = Palette::catppuccin();
-        assert_eq!(compact_row_color(entry, &palette), palette.peach);
+        assert_eq!(compact_row_color(entry, &palette), palette.red);
 
         info.settled_at = Some(1_725_000_023);
         let settled_snapshot = crate::fleet::Snapshot {
@@ -10227,7 +10235,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|entry| entry.ws_idx)
                 .collect::<Vec<_>>(),
-            [0, 1]
+            [1]
         );
         assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
     }
@@ -10698,7 +10706,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn red_gate_dot_and_dimmed_subagent_count_share_the_row() {
+    fn blue_working_dot_and_active_subagent_count_share_the_row() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("blocked review".into());
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -10731,16 +10739,16 @@ pub(crate) mod tests {
                 .unwrap();
             let card = compute_tab_card_areas(&app, area)[0].clone();
             let buffer = terminal.backend().buffer();
-            let gate_x = (card.rect.x..card.rect.x + card.rect.width)
+            let working_x = (card.rect.x..card.rect.x + card.rect.width)
                 .find(|x| {
                     let cell = &buffer[(*x, card.rect.y)];
-                    cell.symbol() == "○" && cell.fg == app.palette.red
+                    cell.symbol() == "●" && cell.fg == app.palette.blue
                 })
-                .unwrap_or_else(|| panic!("width {width} omitted red gate dot"));
-            let gate_style = buffer[(gate_x, card.rect.y)].style();
+                .unwrap_or_else(|| panic!("width {width} omitted blue working dot"));
+            let working_style = buffer[(working_x, card.rect.y)].style();
             let rendered = row_text(buffer, card.rect.y, card.rect.width);
             assert!(rendered.contains("pi+3"), "width {width}: {rendered:?}");
-            assert!(!gate_style.add_modifier.contains(Modifier::DIM));
+            assert!(!working_style.add_modifier.contains(Modifier::DIM));
         }
     }
 
@@ -10764,21 +10772,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sidebar_entry_parses_only_positive_closing_agent_counts() {
-        for (value, expected) in [
-            (None, None),
-            (Some(""), None),
-            (Some("0"), None),
-            (Some("invalid"), None),
-            (Some("4294967296"), None),
-            (Some("3"), Some(3)),
+    fn sidebar_does_not_present_reported_worker_claims_as_live_counts() {
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("invalid"),
+            Some("4294967296"),
+            Some("3"),
         ] {
             let mut app = app_with_agents(&["one"]);
             if value.is_some() {
                 set_closing_agents_token(&mut app, 0, value);
             }
             let entry = all_agent_panel_entries(&app).remove(0);
-            assert_eq!(entry.active_subagents, expected, "value {value:?}");
+            assert_eq!(entry.active_subagents, None, "value {value:?}");
         }
     }
     fn configure_real_sidebar_agent(
@@ -11528,8 +11536,8 @@ pub(crate) mod tests {
                     })
                     .count()
             };
-            assert_eq!(colored_dots(app.palette.red), 1, "width {width}");
-            assert_eq!(colored_dots(app.palette.blue), 0, "width {width}");
+            assert_eq!(colored_dots(app.palette.red), 0, "width {width}");
+            assert_eq!(colored_dots(app.palette.blue), 1, "width {width}");
         }
 
         // Clearing the gate does not change the already-correct working row.
@@ -11577,13 +11585,12 @@ pub(crate) mod tests {
         let entries = sidebar_thread_entries(&app);
         let entry = |ws_idx| entries.iter().find(|entry| entry.ws_idx == ws_idx).unwrap();
         assert_eq!(compact_row_color(entry(0), &app.palette), app.palette.red);
-        assert_eq!(compact_row_color(entry(1), &app.palette), app.palette.peach);
-        assert_ne!(app.palette.peach, app.palette.yellow);
+        assert_eq!(compact_row_color(entry(1), &app.palette), app.palette.red);
         assert_eq!(compact_row_color(entry(2), &app.palette), app.palette.red);
         assert_eq!(
             compact_row_color(entry(3), &app.palette),
             app.palette.blue,
-            "the yellow tier clears when the agent resumes working"
+            "accepted work is blue while the unresolved Answer remains retained"
         );
 
         let attention_pane = app.workspaces[1].tabs[0].root_pane;
@@ -11599,6 +11606,82 @@ pub(crate) mod tests {
             AttentionTier::None,
             "settled panes leave the workspace attention roll-up"
         );
+    }
+
+    #[test]
+    fn accepted_resumed_turn_with_pending_cap_renders_blue_and_remains_open() {
+        let mut app = app_with_agents(&["resumed"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let observed = std::time::Instant::now();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_raw_agent_state_for_test(AgentState::Idle);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose the independent release lane".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(8),
+            observed + std::time::Duration::from_millis(1),
+        );
+
+        let entry = sidebar_thread_entries(&app).remove(0);
+        assert_eq!(entry.state, AgentState::Working);
+        assert!(entry.open_blockers, "the unrelated Answer remains retained");
+        assert_eq!(entry.attention_tier, Some(AttentionTier::Blocked));
+        assert!(!entry_is_blocked(&entry));
+        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.blue);
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
+        assert_eq!(
+            app.workspaces[0].aggregate_state_and_attention(&app.terminals),
+            (AgentState::Working, true, AttentionTier::None),
+            "the mobile workspace projection uses the same active-blue precedence"
+        );
+        for width in [18, 60] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut rendered = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            rendered
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let buffer = rendered.backend().buffer();
+            let colored_dots = |color| {
+                (0..area.height)
+                    .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+                    .filter(|(x, y)| {
+                        let cell = &buffer[(*x, *y)];
+                        cell.symbol() == "●" && cell.fg == color
+                    })
+                    .count()
+            };
+            assert_eq!(colored_dots(app.palette.red), 0, "width {width}");
+            assert_eq!(colored_dots(app.palette.blue), 1, "width {width}");
+        }
     }
 
     #[test]
@@ -11625,8 +11708,8 @@ pub(crate) mod tests {
         );
 
         let entry = sidebar_thread_entries(&app).remove(0);
-        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.peach);
-        assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
+        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.red);
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
         assert!(app.settle_pane_at(0, pane, 1_725_000_000));
         assert_eq!(
@@ -11695,7 +11778,7 @@ pub(crate) mod tests {
             });
             (has_blocked_header, red_rows)
         };
-        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 0));
 
         app.terminals
             .get_mut(&terminal_id)
@@ -11707,9 +11790,9 @@ pub(crate) mod tests {
             .find(|entry| entry.pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers, "the gate stays latched");
-        assert_eq!(entry.state, AgentState::Idle);
+        assert_eq!(entry.state, AgentState::Blocked);
         assert!(entry_is_blocked(&entry));
-        assert!(gate_overrides_label(&entry));
+        assert!(!gate_overrides_label(&entry));
         assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
     }
 
@@ -20195,11 +20278,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         entry.state = AgentState::Blocked;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
-        // The tooltip describes the rendered attention tier, even while the
-        // lifecycle state is still working.
+        // Active work remains the visible lifecycle while an action point is
+        // retained for later.
         entry.state = AgentState::Working;
         entry.open_blockers = true;
-        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
         entry.state = AgentState::Idle;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
@@ -20446,8 +20529,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Status);
         assert_eq!(
             sidebar_tab_order(&app),
-            vec![4, 3, 2, 1, 0],
-            "blocked first, then yellow attention, then working and idle"
+            vec![4, 2, 3, 1, 0],
+            "structured action points and blocked lifecycle precede working and idle"
         );
 
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Recent);

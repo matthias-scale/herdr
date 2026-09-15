@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn nonblocking_items_do_not_hold_quiet_settle() {
+    fn informational_items_do_not_hold_quiet_settle() {
         let now = Instant::now();
         let quiet_since = now - Duration::from_secs(31 * 60);
         let (mut state, pane_id) = done_state(true, quiet_since);
@@ -1190,8 +1190,8 @@ mod tests {
             .expect("terminal")
             .closing_items = vec![crate::api::schema::ClosingBlockItem {
             n: 1,
-            label: "Answer".into(),
-            text: "Optional preference".into(),
+            label: "What to test".into(),
+            text: "Run the focused regression".into(),
             blocking: false,
             pr: None,
             ticket: None,
