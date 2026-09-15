@@ -1489,7 +1489,12 @@ pub(crate) fn remote_agent_panel_entries(
                         projection.open_blockers,
                         Some(projection.attention_tier),
                         projection.usage_limited,
-                        usize::from(projection.open_blockers) * info.gates.len(),
+                        info.gates.len()
+                            + info
+                                .items
+                                .iter()
+                                .filter(|item| item.requires_human_input())
+                                .count(),
                         Some(info.state_change_seq),
                         info.state_labels.clone(),
                         info.tokens.clone(),

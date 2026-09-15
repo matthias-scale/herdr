@@ -571,6 +571,15 @@ pub struct ClosingBlockItem {
     pub default_at: Option<String>,
 }
 
+impl ClosingBlockItem {
+    pub(crate) fn requires_human_input(&self) -> bool {
+        matches!(
+            self.label.trim().to_ascii_lowercase().as_str(),
+            "gate" | "answer" | "verify"
+        )
+    }
+}
+
 impl<'de> Deserialize<'de> for ClosingBlockItem {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

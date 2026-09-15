@@ -712,11 +712,13 @@ impl TerminalState {
     }
 
     pub(crate) fn has_blocking_closing_items(&self) -> bool {
-        !self.closing_items.is_empty()
+        self.closing_items
+            .iter()
+            .any(crate::api::schema::ClosingBlockItem::requires_human_input)
     }
 
     pub(crate) fn has_pending_human_input(&self) -> bool {
-        !self.closing_gates.is_empty() || !self.closing_items.is_empty()
+        !self.closing_gates.is_empty() || self.has_blocking_closing_items()
     }
 
     fn closing_task_reported(&self) -> bool {
@@ -996,7 +998,13 @@ impl TerminalState {
         if self.active_subagents.is_some_and(|count| count > 0) {
             (AgentState::Working, seen)
         } else {
-            (self.closing_task_projection(state).0, seen)
+            let state = self.closing_task_projection(state).0;
+            let seen = if state == AgentState::Idle && self.closing_task_complete() {
+                false
+            } else {
+                seen
+            };
+            (state, seen)
         }
     }
 
@@ -3822,7 +3830,7 @@ mod tests {
     use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
 
     #[test]
-    fn every_retained_closing_item_requires_human_attention() {
+    fn action_point_labels_require_human_attention_regardless_of_legacy_flag() {
         assert_eq!(
             attention_tier(AgentState::Blocked, true, false, false),
             AttentionTier::Blocked
@@ -3853,6 +3861,11 @@ mod tests {
             default_at: None,
         }];
         assert!(terminal.has_blocking_closing_items());
+
+        terminal.closing_items[0].label = "What to test".into();
+        terminal.closing_items[0].blocking = true;
+        assert!(!terminal.has_blocking_closing_items());
+        assert!(!terminal.has_pending_human_input());
     }
 
     const TEST_AGENT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -4090,6 +4103,22 @@ mod tests {
             terminal.sidebar_projection(false),
             (AgentState::Unknown, false)
         );
+    }
+
+    #[test]
+    fn explicit_completion_projects_an_idle_task_as_done() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, false));
     }
 
     #[test]
@@ -6023,8 +6052,8 @@ mod tests {
         assert!(terminal.set_active_subagents(Some(0)));
         assert_eq!(
             terminal.sidebar_projection(true),
-            (AgentState::Idle, true),
-            "native zero wins over the earlier unknown prose-worker claim"
+            (AgentState::Idle, false),
+            "native zero and explicit completion settle the earlier unknown worker claim"
         );
     }
 

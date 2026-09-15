@@ -1817,10 +1817,13 @@ impl App {
                     tokens.remove("closing_blocking");
                     tokens.remove("closing_gates");
                 } else if parse.as_deref() == Some("malformed") {
-                    let blocking = terminal
-                        .closing_gates
-                        .len()
-                        .saturating_add(terminal.closing_items.len());
+                    let blocking = terminal.closing_gates.len().saturating_add(
+                        terminal
+                            .closing_items
+                            .iter()
+                            .filter(|item| item.requires_human_input())
+                            .count(),
+                    );
                     let gates = terminal
                         .closing_gates
                         .iter()
@@ -3250,13 +3253,40 @@ mod tests {
             .current_dir(asset_dir)
             .args([
                 "-c",
-                "import json, sys; import herdr_status; calls = []; mirror_calls = []; herdr_status.write_mirror = lambda pane_id, payload: mirror_calls.append((pane_id, payload)); herdr_status._rpc = lambda _sock, _source, method, params: calls.append({'method': method, 'params': params}); items = json.loads(sys.argv[1]); herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if items else 'complete', parse_status='ok', pane_id=sys.argv[2], sock_path='test.sock', session_id=sys.argv[3]); assert len(mirror_calls) == 1; print(json.dumps(calls))",
+                "import json, sys; import herdr_status; calls = []; mirror_calls = []; herdr_status.write_mirror = lambda pane_id, payload: mirror_calls.append((pane_id, payload)); herdr_status._rpc = lambda _sock, _source, method, params: calls.append({'method': method, 'params': params}); items = json.loads(sys.argv[1]); action_labels = {'gate', 'answer', 'verify'}; has_action = any(str(item.get('label', '')).strip().lower() in action_labels for item in items); herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if has_action else 'complete', parse_status='ok', pane_id=sys.argv[2], sock_path='test.sock', session_id=sys.argv[3]); assert len(mirror_calls) == 1; print(json.dumps(calls))",
                 &input,
                 pane_id,
                 session_id,
             ])
             .output()
             .expect("run closing-block adapter");
+        assert!(
+            output.status.success(),
+            "adapter failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse closing-block adapter requests")
+    }
+
+    #[cfg(unix)]
+    fn closing_block_text_adapter_requests(
+        pane_id: &str,
+        session_id: &str,
+        text: &str,
+    ) -> Vec<serde_json::Value> {
+        let asset_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/integration/assets/closing-block");
+        let output = std::process::Command::new("python3")
+            .current_dir(asset_dir)
+            .args([
+                "-c",
+                "import json, sys; import closing_block, herdr_status; calls = []; mirror_calls = []; herdr_status.write_mirror = lambda pane_id, payload: mirror_calls.append((pane_id, payload)); herdr_status._rpc = lambda _sock, _source, method, params: calls.append({'method': method, 'params': params}); block = closing_block.parse(sys.argv[1]); herdr_status.report(agent='claude', blocking=block.blocking, agents=block.agents_running, gates=block.wire_gates(), items=block.wire_items(), decisions=block.wire_decisions(), agent_names=block.agents, contract=block.contract, contract_met=block.contract_met, completion=block.completion, external_wait=block.external_wait, parse_status=block.parse_status, workers_unknown=block.workers_unknown, pane_id=sys.argv[2], sock_path='test.sock', session_id=sys.argv[3]); assert len(mirror_calls) == 1; print(json.dumps(calls))",
+                text,
+                pane_id,
+                session_id,
+            ])
+            .output()
+            .expect("run closing-block parser and adapter");
         assert!(
             output.status.success(),
             "adapter failed: {}",
@@ -5999,6 +6029,53 @@ mod tests {
         assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.closing_gates.is_empty());
         assert!(terminal.closing_items.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adapter_informational_item_stays_visible_without_blocking_done() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:claude",
+            "claude",
+            "session-current",
+        );
+
+        let requests = closing_block_text_adapter_requests(
+            &pane_id,
+            "session-current",
+            "**Critical action points (0 blocking)**\n\n\
+             **What to test**\n\n\
+             1. Confirm the green state remains visible.\n\n\
+             Done here.\n",
+        );
+        apply_closing_block_adapter_requests(&mut app, "informational-item", requests);
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.closing_items.len(), 1);
+        assert!(!terminal.has_pending_human_input());
+        let pane = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap();
+        let projection = pane.agent_projection(terminal);
+        assert!(!projection.open_blockers);
+        assert_eq!(projection.gate_count, 0);
+        let info = app.pane_info(0, internal_pane_id).unwrap();
+        assert_eq!(info.agent_status, crate::api::schema::AgentStatus::Done);
+        assert_eq!(info.items[0].label, "What to test");
     }
 
     #[test]

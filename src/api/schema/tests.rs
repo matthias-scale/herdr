@@ -1659,7 +1659,7 @@ fn closing_item_blocking_defaults_true() {
         "text": "choose"
     }))
     .unwrap();
-    let nonblocking: ClosingBlockItem = serde_json::from_value(serde_json::json!({
+    let legacy_false: ClosingBlockItem = serde_json::from_value(serde_json::json!({
         "n": 2,
         "label": "Verify",
         "text": "optional check",
@@ -1668,8 +1668,19 @@ fn closing_item_blocking_defaults_true() {
     .unwrap();
 
     assert!(legacy.blocking);
-    assert!(!nonblocking.blocking);
+    assert!(!legacy_false.blocking);
+    assert!(legacy.requires_human_input());
+    assert!(legacy_false.requires_human_input());
     assert_eq!(serde_json::to_value(legacy).unwrap()["blocking"], true);
+
+    let informational: ClosingBlockItem = serde_json::from_value(serde_json::json!({
+        "n": 3,
+        "label": " What to test ",
+        "text": "run the smoke test",
+        "blocking": true
+    }))
+    .unwrap();
+    assert!(!informational.requires_human_input());
 }
 
 #[test]
