@@ -1404,6 +1404,116 @@ impl App {
         let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION))
             .then(|| params.gates.zip(params.items).zip(params.decisions))
             .flatten();
+        let completion = params.completion;
+        let external_wait = params.external_wait.and_then(|wait| {
+            let wait = wait
+                .trim()
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(80)
+                .collect::<String>();
+            (!wait.is_empty()).then_some(wait)
+        });
+        let parse_status = params.parse_status;
+        let workers_unknown = params.workers_unknown;
+        let dependencies_authoritative = !matches!(
+            parse_status,
+            Some(
+                crate::api::schema::ClosingParseStatus::Missing
+                    | crate::api::schema::ClosingParseStatus::Malformed
+            )
+        );
+        let reported_external_wait = dependencies_authoritative
+            .then(|| external_wait.clone())
+            .flatten();
+        let task_reported = completion.is_some()
+            || external_wait.is_some()
+            || parse_status.is_some()
+            || workers_unknown.is_some();
+        let report_wait = if dependencies_authoritative {
+            params.wait.or_else(|| reported_external_wait.clone())
+        } else {
+            None
+        };
+        let terminal_id = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.pane_state(pane_id))
+            .map(|pane| pane.attached_terminal_id.clone());
+        if params
+            .agent_session_id
+            .as_deref()
+            .is_some_and(|session_id| {
+                terminal_id
+                    .as_ref()
+                    .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+                    .is_none_or(|terminal| {
+                        !terminal.agent_session_id_matches_current_agent(&agent_label, session_id)
+                    })
+            })
+        {
+            return encode_success(id, ResponseResult::Ok {});
+        }
+        let previous_task_state = terminal_id
+            .as_ref()
+            .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+            .map(|terminal| {
+                (
+                    terminal.metadata_tokens.clone(),
+                    terminal.closing_gates.clone(),
+                    terminal.closing_items.clone(),
+                    terminal.closing_decisions.clone(),
+                    terminal.revision,
+                )
+            });
+        let task_changed = terminal_id
+            .as_ref()
+            .and_then(|terminal_id| self.state.terminals.get_mut(terminal_id))
+            .is_some_and(|terminal| {
+                let mut changed = false;
+                if task_reported {
+                    changed |= terminal.apply_closing_task_report(
+                        completion,
+                        external_wait.clone(),
+                        parse_status,
+                        workers_unknown,
+                        std::time::Instant::now(),
+                    );
+                }
+                if let Some(((gates, items), decisions)) = closing_block {
+                    changed |= match parse_status {
+                        Some(crate::api::schema::ClosingParseStatus::Missing) => false,
+                        Some(crate::api::schema::ClosingParseStatus::Malformed) => {
+                            terminal.merge_closing_block_payload(gates, items, decisions)
+                        }
+                        Some(crate::api::schema::ClosingParseStatus::Ok) | None => {
+                            terminal.apply_closing_block_payload(gates, items, decisions)
+                        }
+                    };
+                }
+                changed
+            });
+        let report_wait = report_wait.or_else(|| {
+            (!dependencies_authoritative)
+                .then(|| {
+                    terminal_id
+                        .as_ref()
+                        .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+                        .and_then(|terminal| {
+                            terminal
+                                .metadata_tokens
+                                .get("closing_wait")
+                                .map(str::to_string)
+                        })
+                })
+                .flatten()
+        });
+        let report_state = if report_wait.is_some() {
+            crate::detect::AgentState::Working
+        } else {
+            detect_state_from_api(params.state)
+        };
         let hook_state_report_accepted = self
             .handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,
@@ -1415,29 +1525,27 @@ impl App {
                 ),
                 source: params.source,
                 agent_label,
-                state: detect_state_from_api(params.state),
+                state: report_state,
                 message: params.message,
                 seq: params.seq,
-                wait: params.wait,
+                wait: report_wait,
                 eta_s: params.eta_s,
                 reported_at: params.reported_at,
             })
             .unwrap_or(false);
         if hook_state_report_accepted {
-            if let Some(((gates, items), decisions)) = closing_block {
-                let changed = self
-                    .state
-                    .workspaces
-                    .get(ws_idx)
-                    .and_then(|workspace| workspace.pane_state(pane_id))
-                    .map(|pane| pane.attached_terminal_id.clone())
-                    .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
-                    .is_some_and(|terminal| {
-                        terminal.apply_closing_block_payload(gates, items, decisions)
-                    });
-                if changed {
-                    self.emit_pane_updated(ws_idx, pane_id);
-                }
+            if task_changed {
+                self.emit_pane_updated(ws_idx, pane_id);
+            }
+        } else if let (Some(terminal_id), Some((tokens, gates, items, decisions, revision))) =
+            (terminal_id.as_ref(), previous_task_state)
+        {
+            if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
+                terminal.metadata_tokens = tokens;
+                terminal.closing_gates = gates;
+                terminal.closing_items = items;
+                terminal.closing_decisions = decisions;
+                terminal.revision = revision;
             }
         }
         let _ = self.sync_terminal_titles();
@@ -1660,7 +1768,11 @@ impl App {
                 .as_deref()
                 .zip(applies_to_source.as_deref())
                 .is_some_and(|(agent, source)| {
-                    terminal.agent_session_matches(source, agent, agent_session_id)
+                    if crate::detect::is_closing_block_source(source, agent) {
+                        terminal.agent_session_id_matches_current_agent(agent, agent_session_id)
+                    } else {
+                        terminal.agent_session_matches(source, agent, agent_session_id)
+                    }
                 });
             if !session_matches {
                 return encode_error(
@@ -1687,7 +1799,46 @@ impl App {
                     tokens.entry("closing_contract".into()).or_insert(None);
                     tokens.entry("closing_contract_met".into()).or_insert(None);
                 }
+                let parse = tokens
+                    .get("closing_parse")
+                    .and_then(Option::as_deref)
+                    .map(str::to_string);
+                if matches!(parse.as_deref(), Some("missing" | "malformed")) {
+                    for key in [
+                        "closing_agents",
+                        "closing_agent_names",
+                        "closing_wait",
+                        "closing_workers_unknown",
+                    ] {
+                        tokens.remove(key);
+                    }
+                }
+                if parse.as_deref() == Some("missing") {
+                    tokens.remove("closing_blocking");
+                    tokens.remove("closing_gates");
+                } else if parse.as_deref() == Some("malformed") {
+                    let blocking = terminal
+                        .closing_gates
+                        .len()
+                        .saturating_add(terminal.closing_items.len());
+                    let gates = terminal
+                        .closing_gates
+                        .iter()
+                        .map(|gate| gate.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                        .chars()
+                        .take(200)
+                        .collect::<String>();
+                    tokens.insert("closing_blocking".into(), Some(blocking.to_string()));
+                    tokens.insert("closing_gates".into(), (!gates.is_empty()).then_some(gates));
+                }
             }
+        }
+        if closing_block_metadata
+            && !terminal.closing_metadata_not_older_than_report(&source, params.seq)
+        {
+            return encode_success(id, ResponseResult::Ok {});
         }
         if !terminal.metadata_report_sequence_is_fresh(&source, params.seq) {
             return encode_success(id, ResponseResult::Ok {});
@@ -2394,6 +2545,10 @@ mod tests {
             gates: Some(gates),
             items: Some(Vec::new()),
             decisions: Some(Vec::new()),
+            completion: None,
+            external_wait: None,
+            parse_status: None,
+            workers_unknown: None,
         }
     }
 
@@ -2728,6 +2883,10 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5379,6 +5538,10 @@ mod tests {
                 gates: Some(gates),
                 items: Some(items),
                 decisions: Some(decisions),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5399,6 +5562,326 @@ mod tests {
         assert_eq!(pane.items[0].label, "Answer");
         assert_eq!(pane.decisions[0].recommendation, "proceed");
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn missing_short_reply_preserves_the_previous_human_blocker() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let mut blocked = closing_block_report(&pane_id, 1, vec![test_gate()]);
+        blocked.state = crate::api::schema::PaneAgentState::Blocked;
+        blocked.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        blocked.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("blocked".into(), blocked)).unwrap();
+        let mut blocked_metadata = metadata_params(pane_id.clone());
+        blocked_metadata.title = None;
+        blocked_metadata.source = "herdr:codex-closing-block".into();
+        blocked_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        blocked_metadata.seq = Some(1);
+        blocked_metadata.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("1".into())),
+            (
+                "closing_gates".into(),
+                Some("Choose the release path".into()),
+            ),
+            ("closing_completion".into(), Some("incomplete".into())),
+            ("closing_parse".into(), Some("ok".into())),
+        ]);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("blocked-metadata".into(), blocked_metadata),
+        )
+        .unwrap();
+
+        let mut progressing = closing_block_report(&pane_id, 2, Vec::new());
+        progressing.state = crate::api::schema::PaneAgentState::Unknown;
+        progressing.completion = Some(crate::api::schema::ClosingCompletion::Missing);
+        progressing.parse_status = Some(crate::api::schema::ClosingParseStatus::Missing);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("progressing".into(), progressing))
+                .unwrap();
+        let mut missing_metadata = metadata_params(pane_id.clone());
+        missing_metadata.title = None;
+        missing_metadata.source = "herdr:codex-closing-block".into();
+        missing_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        missing_metadata.seq = Some(2);
+        missing_metadata.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("0".into())),
+            ("closing_gates".into(), None),
+            ("closing_completion".into(), Some("missing".into())),
+            ("closing_parse".into(), Some("missing".into())),
+        ]);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("missing-metadata".into(), missing_metadata),
+        )
+        .unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.closing_gates, vec![test_gate()]);
+        assert_eq!(terminal.metadata_tokens.get("closing_blocking"), Some("1"));
+        assert_eq!(
+            terminal.metadata_tokens.get("closing_gates"),
+            Some("Choose the release path")
+        );
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn malformed_report_keeps_recognized_answer_through_a_missing_short_reply() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let mut answer = test_gate();
+        answer.label = "Answer".into();
+        answer.text = "What next for placement accuracy?".into();
+        answer.blocking = false;
+        let mut malformed = closing_block_report(&pane_id, 1, Vec::new());
+        malformed.items = Some(vec![answer.clone()]);
+        malformed.state = crate::api::schema::PaneAgentState::Unknown;
+        malformed.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        malformed.parse_status = Some(crate::api::schema::ClosingParseStatus::Malformed);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("malformed".into(), malformed))
+                .unwrap();
+
+        let mut short_reply = closing_block_report(&pane_id, 2, Vec::new());
+        short_reply.state = crate::api::schema::PaneAgentState::Unknown;
+        short_reply.completion = Some(crate::api::schema::ClosingCompletion::Missing);
+        short_reply.parse_status = Some(crate::api::schema::ClosingParseStatus::Missing);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("short-reply".into(), short_reply))
+                .unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.closing_items, vec![answer]);
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn registered_external_wait_projects_as_in_progress_without_an_eta() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let mut waiting = closing_block_report(&pane_id, 1, Vec::new());
+        waiting.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        waiting.external_wait = Some("CI run 4123".into());
+        waiting.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        waiting.workers_unknown = Some(false);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("external-wait".into(), waiting))
+                .unwrap();
+
+        let pane = app.pane_info(0, internal_pane_id).unwrap();
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+        assert_eq!(pane.wait.as_deref(), Some("CI run 4123"));
+        assert_eq!(
+            pane.tokens.get("closing_wait").map(String::as_str),
+            Some("CI run 4123")
+        );
+
+        let stale_after = std::time::Duration::from_secs(20 * 60);
+        let elapsed = std::time::Instant::now() + std::time::Duration::from_secs(24 * 60 * 60);
+        assert!(app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .mark_agent_status_stale_at(elapsed, stale_after)
+            .is_none());
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Working,
+            "an elapsed registered wait remains in progress until its wake report"
+        );
+
+        let mut missing = closing_block_report(&pane_id, 2, Vec::new());
+        missing.state = crate::api::schema::PaneAgentState::Unknown;
+        missing.completion = Some(crate::api::schema::ClosingCompletion::Missing);
+        missing.parse_status = Some(crate::api::schema::ClosingParseStatus::Missing);
+        missing.workers_unknown = Some(false);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent("missing-after-wait".into(), missing),
+        )
+        .unwrap();
+
+        let mut missing_metadata = metadata_params(pane_id.clone());
+        missing_metadata.title = None;
+        missing_metadata.source = "herdr:codex-closing-block".into();
+        missing_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        missing_metadata.seq = Some(1);
+        missing_metadata.tokens = std::collections::HashMap::from([
+            ("closing_completion".into(), Some("missing".into())),
+            ("closing_parse".into(), Some("missing".into())),
+            ("closing_wait".into(), None),
+            ("closing_workers_unknown".into(), Some("0".into())),
+        ]);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata(
+                "missing-metadata-after-wait".into(),
+                missing_metadata,
+            ))
+            .unwrap();
+        let pane = app.pane_info(0, internal_pane_id).unwrap();
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+        assert_eq!(pane.wait.as_deref(), Some("CI run 4123"));
+        assert_eq!(
+            pane.tokens.get("closing_wait").map(String::as_str),
+            Some("CI run 4123")
+        );
+
+        let mut completed = closing_block_report(&pane_id, 3, Vec::new());
+        completed.completion = Some(crate::api::schema::ClosingCompletion::Complete);
+        completed.external_wait = Some(" \n\t ".into());
+        completed.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        completed.workers_unknown = Some(false);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("completed".into(), completed))
+                .unwrap();
+
+        let pane = app.pane_info(0, internal_pane_id).unwrap();
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Done);
+        assert_eq!(pane.wait, None);
+        assert!(!pane.tokens.contains_key("closing_wait"));
+    }
+
+    #[test]
+    fn incomplete_idle_report_emits_only_the_final_unknown_status() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Working);
+
+        let mut report = closing_block_report(&pane_id, 1, Vec::new());
+        report.state = crate::api::schema::PaneAgentState::Idle;
+        report.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        report.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        report.workers_unknown = Some(false);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("incomplete-idle".into(), report))
+                .unwrap();
+
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Unknown
+        );
+        let statuses = app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .filter_map(|(_, event)| match &event.data {
+                crate::api::schema::EventData::PaneAgentStatusChanged { agent_status, .. } => {
+                    Some(*agent_status)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec![crate::api::schema::AgentStatus::Unknown]);
+    }
+
+    #[test]
+    fn missing_report_preserves_an_unknown_worker_claim_through_metadata() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let mut unknown_worker = closing_block_report(&pane_id, 1, Vec::new());
+        unknown_worker.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        unknown_worker.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        unknown_worker.workers_unknown = Some(true);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent("unknown-worker".into(), unknown_worker),
+        )
+        .unwrap();
+
+        let mut missing = closing_block_report(&pane_id, 2, Vec::new());
+        missing.state = crate::api::schema::PaneAgentState::Unknown;
+        missing.completion = Some(crate::api::schema::ClosingCompletion::Missing);
+        missing.parse_status = Some(crate::api::schema::ClosingParseStatus::Missing);
+        missing.workers_unknown = Some(false);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent("missing-after-worker".into(), missing),
+        )
+        .unwrap();
+
+        let mut missing_metadata = metadata_params(pane_id.clone());
+        missing_metadata.title = None;
+        missing_metadata.source = "herdr:codex-closing-block".into();
+        missing_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        missing_metadata.seq = Some(1);
+        missing_metadata.tokens = std::collections::HashMap::from([
+            ("closing_completion".into(), Some("missing".into())),
+            ("closing_parse".into(), Some("missing".into())),
+            ("closing_workers_unknown".into(), Some("0".into())),
+        ]);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata(
+                "missing-metadata-after-worker".into(),
+                missing_metadata,
+            ))
+            .unwrap();
+
+        let pane = app.pane_info(0, internal_pane_id).unwrap();
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Unknown);
+        assert_eq!(
+            pane.tokens
+                .get("closing_workers_unknown")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[cfg(unix)]
@@ -5450,10 +5933,10 @@ mod tests {
             .pane_info(0, internal_pane_id)
             .expect("reported pane info");
         assert_eq!(pane_info.items[0].text, "Choose the release lane");
-        assert!(!projection.counts_as_blocked());
+        assert!(projection.counts_as_blocked());
         assert_eq!(
             projection.attention_tier,
-            crate::terminal::state::AttentionTier::Attention
+            crate::terminal::state::AttentionTier::Blocked
         );
         assert!(!crate::app::pane_lifecycle::pane_is_done(pane, terminal));
 
@@ -5532,6 +6015,10 @@ mod tests {
                 gates: Some(Vec::new()),
                 items: Some(Vec::new()),
                 decisions: Some(Vec::new()),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5630,6 +6117,10 @@ mod tests {
                 gates: Some(Vec::new()),
                 items: Some(Vec::new()),
                 decisions: Some(Vec::new()),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5691,6 +6182,10 @@ mod tests {
             }]),
             items: Some(Vec::new()),
             decisions: Some(Vec::new()),
+            completion: Some(crate::api::schema::ClosingCompletion::Incomplete),
+            external_wait: None,
+            parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+            workers_unknown: Some(false),
         };
 
         let _: SuccessResponse = serde_json::from_str(
@@ -5711,6 +6206,108 @@ mod tests {
             panic!("expected pane info");
         };
         assert_eq!(pane.gates[0].text, "newer gate");
+    }
+
+    #[test]
+    fn older_closing_metadata_cannot_overwrite_a_newer_typed_task_report() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Working);
+
+        let mut completed = closing_block_report(&pane_id, 20, Vec::new());
+        completed.completion = Some(crate::api::schema::ClosingCompletion::Complete);
+        completed.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        completed.workers_unknown = Some(false);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("new-complete".into(), completed))
+                .unwrap();
+
+        let mut older = metadata_params(pane_id.clone());
+        older.title = None;
+        older.source = "herdr:codex-closing-block".into();
+        older.applies_to_source = Some("herdr:codex-closing-block".into());
+        older.seq = Some(10);
+        older.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("1".into())),
+            ("closing_gates".into(), Some("old gate".into())),
+            ("closing_completion".into(), Some("incomplete".into())),
+            ("closing_parse".into(), Some("ok".into())),
+        ]);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("old-metadata".into(), older))
+                .unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.metadata_tokens.get("closing_completion"),
+            Some("complete")
+        );
+        assert!(terminal.closing_gates.is_empty());
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+    }
+
+    #[test]
+    fn old_session_task_reports_cannot_mutate_the_current_session() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:codex",
+            "codex",
+            "session-current",
+        );
+
+        let mut current = closing_block_report(&pane_id, 20, Vec::new());
+        current.agent_session_id = Some("session-current".into());
+        current.completion = Some(crate::api::schema::ClosingCompletion::Complete);
+        current.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        current.workers_unknown = Some(false);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("current-session".into(), current))
+                .unwrap();
+
+        let mut old = closing_block_report(&pane_id, 21, vec![test_gate()]);
+        old.agent_session_id = Some("session-old".into());
+        old.state = crate::api::schema::PaneAgentState::Blocked;
+        old.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        old.parse_status = Some(crate::api::schema::ClosingParseStatus::Ok);
+        old.workers_unknown = Some(false);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("old-session".into(), old)).unwrap();
+
+        let mut old_metadata = metadata_params(pane_id);
+        old_metadata.title = None;
+        old_metadata.source = "herdr:codex-closing-block".into();
+        old_metadata.agent = Some("codex".into());
+        old_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        old_metadata.agent_session_id = Some("session-old".into());
+        old_metadata.seq = Some(21);
+        old_metadata.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("1".into())),
+            ("closing_completion".into(), Some("incomplete".into())),
+            ("closing_parse".into(), Some("ok".into())),
+        ]);
+        let response = app.handle_pane_report_metadata("old-session-metadata".into(), old_metadata);
+        assert_eq!(metadata_error_code(&response), "agent_session_mismatch");
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert!(terminal.closing_gates.is_empty());
+        assert_eq!(
+            terminal.metadata_tokens.get("closing_completion"),
+            Some("complete")
+        );
     }
 
     #[test]
@@ -5756,6 +6353,10 @@ mod tests {
                 }]),
                 items: Some(Vec::new()),
                 decisions: Some(Vec::new()),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5804,6 +6405,10 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5828,6 +6433,10 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -6832,6 +7441,10 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
         let _: SuccessResponse =

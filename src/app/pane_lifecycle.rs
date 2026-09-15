@@ -239,9 +239,7 @@ pub(crate) fn pane_is_done(
     // paints as blocking can never be reaped underneath it.
     crate::terminal::state::session_is_quiet(
         state,
-        !terminal.closing_gates.is_empty()
-            || terminal.has_blocking_closing_items()
-            || terminal.usage_limited,
+        terminal.has_pending_human_input() || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
     )
@@ -257,9 +255,7 @@ pub(crate) fn pane_is_quiet(
     let state = terminal.sidebar_projection(pane.seen).0;
     crate::terminal::state::session_is_quiet(
         state,
-        !terminal.closing_gates.is_empty()
-            || terminal.has_blocking_closing_items()
-            || terminal.usage_limited,
+        terminal.has_pending_human_input() || terminal.usage_limited,
         terminal.effective_active_subagents(),
         terminal.holds_shell,
     )

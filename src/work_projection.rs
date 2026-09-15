@@ -1661,7 +1661,7 @@ mod tests {
         assert_eq!(projection.poll_rows.len(), 1);
         assert_eq!(
             projection.poll_rows[0].attention_tier,
-            crate::terminal::state::AttentionTier::Attention
+            crate::terminal::state::AttentionTier::Blocked
         );
 
         state.workspaces[0].tabs[0]

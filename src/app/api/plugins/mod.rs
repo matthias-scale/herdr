@@ -2950,6 +2950,10 @@ action = "missing"
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
             },
         );
 

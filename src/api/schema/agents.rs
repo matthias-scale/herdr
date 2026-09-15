@@ -361,15 +361,15 @@ impl AgentInfo {
             AgentStatus::Stale => (crate::detect::AgentState::Unknown, true, true),
             AgentStatus::Unknown => (crate::detect::AgentState::Unknown, true, false),
         };
-        let open_blockers = !self.gates.is_empty();
+        let open_blockers = !self.gates.is_empty() || !self.items.is_empty();
         AgentInfoProjection {
             state,
             seen,
             stale,
             attention_tier: crate::terminal::state::attention_tier(
                 state,
-                open_blockers,
-                self.items.iter().any(|item| item.blocking),
+                !self.gates.is_empty(),
+                !self.items.is_empty(),
                 self.usage_limited,
             ),
             open_blockers,

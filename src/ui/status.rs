@@ -418,10 +418,14 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
         .into_iter()
         .fold((0usize, 0usize), |(blocked, attention), entry| {
-            match crate::ui::sidebar::entry_attention_tier(&entry) {
-                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
-                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
-                crate::terminal::state::AttentionTier::None => (blocked, attention),
+            if crate::ui::sidebar::entry_is_blocked(&entry) {
+                (blocked + 1, attention)
+            } else if crate::ui::sidebar::entry_attention_tier(&entry)
+                == crate::terminal::state::AttentionTier::Attention
+            {
+                (blocked, attention + 1)
+            } else {
+                (blocked, attention)
             }
         });
     let specs = status_button_specs(app, blocked, attention);
