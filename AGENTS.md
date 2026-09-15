@@ -324,22 +324,20 @@ The fork left upstream at `73d92004` (2026-07-29), which is *before* upstream
 sync lands. Any binary, release note, or changelog describing itself as 0.8.1 or
 0.8.2 is stock upstream and does not have the fork sidebar.
 
-`--version` cannot tell the two apart. `Cargo.toml` still reads `0.8.0`, so the
-fork and a stock upstream 0.8.0 both print `herdr 0.8.0`. There is also no string
-that marks every fork build: `herdr-claude-subagents` was only introduced in #82 and
-is absent from older fork builds as well as from upstream, so a zero result proves
-nothing about lineage.
+Fork builds stamp their commit in `--version`:
 
-Until the fork version is stamped, `sha256sum` against the artifact you built is the
-only reliable identification. Record the artifact hash with the deploy and compare
-it on the host:
+```
+herdr --version   # herdr 0.8.2+fork.9b7876844c32
+```
+
+A build without the `+fork.<sha>` suffix is stock upstream. The suffix also names the
+exact commit, so `git log --oneline -1 <sha>` says what is deployed. Builds older than
+the stamp print a bare `herdr 0.8.x` and still need `sha256sum` against the artifact
+you built:
 
 ```
 sha256sum target/release/herdr ~/.local/bin/herdr   # must match
 ```
-
-Stamping the fork version (for example `0.8.0+fork.N`, or a build-time git SHA in
-`--version`) removes the need for this and is the preferred fix.
 
 Never run `herdr update` and never accept the in-app "update available" prompt on a
 fork host. It fetches `https://herdr.dev/latest.json` and overwrites
@@ -374,7 +372,8 @@ The build needs Zig exactly 0.15.2, which is usually not the system Zig:
 
 | host | Zig |
 | --- | --- |
-| mac | `$(brew --prefix zig@0.15)/bin/zig` |
+| air | `~/.local/zig-0.15.2/zig` |
+| mbpro | `$(brew --prefix zig@0.15)/bin/zig` |
 | ub1 | `~/.local/zig-0.15.2/zig` |
 | ub2 | `~/.local/bin/zig` |
 
