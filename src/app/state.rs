@@ -2275,6 +2275,8 @@ pub struct ViewState {
     pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
+    /// Per-machine notification toggle beside the break timer.
+    pub(crate) notification_hit_area: Rect,
     /// The idle animation's panel under the notepad. Empty when it is off.
     pub(crate) hyperspace_rect: Rect,
     /// Its pause button, in the panel's bottom-left corner.
@@ -4034,6 +4036,8 @@ pub struct AppState {
     pub sound: SoundConfig,
     pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
+    /// Delivery restored when the per-machine notification toggle is turned on.
+    pub last_non_off_toast_delivery: ToastDelivery,
     pub keybinds: Keybinds,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
@@ -4307,6 +4311,7 @@ pub(crate) enum SidebarFooterItem {
     Linear,
     Missive,
     Refresh,
+    Notifications,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5813,6 +5818,10 @@ impl AppState {
         self.toast_config.delivery
     }
 
+    pub fn notifications_enabled(&self) -> bool {
+        self.toast_config.delivery != ToastDelivery::Off || self.sound.enabled
+    }
+
     pub fn agent_border_labels_enabled(&self) -> bool {
         self.show_agent_labels_on_pane_borders
     }
@@ -6211,6 +6220,7 @@ impl AppState {
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
+                notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
@@ -6461,6 +6471,7 @@ impl AppState {
             },
             local_sound_playback: false,
             toast_config: ToastConfig::default(),
+            last_non_off_toast_delivery: ToastDelivery::Terminal,
             keybinds: Keybinds::default(),
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),

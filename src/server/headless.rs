@@ -18246,6 +18246,7 @@ next_tab = ""
         server.app.state.mode = crate::app::Mode::Terminal;
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
+        server.app.state.sound.enabled = true;
 
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
         server.clients.insert(
@@ -18335,6 +18336,7 @@ next_tab = ""
         server.app.state.mode = crate::app::Mode::Terminal;
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
+        server.app.state.sound.enabled = true;
 
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
         server.clients.insert(

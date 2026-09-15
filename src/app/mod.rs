@@ -202,6 +202,7 @@ pub struct App {
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
+    pub(crate) missing_terminal_notification_backend_warned: std::cell::Cell<bool>,
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) last_git_repo_discovery_refresh: Instant,
     pub(crate) git_refresh_in_flight: Option<GitRefreshInFlight>,
@@ -1014,6 +1015,7 @@ impl App {
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
+                notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
@@ -1272,6 +1274,10 @@ impl App {
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
+            last_non_off_toast_delivery: match config.ui.toast.delivery {
+                crate::config::ToastDelivery::Off => crate::config::ToastDelivery::Terminal,
+                delivery => delivery,
+            },
             keybinds: config.keybinds(),
             palette: theme_palette,
             theme_name,
@@ -1363,6 +1369,7 @@ impl App {
             toast_deadline: None,
             copy_feedback_deadline: None,
             last_api_notification_at: None,
+            missing_terminal_notification_backend_warned: std::cell::Cell::new(false),
             state,
             pane_graphics: pane_graphics::Runtime::default(),
             pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
@@ -2601,6 +2608,12 @@ impl App {
                     self.state.request_client_config_reload = true;
                 }
                 self.state.sound = config.ui.sound.clone();
+                if self.state.toast_config.terminal_backend != config.ui.toast.terminal_backend {
+                    self.state.request_client_config_reload = true;
+                }
+                if config.ui.toast.delivery != crate::config::ToastDelivery::Off {
+                    self.state.last_non_off_toast_delivery = config.ui.toast.delivery;
+                }
                 self.state.toast_config = config.ui.toast.clone();
             }
         }

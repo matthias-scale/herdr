@@ -1623,6 +1623,17 @@
           ]
         },
         {
+          "key": "ui.toast.terminal_backend",
+          "type": "enum",
+          "default": "\"auto\"",
+          "description": "Outer-terminal notification protocol. auto detects WezTerm, iTerm2, Ghostty, or Kitty from the attaching client's environment. Use osc9 for WezTerm, iTerm2, or Ghostty, and osc99 for Kitty when SSH does not forward terminal identity.",
+          "values": [
+            "auto",
+            "osc9",
+            "osc99"
+          ]
+        },
+        {
           "key": "ui.toast.delay_seconds",
           "type": "integer",
           "default": "1",
@@ -1669,7 +1680,7 @@
         {
           "key": "ui.sound.enabled",
           "type": "boolean",
-          "default": "true",
+          "default": "false",
           "description": "Play sounds when agents change state in background workspaces."
         },
         {

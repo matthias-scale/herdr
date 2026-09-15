@@ -91,12 +91,27 @@ impl App {
         true
     }
 
-    /// Persist one settings-screen edit and reload, so the change is live in
-    /// the same frame the operator made it.
+    /// Persist one UI edit and reload, so the change is live in the same frame
+    /// the operator made it.
     pub(super) fn save_config_edit(&mut self, edit: crate::app::settings_general::ConfigEdit) {
         use crate::app::settings_general::ConfigEdit;
 
         let saved = match edit {
+            ConfigEdit::Notifications {
+                delivery,
+                sound_enabled,
+            } => self.update_config_file("notifications", |content| {
+                let value = match delivery {
+                    crate::config::ToastDelivery::Off => "\"off\"",
+                    crate::config::ToastDelivery::Herdr => "\"herdr\"",
+                    crate::config::ToastDelivery::Terminal => "\"terminal\"",
+                    crate::config::ToastDelivery::System => "\"system\"",
+                };
+                let content =
+                    crate::config::upsert_section_value(content, "ui.toast", "delivery", value);
+                let content = crate::config::remove_section_key(&content, "ui.toast", "enabled");
+                crate::config::upsert_section_bool(&content, "ui.sound", "enabled", sound_enabled)
+            }),
             ConfigEdit::Bool {
                 section,
                 key,
@@ -122,6 +137,18 @@ impl App {
         if saved {
             self.apply_config_from_disk(false);
         }
+    }
+
+    pub(super) fn toggle_notifications(&mut self) {
+        let enabled = self.state.notifications_enabled();
+        self.save_config_edit(crate::app::settings_general::ConfigEdit::Notifications {
+            delivery: if enabled {
+                crate::config::ToastDelivery::Off
+            } else {
+                self.state.last_non_off_toast_delivery
+            },
+            sound_enabled: !enabled,
+        });
     }
 
     /// Persist one captured keybinding and reload.
@@ -274,7 +301,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::write_config_atomically;
+    use super::{write_config_atomically, App};
 
     fn scratch_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -334,6 +361,62 @@ mod tests {
             std::fs::read_to_string(&target).expect("read target"),
             "[ui]\nconfirm_close = false\n"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn notification_toggle_restores_last_delivery_through_a_symlink() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let dir = scratch_dir();
+        let target = dir.join("generated.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(
+            &target,
+            "[ui.toast]\ndelivery = \"system\"\n[ui.sound]\nenabled = true\n",
+        )
+        .expect("seed");
+        std::os::unix::fs::symlink("generated.toml", &link).expect("symlink");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &link);
+        let config = crate::config::Config::load().config;
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+
+        app.toggle_notifications();
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Off
+        );
+        assert!(!app.state.sound.enabled);
+
+        app.toggle_notifications();
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::System
+        );
+        assert!(app.state.sound.enabled);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "toggle replaced the managed symlink"
+        );
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&target).expect("read managed target"))
+                .expect("saved config parses");
+        assert_eq!(
+            saved.ui.toast.delivery,
+            crate::config::ToastDelivery::System
+        );
+        assert!(saved.ui.sound.enabled);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         std::fs::remove_dir_all(&dir).ok();
     }
 
