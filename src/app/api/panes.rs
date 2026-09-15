@@ -3238,7 +3238,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn closing_block_adapter_payload(items: serde_json::Value) -> serde_json::Value {
+    fn closing_block_adapter_requests(
+        pane_id: &str,
+        session_id: &str,
+        items: serde_json::Value,
+    ) -> Vec<serde_json::Value> {
         let asset_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/integration/assets/closing-block");
         let input = serde_json::to_string(&items).expect("serialize adapter input");
@@ -3246,8 +3250,10 @@ mod tests {
             .current_dir(asset_dir)
             .args([
                 "-c",
-                "import json, sys; import herdr_status; items = json.loads(sys.argv[1]); outcome = herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if items else 'complete', parse_status='ok', pane_id='', sock_path=''); print(json.dumps(outcome['payload']))",
+                "import json, sys; import herdr_status; calls = []; herdr_status._rpc = lambda _sock, _source, method, params: calls.append({'method': method, 'params': params}); items = json.loads(sys.argv[1]); herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if items else 'complete', parse_status='ok', pane_id=sys.argv[2], sock_path='test.sock', session_id=sys.argv[3]); print(json.dumps(calls))",
                 &input,
+                pane_id,
+                session_id,
             ])
             .output()
             .expect("run closing-block adapter");
@@ -3256,7 +3262,27 @@ mod tests {
             "adapter failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).expect("parse closing-block adapter payload")
+        serde_json::from_slice(&output.stdout).expect("parse closing-block adapter requests")
+    }
+
+    #[cfg(unix)]
+    fn apply_closing_block_adapter_requests(
+        app: &mut App,
+        prefix: &str,
+        requests: Vec<serde_json::Value>,
+    ) {
+        assert_eq!(requests.len(), 3, "adapter reports the complete RPC chain");
+        for (index, request) in requests.into_iter().enumerate() {
+            let request: crate::api::schema::Request = serde_json::from_value(serde_json::json!({
+                "id": format!("{prefix}-{index}"),
+                "method": request["method"],
+                "params": request["params"],
+            }))
+            .expect("adapter request matches the runtime schema");
+            let response = app.handle_api_request(request);
+            let _: SuccessResponse = serde_json::from_str(&response)
+                .unwrap_or_else(|_| panic!("adapter request {index} failed: {response}"));
+        }
     }
 
     fn metadata_error_code(response: &str) -> String {
@@ -5899,22 +5925,24 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:claude",
+            "claude",
+            "session-current",
+        );
 
-        let mut payload = closing_block_adapter_payload(serde_json::json!([{
-            "n": 1,
-            "label": "Answer",
-            "text": "Choose the release lane"
-        }]));
-        payload["pane_id"] = serde_json::json!(pane_id);
-        payload["source"] = serde_json::json!("herdr:claude-closing-block");
-        payload["seq"] = serde_json::json!(1);
-        let params: PaneReportAgentParams =
-            serde_json::from_value(payload).expect("adapter payload matches pane report schema");
-        let response = app.handle_api_request(crate::api::schema::Request {
-            id: "answer-action-point".into(),
-            method: crate::api::schema::Method::PaneReportAgent(params),
-        });
-        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let requests = closing_block_adapter_requests(
+            &pane_id,
+            "session-current",
+            serde_json::json!([{
+                "n": 1,
+                "label": "Answer",
+                "text": "Choose the release lane"
+            }]),
+        );
+        apply_closing_block_adapter_requests(&mut app, "answer-action-point", requests);
 
         app.state.workspaces[0].tabs[0]
             .panes
@@ -5964,17 +5992,9 @@ mod tests {
             "blocked pane received an auto-nudge"
         );
 
-        let mut clear = closing_block_adapter_payload(serde_json::json!([]));
-        clear["pane_id"] = serde_json::json!(pane_id);
-        clear["source"] = serde_json::json!("herdr:claude-closing-block");
-        clear["seq"] = serde_json::json!(2);
-        let params: PaneReportAgentParams =
-            serde_json::from_value(clear).expect("clear payload matches pane report schema");
-        let response = app.handle_api_request(crate::api::schema::Request {
-            id: "clear-action-point".into(),
-            method: crate::api::schema::Method::PaneReportAgent(params),
-        });
-        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let requests =
+            closing_block_adapter_requests(&pane_id, "session-current", serde_json::json!([]));
+        apply_closing_block_adapter_requests(&mut app, "clear-action-point", requests);
         let terminal = &app.state.terminals[&terminal_id];
         assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
         assert!(terminal.closing_gates.is_empty());

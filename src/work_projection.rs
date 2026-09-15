@@ -1639,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn answer_only_pane_contributes_a_yellow_poll() {
+    fn answer_only_pane_contributes_a_blocking_poll() {
         let mut state = state_with_gates(&[("question", Vec::new())]);
         let pane_id = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();

@@ -94,9 +94,7 @@ pub(crate) fn attention_tier(
     has_closing_items: bool,
     usage_limited: bool,
 ) -> AttentionTier {
-    if usage_limited || has_closing_gates || has_closing_items {
-        AttentionTier::Blocked
-    } else if state == AgentState::Blocked {
+    if usage_limited || has_closing_gates || has_closing_items || state == AgentState::Blocked {
         AttentionTier::Blocked
     } else {
         AttentionTier::None
@@ -1689,7 +1687,9 @@ impl TerminalState {
                 }
             }
         }
-        self.persisted_agent_session = None;
+        if !crate::detect::is_closing_block_source(&source, &agent_label) {
+            self.persisted_agent_session = None;
+        }
         let (wait, eta_s) = normalize_declared_wait(state, wait, eta_s);
         self.replace_hook_authority(Some(HookAuthority {
             source,
