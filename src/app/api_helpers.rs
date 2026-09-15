@@ -13,7 +13,7 @@ pub(super) fn tab_attention_priority_with_stale(
     seen: bool,
     stale: bool,
 ) -> u8 {
-    if stale {
+    if stale && state != crate::detect::AgentState::Blocked {
         5
     } else {
         tab_attention_priority(state, seen)
@@ -123,7 +123,7 @@ pub(super) fn pane_agent_status_with_stale(
     seen: bool,
     stale: bool,
 ) -> crate::api::schema::AgentStatus {
-    if stale {
+    if stale && state != crate::detect::AgentState::Blocked {
         crate::api::schema::AgentStatus::Stale
     } else {
         pane_agent_status(state, seen)
@@ -306,6 +306,23 @@ pub(super) fn normalize_metadata_tokens(
             Ok((key, value))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_status_outranks_a_stale_supervisor_mark() {
+        assert_eq!(
+            pane_agent_status_with_stale(crate::detect::AgentState::Blocked, true, true),
+            crate::api::schema::AgentStatus::Blocked
+        );
+        assert_eq!(
+            tab_attention_priority_with_stale(crate::detect::AgentState::Blocked, true, true),
+            tab_attention_priority(crate::detect::AgentState::Blocked, true)
+        );
+    }
 }
 
 #[cfg(test)]

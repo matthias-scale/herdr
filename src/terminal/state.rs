@@ -1633,7 +1633,7 @@ impl TerminalState {
 
     pub fn agent_status_watchdog_deadline(&self, stale_after: Duration) -> Option<Instant> {
         let authority = self.hook_authority.as_ref()?;
-        if self.supervisor_stale {
+        if self.supervisor_stale || self.state == AgentState::Blocked {
             return None;
         }
         let age = match authority.state {
@@ -5747,6 +5747,36 @@ mod tests {
             .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn a_blocked_closing_gate_with_subagents_never_arms_the_stale_watchdog() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), Some("1".into()))]),
+            None,
+            now,
+        ));
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
+            .is_none());
+        assert!(!terminal.supervisor_stale);
     }
 
     /// Pins that a stale unverified subagent claim blocks the armed Done auto-settle trigger.
