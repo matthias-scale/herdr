@@ -1,12 +1,12 @@
 use crate::api::schema::{
-    Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
+    AgentSessionInfo, Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWaitForOutputParams, PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, ReadFormat,
-    ReadSource, Request, SplitDirection,
+    PaneSendKeysParams, PaneSendTextCondition, PaneSendTextIfParams, PaneSendTextParams,
+    PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams, PaneWorkContextSetParams,
+    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -37,6 +37,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "move" => pane_move(&args[1..]),
         "close" => pane_close(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
+        "send-text-if" => pane_send_text_if(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
         "wait-output" => pane_wait_output(&args[1..]),
         "report-agent" => pane_report_agent(&args[1..]),
@@ -643,8 +644,8 @@ fn pane_rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn pane_read(args: &[String]) -> std::io::Result<i32> {
-    let params = match parse_pane_read_args(args) {
-        Ok(params) => params,
+    let (params, json) = match parse_pane_read_command_args(args) {
+        Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}");
             return Ok(2);
@@ -656,11 +657,31 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
         method: Method::PaneRead(params),
     })?;
 
-    super::print_read_response(&response)
+    if json {
+        super::print_response(&response)
+    } else {
+        super::print_read_response(&response)
+    }
+}
+
+fn parse_pane_read_command_args(args: &[String]) -> Result<(PaneReadParams, bool), String> {
+    let mut json = false;
+    let mut filtered = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg == "--json" {
+            if json {
+                return Err("duplicate option: --json".into());
+            }
+            json = true;
+        } else {
+            filtered.push(arg.clone());
+        }
+    }
+    parse_pane_read_args(&filtered).map(|params| (params, json))
 }
 
 fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
-    const USAGE: &str = "usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]";
+    const USAGE: &str = "usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw] [--json]";
 
     let args = super::expand_equals_args(args, &["--source", "--lines", "--format"]);
     let mut pane_id = None;
@@ -1230,6 +1251,104 @@ fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
     let pane_id = super::normalize_pane_id(&args[0]);
     let text = args[1..].join(" ");
     super::send_ok_request(Method::PaneSendText(PaneSendTextParams { pane_id, text }))
+}
+
+fn pane_send_text_if(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str = "usage: herdr pane send-text-if <pane_id> <text> --workspace <id> --terminal <id> --agent-ref <host::pane> --agent-source <source> --agent <label> --session-kind <id|path> --session <value> --condition detection-snapshot-unchanged --observation-token <token>";
+    if args.len() < 2 {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    }
+    let pane_id = super::normalize_pane_id(&args[0]);
+    let text = args[1].clone();
+    let mut values = std::collections::HashMap::<&str, String>::new();
+    let mut index = 2;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let Some(value) = args.get(index + 1) else {
+            eprintln!("missing value for {option}");
+            return Ok(2);
+        };
+        if !matches!(
+            option,
+            "--workspace"
+                | "--terminal"
+                | "--agent-ref"
+                | "--agent-source"
+                | "--agent"
+                | "--session-kind"
+                | "--session"
+                | "--condition"
+                | "--observation-token"
+        ) || values.insert(option, value.clone()).is_some()
+        {
+            eprintln!("invalid or duplicate option: {option}");
+            return Ok(2);
+        }
+        index += 2;
+    }
+    let required = |name| values.get(name).cloned().ok_or(name);
+    let Ok(workspace_id) = required("--workspace") else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let Ok(terminal_id) = required("--terminal") else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let Ok(agent_ref) =
+        required("--agent-ref").and_then(|value| value.parse().map_err(|_| "--agent-ref"))
+    else {
+        eprintln!("invalid --agent-ref");
+        return Ok(2);
+    };
+    let Ok(source) = required("--agent-source") else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let Ok(agent) = required("--agent") else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let Ok(session) = required("--session") else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let kind = match values.get("--session-kind").map(String::as_str) {
+        Some("id") => crate::agent_resume::AgentSessionRefKind::Id,
+        Some("path") => crate::agent_resume::AgentSessionRefKind::Path,
+        _ => {
+            eprintln!("invalid --session-kind (expected id or path)");
+            return Ok(2);
+        }
+    };
+    if values.get("--condition").map(String::as_str) != Some("detection-snapshot-unchanged") {
+        eprintln!("unsupported --condition");
+        return Ok(2);
+    }
+    let Ok(observation_token) = required("--observation-token") else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:send-text-if".into(),
+        method: Method::PaneSendTextIf(PaneSendTextIfParams {
+            pane_id,
+            text,
+            workspace_id,
+            terminal_id,
+            agent_ref,
+            agent_session: AgentSessionInfo {
+                source,
+                agent,
+                kind,
+                value: session,
+            },
+            condition: PaneSendTextCondition::DetectionSnapshotUnchanged,
+            observation_token,
+        }),
+    })?)
 }
 
 fn pane_send_keys(args: &[String]) -> std::io::Result<i32> {
@@ -1914,6 +2033,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]");
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
+    eprintln!("  herdr pane send-text-if <pane_id> <text> [guard options]");
     eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
     eprintln!("  herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
@@ -2427,6 +2547,16 @@ mod tests {
         assert_eq!(params.pane_id, "issue-1");
         assert_eq!(params.source, ReadSource::Visible);
         assert_eq!(params.lines, Some(5));
+    }
+
+    #[test]
+    fn parse_pane_read_command_args_accepts_json_output() {
+        let (params, json) =
+            parse_pane_read_command_args(&args(&["issue-1", "--source", "detection", "--json"]))
+                .unwrap();
+
+        assert_eq!(params.source, ReadSource::Detection);
+        assert!(json);
     }
 
     #[test]

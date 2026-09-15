@@ -10969,13 +10969,17 @@ next_tab = ""
                     "fallback".into(),
                     api::schema::PaneReadResult {
                         pane_id: "w1:p1".into(),
+                        terminal_id: terminal_id_string.clone(),
                         workspace_id: "w1".into(),
                         tab_id: "w1:t1".into(),
+                        agent_ref: None,
+                        agent_session: None,
                         source: api::schema::ReadSource::Recent,
                         format: api::schema::ReadFormat::Text,
                         text: String::new(),
                         revision: 0,
                         truncated: false,
+                        input_observation: None,
                     },
                     120,
                     false,
@@ -11014,7 +11018,7 @@ next_tab = ""
     #[test]
     fn pane_read_cancels_alt_screen_history_capture_before_serving_live_content() {
         with_terminal_session_test_server(
-            |server, terminal_id, _terminal_id_string, public_pane_id| {
+            |server, terminal_id, terminal_id_string, public_pane_id| {
                 let runtime = server
                     .app
                     .terminal_runtimes
@@ -11062,13 +11066,17 @@ next_tab = ""
                         "fallback".into(),
                         api::schema::PaneReadResult {
                             pane_id: public_pane_id.clone(),
+                            terminal_id: terminal_id_string.clone(),
                             workspace_id: "w1".into(),
                             tab_id: "w1:t1".into(),
+                            agent_ref: None,
+                            agent_session: None,
                             source: api::schema::ReadSource::Recent,
                             format: api::schema::ReadFormat::Text,
                             text: String::new(),
                             revision: baseline.revision,
                             truncated: false,
+                            input_observation: None,
                         },
                         200,
                         false,
