@@ -1898,6 +1898,106 @@ class CodexNotifyHookTests(unittest.TestCase):
         self.assertFalse(kwargs["workers_unknown"])
 
 
+class BundleInstallerTests(unittest.TestCase):
+    RUNTIME_FILES = (
+        "closing_block.py",
+        "herdr_status.py",
+        "herdr-closing-block.py",
+        "herdr-codex-notify.py",
+        "herdr-question-gate.py",
+    )
+
+    @staticmethod
+    def _installer_module():
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "install.py")
+        spec = importlib.util.spec_from_file_location("closing_block_installer", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def setUp(self):
+        import pathlib
+        import shutil
+        import tempfile
+
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="herdr-closing-install-test-"))
+        self.addCleanup(shutil.rmtree, self.root)
+        self.source = pathlib.Path(__file__).parent
+        self.target = self.root / "share" / "herdr-closing-block"
+        self.target.mkdir(parents=True)
+        for name in self.RUNTIME_FILES:
+            (self.target / name).write_text(
+                "# HERDR_INTEGRATION_VERSION=1\nSTALE = True\n",
+                encoding="utf-8",
+            )
+        (self.target / "codex-notify-chain.sh").write_text(
+            "preserve existing notify wiring\n", encoding="utf-8"
+        )
+
+    def test_install_replaces_the_five_modules_as_one_verified_bundle(self):
+        installer = self._installer_module()
+
+        result = installer.install_bundle(self.source, self.target, dry_run=False)
+
+        self.assertEqual(result["mode"], "installed")
+        self.assertEqual(set(result["files"]), set(self.RUNTIME_FILES))
+        for name in self.RUNTIME_FILES:
+            self.assertEqual(
+                (self.target / name).read_bytes(),
+                (self.source / name).read_bytes(),
+            )
+            self.assertEqual(result["files"][name]["version"], 2)
+            self.assertRegex(result["files"][name]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            (self.target / "codex-notify-chain.sh").read_text(encoding="utf-8"),
+            "preserve existing notify wiring\n",
+        )
+        backup = self.root / "share" / result["backup"]
+        self.assertTrue(backup.is_dir())
+        self.assertIn("STALE = True", (backup / "closing_block.py").read_text())
+
+    def test_dry_run_validates_without_writing_target_or_backup(self):
+        installer = self._installer_module()
+        before = {
+            path.relative_to(self.target): path.read_bytes()
+            for path in self.target.iterdir()
+        }
+
+        result = installer.install_bundle(self.source, self.target, dry_run=True)
+
+        after = {
+            path.relative_to(self.target): path.read_bytes()
+            for path in self.target.iterdir()
+        }
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(after, before)
+        self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
+        self.assertEqual(list(self.target.parent.glob(".herdr-closing-block.stage-*")), [])
+
+    def test_invalid_source_bundle_leaves_existing_install_untouched(self):
+        import shutil
+
+        installer = self._installer_module()
+        invalid_source = self.root / "invalid-source"
+        invalid_source.mkdir()
+        for name in self.RUNTIME_FILES:
+            shutil.copy2(self.source / name, invalid_source / name)
+        (invalid_source / "closing_block.py").write_text(
+            "# HERDR_INTEGRATION_VERSION=2\nthis is not valid python !\n",
+            encoding="utf-8",
+        )
+        before = (self.target / "closing_block.py").read_bytes()
+
+        with self.assertRaises(installer.BundleValidationError):
+            installer.install_bundle(invalid_source, self.target, dry_run=False)
+
+        self.assertEqual((self.target / "closing_block.py").read_bytes(), before)
+        self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
+
+
 class QuestionGateHookTests(unittest.TestCase):
     """`AskUserQuestion` opens a gate mid-turn, where no `Stop` ever fires."""
 
