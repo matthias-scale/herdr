@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 """Codex `notify` handler -> herdr turn-end status.
 
 Codex invokes the notify program with a single JSON argument. For a finished
@@ -93,11 +93,8 @@ def main() -> int:
     )
     if not text:
         return 0
-    # A turn that ended without a closing block still ended, and a full-lifecycle
-    # source that stays silent leaves its last report standing forever -- a pane
-    # that reported a gate last turn would keep showing it with nothing able to
-    # clear it. An absent block parses to zero counts, which is the honest
-    # reading: nobody is waiting on a human.
+    # Missing task evidence is reported explicitly so an abbreviated reply does
+    # not clear unresolved decisions from an earlier authoritative report.
     block = parse(text)
 
     outcome = report(
@@ -108,6 +105,10 @@ def main() -> int:
         items=block.wire_items(),
         decisions=block.wire_decisions(),
         agent_names=block.agents,
+        completion=block.completion,
+        external_wait=block.external_wait,
+        parse_status=block.parse_status,
+        workers_unknown=block.workers_unknown,
         session_id=payload.get("turn-id") or payload.get("turn_id"),
         title=title_from(payload, os.environ["HERDR_PANE_ID"]),
     )

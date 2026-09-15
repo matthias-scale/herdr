@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 """Claude Code `AskUserQuestion` hooks -> herdr blocked/working status.
 
 Installed beside `herdr-closing-block.py` and reporting through the same
@@ -112,6 +112,8 @@ def open_gate(payload: dict, pane_id: str) -> dict:
         blocking=len(gates),
         agents=0,
         gates=gates,
+        completion="incomplete",
+        parse_status="ok",
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
     )
@@ -153,6 +155,8 @@ def close_gate(payload: dict, pane_id: str, *, require_marker: bool) -> dict | N
         blocking=0,
         agents=0,
         state="working",
+        completion="incomplete",
+        parse_status="ok",
         session_id=session_id,
         session_path=payload.get("transcript_path"),
     )

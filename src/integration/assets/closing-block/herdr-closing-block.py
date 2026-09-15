@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 """Claude Code `Stop` hook -> herdr turn-end status.
 
 Installed *beside* herdr's managed `herdr-agent-state.sh`, which herdr overwrites
@@ -98,11 +98,8 @@ def main() -> int:
     text = last_assistant_text(payload.get("transcript_path") or "")
     if text is None:
         return 0
-    # A turn that ended without a closing block still ended, and a full-lifecycle
-    # source that stays silent leaves its last report standing forever -- a pane
-    # that reported a gate last turn would keep showing it with nothing able to
-    # clear it. Absent counts are zero counts: nobody is waiting on a human.
-    # An absent block parses to zero counts, which is the honest reading.
+    # A short reply without task evidence still emits a sequenced report, but
+    # marks that evidence missing so the runtime can preserve unresolved state.
     block = parse(text)
 
     outcome = report(
@@ -115,6 +112,10 @@ def main() -> int:
         agent_names=block.agents,
         contract=block.contract,
         contract_met=block.contract_met,
+        completion=block.completion,
+        external_wait=block.external_wait,
+        parse_status=block.parse_status,
+        workers_unknown=block.workers_unknown,
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
     )
