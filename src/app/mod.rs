@@ -2806,13 +2806,17 @@ impl App {
 
 impl App {
     fn headless_overlay_precedes_subgroup_picker(&self) -> bool {
-        self.state.usage_view.is_some() || self.try_route_paste_to_overlay()
+        self.state.loop_run_history_detail.is_some()
+            || self.state.usage_view.is_some()
+            || self.state.inbox.is_some()
+            || self.try_route_paste_to_overlay()
     }
 
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         // Full-frame overlays bypass ordinary pane context. The inbox routes keys
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
+            || self.state.loop_run_history_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
@@ -8896,7 +8900,14 @@ last_pane = "prefix+tab"
 
     #[tokio::test]
     async fn headless_full_frame_overlays_take_keys_before_subgroup_picker() {
-        for overlay in ["Symphony", "Usage", "Work", "dock preview"] {
+        for overlay in [
+            "Symphony",
+            "Loop History",
+            "Usage",
+            "Work",
+            "dock preview",
+            "Inbox",
+        ] {
             let mut app = test_app();
             let mut workspace = Workspace::test_new("test");
             let focused = workspace.focused_pane_id().unwrap();
@@ -8914,6 +8925,7 @@ last_pane = "prefix+tab"
             });
             match overlay {
                 "Symphony" => app.state.toggle_symphony(),
+                "Loop History" => app.state.toggle_loop_run_history(),
                 "Usage" => app.state.toggle_usage_view(),
                 "Work" => {
                     app.state.work_view = Some(state::WorkViewState::new(false, None));
@@ -8925,16 +8937,19 @@ last_pane = "prefix+tab"
                         key: "SCA-1".into(),
                     });
                 }
+                "Inbox" => app.state.toggle_inbox(),
                 _ => unreachable!(),
             }
 
+            let key = if matches!(overlay, "Loop History" | "Inbox") {
+                KeyCode::Esc
+            } else {
+                KeyCode::Char('7')
+            };
+
             app.route_client_events_from(
                 42,
-                vec![raw_key(
-                    KeyCode::Char('7'),
-                    KeyModifiers::empty(),
-                    KeyEventKind::Press,
-                )],
+                vec![raw_key(key, KeyModifiers::empty(), KeyEventKind::Press)],
                 false,
             );
 
@@ -8955,6 +8970,12 @@ last_pane = "prefix+tab"
                     app.state.usage_view.as_ref().map(|view| view.range),
                     Some(state::UsageRange::Days7)
                 );
+            }
+            if overlay == "Loop History" {
+                assert!(app.state.loop_run_history_detail.is_none());
+            }
+            if overlay == "Inbox" {
+                assert!(app.state.inbox.is_none());
             }
         }
     }
