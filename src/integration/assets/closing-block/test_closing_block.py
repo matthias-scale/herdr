@@ -1248,6 +1248,45 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertNotIn("Approve PR #2606", params["state_labels"]["blocked"])
         self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
 
+    def test_report_binds_every_rpc_to_the_provider_session(self):
+        with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            herdr_status.report(
+                agent="codex",
+                blocking=0,
+                agents=0,
+                session_id="thread-native-1",
+                pane_id="w1:p2",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(
+            [call.args[2] for call in rpc.call_args_list],
+            ["pane.report_agent_session", "pane.report_agent", "pane.report_metadata"],
+        )
+        self.assertTrue(
+            all(
+                call.args[3]["agent_session_id"] == "thread-native-1"
+                for call in rpc.call_args_list
+            )
+        )
+
+    def test_report_uses_a_sequence_reserved_by_the_caller(self):
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                seq=123456,
+                pane_id="w1:p3",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(outcome["payload"]["seq"], 123456)
+
     def test_non_gate_action_points_block_only_when_no_agent_is_running(self):
         cases = [
             ([{"label": "Answer", "text": "Choose the release lane"}], 0, "answer"),
@@ -1852,6 +1891,79 @@ class StopHookTranscriptTests(unittest.TestCase):
         self.assertIsNone(kwargs["external_wait"])
         self.assertFalse(kwargs["workers_unknown"])
 
+    def test_reserves_report_sequence_before_reading_the_transcript(self):
+        import io
+
+        hook = self._hook_module()
+        calls = []
+
+        def reserve():
+            calls.append("reserve")
+            return 101
+
+        def read(_path):
+            calls.append("read")
+            return "Done here."
+
+        with mock.patch.object(hook, "reserve_sequence", side_effect=reserve), mock.patch.object(
+            hook, "last_assistant_text", side_effect=read
+        ), mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": None, "socket": False},
+        ) as report, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ), mock.patch.object(
+            hook.sys,
+            "stdin",
+            io.StringIO(
+                '{"session_id":"claude-session-1",'
+                '"transcript_path":"/tmp/native-transcript.jsonl"}'
+            ),
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(calls, ["reserve", "read"])
+        self.assertEqual(report.call_args.kwargs["seq"], 101)
+
+    def test_reserved_old_stop_cannot_restore_a_newer_done_report(self):
+        gate = closing_block.parse(
+            "**Critical action points (1 blocking)**\n\n"
+            "1. **Gate** — Approve A.\n\nDone here."
+        )
+        done = closing_block.parse(
+            "**Critical action points (0 blocking)**\n\nDone here."
+        )
+        import tempfile
+
+        state_dir = tempfile.mkdtemp(prefix="herdr-stop-order-test-")
+        with mock.patch.dict(
+            herdr_status.os.environ, {"XDG_STATE_HOME": state_dir}, clear=False
+        ), mock.patch.object(herdr_status, "_rpc"):
+            for block, seq in ((done, 202), (gate, 101)):
+                herdr_status.report(
+                    agent="claude",
+                    blocking=block.blocking,
+                    agents=block.agents_running,
+                    gates=block.wire_gates(),
+                    items=block.wire_items(),
+                    decisions=block.wire_decisions(),
+                    completion=block.completion,
+                    parse_status=block.parse_status,
+                    seq=seq,
+                    pane_id="w1:p1",
+                    sock_path="/tmp/herdr-test.sock",
+                )
+            mirror = herdr_status.mirror_path("w1:p1")
+
+        with open(mirror, encoding="utf-8") as fh:
+            latest = herdr_status.json.load(fh)
+        self.assertEqual(latest["seq"], 202)
+        self.assertEqual(latest["completion"], "complete")
+        self.assertEqual(latest["gates"], [])
+
 
 class CodexNotifyHookTests(unittest.TestCase):
     @staticmethod
@@ -1896,6 +2008,176 @@ class CodexNotifyHookTests(unittest.TestCase):
         self.assertEqual(kwargs["parse_status"], "missing")
         self.assertIsNone(kwargs["external_wait"])
         self.assertFalse(kwargs["workers_unknown"])
+
+    def test_documented_thread_id_is_the_session_identity(self):
+        import json
+
+        hook = self._hook_module()
+        payload = json.dumps(
+            {
+                "type": "agent-turn-complete",
+                "thread-id": "01a0a5ef-d376-7630-ab2e-1df07874247c",
+                "turn-id": "01a0a5ef-d39c-7bc2-a807-265792464411",
+                "last-assistant-message": "Done here.",
+                "input-messages": ["Finish the adapter."],
+            }
+        )
+        with mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": "/tmp/mirror", "socket": False},
+        ) as report, mock.patch.object(
+            hook, "claim_unreported_turn", return_value=True
+        ), mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ), mock.patch.object(
+            hook.sys, "argv", ["herdr-codex-notify.py", payload]
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(
+            report.call_args.kwargs["session_id"],
+            "01a0a5ef-d376-7630-ab2e-1df07874247c",
+        )
+
+    def test_reserves_sequence_before_loading_and_parsing_the_notification(self):
+        hook = self._hook_module()
+        calls = []
+        payload = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "last-assistant-message": "Done here.",
+        }
+
+        def reserve():
+            calls.append("reserve")
+            return 303
+
+        def load(_argv):
+            calls.append("load")
+            return payload
+
+        with mock.patch.object(hook, "reserve_sequence", side_effect=reserve), mock.patch.object(
+            hook, "load_payload", side_effect=load
+        ), mock.patch.object(
+            hook, "claim_unreported_turn", return_value=True
+        ), mock.patch.object(
+            hook, "title_from", return_value="Task title"
+        ), mock.patch.object(
+            hook,
+            "report",
+            return_value={"payload": {}, "mirror": "/tmp/mirror", "socket": False},
+        ) as report, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(calls, ["reserve", "load"])
+        self.assertEqual(report.call_args.kwargs["seq"], 303)
+
+    def test_empty_notification_does_not_consume_the_replay_key(self):
+        hook = self._hook_module()
+        payload = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+        }
+        with mock.patch.object(hook, "load_payload", return_value=payload), mock.patch.object(
+            hook, "claim_unreported_turn"
+        ) as claim, mock.patch.dict(
+            hook.os.environ,
+            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            clear=False,
+        ):
+            self.assertEqual(hook.main(), 0)
+
+        claim.assert_not_called()
+
+    def test_duplicate_old_turn_cannot_restore_a_resolved_gate(self):
+        import json
+        import tempfile
+
+        hook = self._hook_module()
+        old = {
+            "type": "agent-turn-complete",
+            "thread-id": "01a0a5ef-d376-7630-ab2e-1df07874247c",
+            "turn-id": "01a0a5ef-d39c-7bc2-a807-265792464411",
+            "last-assistant-message": (
+                "**Critical action points (1 blocking)**\n\n"
+                "1. **Gate** — Approve A.\n\nDone here."
+            ),
+        }
+        done = {
+            **old,
+            "turn-id": "01a0a5f4-9f04-7101-843e-d46c286d65f4",
+            "last-assistant-message": (
+                "**Critical action points (0 blocking)**\n\nDone here."
+            ),
+        }
+        state_dir = tempfile.mkdtemp(prefix="herdr-codex-replay-test-")
+        reports = []
+
+        def report(**kwargs):
+            reports.append(kwargs)
+            return {"payload": {}, "mirror": "/tmp/mirror", "socket": False}
+
+        with mock.patch.object(hook, "report", side_effect=report), mock.patch.object(
+            hook, "title_from", return_value="Task title"
+        ), mock.patch.dict(
+            hook.os.environ,
+            {
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "XDG_STATE_HOME": state_dir,
+            },
+            clear=False,
+        ):
+            for native in (old, done, old):
+                with mock.patch.object(
+                    hook.sys,
+                    "argv",
+                    ["herdr-codex-notify.py", json.dumps(native)],
+                ):
+                    self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[0]["blocking"], 1)
+        self.assertEqual(reports[1]["blocking"], 0)
+
+    def test_competing_processes_claim_one_turn_only_once(self):
+        import multiprocessing
+        import tempfile
+
+        hook = self._hook_module()
+        state_dir = tempfile.mkdtemp(prefix="herdr-codex-claim-test-")
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        results = context.Queue()
+
+        def claim():
+            ready.wait(2)
+            with mock.patch.dict(
+                hook.os.environ, {"XDG_STATE_HOME": state_dir}, clear=False
+            ):
+                results.put(
+                    hook.claim_unreported_turn("w1:p1", "thread-1", "turn-1")
+                )
+
+        processes = [context.Process(target=claim) for _ in range(6)]
+        for process in processes:
+            process.start()
+        ready.set()
+        for process in processes:
+            process.join(2)
+            self.assertFalse(process.is_alive())
+
+        claimed = [results.get(timeout=1) for _ in processes]
+        self.assertEqual(claimed.count(True), 1)
 
 
 class BundleInstallerTests(unittest.TestCase):

@@ -239,6 +239,11 @@ def accepts_payload(payload: object) -> bool:
     return version is None or version == VERSION
 
 
+def reserve_sequence() -> int:
+    """Reserve report ordering before a caller performs a fallible slow read."""
+    return time.time_ns()
+
+
 def report(
     *,
     agent: str,
@@ -262,6 +267,7 @@ def report(
     pane_id: str | None = None,
     sock_path: str | None = None,
     state: str | None = None,
+    seq: int | None = None,
 ) -> dict:
     """Push one v2 turn-end status. Never raises; returns what it did."""
     gate_objects = [
@@ -289,7 +295,7 @@ def report(
     pane_id = pane_id or os.environ.get("HERDR_PANE_ID") or ""
     sock_path = sock_path or os.environ.get("HERDR_SOCKET_PATH") or ""
 
-    seq = time.time_ns()
+    seq = seq if isinstance(seq, int) else reserve_sequence()
     reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     completion = (
         completion if completion in {"complete", "incomplete", "missing"} else "missing"
@@ -387,6 +393,9 @@ def report(
         },
         "seq": seq,
     }
+    if session_id:
+        agent_params["agent_session_id"] = session_id
+        meta_params["agent_session_id"] = session_id
 
     try:
         _rpc(sock_path, source, "pane.report_agent_session", session_params)

@@ -24,7 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from closing_block import parse  # noqa: E402
-from herdr_status import report  # noqa: E402
+from herdr_status import report, reserve_sequence  # noqa: E402
 
 # Claude Code fires Stop hooks concurrently with flushing the final assistant
 # message to the transcript. Reading immediately can find no assistant text at
@@ -95,6 +95,11 @@ def main() -> int:
     if payload.get("agent_id"):  # subagent stop -- never speaks for the pane
         return 0
 
+    # Reserve the ordering at hook invocation, before transcript polling. An
+    # older Stop may read its final row and then stall while a newer Stop reads
+    # and reports; allocating its sequence after that stall would revive the
+    # old turn.
+    seq = reserve_sequence()
     text = last_assistant_text(payload.get("transcript_path") or "")
     if text is None:
         return 0
@@ -118,6 +123,7 @@ def main() -> int:
         workers_unknown=block.workers_unknown,
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
+        seq=seq,
     )
     if os.environ.get("HERDR_CLOSING_BLOCK_DEBUG"):
         print(json.dumps(outcome["payload"]), file=sys.stderr)
