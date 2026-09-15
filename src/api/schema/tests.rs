@@ -575,6 +575,7 @@ fn unknown_method_is_rejected() {
 fn pane_send_text_if_is_a_distinct_method_that_legacy_servers_reject_before_send() {
     #[derive(serde::Deserialize)]
     struct LegacyRequest {
+        #[serde(flatten)]
         method: LegacyMethod,
     }
     #[derive(serde::Deserialize)]
@@ -583,6 +584,26 @@ fn pane_send_text_if_is_a_distinct_method_that_legacy_servers_reject_before_send
         #[serde(rename = "pane.send_text")]
         PaneSendText(PaneSendTextParams),
     }
+
+    fn legacy_dispatch(encoded: &str, sent: &mut Vec<u8>) -> Result<(), serde_json::Error> {
+        let legacy = serde_json::from_str::<LegacyRequest>(encoded)?;
+        match legacy.method {
+            LegacyMethod::PaneSendText(params) => sent.extend_from_slice(params.text.as_bytes()),
+        }
+        Ok(())
+    }
+
+    let legacy_request = Request {
+        id: "legacy".into(),
+        method: Method::PaneSendText(PaneSendTextParams {
+            pane_id: "workspace-1".into(),
+            text: "legacy".into(),
+        }),
+    };
+    let mut sent = Vec::new();
+    legacy_dispatch(&serde_json::to_string(&legacy_request).unwrap(), &mut sent).unwrap();
+    assert_eq!(sent, b"legacy");
+    sent.clear();
 
     let request = Request {
         id: "guarded".into(),
@@ -605,12 +626,7 @@ fn pane_send_text_if_is_a_distinct_method_that_legacy_servers_reject_before_send
     let encoded = serde_json::to_string(&request).unwrap();
     assert!(encoded.contains(r#""method":"pane.send_text_if""#));
 
-    let mut sent = Vec::new();
-    if let Ok(legacy) = serde_json::from_str::<LegacyRequest>(&encoded) {
-        match legacy.method {
-            LegacyMethod::PaneSendText(params) => sent.extend_from_slice(params.text.as_bytes()),
-        }
-    }
+    assert!(legacy_dispatch(&encoded, &mut sent).is_err());
     assert!(sent.is_empty());
 }
 

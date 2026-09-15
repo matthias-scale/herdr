@@ -1292,7 +1292,8 @@ pub struct PaneRuntime {
     content_seq: Arc<AtomicU64>,
     input_admission: Arc<Mutex<InputAdmissionState>>,
     pending_input_reservations: Arc<AtomicU64>,
-    unreflected_input: Arc<AtomicBool>,
+    input_delivery_seq: Arc<AtomicU64>,
+    reflected_input_seq: Arc<AtomicU64>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
@@ -1316,16 +1317,16 @@ struct InputAdmissionState {
 
 struct PendingInputReservation {
     pending: Arc<AtomicU64>,
-    unreflected: Arc<AtomicBool>,
+    input_delivery_seq: Arc<AtomicU64>,
     delivered: bool,
 }
 
 impl PendingInputReservation {
-    fn new(pending: &Arc<AtomicU64>, unreflected: &Arc<AtomicBool>) -> Self {
+    fn new(pending: &Arc<AtomicU64>, input_delivery_seq: &Arc<AtomicU64>) -> Self {
         pending.fetch_add(1, Ordering::AcqRel);
         Self {
             pending: Arc::clone(pending),
-            unreflected: Arc::clone(unreflected),
+            input_delivery_seq: Arc::clone(input_delivery_seq),
             delivered: false,
         }
     }
@@ -1338,10 +1339,14 @@ impl PendingInputReservation {
 impl Drop for PendingInputReservation {
     fn drop(&mut self) {
         if self.delivered {
-            self.unreflected.store(true, Ordering::Release);
+            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
         }
         self.pending.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+fn mark_input_reflected_through(reflected_input_seq: &AtomicU64, input_delivery_seq: u64) {
+    reflected_input_seq.fetch_max(input_delivery_seq, Ordering::AcqRel);
 }
 
 static NEXT_INPUT_ADMISSION_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -2295,7 +2300,8 @@ impl PaneRuntime {
                 content_seq: Arc::new(AtomicU64::new(0)),
                 input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
                 pending_input_reservations: Arc::new(AtomicU64::new(0)),
-                unreflected_input: Arc::new(AtomicBool::new(false)),
+                input_delivery_seq: Arc::new(AtomicU64::new(0)),
+                reflected_input_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -2738,7 +2744,8 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let input_admission = Arc::new(Mutex::new(InputAdmissionState::default()));
         let pending_input_reservations = Arc::new(AtomicU64::new(0));
-        let unreflected_input = Arc::new(AtomicBool::new(false));
+        let input_delivery_seq = Arc::new(AtomicU64::new(0));
+        let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
@@ -2750,7 +2757,8 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let content_seq = content_seq.clone();
             let pending_input_for_read = Arc::clone(&pending_input_reservations);
-            let unreflected_input_for_read = Arc::clone(&unreflected_input);
+            let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
+            let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
@@ -2759,13 +2767,19 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let input_delivery_seq_at_read_start =
+                    input_delivery_seq_for_read.load(Ordering::Acquire);
+                let input_was_pending = pending_input_for_read.load(Ordering::Acquire) != 0;
                 content_seq.fetch_add(1, Ordering::AcqRel);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
-                if pending_input_for_read.load(Ordering::Acquire) == 0 {
-                    unreflected_input_for_read.store(false, Ordering::Release);
+                if !input_was_pending {
+                    mark_input_reflected_through(
+                        &reflected_input_seq_for_read,
+                        input_delivery_seq_at_read_start,
+                    );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
@@ -2867,7 +2881,8 @@ impl PaneRuntime {
             content_seq,
             input_admission,
             pending_input_reservations,
-            unreflected_input,
+            input_delivery_seq,
+            reflected_input_seq,
             detection_content_seq,
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
@@ -2940,7 +2955,8 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let input_admission = Arc::new(Mutex::new(InputAdmissionState::default()));
         let pending_input_reservations = Arc::new(AtomicU64::new(0));
-        let unreflected_input = Arc::new(AtomicBool::new(false));
+        let input_delivery_seq = Arc::new(AtomicU64::new(0));
+        let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
@@ -2985,7 +3001,8 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let content_seq = content_seq.clone();
             let pending_input_for_read = Arc::clone(&pending_input_reservations);
-            let unreflected_input_for_read = Arc::clone(&unreflected_input);
+            let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
+            let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
             let first_output = Arc::new(AtomicBool::new(false));
@@ -2997,6 +3014,9 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let input_delivery_seq_at_read_start =
+                    input_delivery_seq_for_read.load(Ordering::Acquire);
+                let input_was_pending = pending_input_for_read.load(Ordering::Acquire) != 0;
                 content_seq.fetch_add(1, Ordering::AcqRel);
                 if !bytes.is_empty() && !first_output_for_read.swap(true, Ordering::AcqRel) {
                     crate::logging::pane_first_output(pane_id.raw(), bytes.len());
@@ -3005,8 +3025,11 @@ impl PaneRuntime {
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
-                if pending_input_for_read.load(Ordering::Acquire) == 0 {
-                    unreflected_input_for_read.store(false, Ordering::Release);
+                if !input_was_pending {
+                    mark_input_reflected_through(
+                        &reflected_input_seq_for_read,
+                        input_delivery_seq_at_read_start,
+                    );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
                 if agent_detection == AgentDetection::Enabled {
@@ -3555,7 +3578,8 @@ impl PaneRuntime {
             content_seq,
             input_admission,
             pending_input_reservations,
-            unreflected_input,
+            input_delivery_seq,
+            reflected_input_seq,
             detection_content_seq,
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
@@ -3941,7 +3965,7 @@ impl PaneRuntime {
             // Reserve this write before awaiting queue capacity. A conditional
             // sender must treat pending input as intervening input.
             admission.revision = admission.revision.saturating_add(1);
-            PendingInputReservation::new(&self.pending_input_reservations, &self.unreflected_input)
+            PendingInputReservation::new(&self.pending_input_reservations, &self.input_delivery_seq)
         };
         let result = self.io.send_bytes(bytes).await;
         if result.is_ok() {
@@ -3961,7 +3985,7 @@ impl PaneRuntime {
         let result = self.io.try_send_bytes(bytes);
         if result.is_ok() {
             admission.revision = admission.revision.saturating_add(1);
-            self.unreflected_input.store(true, Ordering::Release);
+            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
         }
         result
     }
@@ -3972,7 +3996,8 @@ impl PaneRuntime {
         }
         let admission = self.input_admission.lock().ok()?;
         if self.pending_input_reservations.load(Ordering::Acquire) != 0
-            || self.unreflected_input.load(Ordering::Acquire)
+            || self.input_delivery_seq.load(Ordering::Acquire)
+                != self.reflected_input_seq.load(Ordering::Acquire)
         {
             return None;
         }
@@ -4011,7 +4036,8 @@ impl PaneRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.pending_input_reservations.load(Ordering::Acquire) != 0
-            || self.unreflected_input.load(Ordering::Acquire)
+            || self.input_delivery_seq.load(Ordering::Acquire)
+                != self.reflected_input_seq.load(Ordering::Acquire)
         {
             return ConditionalInputResult::ConditionMismatch;
         }
@@ -4037,7 +4063,7 @@ impl PaneRuntime {
                 match self.io.try_send_bytes(bytes) {
                     Ok(()) => {
                         admission.revision = admission.revision.saturating_add(1);
-                        self.unreflected_input.store(true, Ordering::Release);
+                        self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
                         ConditionalInputResult::Sent
                     }
                     Err(_) => ConditionalInputResult::Failed,
@@ -4080,7 +4106,7 @@ impl PaneRuntime {
             ControlledWriteResult::Written | ControlledWriteResult::DeliveryUnknown { .. }
         ) {
             admission.revision = admission.revision.saturating_add(1);
-            self.unreflected_input.store(true, Ordering::Release);
+            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
         }
         result
     }
@@ -4097,7 +4123,7 @@ impl PaneRuntime {
             // Scheduling is already pending input, even before the delayed write
             // reaches the PTY queue.
             admission.revision = admission.revision.saturating_add(1);
-            PendingInputReservation::new(&self.pending_input_reservations, &self.unreflected_input)
+            PendingInputReservation::new(&self.pending_input_reservations, &self.input_delivery_seq)
         };
         self.io.send_bytes_after(bytes, delay, reservation);
     }
@@ -4355,12 +4381,17 @@ impl PaneRuntime {
     }
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
+        let input_delivery_seq_at_read_start = self.input_delivery_seq.load(Ordering::Acquire);
+        let input_was_pending = self.pending_input_reservations.load(Ordering::Acquire) != 0;
         self.content_seq.fetch_add(1, Ordering::AcqRel);
         let (tx, _rx) = mpsc::channel(1);
         let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
         self.content_seq.fetch_add(1, Ordering::Release);
-        if self.pending_input_reservations.load(Ordering::Acquire) == 0 {
-            self.unreflected_input.store(false, Ordering::Release);
+        if !input_was_pending {
+            mark_input_reflected_through(
+                &self.reflected_input_seq,
+                input_delivery_seq_at_read_start,
+            );
         }
     }
 
@@ -4411,7 +4442,8 @@ impl PaneRuntime {
                 content_seq: Arc::new(AtomicU64::new(0)),
                 input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
                 pending_input_reservations: Arc::new(AtomicU64::new(0)),
-                unreflected_input: Arc::new(AtomicBool::new(false)),
+                input_delivery_seq: Arc::new(AtomicU64::new(0)),
+                reflected_input_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -4562,6 +4594,23 @@ mod tests {
         );
         assert_eq!(rx.recv().await, Some(Bytes::from_static(b"controlled")));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_output_completion_cannot_reflect_newer_input() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let input_sequence_when_output_started = runtime.input_delivery_seq.load(Ordering::Acquire);
+
+        runtime
+            .try_send_bytes(Bytes::from_static(b"newer-input"))
+            .expect("input queues");
+        mark_input_reflected_through(
+            &runtime.reflected_input_seq,
+            input_sequence_when_output_started,
+        );
+
+        assert!(runtime.input_observation().is_none());
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"newer-input")));
     }
 
     #[tokio::test]
@@ -5573,7 +5622,8 @@ mod tests {
             content_seq: Arc::new(AtomicU64::new(0)),
             input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
             pending_input_reservations: Arc::new(AtomicU64::new(0)),
-            unreflected_input: Arc::new(AtomicBool::new(false)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
+            reflected_input_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -5617,7 +5667,8 @@ mod tests {
             content_seq: Arc::new(AtomicU64::new(0)),
             input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
             pending_input_reservations: Arc::new(AtomicU64::new(0)),
-            unreflected_input: Arc::new(AtomicBool::new(false)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
+            reflected_input_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
