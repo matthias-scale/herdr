@@ -473,7 +473,7 @@ fn receipts_dir(run_digest: &str) -> Option<String> {
         .or_else(|| std::env::var_os("SYMPHONY_RUN_ROOT"))
         .map(PathBuf::from)
         .or_else(|| {
-            symphony_home_dir().map(|home| home.join(".local/state/symphony-temporal/runs"))
+            symphony_home_dir().map(|home| home.join(".local/share/symphony-runs-store/runs"))
         })?;
     Some(
         root.join(format!("flow-{run_digest}"))
@@ -1033,6 +1033,31 @@ mod tests {
             );
             assert_eq!(receipts_dir(hostile), None);
         }
+    }
+
+    #[test]
+    fn symphony_receipts_use_executor_run_root_fallback_and_env_precedence() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set("HOME", "/tmp/herdr-symphony-test-home");
+        env.remove("SYMPHONY_FLOW_RUN_ROOT");
+        env.remove("SYMPHONY_RUN_ROOT");
+
+        assert_eq!(
+            receipts_dir("digest").as_deref(),
+            Some("/tmp/herdr-symphony-test-home/.local/share/symphony-runs-store/runs/flow-digest")
+        );
+
+        env.set("SYMPHONY_RUN_ROOT", "/tmp/symphony-run-root");
+        assert_eq!(
+            receipts_dir("digest").as_deref(),
+            Some("/tmp/symphony-run-root/flow-digest")
+        );
+
+        env.set("SYMPHONY_FLOW_RUN_ROOT", "/tmp/symphony-flow-run-root");
+        assert_eq!(
+            receipts_dir("digest").as_deref(),
+            Some("/tmp/symphony-flow-run-root/flow-digest")
+        );
     }
 
     #[test]
