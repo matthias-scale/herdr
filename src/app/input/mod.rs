@@ -4426,6 +4426,9 @@ impl App {
             }
             return;
         }
+        if self.route_text_to_sidebar_subgroup_picker(text) {
+            return;
+        }
         if self.state.mode != Mode::Terminal || self.state.notepad.focused {
             self.paste_into_active_text_input(text);
             return;
@@ -4554,6 +4557,9 @@ impl App {
             }
             return;
         }
+        if self.route_text_to_sidebar_subgroup_picker(&text) {
+            return;
+        }
         if self.state.mode != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
@@ -4585,6 +4591,19 @@ impl App {
                 self.note_human_text(pane_id, &draft);
             }
         }
+    }
+
+    pub(super) fn route_text_to_sidebar_subgroup_picker(&mut self, text: &str) -> bool {
+        if self.state.sidebar_subgroup_picker.is_none() {
+            return false;
+        }
+        for character in text.chars().filter(|character| !character.is_control()) {
+            self.state.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            ));
+        }
+        true
     }
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {

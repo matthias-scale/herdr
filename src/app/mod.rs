@@ -3249,6 +3249,7 @@ impl App {
                     self.state.clear_hovered_control();
                     if self.try_route_paste_to_overlay(&text)
                         || self.try_route_paste_to_popup(&text)
+                        || self.route_text_to_sidebar_subgroup_picker(&text)
                     {
                     } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
                         self.paste_into_active_text_input(&text);

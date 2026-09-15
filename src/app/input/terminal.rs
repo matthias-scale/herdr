@@ -62,10 +62,14 @@ impl App {
             }
         }
 
+        let key_event = key.as_key_event();
+        if self.state.handle_sidebar_subgroup_picker_key(key_event) {
+            return None;
+        }
+
         // This is the key already on its way to a pane, so the sidebar may only
         // intercept it while the sidebar owns the keyboard.
         if self.state.sidebar_focused {
-            let key_event = key.as_key_event();
             if self.state.handle_sidebar_new_menu_key(key_event) {
                 return None;
             }
@@ -650,6 +654,87 @@ mod tests {
             app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
         assert!(target.is_none());
         assert!(app.state.sidebar_new_thread.is_none());
+    }
+
+    #[tokio::test]
+    async fn headless_subgroup_picker_owns_key_text_and_paste_input() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("subgroup-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_focused = false;
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('a'),
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("p"),
+            )],
+            false,
+        );
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("i".into())],
+            false,
+        );
+
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("api")
+        );
+        assert!(
+            pane_input.try_recv().is_err(),
+            "picker-owned input must not reach the pane"
+        );
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("api")
+        );
+        assert!(app.state.sidebar_subgroup_picker.is_none());
+        assert!(pane_input.try_recv().is_err());
+
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Esc,
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+        assert!(app.state.sidebar_subgroup_picker.is_none());
+        assert!(pane_input.try_recv().is_err());
     }
 
     #[tokio::test]
