@@ -199,9 +199,13 @@ impl GeneralRow {
     }
 }
 
-/// What pressing `enter` on `row` should write.
+/// Config edits shared by settings rows and compact UI toggles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConfigEdit {
+    Notifications {
+        delivery: crate::config::ToastDelivery,
+        sound_enabled: bool,
+    },
     Bool {
         section: &'static str,
         key: &'static str,

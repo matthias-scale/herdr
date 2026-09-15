@@ -673,9 +673,12 @@ log_file = "pomodoro-log.md"
 
 当后台智能体完成任务或需要输入时，Herdr 可以通知你：
 
+通知默认静音。休息计时器旁的铃铛可切换这台机器的弹出通知和声音，并将两项选择写入这台机器的配置文件。
+
 ```toml
 [ui.toast]
 delivery = "herdr"
+terminal_backend = "auto"
 delay_seconds = 1
 
 [ui.toast.herdr]
@@ -683,6 +686,8 @@ position = "bottom-right"
 ```
 
 选择 `herdr` 可使用应用内 toast，选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。
+
+使用 `delivery = "terminal"` 时，`terminal_backend = "auto"` 会检测 WezTerm、iTerm2、Ghostty 和 Kitty。SSH 转发 `LC_TERMINAL=WezTerm` 或 `LC_TERMINAL=iTerm2` 时也能识别。如果 SSH 无法提供终端标识，请为 WezTerm、iTerm2 或 Ghostty 设置 `terminal_backend = "osc9"`，为 Kitty 设置 `"osc99"`。
 
 在 macOS 上，`system` 会先尝试 `terminal-notifier`；如果它不可用或执行失败，则回退到 `/usr/bin/osascript`。该回退方式会在通知中心显示为 Script Editor，并且无法激活承载 Herdr 的终端。可运行 `brew install terminal-notifier` 安装 `terminal-notifier`。如果 Herdr 检测到受支持的终端，点击通知时它可以激活该终端应用。也可以选择 `terminal`，让受支持的外层终端负责发送通知。
 
@@ -692,12 +697,13 @@ position = "bottom-right"
 
 ```toml
 [ui.sound]
+enabled = true
 path = "sounds/notification.mp3"
 done_path = "sounds/done.mp3"
 request_path = "sounds/request.mp3"
 ```
 
-`path` 为所有声音通知设置同一种声音。`done_path` 和 `request_path` 只覆盖完成和需要输入时的声音。
+声音默认静音。设置 `enabled = true` 可将其打开。`path` 为所有声音通知设置同一种声音。`done_path` 和 `request_path` 只覆盖完成和需要输入时的声音。
 
 按智能体覆盖声音设置时，可使用 `default`、`on` 或 `off`。键应使用检测到的智能体标签，例如 `claude`、`codex`、`devin` 或 `droid`。Droid 默认静音。
 

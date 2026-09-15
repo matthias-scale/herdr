@@ -6702,6 +6702,11 @@ pub(super) fn render_sidebar(
         crate::ui::pomodoro::pomodoro_hit_area(app, area),
         app.view_observed_at,
     );
+    crate::ui::pomodoro::render_notification_toggle(
+        app,
+        frame,
+        crate::ui::pomodoro::notification_hit_area(app, area),
+    );
     let refresh = sidebar_footer_refresh_hit_area(area);
     if refresh.width > 0 {
         let style = sidebar_footer_style(

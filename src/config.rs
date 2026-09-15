@@ -29,8 +29,8 @@ pub use self::{
         NewTerminalCwdConfig, NewThreadWorkspaceConfig, NotepadConfig, PanelConfig,
         PanelSurfaceConfig, PomodoroConfig, ProjectConfig, ShellModeConfig,
         SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
+        TerminalNotificationBackend, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
         MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{

@@ -4904,6 +4904,12 @@ mod tests {
                 Some(ControlId::SidebarFooter(item))
             );
         }
+        let bell = app.state.view.notification_hit_area;
+        app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::Notifications))
+        );
         let linear = areas[3];
 
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
@@ -8698,6 +8704,55 @@ mod tests {
     }
 
     #[test]
+    fn clicking_notification_bell_persists_both_transitions() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-notification-bell-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "# per-machine config\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+        let bell = app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+        assert!(!app.state.notifications_enabled());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            bell.x,
+            bell.y,
+        ));
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        assert!(app.state.sound.enabled);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            bell.x,
+            bell.y,
+        ));
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Off
+        );
+        assert!(!app.state.sound.enabled);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid config");
+        assert_eq!(saved.ui.toast.delivery, crate::config::ToastDelivery::Off);
+        assert!(!saved.ui.sound.enabled);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn sidebar_footer_order_hit_areas_settings_and_hover_are_complete() {
         use crate::app::state::SidebarFooterItem;
 
@@ -8718,6 +8773,16 @@ mod tests {
         ];
         assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
         assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+
+        let bell = app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+        app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(crate::app::state::ControlId::SidebarFooter(
+                SidebarFooterItem::Notifications
+            ))
+        );
 
         let linear = areas[3];
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
