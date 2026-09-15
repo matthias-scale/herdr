@@ -1273,6 +1273,11 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 for call in rpc.call_args_list
             )
         )
+        metadata = rpc.call_args_list[-1].args[3]
+        self.assertEqual(metadata["agent"], "codex")
+        self.assertEqual(
+            metadata["applies_to_source"], "herdr:codex-closing-block"
+        )
 
     def test_report_uses_a_sequence_reserved_by_the_caller(self):
         with self._isolated():

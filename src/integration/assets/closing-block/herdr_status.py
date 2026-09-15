@@ -385,6 +385,7 @@ def report(
     meta_params = {
         "pane_id": pane_id,
         "source": source,
+        "agent": agent,
         "applies_to_source": source,
         "tokens": tokens,
         "state_labels": {
