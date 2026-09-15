@@ -4499,6 +4499,9 @@ impl App {
             }
             return;
         }
+        if self.route_text_to_sidebar_subgroup_picker(&text) {
+            return;
+        }
         if self.state.mode != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
@@ -9286,6 +9289,36 @@ navigate_workspace_down = "ctrl+j"
         app.handle_text_commit_headless("continue");
         assert!(rx.try_recv().is_ok());
         assert_blocked_hook_retired(&app, &terminal_id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_text_commit_is_consumed_by_visible_subgroup_picker() {
+        let (mut app, _terminal_id, mut pane_input) = terminal_app_with_blocked_hook();
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("api"),
+            ))
+            .await
+        );
+
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("api")
+        );
+        assert!(
+            pane_input.try_recv().is_err(),
+            "picker-owned text must not reach the pane"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
