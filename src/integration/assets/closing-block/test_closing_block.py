@@ -2138,6 +2138,77 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(reports[1]["completion"], "incomplete")
         self.assertEqual(reports[1]["parse_status"], "ok")
 
+    def test_post_without_a_marker_cannot_clear_an_unrelated_pending_gate(self):
+        import json
+
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._POST)
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["state"], "working")
+        self.assertEqual(reports[0]["parse_status"], "missing")
+        with open(self.hook.mirror_path(self.pane_id), encoding="utf-8") as fh:
+            mirrored = json.load(fh)
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate A"])
+
+    def test_late_post_cannot_restore_over_a_newer_authoritative_report(self):
+        import json
+
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self._run(self._PRE)
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 8, "label": "Gate", "text": "Gate B"}],
+            completion="incomplete",
+            parse_status="ok",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._POST)
+
+        self.assertEqual(self._reports(), [])
+        self.assertIsNone(self.hook.read_marker(self.pane_id))
+        with open(self.hook.mirror_path(self.pane_id), encoding="utf-8") as fh:
+            mirrored = json.load(fh)
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate B"])
+
+    def test_mismatched_post_cannot_clear_another_tool_question(self):
+        self._run(self._PRE)
+        self.rpc.reset_mock()
+
+        self._run(dict(self._POST, tool_use_id="toolu_other"))
+
+        self.assertEqual(self._reports(), [])
+        self.assertIsNotNone(self.hook.read_marker(self.pane_id))
+        self._run(self._POST)
+        self.assertEqual(len(self._reports()), 1)
+        self.assertIsNone(self.hook.read_marker(self.pane_id))
+
     def test_a_prompt_submit_clears_a_dialog_cancelled_with_escape(self):
         self._run(self._PRE)
         self._run(
