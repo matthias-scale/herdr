@@ -3078,9 +3078,12 @@ impl App {
                                 continue;
                             }
                             // Popup input is routed below by its terminal context.
-                            // The floating subgroup picker otherwise owns keys
-                            // before a stale notepad or sidebar focus can take them.
+                            // Full-frame overlays keep input precedence; otherwise
+                            // the floating subgroup picker owns keys before a stale
+                            // notepad or sidebar focus can take them.
                             if self.state.popup_pane.is_none()
+                                && self.state.symphony_detail.is_none()
+                                && self.state.work_view.is_none()
                                 && self
                                     .state
                                     .handle_sidebar_subgroup_picker_key(key.as_key_event())
@@ -8877,6 +8880,49 @@ last_pane = "prefix+tab"
         );
         assert_eq!(app.state.notepad.body(), note_before);
         assert!(pane_input.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn headless_full_frame_overlays_take_keys_before_subgroup_picker() {
+        for overlay in ["Symphony", "Work"] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("test")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
+                ws_idx: 0,
+                tab_idx: 0,
+                anchor: (7, 4),
+                filter: crate::ui::dropdown::DropdownFilterState::default(),
+            });
+            match overlay {
+                "Symphony" => app.state.toggle_symphony(),
+                "Work" => {
+                    app.state.work_view = Some(state::WorkViewState::new(false, None));
+                }
+                _ => unreachable!(),
+            }
+
+            app.route_client_events_from(
+                42,
+                vec![raw_key(
+                    KeyCode::Char('a'),
+                    KeyModifiers::empty(),
+                    KeyEventKind::Press,
+                )],
+                false,
+            );
+
+            assert_eq!(
+                app.state
+                    .sidebar_subgroup_picker
+                    .as_ref()
+                    .map(|picker| picker.filter.query.as_str()),
+                Some(""),
+                "{overlay} must retain input precedence over the subgroup picker"
+            );
+        }
     }
 
     #[tokio::test]
