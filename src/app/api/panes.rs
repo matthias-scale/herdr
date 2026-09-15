@@ -3246,7 +3246,7 @@ mod tests {
             .current_dir(asset_dir)
             .args([
                 "-c",
-                "import json, sys; import herdr_status; items = json.loads(sys.argv[1]); outcome = herdr_status.report(agent='claude', blocking=0, agents=0, items=items, pane_id='', sock_path=''); print(json.dumps(outcome['payload']))",
+                "import json, sys; import herdr_status; items = json.loads(sys.argv[1]); outcome = herdr_status.report(agent='claude', blocking=0, agents=0, items=items, completion='incomplete' if items else 'complete', parse_status='ok', pane_id='', sock_path=''); print(json.dumps(outcome['payload']))",
                 &input,
             ])
             .output()
