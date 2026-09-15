@@ -255,17 +255,22 @@ repository may be bound to only one workspace.
 Read output:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw] [--json]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
 
 `pane read` prints UTF-8 terminal text directly. ANSI escapes are stripped by default; use `--format ansi` or `--ansi` to preserve them where the source exposes styling. The `detection` source is always plain text. For recent sources, `--lines N` selects the last N rendered terminal rows before optional unwrapping; without it, reads default to 80 rows. For `visible` and `detection`, omitting `--lines` returns the full snapshot, while specifying it keeps the last N newline-delimited lines. `agent read` uses the same output and line behavior.
 
+`--json` returns the complete response envelope. An unbounded text read from the
+`detection` source includes `terminal_id`, `agent_ref`, `agent_session`, and an
+`input_observation.token` when the snapshot is coherent and no input is pending.
+
 Send input:
 
 ```bash
 herdr pane send-text <pane_id> <text>
+herdr pane send-text-if <pane_id> <text> --workspace <workspace_id> --terminal <terminal_id> --agent-ref <host::pane> --agent-source <source> --agent <label> --session-kind <id|path> --session <value> --condition detection-snapshot-unchanged --observation-token <token>
 herdr pane send-keys <pane_id> <key> [key ...]
 herdr pane run <pane_id> <command>
 ```
@@ -279,6 +284,13 @@ aliases for `ctrl+c`.
 `esc` is the canonical spelling; `escape` is also accepted.
 
 `pane run` honors live bracketed-paste mode and submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting.
+
+`pane send-text-if` is for automation that must not overwrite intervening input.
+Copy every identity field and the observation token from the JSON detection read.
+It emits `pane_text_send` with `outcome: sent` only after one enqueue; a stale
+identity, changed snapshot, or pending input emits `outcome: condition_mismatch`
+and sends no bytes. Servers without this method reject it without falling back to
+unguarded `pane.send_text`.
 
 Report agent state from custom hooks:
 

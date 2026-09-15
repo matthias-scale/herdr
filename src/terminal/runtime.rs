@@ -540,6 +540,19 @@ impl TerminalRuntime {
         self.0.try_send_bytes(bytes)
     }
 
+    pub(crate) fn input_observation(&self) -> Option<crate::pane::InputObservation> {
+        self.0.input_observation()
+    }
+
+    pub(crate) fn try_send_bytes_if_observation(
+        &self,
+        observation_token: &str,
+        bytes: Bytes,
+    ) -> crate::pane::ConditionalInputResult {
+        self.0
+            .try_send_bytes_if_observation(observation_token, bytes)
+    }
+
     #[cfg(unix)]
     pub(crate) fn try_acquire_remote_owner(
         &self,
