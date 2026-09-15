@@ -130,7 +130,7 @@ Herdr moves panes into the collapsible Settled section when their primary pull r
 
 A pane also settles after its agent stays quiet for `settle_done_after_minutes`. Quiet means the resolved agent state is idle with no closing gate, usage limit, active sub-agent, or held shell. The trigger applies whether or not the pane has been seen and when stale supervision resolves to an idle screen. Stale screens that resolve to working or blocked do not settle.
 
-When a settled pane has a native resume plan, Herdr can stop its process and offer Resume. Without one, Herdr keeps the runtime live and clicking its Settled row focuses that pane directly. These live settled panes remain eligible for automatic reaping on `reap_done_after_minutes`; resumable settled panes remain exempt.
+When a settled pane has a native resume plan, Herdr can stop its process until you reopen it. Clicking any settled row or its workspace header focuses the pane, returns it to the active sidebar, and resumes it when needed. Without a resume plan, Herdr keeps the runtime live and focuses it directly. Pressing `enter` on a keyboard-selected settled row still opens its action menu. Live settled panes remain eligible for automatic reaping on `reap_done_after_minutes`; resumable settled panes remain exempt.
 
 The three triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, `auto_settle_inactive = false` to stop the multi-day inactivity trigger, and `auto_settle_done = false` to stop settling quiet agents on the shorter minute clock. All three are on by default and are toggles in **Settings → General**.
 

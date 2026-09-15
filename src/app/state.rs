@@ -1006,6 +1006,9 @@ pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
     pub indented: bool,
+    /// The settled pane represented by this workspace header, when the header
+    /// belongs to the Settled section.
+    pub settled_pane_id: Option<PaneId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

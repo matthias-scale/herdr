@@ -1901,6 +1901,7 @@ pub(crate) enum SidebarRow {
     Workspace {
         ws_idx: usize,
         indented: bool,
+        settled_pane_id: Option<crate::layout::PaneId>,
         title: String,
         count: Option<usize>,
         /// Canonical group key the sort dropdown writes to, when this header
@@ -2534,6 +2535,7 @@ fn append_legacy_space_rows(
         rows.push(SidebarRow::Workspace {
             ws_idx,
             indented: false,
+            settled_pane_id: None,
             title: String::new(),
             count: None,
             sort_key: space_sort_key,
@@ -2778,12 +2780,14 @@ fn append_repo_group_rows(
         mark_redundant_space_labels(&mut group.entries, &group.title);
         let group_sort = effective_sidebar_group_sort(app, &group.key, SidebarSortMode::Default);
         if !group.unlinked {
-            let Some(ws_idx) = group.entries.first().map(|entry| entry.ws_idx) else {
+            let Some(representative) = group.entries.first() else {
                 continue;
             };
+            let ws_idx = representative.ws_idx;
             rows.push(SidebarRow::Workspace {
                 ws_idx,
                 indented: false,
+                settled_pane_id: settled.then_some(representative.pane_id),
                 title: group.title.clone(),
                 count: Some(group.entries.len()),
                 sort_key: Some(group.key.clone()),
@@ -5248,7 +5252,10 @@ pub(crate) fn compute_sidebar_row_areas(
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
             SidebarRow::Workspace {
-                ws_idx, indented, ..
+                ws_idx,
+                indented,
+                settled_pane_id,
+                ..
             } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
@@ -5261,6 +5268,7 @@ pub(crate) fn compute_sidebar_row_areas(
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    settled_pane_id: *settled_pane_id,
                 });
             }
             SidebarRow::Agent { entry, depth } => {
@@ -15290,6 +15298,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            settled_pane_id: None,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");

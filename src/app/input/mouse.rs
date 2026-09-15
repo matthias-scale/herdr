@@ -1653,15 +1653,26 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some(target) = self.sidebar_settled_target_at(mouse.row) {
+                    if self.sidebar_settled_target_at(mouse.row).is_some() {
                         self.sidebar_selected_work_group = None;
-                        if !self.settled_target_has_resume_plan(&target) {
-                            self.sidebar_selected_settled = None;
-                            self.mode = Mode::Terminal;
-                            return Some(MouseAction::FocusLiveSettledPane(target));
+                        self.sidebar_selected_settled = None;
+                        self.mode = Mode::Terminal;
+                        if let Some((ws_idx, tab_idx)) =
+                            self.tab_target_at(mouse.row).or_else(|| {
+                                self.agent_detail_target_at(mouse.row)
+                                    .map(|(ws_idx, tab_idx, _)| (ws_idx, tab_idx))
+                            })
+                        {
+                            self.tab_presses.insert(
+                                source_id,
+                                TabPressState {
+                                    ws_idx,
+                                    tab_idx,
+                                    start_col: mouse.column,
+                                    start_row: mouse.row,
+                                },
+                            );
                         }
-                        self.sidebar_selected_settled = Some(target);
-                        self.mode = Mode::Navigate;
                         return None;
                     }
 
@@ -3060,11 +3071,18 @@ impl AppState {
     ) -> Option<MouseAction> {
         if let Some(press) = workspace_press {
             self.mode = Mode::Terminal;
+            if let Some(target) = self.sidebar_settled_target_at(press.start_row) {
+                return Some(MouseAction::FocusLiveSettledPane(target));
+            }
             return Some(MouseAction::FocusWorkspace {
                 ws_idx: press.ws_idx,
             });
         }
         if let Some(press) = tab_press {
+            if let Some(target) = self.sidebar_settled_target_at(press.start_row) {
+                self.mode = Mode::Terminal;
+                return Some(MouseAction::FocusLiveSettledPane(target));
+            }
             if self.active == Some(press.ws_idx) {
                 self.mode = Mode::Terminal;
                 return Some(MouseAction::FocusTab {
