@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_items_have_no_nonblocking_attention_category() {
+    fn action_point_items_have_no_nonblocking_attention_category() {
         let terminal_id = TerminalId::alloc();
         let mut terminal = TerminalState::new(terminal_id.clone(), "/tmp".into());
         terminal.set_raw_agent_state_for_test(AgentState::Idle);

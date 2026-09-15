@@ -767,7 +767,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(block.wire_gates(), [])
         self.assertIsNone(block.message())
 
-    def test_answer_and_what_to_test_are_nonblocking_items(self):
+    def test_answer_and_informational_notes_remain_separate_items(self):
         block = closing_block.parse(REALISTIC_CAP)
         items = block.wire_items()
 
