@@ -2805,6 +2805,10 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
+    fn headless_overlay_precedes_subgroup_picker(&self) -> bool {
+        self.state.usage_view.is_some() || self.try_route_paste_to_overlay()
+    }
+
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         // Full-frame overlays bypass ordinary pane context. The inbox routes keys
         // to a selected pane, while Symphony and home consume them themselves.
@@ -3078,12 +3082,11 @@ impl App {
                                 continue;
                             }
                             // Popup input is routed below by its terminal context.
-                            // Full-frame overlays keep input precedence; otherwise
-                            // the floating subgroup picker owns keys before a stale
-                            // notepad or sidebar focus can take them.
+                            // Non-Home full-frame overlays keep input precedence;
+                            // otherwise the floating subgroup picker owns keys
+                            // before a stale notepad or sidebar focus can take them.
                             if self.state.popup_pane.is_none()
-                                && self.state.symphony_detail.is_none()
-                                && self.state.work_view.is_none()
+                                && !self.headless_overlay_precedes_subgroup_picker()
                                 && self
                                     .state
                                     .handle_sidebar_subgroup_picker_key(key.as_key_event())
@@ -3155,6 +3158,15 @@ impl App {
                                 continue;
                             }
                             if self.handle_dock_chooser_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.state.popup_pane.is_none()
+                                && self.state.dock_object_preview.is_some()
+                            {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
@@ -8884,9 +8896,13 @@ last_pane = "prefix+tab"
 
     #[tokio::test]
     async fn headless_full_frame_overlays_take_keys_before_subgroup_picker() {
-        for overlay in ["Symphony", "Work"] {
+        for overlay in ["Symphony", "Usage", "Work", "dock preview"] {
             let mut app = test_app();
-            app.state.workspaces = vec![Workspace::test_new("test")];
+            let mut workspace = Workspace::test_new("test");
+            let focused = workspace.focused_pane_id().unwrap();
+            let (runtime, mut pane_input) = TerminalRuntime::test_with_channel(80, 24);
+            workspace.tabs[0].runtimes.insert(focused, runtime);
+            app.state.workspaces = vec![workspace];
             app.state.active = Some(0);
             app.state.selected = 0;
             app.state.mode = Mode::Terminal;
@@ -8898,8 +8914,16 @@ last_pane = "prefix+tab"
             });
             match overlay {
                 "Symphony" => app.state.toggle_symphony(),
+                "Usage" => app.state.toggle_usage_view(),
                 "Work" => {
                     app.state.work_view = Some(state::WorkViewState::new(false, None));
+                }
+                "dock preview" => {
+                    app.state.dock_collapsed = true;
+                    app.state.dock_object_preview = Some(state::DockObjectRef {
+                        surface: state::DockSurface::Linear,
+                        key: "SCA-1".into(),
+                    });
                 }
                 _ => unreachable!(),
             }
@@ -8907,7 +8931,7 @@ last_pane = "prefix+tab"
             app.route_client_events_from(
                 42,
                 vec![raw_key(
-                    KeyCode::Char('a'),
+                    KeyCode::Char('7'),
                     KeyModifiers::empty(),
                     KeyEventKind::Press,
                 )],
@@ -8922,6 +8946,16 @@ last_pane = "prefix+tab"
                 Some(""),
                 "{overlay} must retain input precedence over the subgroup picker"
             );
+            assert!(
+                pane_input.try_recv().is_err(),
+                "{overlay} must not leak keys into the focused pane"
+            );
+            if overlay == "Usage" {
+                assert_eq!(
+                    app.state.usage_view.as_ref().map(|view| view.range),
+                    Some(state::UsageRange::Days7)
+                );
+            }
         }
     }
 
