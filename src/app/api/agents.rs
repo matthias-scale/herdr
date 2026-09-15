@@ -957,8 +957,8 @@ mod tests {
             panic!("expected panel-removed explain response");
         };
         assert_eq!(explain["screen_state"], "idle");
-        assert_eq!(explain["effective_state"], "idle");
-        assert_eq!(explain["arbitration"], "screen");
+        assert_eq!(explain["effective_state"], "unknown");
+        assert_eq!(explain["arbitration"], "closing_task_uncertain");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1149,8 +1149,8 @@ mod tests {
             app.handle_internal_event(event);
             assert_eq!(
                 app.agent_info(0, pane_id).unwrap().agent_status,
-                AgentStatus::Done,
-                "hidden pane reaches Done only from the manifest-confirmed idle screen"
+                AgentStatus::Unknown,
+                "screen idle cannot complete a task report with missing completion evidence"
             );
         }
     }
@@ -1158,10 +1158,25 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn closing_block_authority_is_limited_to_live_blocked_gates_explain_matches_effective_state(
     ) {
-        for (report_state, expected_status, expected_label) in [
-            (AgentState::Working, AgentStatus::Working, "working"),
-            (AgentState::Idle, AgentStatus::Idle, "idle"),
-            (AgentState::Unknown, AgentStatus::Unknown, "unknown"),
+        for (report_state, expected_status, expected_label, expected_arbitration) in [
+            (
+                AgentState::Working,
+                AgentStatus::Working,
+                "working",
+                "closing_block_report",
+            ),
+            (
+                AgentState::Idle,
+                AgentStatus::Unknown,
+                "unknown",
+                "closing_task_uncertain",
+            ),
+            (
+                AgentState::Unknown,
+                AgentStatus::Unknown,
+                "unknown",
+                "closing_block_report",
+            ),
         ] {
             let mut app = app_with_agent();
             let pane_id = app.state.workspaces[0].tabs[0].root_pane;
@@ -1207,7 +1222,7 @@ mod tests {
             };
             assert_eq!(info.agent_status, expected_status, "{report_state:?}");
             assert_eq!(explain["effective_state"], expected_label);
-            assert_eq!(explain["arbitration"], "closing_block_report");
+            assert_eq!(explain["arbitration"], expected_arbitration);
 
             app.handle_internal_event(crate::events::AppEvent::StateChanged {
                 pane_id,
@@ -1225,9 +1240,9 @@ mod tests {
             let ResponseResult::AgentExplain { explain } = success.result else {
                 panic!("expected refreshed agent explain response");
             };
-            assert_eq!(info.agent_status, AgentStatus::Idle);
-            assert_eq!(explain["effective_state"], "idle");
-            assert_eq!(explain["arbitration"], "screen");
+            assert_eq!(info.agent_status, AgentStatus::Unknown);
+            assert_eq!(explain["effective_state"], "unknown");
+            assert_eq!(explain["arbitration"], "closing_task_uncertain");
         }
     }
 

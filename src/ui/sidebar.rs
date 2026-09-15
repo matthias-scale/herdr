@@ -114,9 +114,8 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 
 /// Runtime severity shared by dots and the sidebar filter.
 ///
-/// `entry_is_blocked` narrows this for navigation and the inbox, where a
-/// working pane is not yet a stop. The sidebar filter instead follows the dot
-/// exactly, so a latched Gate remains visible while work resumes.
+/// `entry_is_blocked` narrows this for navigation, the inbox, and the sidebar
+/// filter, where active work remains blue even with a retained action point.
 pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     #[cfg(test)]
     ENTRY_ATTENTION_TIER_VISITS.with(|visits| visits.set(visits.get() + 1));
@@ -168,9 +167,9 @@ pub(crate) fn entry_has_red_dot(entry: &AgentPanelEntry) -> bool {
     entry_is_blocked(entry)
 }
 
-/// A working pane keeps its blue lifecycle label while a human gate is latched.
-/// Once work stops, the gate becomes blocking and supplies the blocked label.
-/// Usage limits still override every lifecycle label.
+/// Whether a retained action point must supply a blocked label over a
+/// non-working lifecycle state. Working stays blue, and a projected Blocked
+/// state already owns its label. Usage limits override both.
 #[cfg(test)]
 pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
     entry.usage_limited
@@ -9346,7 +9345,7 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["pane/1", "pane/2", "pane/4", "ra-windowless"]
+            ["pane/2", "pane/4", "ra-windowless"]
         );
     }
 
@@ -10236,7 +10235,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|entry| entry.ws_idx)
                 .collect::<Vec<_>>(),
-            [0, 1]
+            [1]
         );
         assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
     }
@@ -10707,7 +10706,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn red_gate_dot_and_dimmed_subagent_count_share_the_row() {
+    fn blue_working_dot_and_active_subagent_count_share_the_row() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("blocked review".into());
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -10740,16 +10739,16 @@ pub(crate) mod tests {
                 .unwrap();
             let card = compute_tab_card_areas(&app, area)[0].clone();
             let buffer = terminal.backend().buffer();
-            let gate_x = (card.rect.x..card.rect.x + card.rect.width)
+            let working_x = (card.rect.x..card.rect.x + card.rect.width)
                 .find(|x| {
                     let cell = &buffer[(*x, card.rect.y)];
-                    cell.symbol() == "○" && cell.fg == app.palette.red
+                    cell.symbol() == "●" && cell.fg == app.palette.blue
                 })
-                .unwrap_or_else(|| panic!("width {width} omitted red gate dot"));
-            let gate_style = buffer[(gate_x, card.rect.y)].style();
+                .unwrap_or_else(|| panic!("width {width} omitted blue working dot"));
+            let working_style = buffer[(working_x, card.rect.y)].style();
             let rendered = row_text(buffer, card.rect.y, card.rect.width);
             assert!(rendered.contains("pi+3"), "width {width}: {rendered:?}");
-            assert!(!gate_style.add_modifier.contains(Modifier::DIM));
+            assert!(!working_style.add_modifier.contains(Modifier::DIM));
         }
     }
 
@@ -11779,7 +11778,7 @@ pub(crate) mod tests {
             });
             (has_blocked_header, red_rows)
         };
-        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 0));
 
         app.terminals
             .get_mut(&terminal_id)
@@ -11791,9 +11790,9 @@ pub(crate) mod tests {
             .find(|entry| entry.pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers, "the gate stays latched");
-        assert_eq!(entry.state, AgentState::Idle);
+        assert_eq!(entry.state, AgentState::Blocked);
         assert!(entry_is_blocked(&entry));
-        assert!(gate_overrides_label(&entry));
+        assert!(!gate_overrides_label(&entry));
         assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
     }
 
@@ -20279,11 +20278,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         entry.state = AgentState::Blocked;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
-        // The tooltip describes the rendered attention tier, even while the
-        // lifecycle state is still working.
+        // Active work remains the visible lifecycle while an action point is
+        // retained for later.
         entry.state = AgentState::Working;
         entry.open_blockers = true;
-        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
         entry.state = AgentState::Idle;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
@@ -20530,8 +20529,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Status);
         assert_eq!(
             sidebar_tab_order(&app),
-            vec![4, 3, 2, 1, 0],
-            "blocked first, then yellow attention, then working and idle"
+            vec![4, 2, 3, 1, 0],
+            "structured action points and blocked lifecycle precede working and idle"
         );
 
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Recent);

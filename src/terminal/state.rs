@@ -255,6 +255,14 @@ pub(crate) struct TerminalAgentHandoffState {
     closing_contract_met: Option<bool>,
     #[serde(default)]
     closing_contract_met_elapsed: Option<Duration>,
+    #[serde(default)]
+    closing_completion: Option<String>,
+    #[serde(default)]
+    closing_wait: Option<String>,
+    #[serde(default)]
+    closing_parse: Option<String>,
+    #[serde(default)]
+    closing_workers_unknown: Option<String>,
 }
 
 #[cfg(unix)]
@@ -723,7 +731,8 @@ impl TerminalState {
 
     fn closing_task_reported(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
-            crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+            authority.retired_at.is_none()
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         }) || self.closing_idle.is_some()
             || self.closing_contract.is_some()
             || self.metadata_tokens.get("closing_completion").is_some()
@@ -3176,6 +3185,13 @@ impl TerminalState {
             && self.closing_idle.is_none()
             && self.closing_contract.is_none()
             && self.closing_contract_met.is_none()
+            && self.metadata_tokens.get("closing_completion").is_none()
+            && self.metadata_tokens.get("closing_wait").is_none()
+            && self.metadata_tokens.get("closing_parse").is_none()
+            && self
+                .metadata_tokens
+                .get("closing_workers_unknown")
+                .is_none()
         {
             return None;
         }
@@ -3206,6 +3222,19 @@ impl TerminalState {
             closing_contract_met_elapsed: self
                 .closing_contract_met_at
                 .map(|reported_at| now.saturating_duration_since(reported_at)),
+            closing_completion: self
+                .metadata_tokens
+                .get("closing_completion")
+                .map(str::to_string),
+            closing_wait: self.metadata_tokens.get("closing_wait").map(str::to_string),
+            closing_parse: self
+                .metadata_tokens
+                .get("closing_parse")
+                .map(str::to_string),
+            closing_workers_unknown: self
+                .metadata_tokens
+                .get("closing_workers_unknown")
+                .map(str::to_string),
         })
     }
 
@@ -3243,6 +3272,19 @@ impl TerminalState {
         self.closing_contract_met_at = handoff
             .closing_contract_met_elapsed
             .and_then(|elapsed| now.checked_sub(elapsed));
+        self.metadata_tokens.patch(
+            HashMap::from([
+                ("closing_completion".into(), handoff.closing_completion),
+                ("closing_wait".into(), handoff.closing_wait),
+                ("closing_parse".into(), handoff.closing_parse),
+                (
+                    "closing_workers_unknown".into(),
+                    handoff.closing_workers_unknown,
+                ),
+            ]),
+            None,
+            now,
+        );
     }
 
     #[cfg(unix)]
@@ -4106,6 +4148,25 @@ mod tests {
     }
 
     #[test]
+    fn task_report_without_completion_cannot_project_as_done() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Unknown, false)
+        );
+    }
+
+    #[test]
     fn explicit_completion_projects_an_idle_task_as_done() {
         let now = Instant::now();
         let mut terminal = test_terminal();
@@ -4581,6 +4642,50 @@ mod tests {
         );
         assert_eq!(restored.state, AgentState::Unknown);
         assert!(restored.hook_authority.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_task_lifecycle_tokens_and_wait_projection() {
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        source.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        source.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            Some("CI checks".into()),
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(true),
+            captured_at,
+        );
+
+        let encoded = serde_json::to_string(
+            &source
+                .terminal_agent_handoff_state(captured_at)
+                .expect("task lifecycle tokens should create handoff state"),
+        )
+        .unwrap();
+        let decoded: TerminalAgentHandoffState = serde_json::from_str(&encoded).unwrap();
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
+
+        assert_eq!(
+            restored.metadata_tokens.get("closing_completion"),
+            Some("incomplete")
+        );
+        assert_eq!(
+            restored.metadata_tokens.get("closing_wait"),
+            Some("CI checks")
+        );
+        assert_eq!(restored.metadata_tokens.get("closing_parse"), Some("ok"));
+        assert_eq!(
+            restored.metadata_tokens.get("closing_workers_unknown"),
+            Some("1")
+        );
+        assert_eq!(
+            restored.sidebar_projection(false),
+            (AgentState::Working, false)
+        );
     }
 
     #[test]
@@ -5775,6 +5880,13 @@ mod tests {
             Some(999),
             Some("startup".into()),
         );
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5825,6 +5937,13 @@ mod tests {
             Some(999),
             Some("startup".into()),
         );
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5852,6 +5971,13 @@ mod tests {
 
         let mut quiet = test_terminal();
         quiet.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        quiet.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
         quiet.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5942,7 +6068,7 @@ mod tests {
             None,
             now,
         ));
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Unknown);
         terminal
     }
 
@@ -7010,6 +7136,13 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Blocked);
         assert_eq!(terminal.detected_agent, None);
 
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            observed + std::time::Duration::from_secs(30),
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -10015,8 +10148,8 @@ mod tests {
         );
         assert_eq!(
             terminal.state,
-            AgentState::Idle,
-            "non-blocked closing report yields to newer screen"
+            AgentState::Unknown,
+            "a closing report without completion remains missing evidence"
         );
 
         terminal.set_hook_authority_at(

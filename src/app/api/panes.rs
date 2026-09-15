@@ -2532,6 +2532,11 @@ mod tests {
         seq: u64,
         gates: Vec<crate::api::schema::ClosingBlockItem>,
     ) -> PaneReportAgentParams {
+        let completion = if gates.is_empty() {
+            crate::api::schema::ClosingCompletion::Complete
+        } else {
+            crate::api::schema::ClosingCompletion::Incomplete
+        };
         PaneReportAgentParams {
             pane_id: pane_id.into(),
             source: "herdr:codex-closing-block".into(),
@@ -2548,10 +2553,10 @@ mod tests {
             gates: Some(gates),
             items: Some(Vec::new()),
             decisions: Some(Vec::new()),
-            completion: None,
+            completion: Some(completion),
             external_wait: None,
-            parse_status: None,
-            workers_unknown: None,
+            parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+            workers_unknown: Some(false),
         }
     }
 
@@ -2788,15 +2793,19 @@ mod tests {
             _ => unreachable!(),
         }
         assert!(!app.state.terminals[&terminal_id].usage_limited);
+        let cleared_at = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
         assert_eq!(
-            app.state.refresh_settled_panes_at(None, now, 1_725_000_001),
+            app.state
+                .refresh_settled_panes_at(None, cleared_at, 1_725_000_001),
             0,
             "clearing {blocker} must start, not consume, the quiet window"
         );
         assert_eq!(
             app.state.refresh_settled_panes_at(
                 None,
-                now + app.state.settle_done_after - std::time::Duration::from_nanos(1),
+                cleared_at + app.state.settle_done_after - std::time::Duration::from_nanos(1),
                 1_725_001_799,
             ),
             0
@@ -2804,7 +2813,7 @@ mod tests {
         assert_eq!(
             app.state.refresh_settled_panes_at(
                 None,
-                now + app.state.settle_done_after,
+                cleared_at + app.state.settle_done_after,
                 1_725_001_800,
             ),
             1
