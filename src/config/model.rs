@@ -72,6 +72,19 @@ pub enum ToastDelivery {
     System,
 }
 
+/// Outer-terminal protocol used for `ui.toast.delivery = "terminal"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalNotificationBackend {
+    /// Detect the protocol from the attaching terminal's environment.
+    #[default]
+    Auto,
+    /// OSC 9, supported by WezTerm, iTerm2, and Ghostty.
+    Osc9,
+    /// OSC 99, supported by Kitty.
+    Osc99,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema, Default,
 )]
@@ -211,6 +224,8 @@ fn parse_right_click_passthrough_modifier(value: &str) -> Option<Option<KeyModif
 #[derive(Debug, Clone)]
 pub struct ToastConfig {
     pub delivery: ToastDelivery,
+    /// Outer-terminal protocol for terminal delivery. Auto detects the attaching terminal.
+    pub terminal_backend: TerminalNotificationBackend,
     pub delay_seconds: u64,
     pub herdr: HerdrToastConfig,
     pub clipboard: ClipboardToastConfig,
@@ -2210,6 +2225,7 @@ impl Default for ToastConfig {
     fn default() -> Self {
         Self {
             delivery: ToastDelivery::Off,
+            terminal_backend: TerminalNotificationBackend::Auto,
             delay_seconds: 1,
             herdr: HerdrToastConfig::default(),
             clipboard: ClipboardToastConfig::default(),
@@ -2243,6 +2259,7 @@ impl<'de> Deserialize<'de> for ToastConfig {
         #[serde(default)]
         struct RawToastConfig {
             delivery: Option<ToastDelivery>,
+            terminal_backend: TerminalNotificationBackend,
             enabled: Option<bool>,
             delay_seconds: Option<u64>,
             herdr: HerdrToastConfig,
@@ -2264,6 +2281,7 @@ impl<'de> Deserialize<'de> for ToastConfig {
         }
         Ok(Self {
             delivery,
+            terminal_backend: raw.terminal_backend,
             delay_seconds,
             herdr: raw.herdr,
             clipboard: raw.clipboard,
@@ -2975,6 +2993,10 @@ position = "top-center"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
+        assert_eq!(
+            config.ui.toast.terminal_backend,
+            TerminalNotificationBackend::Auto
+        );
         assert_eq!(config.ui.toast.delay_seconds, 2);
         assert_eq!(config.ui.toast.herdr.position, ToastHerdrPosition::TopLeft);
         assert!(!config.ui.toast.clipboard.enabled);
@@ -2988,6 +3010,10 @@ position = "top-center"
     fn toast_config_defaults_preserve_existing_behavior_with_delay() {
         let config = Config::default();
         assert_eq!(config.ui.toast.delivery, ToastDelivery::Off);
+        assert_eq!(
+            config.ui.toast.terminal_backend,
+            TerminalNotificationBackend::Auto
+        );
         assert_eq!(config.ui.toast.delay_seconds, 1);
         assert_eq!(
             config.ui.toast.herdr.position,
@@ -2997,6 +3023,23 @@ position = "top-center"
         assert_eq!(
             config.ui.toast.clipboard.position,
             ToastClipboardPosition::BottomCenter
+        );
+    }
+
+    #[test]
+    fn toast_config_parses_explicit_terminal_backend() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.toast]
+delivery = "terminal"
+terminal_backend = "osc99"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.ui.toast.terminal_backend,
+            TerminalNotificationBackend::Osc99
         );
     }
 

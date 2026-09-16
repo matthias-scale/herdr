@@ -682,9 +682,12 @@ log_file = "pomodoro-log.md"
 
 Herdr は、バックグラウンドのエージェントが完了したり入力を必要としたりしたときに通知できます:
 
+通知はデフォルトでミュートされています。休憩タイマー横のベルで、このマシンのポップアップ通知とサウンドを切り替えます。どちらの設定もこのマシンの設定ファイルに保存されます。
+
 ```toml
 [ui.toast]
 delivery = "herdr"
+terminal_backend = "auto"
 delay_seconds = 1
 
 [ui.toast.herdr]
@@ -692,6 +695,8 @@ position = "bottom-right"
 ```
 
 アプリ内トーストには `herdr`、SSH 越しでも使いやすい外側のターミナル通知には `terminal`、ローカル OS の通知サービスには `system`、ポップアップを無効にするには `off` を選びます。Herdr はアクティブなタブのポップアップを抑制します。位置、遅延の挙動、クリップボードのフィードバック設定については、[設定リファレンス](/docs/config-reference/)で `ui.toast` を検索してください。
+
+`delivery = "terminal"` の場合、`terminal_backend = "auto"` は WezTerm、iTerm2、Ghostty、Kitty を検出します。SSH が `LC_TERMINAL=WezTerm` または `LC_TERMINAL=iTerm2` を転送する場合も検出できます。SSH 越しにターミナル情報を取得できない場合は、WezTerm、iTerm2、Ghostty では `terminal_backend = "osc9"`、Kitty では `"osc99"` を設定してください。
 
 macOS では、`system` は最初に `terminal-notifier` を試し、利用できない場合や失敗した場合は `/usr/bin/osascript` にフォールバックします。このフォールバックは通知センターで Script Editor として表示され、ホストターミナルをアクティブにできません。`brew install terminal-notifier` で `terminal-notifier` をインストールできます。対応するターミナルを Herdr が検出できた場合、通知のクリック時にそのターミナルアプリをアクティブにできます。または、`terminal` を選んで対応する外側のターミナルに通知を送信させてください。
 
@@ -701,12 +706,13 @@ macOS では、`system` は最初に `terminal-notifier` を試し、利用で�
 
 ```toml
 [ui.sound]
+enabled = true
 path = "sounds/notification.mp3"
 done_path = "sounds/done.mp3"
 request_path = "sounds/request.mp3"
 ```
 
-`path` はすべてのサウンド通知に 1 つの音を設定します。`done_path` と `request_path` は、完了音と入力要求音だけを上書きします。
+サウンドはデフォルトでミュートされています。`enabled = true` で有効にします。`path` はすべてのサウンド通知に 1 つの音を設定します。`done_path` と `request_path` は、完了音と入力要求音だけを上書きします。
 
 エージェント別のサウンド上書きには `default`、`on`、`off` を指定できます。キーには `claude`、`codex`、`devin`、`droid` のような検出されたエージェントラベルを使います。Droid はデフォルトでミュートされています。
 

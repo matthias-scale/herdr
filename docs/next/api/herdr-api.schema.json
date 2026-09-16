@@ -1894,6 +1894,36 @@
           ],
           "type": "object"
         },
+        "AgentSessionInfo": {
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/AgentSessionRefKind"
+            },
+            "source": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "agent",
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        "AgentSessionRefKind": {
+          "enum": [
+            "id",
+            "path"
+          ],
+          "type": "string"
+        },
         "AgentStartParams": {
           "properties": {
             "args": {
@@ -3800,6 +3830,51 @@
           "required": [
             "pane_id",
             "keys"
+          ],
+          "type": "object"
+        },
+        "PaneSendTextCondition": {
+          "enum": [
+            "detection_snapshot_unchanged"
+          ],
+          "type": "string"
+        },
+        "PaneSendTextIfParams": {
+          "properties": {
+            "agent_ref": {
+              "$ref": "#/schemas/request/$defs/AgentRef"
+            },
+            "agent_session": {
+              "$ref": "#/schemas/request/$defs/AgentSessionInfo"
+            },
+            "condition": {
+              "$ref": "#/schemas/request/$defs/PaneSendTextCondition"
+            },
+            "observation_token": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "text",
+            "workspace_id",
+            "terminal_id",
+            "agent_ref",
+            "agent_session",
+            "condition",
+            "observation_token"
           ],
           "type": "object"
         },
@@ -6796,6 +6871,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.send_text_if",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSendTextIfParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.send_keys",
               "type": "string"
             },
@@ -7271,6 +7362,40 @@
     },
     "subscription_event": {
       "$defs": {
+        "AgentRef": {
+          "description": "Cross-host identity for a pane-backed agent or windowless run.",
+          "type": "string"
+        },
+        "AgentSessionInfo": {
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/subscription_event/$defs/AgentSessionRefKind"
+            },
+            "source": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "agent",
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        "AgentSessionRefKind": {
+          "enum": [
+            "id",
+            "path"
+          ],
+          "type": "string"
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -7348,6 +7473,17 @@
           ],
           "type": "object"
         },
+        "PaneInputObservation": {
+          "properties": {
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "type": "object"
+        },
         "PaneOutputMatchedEvent": {
           "properties": {
             "matched_line": {
@@ -7369,8 +7505,38 @@
         },
         "PaneReadResult": {
           "properties": {
+            "agent_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/subscription_event/$defs/AgentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "agent_session": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/subscription_event/$defs/AgentSessionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "format": {
               "$ref": "#/schemas/subscription_event/$defs/ReadFormat"
+            },
+            "input_observation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/subscription_event/$defs/PaneInputObservation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "pane_id": {
               "type": "string"
@@ -7384,6 +7550,10 @@
               "$ref": "#/schemas/subscription_event/$defs/ReadSource"
             },
             "tab_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "default": "",
               "type": "string"
             },
             "text": {
@@ -9604,6 +9774,17 @@
           ],
           "type": "object"
         },
+        "PaneInputObservation": {
+          "properties": {
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "type": "object"
+        },
         "PaneLayoutPane": {
           "properties": {
             "focused": {
@@ -9928,8 +10109,38 @@
         },
         "PaneReadResult": {
           "properties": {
+            "agent_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "agent_session": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentSessionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "format": {
               "$ref": "#/schemas/success_response/$defs/ReadFormat"
+            },
+            "input_observation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneInputObservation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "pane_id": {
               "type": "string"
@@ -9943,6 +10154,10 @@
               "$ref": "#/schemas/success_response/$defs/ReadSource"
             },
             "tab_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "default": "",
               "type": "string"
             },
             "text": {
@@ -10030,6 +10245,13 @@
             "viewport_rows"
           ],
           "type": "object"
+        },
+        "PaneSendTextIfOutcome": {
+          "enum": [
+            "sent",
+            "condition_mismatch"
+          ],
+          "type": "string"
         },
         "PaneSwapReason": {
           "enum": [
@@ -11774,6 +11996,22 @@
               "required": [
                 "type",
                 "read"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "outcome": {
+                  "$ref": "#/schemas/success_response/$defs/PaneSendTextIfOutcome"
+                },
+                "type": {
+                  "const": "pane_text_send",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "outcome"
               ],
               "type": "object"
             },

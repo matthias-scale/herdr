@@ -6,7 +6,7 @@ use crate::detect::Agent;
 
 use super::io::resolve_config_relative_path;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default)]
 pub struct SoundConfig {
     pub enabled: bool,
@@ -149,18 +149,6 @@ impl AgentSoundOverrides {
     }
 }
 
-impl Default for SoundConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            path: None,
-            done_path: None,
-            request_path: None,
-            agents: AgentSoundOverrides::default(),
-        }
-    }
-}
-
 impl Default for AgentSoundOverrides {
     fn default() -> Self {
         Self {
@@ -195,6 +183,15 @@ mod tests {
 
     use super::*;
     use crate::config::{config_path, Config};
+
+    #[test]
+    fn sound_defaults_to_muted() {
+        assert!(!SoundConfig::default().enabled);
+        assert!(!Config::default().ui.sound.enabled);
+        let empty: Config = toml::from_str("").expect("empty config parses");
+        assert!(!empty.ui.sound.enabled);
+        assert_eq!(empty.ui.toast.delivery, crate::config::ToastDelivery::Off);
+    }
 
     #[test]
     fn sound_table_config_parses() {

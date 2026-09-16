@@ -10,15 +10,17 @@ use crate::api::schema::{
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
-    PaneSwapReason, PaneSwapResult, PaneTarget, PaneWorkContextSetParams, PaneZoomMode,
-    PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
+    PaneSendInputParams, PaneSendKeysParams, PaneSendTextIfOutcome, PaneSendTextIfParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
+    PaneTarget, PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, PaneZoomReason,
+    PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
 #[cfg(test)]
 use crate::app::Mode;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
+use crate::pane::ConditionalInputResult;
 
 use super::super::api_helpers::{
     detect_state_from_api, encode_api_keys, normalize_metadata_source, normalize_metadata_tokens,
@@ -1346,6 +1348,27 @@ impl App {
         let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let agent_session = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .and_then(crate::app::creation::terminal_agent_session_info);
+        let agent_ref = agent_session.as_ref().and_then(|_| {
+            crate::api::schema::AgentRef::new(
+                self.state.agent_host_name.clone(),
+                public_pane_id.clone(),
+            )
+            .ok()
+        });
         let Some((pane, workspace_id)) = self.lookup_runtime(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
@@ -1357,11 +1380,24 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
-        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
-            pane,
-            params.source,
-            params.format,
-            params.lines,
+        let observation = (params.source == crate::api::schema::ReadSource::Detection
+            && params.format == crate::api::schema::ReadFormat::Text
+            && params.lines.is_none())
+        .then(|| pane.input_observation())
+        .flatten();
+        let snapshot = observation.as_ref().map_or_else(
+            || {
+                crate::app::api_helpers::read_terminal_snapshot(
+                    pane,
+                    params.source,
+                    params.format,
+                    params.lines,
+                )
+            },
+            |observation| crate::pane::TerminalReadSnapshot {
+                text: observation.text.clone(),
+                truncated: false,
+            },
         );
 
         encode_success(
@@ -1369,13 +1405,21 @@ impl App {
             ResponseResult::PaneRead {
                 read: PaneReadResult {
                     pane_id: public_pane_id,
+                    terminal_id: terminal_id.to_string(),
                     workspace_id,
                     tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                    agent_ref,
+                    agent_session,
                     source: params.source,
                     format: params.format,
                     text: snapshot.text,
                     revision: pane.content_revision(),
                     truncated: snapshot.truncated,
+                    input_observation: observation.map(|observation| {
+                        crate::api::schema::PaneInputObservation {
+                            token: observation.token,
+                        }
+                    }),
                 },
             },
         )
@@ -1881,6 +1925,80 @@ impl App {
         }
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_send_text_if(
+        &mut self,
+        id: String,
+        params: PaneSendTextIfParams,
+    ) -> String {
+        let mismatch = || {
+            encode_success(
+                id.clone(),
+                ResponseResult::PaneTextSend {
+                    outcome: PaneSendTextIfOutcome::ConditionMismatch,
+                },
+            )
+        };
+        let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.pane_id) else {
+            return mismatch();
+        };
+        if self.public_workspace_id(ws_idx) != params.workspace_id {
+            return mismatch();
+        }
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return mismatch();
+        };
+        if terminal_id.as_str() != params.terminal_id {
+            return mismatch();
+        }
+        let Ok(agent_ref) = crate::api::schema::AgentRef::new(
+            self.state.agent_host_name.clone(),
+            params.pane_id.clone(),
+        ) else {
+            return mismatch();
+        };
+        if agent_ref != params.agent_ref {
+            return mismatch();
+        }
+        let agent_session = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .and_then(crate::app::creation::terminal_agent_session_info);
+        if agent_session.as_ref() != Some(&params.agent_session) {
+            return mismatch();
+        }
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return mismatch();
+        };
+        let outcome = runtime.try_send_bytes_if_observation(
+            &params.observation_token,
+            Bytes::copy_from_slice(params.text.as_bytes()),
+        );
+        match outcome {
+            ConditionalInputResult::Sent => {
+                if !params.text.is_empty() {
+                    self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                }
+                encode_success(
+                    id,
+                    ResponseResult::PaneTextSend {
+                        outcome: PaneSendTextIfOutcome::Sent,
+                    },
+                )
+            }
+            ConditionalInputResult::ConditionMismatch => mismatch(),
+            ConditionalInputResult::Failed => {
+                encode_error(id, "pane_send_failed", "pane input queue unavailable")
+            }
+        }
     }
 
     pub(super) fn handle_pane_send_input(
@@ -3091,6 +3209,37 @@ mod tests {
         (app, public_pane_id, pane_id)
     }
 
+    fn conditional_send_params(app: &mut App, pane_id: &str) -> PaneSendTextIfParams {
+        let terminal_id =
+            bind_test_agent_session(app, pane_id, "herdr:codex", "codex", "session-1");
+        let _ = app.sync_terminal_titles();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(pane_id).unwrap();
+        let observation = app
+            .lookup_runtime_sender(workspace_idx, internal_pane_id)
+            .unwrap()
+            .input_observation()
+            .expect("coherent input observation");
+        PaneSendTextIfParams {
+            pane_id: pane_id.into(),
+            text: "answer".into(),
+            workspace_id: app.public_workspace_id(workspace_idx),
+            terminal_id: terminal_id.to_string(),
+            agent_ref: crate::api::schema::AgentRef::new(
+                app.state.agent_host_name.clone(),
+                pane_id,
+            )
+            .unwrap(),
+            agent_session: crate::api::schema::AgentSessionInfo {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "session-1".into(),
+            },
+            condition: crate::api::schema::PaneSendTextCondition::DetectionSnapshotUnchanged,
+            observation_token: observation.token,
+        }
+    }
+
     fn metadata_params(pane_id: String) -> PaneReportMetadataParams {
         PaneReportMetadataParams {
             pane_id,
@@ -3276,6 +3425,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_detection_read_exposes_identity_and_a_coherent_observation() {
+        let (mut app, pane_id, _rx) = app_with_send_key_runtime(1);
+        let params = conditional_send_params(&mut app, &pane_id);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "read".into(),
+            method: crate::api::schema::Method::PaneRead(PaneReadParams {
+                pane_id,
+                source: crate::api::schema::ReadSource::Detection,
+                lines: None,
+                format: crate::api::schema::ReadFormat::Text,
+                strip_ansi: true,
+                intent: crate::api::schema::ReadIntent::Passive,
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneRead { read } = success.result else {
+            panic!("expected pane read response");
+        };
+        assert_eq!(read.terminal_id, params.terminal_id);
+        assert_eq!(read.agent_ref.as_ref(), Some(&params.agent_ref));
+        assert_eq!(read.agent_session.as_ref(), Some(&params.agent_session));
+        assert!(read.input_observation.is_some());
+    }
+
+    #[tokio::test]
     async fn api_pane_send_keys_preserves_legacy_control_c_aliases() {
         let (mut app, pane_id, mut rx) = app_with_send_key_runtime(3);
 
@@ -3367,6 +3543,84 @@ mod tests {
             rx.try_recv().unwrap(),
             bytes::Bytes::from_static(b"\x1b[200~A != B\x1b[201~\r")
         );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_conditional_send_matches_all_identity_and_enqueues_once() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+        let params = conditional_send_params(&mut app, &pane_id);
+        let (ws_idx, internal_pane_id) = app.parse_current_public_pane_id(&params.pane_id).unwrap();
+        let terminal_id = app.state.workspaces[ws_idx]
+            .terminal_id(internal_pane_id)
+            .unwrap();
+        assert_eq!(app.public_workspace_id(ws_idx), params.workspace_id);
+        assert_eq!(terminal_id.as_str(), params.terminal_id);
+        assert_eq!(
+            crate::api::schema::AgentRef::new(
+                app.state.agent_host_name.clone(),
+                params.pane_id.clone()
+            )
+            .unwrap(),
+            params.agent_ref
+        );
+        assert_eq!(
+            crate::app::creation::terminal_agent_session_info(
+                app.state.terminals.get(terminal_id).unwrap()
+            )
+            .as_ref(),
+            Some(&params.agent_session)
+        );
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "conditional".into(),
+            method: crate::api::schema::Method::PaneSendTextIf(params),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneTextSend {
+                outcome: crate::api::schema::PaneSendTextIfOutcome::Sent
+            }
+        );
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"answer"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn api_conditional_send_rejects_each_stale_identity_without_enqueuing() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(8);
+        let params = conditional_send_params(&mut app, &pane_id);
+        let mut mismatches = Vec::new();
+        let mut changed = params.clone();
+        changed.pane_id.push_str("-stale");
+        mismatches.push(changed);
+        let mut changed = params.clone();
+        changed.workspace_id.push_str("-stale");
+        mismatches.push(changed);
+        let mut changed = params.clone();
+        changed.terminal_id.push_str("-stale");
+        mismatches.push(changed);
+        let mut changed = params.clone();
+        changed.agent_ref.agent.push_str("-stale");
+        mismatches.push(changed);
+        let mut changed = params.clone();
+        changed.agent_session.value.push_str("-stale");
+        mismatches.push(changed);
+        let mut changed = params;
+        changed.observation_token.push_str("-stale");
+        mismatches.push(changed);
+
+        for params in mismatches {
+            let response = app.handle_pane_send_text_if("conditional".into(), params);
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(
+                success.result,
+                ResponseResult::PaneTextSend {
+                    outcome: crate::api::schema::PaneSendTextIfOutcome::ConditionMismatch
+                }
+            );
+        }
         assert!(rx.try_recv().is_err());
     }
 

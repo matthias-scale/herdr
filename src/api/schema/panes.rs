@@ -268,6 +268,31 @@ pub struct PaneSendTextParams {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSendTextCondition {
+    DetectionSnapshotUnchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSendTextIfParams {
+    pub pane_id: String,
+    pub text: String,
+    pub workspace_id: String,
+    pub terminal_id: String,
+    pub agent_ref: super::AgentRef,
+    pub agent_session: AgentSessionInfo,
+    pub condition: PaneSendTextCondition,
+    pub observation_token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSendTextIfOutcome {
+    Sent,
+    ConditionMismatch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneSendKeysParams {
     pub pane_id: String,
@@ -906,11 +931,24 @@ pub enum PaneResizeReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReadResult {
     pub pane_id: String,
+    #[serde(default)]
+    pub terminal_id: String,
     pub workspace_id: String,
     pub tab_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<super::AgentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<AgentSessionInfo>,
     pub source: ReadSource,
     pub format: ReadFormat,
     pub text: String,
     pub revision: u64,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_observation: Option<PaneInputObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneInputObservation {
+    pub token: String,
 }

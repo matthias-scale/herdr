@@ -521,6 +521,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # terminal = ask the outer terminal to show a desktop notification
 # system = ask the OS notification service directly
 # delivery = "off"
+# Outer-terminal protocol: auto, osc9, or osc99. auto detects the attaching terminal.
+# terminal_backend = "auto"
 # delay_seconds = 1
 
 [ui.toast.herdr]
@@ -532,7 +534,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]
-# enabled = true
+# enabled = false
 # Optional custom mp3 sound files. Relative paths are resolved from this config file's directory.
 # path = "sounds/notification.mp3"   # one mp3 file for all sound notifications
 # done_path = "sounds/done.mp3"      # overrides only finished notifications

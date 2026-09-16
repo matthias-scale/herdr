@@ -862,6 +862,10 @@ pub enum ServerMessage {
 
     /// The remote server refused guarded terminal control.
     ControlError { code: String, message: String },
+
+    /// Reload client-local notification settings and apply the server's
+    /// effective sound permission after attach, config reload, or bell toggle.
+    NotificationConfig { sound_enabled: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -1708,6 +1712,17 @@ mod tests {
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_notification_config_roundtrip() {
+        for sound_enabled in [true, false] {
+            let msg = ServerMessage::NotificationConfig { sound_enabled };
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ServerMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
     }
 
     #[test]

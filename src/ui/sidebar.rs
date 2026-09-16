@@ -1918,6 +1918,7 @@ pub(crate) enum SidebarRow {
     Workspace {
         ws_idx: usize,
         indented: bool,
+        settled_pane_id: Option<crate::layout::PaneId>,
         title: String,
         count: Option<usize>,
         /// Canonical group key the sort dropdown writes to, when this header
@@ -2276,15 +2277,20 @@ fn sidebar_filtered_agent_entries_from(
     let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
-    }
-    .into_iter()
-    .filter(|entry| !app.sidebar_starred_only || entry.starred)
-    .filter(|entry| sidebar_entry_matches_query(app, entry))
-    .collect::<Vec<_>>();
-    if let Some(scope) = sidebar_project_scope(app) {
-        entries.retain(|entry| scope.holds(app, entry));
-    }
+    };
+    let scope = sidebar_project_scope(app);
+    entries.retain(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry));
     entries
+}
+
+fn sidebar_entry_matches_filters(
+    app: &AppState,
+    scope: Option<&ProjectScope<'_>>,
+    entry: &AgentPanelEntry,
+) -> bool {
+    (!app.sidebar_starred_only || entry.starred)
+        && sidebar_entry_matches_query(app, entry)
+        && scope.is_none_or(|scope| scope.holds(app, entry))
 }
 
 fn compact_sidebar_rows_inner(
@@ -2293,7 +2299,19 @@ fn compact_sidebar_rows_inner(
     expand_worktrees: bool,
     include_remote: bool,
 ) -> Vec<SidebarRow> {
-    let mut entries = sidebar_filtered_agent_entries_from(app, terminal_runtimes);
+    let mut entries = match terminal_runtimes {
+        Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
+        None => sidebar_thread_entries(app),
+    };
+    if sidebar_rows_are_filtered(app) {
+        let scope = sidebar_project_scope(app);
+        let visible_tabs = entries
+            .iter()
+            .filter(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry))
+            .map(|entry| (entry.ws_idx, entry.tab_idx))
+            .collect::<std::collections::HashSet<_>>();
+        entries.retain(|entry| visible_tabs.contains(&(entry.ws_idx, entry.tab_idx)));
+    }
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -2304,6 +2322,9 @@ fn compact_sidebar_rows_inner(
             entry.space_label_redundant = true;
         }
     }
+    // Lifecycle sections count and render sessions, not split panes. Aggregate
+    // first so one tab has one canonical representative in exactly one section.
+    let entries = ordered_tab_entries(app, &entries);
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
@@ -2551,6 +2572,7 @@ fn append_legacy_space_rows(
         rows.push(SidebarRow::Workspace {
             ws_idx,
             indented: false,
+            settled_pane_id: None,
             title: String::new(),
             count: None,
             sort_key: space_sort_key,
@@ -2593,7 +2615,7 @@ fn append_legacy_space_rows(
                 }
             }
         } else {
-            let tab_entries = ordered_tab_entries(&member_entries);
+            let tab_entries = ordered_tab_entries(app, &member_entries);
             let parent_key = space_sort_key_for(app, ws_idx);
             append_subgrouped_tab_rows(
                 app,
@@ -2646,7 +2668,7 @@ fn unlinked_sort_key(group: &SidebarWorkGroup) -> (bool, bool) {
 
 fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<SidebarWorkGroup> {
     let mut groups = Vec::new();
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let Some((key, title)) = entry_repo_group(app, &entry) else {
             push_unlinked_entry(app, &mut groups, entry);
             continue;
@@ -2795,12 +2817,14 @@ fn append_repo_group_rows(
         mark_redundant_space_labels(&mut group.entries, &group.title);
         let group_sort = effective_sidebar_group_sort(app, &group.key, SidebarSortMode::Default);
         if !group.unlinked {
-            let Some(ws_idx) = group.entries.first().map(|entry| entry.ws_idx) else {
+            let Some(representative) = group.entries.first() else {
                 continue;
             };
+            let ws_idx = representative.ws_idx;
             rows.push(SidebarRow::Workspace {
                 ws_idx,
                 indented: false,
+                settled_pane_id: settled.then_some(representative.pane_id),
                 title: group.title.clone(),
                 count: Some(group.entries.len()),
                 sort_key: Some(group.key.clone()),
@@ -3017,8 +3041,22 @@ struct SidebarTabGroup {
     unlinked: bool,
 }
 
-fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
+fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
+    let mut representatives = std::collections::HashMap::new();
+    for entry in entries {
+        let key = (entry.ws_idx, entry.tab_idx);
+        representatives
+            .entry(key)
+            .and_modify(|pane_id| {
+                if app.pane_is_settled(entry.ws_idx, *pane_id)
+                    && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
+                {
+                    *pane_id = entry.pane_id;
+                }
+            })
+            .or_insert(entry.pane_id);
+    }
     let mut seen = std::collections::HashSet::new();
     entries
         .iter()
@@ -3027,6 +3065,12 @@ fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
             seen.insert(tab)
                 .then(|| tab_entries.get(&tab).cloned())
                 .flatten()
+                .map(|mut entry| {
+                    if let Some(pane_id) = representatives.get(&tab) {
+                        entry.pane_id = *pane_id;
+                    }
+                    entry
+                })
         })
         .collect()
 }
@@ -3103,7 +3147,7 @@ fn sidebar_tab_groups(
     mode: SidebarGroupMode,
 ) -> Vec<SidebarTabGroup> {
     let mut groups = Vec::new();
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -3917,7 +3961,7 @@ pub(crate) fn sidebar_work_groups(
             });
         }
     }
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -5265,7 +5309,10 @@ pub(crate) fn compute_sidebar_row_areas(
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
             SidebarRow::Workspace {
-                ws_idx, indented, ..
+                ws_idx,
+                indented,
+                settled_pane_id,
+                ..
             } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
@@ -5278,6 +5325,7 @@ pub(crate) fn compute_sidebar_row_areas(
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    settled_pane_id: *settled_pane_id,
                 });
             }
             SidebarRow::Agent { entry, depth } => {
@@ -6714,6 +6762,11 @@ pub(super) fn render_sidebar(
         frame,
         crate::ui::pomodoro::pomodoro_hit_area(app, area),
         app.view_observed_at,
+    );
+    crate::ui::pomodoro::render_notification_toggle(
+        app,
+        frame,
+        crate::ui::pomodoro::notification_hit_area(app, area),
     );
     let refresh = sidebar_footer_refresh_hit_area(area);
     if refresh.width > 0 {
@@ -10350,6 +10403,210 @@ pub(crate) mod tests {
         let style = terminal.backend().buffer()[(card.rect.x + 2, card.rect.y)].style();
         assert_eq!(style.fg, Some(app.palette.overlay0));
         assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn settled_count_matches_distinct_tab_rows() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("settled sessions");
+        workspace.test_split(Direction::Horizontal);
+        workspace.test_split(Direction::Vertical);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for pane in app.workspaces[0].tabs[0].panes.values_mut() {
+            pane.settled_at = Some(1_725_000_000);
+        }
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )),
+                "one tab must count as one settled session in {mode:?}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                    .count(),
+                1,
+                "one settled tab must render one session row in {mode:?}"
+            );
+        }
+
+        let second_tab = app.workspaces[0].test_add_tab(Some("second settled session"));
+        let second_pane = app.workspaces[0].tabs[second_tab].root_pane;
+        app.workspaces[0].tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .expect("second pane")
+            .settled_at = Some(1_725_000_001);
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 2,
+                        ..
+                    }
+                )),
+                "two tabs must count as two settled sessions in {mode:?}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                    .count(),
+                2,
+                "two settled tabs must render two session rows in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_settlement_tab_appears_in_one_lifecycle_section() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("mixed session");
+        let settled_root = workspace.tabs[0].root_pane;
+        let active_split = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_root)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            let tab_entries = rows
+                .iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some(entry.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tab_entries.len(), 1, "mixed tab duplicated in {mode:?}");
+            assert_eq!(
+                tab_entries[0].pane_id, active_split,
+                "the active pane must represent a mixed tab in {mode:?}"
+            );
+            assert!(
+                !rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        ..
+                    }
+                )),
+                "a tab with an active pane must not enter Settled in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_mixed_settlement_tab_keeps_its_active_representative() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("filtered mixed session");
+        workspace.identity_cwd = "/tmp/outside-filtered-project".into();
+        let settled_root = workspace.tabs[0].root_pane;
+        let active_split = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_root)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        let settled_terminal = app.workspaces[0].tabs[0].panes[&settled_root]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&settled_terminal)
+            .expect("settled terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("owner/scoped-repo".into()),
+                work_title: Some("settled-only-needle".into()),
+                ..Default::default()
+            })
+            .expect("settled work context");
+        let active_terminal = app.workspaces[0].tabs[0].panes[&active_split]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&active_terminal)
+            .expect("active terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("owner/other-repo".into()),
+                work_title: Some("active sibling".into()),
+                ..Default::default()
+            })
+            .expect("active work context");
+        app.projects = vec![Project {
+            id: "scoped".into(),
+            label: "scoped".into(),
+            repos: vec![ProjectRepo {
+                name: "scoped-repo".into(),
+                path: "/tmp/filtered-project".into(),
+            }],
+        }];
+        app.reconcile_sidebar_presentation();
+
+        let assert_active_tab = |app: &mut AppState, filter: &str| {
+            for mode in SidebarGroupMode::ALL {
+                app.set_sidebar_group_mode(mode);
+                let rows = sidebar_rows(app);
+                let tab_entries = rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        SidebarRow::Tab { entry, .. } => Some(entry.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    tab_entries.len(),
+                    1,
+                    "filtered mixed tab duplicated for {filter} in {mode:?}"
+                );
+                assert_eq!(
+                    tab_entries[0].pane_id, active_split,
+                    "the active pane must represent {filter} in {mode:?}"
+                );
+                assert!(
+                    !rows.iter().any(|row| matches!(
+                        row,
+                        SidebarRow::SectionHeader {
+                            title: SETTLED_SECTION_TITLE,
+                            ..
+                        }
+                    )),
+                    "{filter} must not move a mixed tab into Settled in {mode:?}"
+                );
+            }
+        };
+
+        app.sidebar_work_filter.query = "settled-only-needle".into();
+        assert_active_tab(&mut app, "search");
+
+        app.sidebar_work_filter.query.clear();
+        app.sidebar_work_filter.project = Some("scoped".into());
+        assert_active_tab(&mut app, "project scope");
     }
 
     #[test]
@@ -15371,6 +15628,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            settled_pane_id: None,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");
