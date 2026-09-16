@@ -4890,6 +4890,14 @@ impl App {
         if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
+            let notifications = self.state.view.notification_hit_area;
+            if self
+                .state
+                .point_in_rect(notifications, mouse.column, mouse.row)
+            {
+                self.toggle_notifications();
+                return;
+            }
             let settings = self.state.view.sidebar_footer_settings_hit_area;
             if self.state.point_in_rect(settings, mouse.column, mouse.row) {
                 settings::open_settings(&mut self.state);

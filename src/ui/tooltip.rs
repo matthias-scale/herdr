@@ -114,6 +114,10 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
             ControlId::SidebarFooter(SidebarFooterItem::Refresh),
             view.sidebar_footer_refresh_hit_area,
         ),
+        (
+            ControlId::SidebarFooter(SidebarFooterItem::Notifications),
+            view.notification_hit_area,
+        ),
     ];
     fixed
         .into_iter()
@@ -174,6 +178,14 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
                 SidebarFooterItem::Linear => (view.sidebar_footer_ticket_hit_area, "Linear"),
                 SidebarFooterItem::Missive => (view.sidebar_footer_missive_hit_area, "Missive"),
                 SidebarFooterItem::Refresh => (view.sidebar_footer_refresh_hit_area, "Refresh"),
+                SidebarFooterItem::Notifications => (
+                    view.notification_hit_area,
+                    if app.notifications_enabled() {
+                        "Mute notifications"
+                    } else {
+                        "Turn on notifications"
+                    },
+                ),
             };
             (rect, label.into())
         }
@@ -318,12 +330,17 @@ mod tests {
         let mut app = AppState::test_new();
         app.view.sidebar_rect = Rect::new(0, 0, 26, 24);
         app.view.sidebar_footer_settings_hit_area = Rect::new(1, 23, 2, 1);
+        app.view.notification_hit_area = Rect::new(14, 23, 2, 1);
         app.view.dock_tab_close_rect = Rect::new(90, 1, 1, 1);
         app.view.add_action_button_hit_area = Rect::new(70, 0, 10, 1);
 
         assert_eq!(
             hovered_control_at(&app, 1, 23),
             Some(ControlId::SidebarFooter(SidebarFooterItem::Settings))
+        );
+        assert_eq!(
+            hovered_control_at(&app, 14, 23),
+            Some(ControlId::SidebarFooter(SidebarFooterItem::Notifications))
         );
         assert_eq!(hovered_control_at(&app, 90, 1), Some(ControlId::DockClose));
         assert_eq!(

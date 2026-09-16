@@ -25,6 +25,7 @@ use crate::pomodoro::{PomodoroPhase, PomodoroPrompt, SEND_OFF_DURATION};
 const INDICATOR_WIDTH: u16 = 9;
 /// Columns the footer icon strip already owns.
 const FOOTER_ICON_COLUMNS: u16 = 13;
+const NOTIFICATION_WIDTH: u16 = 2;
 const PROMPT_WIDTH: u16 = 62;
 const PROMPT_HEIGHT: u16 = 12;
 const ORB_PROMPT_WIDTH: u16 = 82;
@@ -356,7 +357,7 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         return Rect::default();
     }
     let content_width = sidebar.width.saturating_sub(1);
-    if content_width < FOOTER_ICON_COLUMNS + INDICATOR_WIDTH {
+    if content_width < FOOTER_ICON_COLUMNS + NOTIFICATION_WIDTH + INDICATOR_WIDTH {
         return Rect::default();
     }
     Rect::new(
@@ -365,6 +366,26 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         INDICATOR_WIDTH,
         1,
     )
+}
+
+/// The per-machine notification toggle beside the timer. It keeps the
+/// right-most footer slot when the timer is hidden so it remains available at
+/// the supported minimum sidebar width.
+pub(crate) fn notification_hit_area(app: &AppState, sidebar: Rect) -> Rect {
+    if app.sidebar_collapsed || sidebar.height == 0 {
+        return Rect::default();
+    }
+    let content_width = sidebar.width.saturating_sub(1);
+    if content_width < FOOTER_ICON_COLUMNS + NOTIFICATION_WIDTH {
+        return Rect::default();
+    }
+    let timer = pomodoro_hit_area(app, sidebar);
+    let x = if timer.width > 0 {
+        timer.x.saturating_sub(NOTIFICATION_WIDTH)
+    } else {
+        sidebar.x + content_width - NOTIFICATION_WIDTH
+    };
+    Rect::new(x, sidebar.bottom().saturating_sub(1), NOTIFICATION_WIDTH, 1)
 }
 
 fn phase_color(app: &AppState, phase: PomodoroPhase) -> ratatui::style::Color {
@@ -403,6 +424,21 @@ pub(crate) fn render_indicator(
     };
     let line = Line::from(vec![Span::styled(label, style)]);
     frame.render_widget(Paragraph::new(line).right_aligned(), area);
+}
+
+pub(crate) fn render_notification_toggle(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (glyph, color) = if app.notifications_enabled() {
+        ("🔔", app.palette.text)
+    } else {
+        ("🔕", app.palette.overlay0)
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(glyph, Style::default().fg(color))).right_aligned(),
+        area,
+    );
 }
 
 /// The due prompt or its short post-confirm acknowledgment.
@@ -977,6 +1013,54 @@ mod tests {
             pomodoro_hit_area(&app, Rect::new(0, 0, 30, 20)),
             Rect::new(20, 19, 9, 1)
         );
+    }
+
+    #[test]
+    fn notification_bell_stays_visible_and_never_overlaps_the_timer() {
+        let app = state();
+        let narrow = Rect::new(0, 0, 18, 20);
+        assert_eq!(pomodoro_hit_area(&app, narrow), Rect::default());
+        assert_eq!(notification_hit_area(&app, narrow), Rect::new(15, 19, 2, 1));
+
+        let almost_wide = Rect::new(0, 0, 24, 20);
+        assert_eq!(pomodoro_hit_area(&app, almost_wide), Rect::default());
+        assert_eq!(
+            notification_hit_area(&app, almost_wide),
+            Rect::new(21, 19, 2, 1)
+        );
+
+        let wide = Rect::new(0, 0, 25, 20);
+        let bell = notification_hit_area(&app, wide);
+        let timer = pomodoro_hit_area(&app, wide);
+        assert_eq!(bell, Rect::new(13, 19, 2, 1));
+        assert_eq!(timer, Rect::new(15, 19, 9, 1));
+        assert_eq!(bell.right(), timer.x);
+    }
+
+    #[test]
+    fn notification_bell_renders_on_and_muted_states_without_the_timer() {
+        let mut app = state();
+        app.pomodoro.enabled = false;
+        let area = Rect::new(0, 0, 18, 1);
+        let slot = notification_hit_area(&app, area);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(18, 1))
+            .expect("test terminal");
+
+        terminal
+            .draw(|frame| render_notification_toggle(&app, frame, slot))
+            .expect("draw muted bell");
+        let muted = &terminal.backend().buffer()[(slot.x, slot.y)];
+        assert_eq!(muted.symbol(), "🔕");
+        assert_eq!(muted.style().fg, Some(app.palette.overlay0));
+
+        app.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+        app.sound.enabled = true;
+        terminal
+            .draw(|frame| render_notification_toggle(&app, frame, slot))
+            .expect("draw active bell");
+        let active = &terminal.backend().buffer()[(slot.x, slot.y)];
+        assert_eq!(active.symbol(), "🔔");
+        assert_eq!(active.style().fg, Some(app.palette.text));
     }
 
     #[test]

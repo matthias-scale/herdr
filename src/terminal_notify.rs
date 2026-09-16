@@ -1,46 +1,64 @@
 use std::io::{self, Write as _};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalNotificationBackend {
-    Ghostty,
-    Iterm2,
-    Kitty,
-    WezTerm,
-}
+use crate::config::TerminalNotificationBackend;
 
 pub fn detect_backend() -> Option<TerminalNotificationBackend> {
     let term_program = std::env::var("TERM_PROGRAM").ok();
+    let lc_terminal = std::env::var("LC_TERMINAL").ok();
     let term = std::env::var("TERM").ok();
+    detect_backend_from(
+        term_program.as_deref(),
+        lc_terminal.as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        term.as_deref(),
+    )
+}
 
-    match term_program.as_deref() {
-        Some("ghostty") => return Some(TerminalNotificationBackend::Ghostty),
-        Some("iTerm.app") => return Some(TerminalNotificationBackend::Iterm2),
-        Some("WezTerm") => return Some(TerminalNotificationBackend::WezTerm),
-        _ => {}
+fn detect_backend_from(
+    term_program: Option<&str>,
+    lc_terminal: Option<&str>,
+    kitty_window_id: bool,
+    term: Option<&str>,
+) -> Option<TerminalNotificationBackend> {
+    if matches!(term_program, Some("ghostty" | "iTerm.app" | "WezTerm")) {
+        return Some(TerminalNotificationBackend::Osc9);
     }
-
-    if std::env::var_os("KITTY_WINDOW_ID").is_some() {
-        return Some(TerminalNotificationBackend::Kitty);
+    if matches!(lc_terminal, Some("WezTerm" | "iTerm2")) {
+        return Some(TerminalNotificationBackend::Osc9);
     }
-
-    match term.as_deref() {
-        Some("xterm-ghostty") => Some(TerminalNotificationBackend::Ghostty),
-        Some("xterm-kitty") => Some(TerminalNotificationBackend::Kitty),
-        Some(term) if term.contains("wezterm") => Some(TerminalNotificationBackend::WezTerm),
+    if kitty_window_id {
+        return Some(TerminalNotificationBackend::Osc99);
+    }
+    match term {
+        Some("xterm-ghostty") => Some(TerminalNotificationBackend::Osc9),
+        Some("xterm-kitty") => Some(TerminalNotificationBackend::Osc99),
+        Some(term) if term.contains("wezterm") => Some(TerminalNotificationBackend::Osc9),
         _ => None,
     }
 }
 
-pub fn show_notification(title: &str, body: Option<&str>) -> io::Result<bool> {
-    let Some(backend) = detect_backend() else {
+pub fn resolve_backend(
+    configured: TerminalNotificationBackend,
+) -> Option<TerminalNotificationBackend> {
+    match configured {
+        TerminalNotificationBackend::Auto => detect_backend(),
+        explicit => Some(explicit),
+    }
+}
+
+pub fn show_notification(
+    title: &str,
+    body: Option<&str>,
+    configured: TerminalNotificationBackend,
+) -> io::Result<bool> {
+    let Some(backend) = resolve_backend(configured) else {
         return Ok(false);
     };
 
     let sequence = match backend {
-        TerminalNotificationBackend::Ghostty
-        | TerminalNotificationBackend::Iterm2
-        | TerminalNotificationBackend::WezTerm => build_osc9_notification(title, body),
-        TerminalNotificationBackend::Kitty => build_osc99_notification(title, body),
+        TerminalNotificationBackend::Osc9 => build_osc9_notification(title, body),
+        TerminalNotificationBackend::Osc99 => build_osc99_notification(title, body),
+        TerminalNotificationBackend::Auto => unreachable!("auto backend must be resolved"),
     };
 
     let sequence = if std::env::var_os("TMUX").is_some() {
@@ -139,5 +157,55 @@ mod tests {
     fn tmux_passthrough_wraps_and_escapes() {
         let wrapped = wrap_tmux_passthrough(b"\x1b]9;hi\x1b\\");
         assert_eq!(wrapped, b"\x1bPtmux;\x1b\x1b]9;hi\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn explicit_backend_bypasses_auto_detection() {
+        assert_eq!(
+            resolve_backend(TerminalNotificationBackend::Osc99),
+            Some(TerminalNotificationBackend::Osc99)
+        );
+    }
+
+    #[test]
+    fn auto_detects_lc_terminal_forwarded_over_ssh() {
+        assert_eq!(
+            detect_backend_from(None, Some("WezTerm"), false, Some("xterm-256color")),
+            Some(TerminalNotificationBackend::Osc9)
+        );
+        assert_eq!(
+            detect_backend_from(None, Some("iTerm2"), false, Some("xterm-256color")),
+            Some(TerminalNotificationBackend::Osc9)
+        );
+    }
+
+    #[test]
+    fn auto_keeps_existing_terminal_detection_paths() {
+        for term_program in ["ghostty", "iTerm.app", "WezTerm"] {
+            assert_eq!(
+                detect_backend_from(Some(term_program), None, false, None),
+                Some(TerminalNotificationBackend::Osc9)
+            );
+        }
+        assert_eq!(
+            detect_backend_from(None, None, true, None),
+            Some(TerminalNotificationBackend::Osc99)
+        );
+        assert_eq!(
+            detect_backend_from(None, None, false, Some("xterm-ghostty")),
+            Some(TerminalNotificationBackend::Osc9)
+        );
+        assert_eq!(
+            detect_backend_from(None, None, false, Some("xterm-kitty")),
+            Some(TerminalNotificationBackend::Osc99)
+        );
+        assert_eq!(
+            detect_backend_from(None, None, false, Some("wezterm")),
+            Some(TerminalNotificationBackend::Osc9)
+        );
+        assert_eq!(
+            detect_backend_from(None, None, false, Some("xterm-256color")),
+            None
+        );
     }
 }
