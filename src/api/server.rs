@@ -971,6 +971,7 @@ mod tests {
             terminal_title_stripped: None,
             display_agent: None,
             agent_status,
+            waiting_on_agents: false,
             wait: None,
             eta_s: None,
             reported_at: None,

@@ -578,10 +578,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resume_nudge_message = "continue"
 # Nudge an agent when both its status declaration and pane activity have gone quiet.
 # auto_nudge_stalled_agents = false
-# Mark a quiet, unattended agent status report stale after this many minutes: a
-# finished report still holding sub-processes, or a pane parked on an unverified
-# subagent claim. An agent reporting itself working keeps the 20-minute budget.
+# Mark a quiet, unattended finished report with unreported child work stale
+# after this many minutes. Working reports keep the 20-minute budget.
 # agent_stale_after_minutes = 5
+# Parents waiting on declared sub-agents use a longer quiet budget.
+# agent_subagent_stale_after_minutes = 60
 # Initial quiet period and maximum sends in one stale-status episode.
 # nudge_after_minutes = 5
 # max_nudges = 3
@@ -1191,6 +1192,7 @@ mod tests {
     fn default_config_documents_stalled_agent_nudge_and_status_alternative() {
         assert!(DEFAULT_CONFIG.contains("# auto_nudge_stalled_agents = false"));
         assert!(DEFAULT_CONFIG.contains("# agent_stale_after_minutes = 5"));
+        assert!(DEFAULT_CONFIG.contains("# agent_subagent_stale_after_minutes = 60"));
         assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 5"));
         assert!(DEFAULT_CONFIG.contains("# max_nudges = 3"));
         assert!(DEFAULT_CONFIG.contains(

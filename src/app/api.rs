@@ -322,12 +322,10 @@ impl App {
                 pane_id,
                 source,
                 agent_label,
-                state,
                 ..
             } => Some((
                 *pane_id,
-                crate::detect::is_closing_block_source(source, agent_label)
-                    && *state != crate::detect::AgentState::Blocked,
+                crate::detect::is_closing_block_source(source, agent_label),
             )),
             _ => None,
         };
@@ -709,7 +707,7 @@ impl App {
         }
         self.sync_detection_authority_mirrors();
         if hook_state_report_accepted == Some(true) {
-            if let Some((pane_id, closing_non_gate)) = hook_report {
+            if let Some((pane_id, closing_report)) = hook_report {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
                     if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
                         &self.terminal_runtimes,
@@ -717,10 +715,11 @@ impl App {
                         pane_id,
                     ) {
                         runtime.rebaseline_hook_authority_output();
-                        if closing_non_gate {
+                        if closing_report {
                             // Closing-block reports describe turn-end/gate state,
                             // not the full lifecycle. Rescan unchanged terminal
-                            // bytes so a quiet prompt can supersede the report.
+                            // bytes so a quiet prompt becomes the baseline for a
+                            // later visible turn start.
                             runtime.request_agent_screen_rescan();
                         }
                     }
@@ -1168,6 +1167,7 @@ impl App {
         let agent_status = pane_agent_status_with_stale(update.state, update.seen, update.stale);
 
         if previous_agent_status != agent_status
+            || update.previous_waiting_on_agents != update.waiting_on_agents
             || update.previous_wait != update.wait
             || update.previous_eta_s != update.eta_s
             || update.previous_reported_at != update.reported_at
@@ -1180,6 +1180,7 @@ impl App {
                     pane_id,
                     workspace_id,
                     agent_status,
+                    waiting_on_agents: update.waiting_on_agents,
                     wait: update.wait.clone(),
                     eta_s: update.eta_s,
                     reported_at: update.reported_at.clone(),

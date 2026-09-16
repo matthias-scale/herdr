@@ -207,6 +207,9 @@ pub(super) fn agent_panel_label_color(
     if entry_attention_tier(entry) == AttentionTier::Attention {
         return p.peach;
     }
+    if entry.waiting_on_agents {
+        return p.yellow;
+    }
     state_label_color(entry.state, entry.seen, p)
 }
 
@@ -230,6 +233,9 @@ fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
 }
 
 fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
+    if entry.waiting_on_agents && !entry_is_blocked(entry) {
+        return "◌";
+    }
     compact_dot_for_state(
         entry.state,
         entry.seen,
@@ -504,6 +510,9 @@ fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
     // colour rather than a fourth dot shape.
     if entry.completion_tier == Some(CompletionTier::ContractSatisfied) {
         return p.mauve;
+    }
+    if entry.waiting_on_agents {
+        return p.yellow;
     }
     state_label_color(entry.state, entry.seen, p)
 }
@@ -944,6 +953,7 @@ pub(crate) struct AgentPanelEntry {
     /// Positive count from the current sub-agent source. Rendering depends on
     /// this field only so the source can change without changing row layout.
     pub active_subagents: Option<u32>,
+    pub waiting_on_agents: bool,
     pub holds_shell: bool,
     pub gate_count: usize,
     pub seen: bool,
@@ -1389,6 +1399,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         completion_tier,
                         usage_limited: detail.usage_limited,
                         active_subagents,
+                        waiting_on_agents: detail.waiting_on_agents,
                         seen: detail.seen,
                         done_since: detail.done_since,
                         stale: detail.stale,
@@ -1435,6 +1446,7 @@ pub(crate) fn remote_agent_panel_entries(
                 open_blockers,
                 attention_tier,
                 usage_limited,
+                waiting_on_agents,
                 gate_count,
                 state_change_seq,
                 state_labels,
@@ -1467,6 +1479,7 @@ pub(crate) fn remote_agent_panel_entries(
                         false,
                         None,
                         false,
+                        false,
                         0,
                         None,
                         std::collections::HashMap::new(),
@@ -1491,6 +1504,7 @@ pub(crate) fn remote_agent_panel_entries(
                         projection.open_blockers,
                         Some(projection.attention_tier),
                         projection.usage_limited,
+                        projection.waiting_on_agents,
                         usize::from(projection.open_blockers) * info.gates.len(),
                         Some(info.state_change_seq),
                         info.state_labels.clone(),
@@ -1544,6 +1558,7 @@ pub(crate) fn remote_agent_panel_entries(
                         completion_tier: None,
                         usage_limited,
                         active_subagents: None,
+                        waiting_on_agents,
                         holds_shell: false,
                         gate_count,
                         seen,
@@ -1666,6 +1681,7 @@ fn aggregate_tab_entries(
                         tab_entry.state = candidate.0;
                         tab_entry.seen = candidate.1;
                         tab_entry.stale = entry.stale;
+                        tab_entry.waiting_on_agents = entry.waiting_on_agents;
                         tab_entry.completion_tier = entry.completion_tier;
                         tab_entry.state_labels = entry.state_labels.clone();
                         tab_entry.foreground_process_name = entry
@@ -1707,6 +1723,7 @@ fn aggregate_tab_entries(
                     tab_entry.attention_tier =
                         Some(entry_attention_tier(tab_entry).max(entry_attention_tier(entry)));
                     tab_entry.usage_limited |= entry.usage_limited;
+                    tab_entry.waiting_on_agents |= entry.waiting_on_agents;
                 },
             )
             .or_insert_with(|| {
@@ -5503,14 +5520,17 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     }
     // A usage limit outranks every attention tier: no answer releases the
     // pane, only the reset window.
+    let attention = entry_attention_tier(entry);
     let key = if entry.usage_limited {
         "usage"
+    } else if attention == AttentionTier::Blocked {
+        "blocked"
+    } else if entry.waiting_on_agents {
+        "waiting_on_agents"
+    } else if attention == AttentionTier::Attention {
+        return "Needs attention".to_string();
     } else {
-        match entry_attention_tier(entry) {
-            AttentionTier::Blocked => "blocked",
-            AttentionTier::Attention => return "Needs attention".to_string(),
-            AttentionTier::None => agent_panel_status_key(entry.state, entry.seen),
-        }
+        agent_panel_status_key(entry.state, entry.seen)
     };
     if let Some(label) = entry.state_labels.get(key) {
         return label.clone();
@@ -5519,6 +5539,7 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
         "usage" => "Usage limit",
         "blocked" => "Blocked, waiting on you",
         "working" => "Working",
+        "waiting_on_agents" => "Waiting on agents",
         "done" => "Done, unread",
         "idle" => "Idle",
         _ => "Unknown",
@@ -9394,6 +9415,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn remote_waiting_projection_clears_when_the_pane_is_settled() {
+        let mut info = remote_agent_info(
+            "pane/waiting",
+            "remote parent",
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+        );
+        info.waiting_on_agents = true;
+        let snapshot_for = |info| crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote".into()],
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row("remote", info)],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let waiting = remote_agent_panel_entries(&snapshot_for(info.clone()));
+        assert!(waiting[0].entry.waiting_on_agents);
+
+        info.settled_at = Some(1_725_000_023);
+        let settled = remote_agent_panel_entries(&snapshot_for(info));
+        assert!(!settled[0].entry.waiting_on_agents);
+    }
+
+    #[test]
     fn remote_projection_keeps_a_host_named_like_self() {
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![fleet_host_snapshot(
@@ -10891,6 +10941,22 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn waiting_on_agents_has_a_distinct_glyph_and_blocked_still_outranks_it() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
+        entry.waiting_on_agents = true;
+        entry.active_subagents = Some(3);
+
+        assert_eq!(compact_row_dot(&entry), "◌");
+        assert_eq!(compact_row_color(&entry, &palette), palette.yellow);
+        assert_eq!(agent_dot_tooltip(&entry), "Waiting on agents");
+
+        entry.open_blockers = true;
+        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+    }
+
     fn aggregation_entry(
         state: AgentState,
         seen: bool,
@@ -10930,6 +10996,7 @@ pub(crate) mod tests {
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
+            waiting_on_agents: false,
             holds_shell: false,
             gate_count: 0,
             seen,
@@ -11141,6 +11208,20 @@ pub(crate) mod tests {
             .remove(&(0, 0))
             .expect("aggregated tab entry");
         assert_eq!(fallback.foreground_process_name.as_deref(), Some("zsh"));
+    }
+
+    #[test]
+    fn tab_aggregation_keeps_a_waiting_pane_beside_an_ordinary_worker() {
+        let mut waiting = aggregation_entry(AgentState::Working, true, None, "waiting");
+        waiting.waiting_on_agents = true;
+        let working = aggregation_entry(AgentState::Working, true, None, "working");
+
+        let aggregated = aggregate_tab_entries(&[waiting, working])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+
+        assert!(aggregated.waiting_on_agents);
+        assert_eq!(compact_row_dot(&aggregated), "◌");
     }
 
     #[test]

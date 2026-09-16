@@ -11566,6 +11566,7 @@ next_tab = ""
                 eta_s: None,
                 reported_at: None,
                 session_ref: None,
+                closing_block: None,
             },
         );
         let reported_at = server.app.state.terminals[&terminal_id]
@@ -11614,6 +11615,7 @@ next_tab = ""
                 eta_s: Some(120),
                 reported_at: None,
                 session_ref: None,
+                closing_block: None,
             },
         );
         let reported_at = server.app.state.terminals[&terminal_id]
@@ -11637,7 +11639,7 @@ next_tab = ""
     }
 
     #[tokio::test]
-    async fn headless_scheduler_subprocess_held_report_uses_configured_budget() {
+    async fn headless_scheduler_finished_report_ignores_a_lingering_subprocess() {
         let now = Instant::now();
         let mut server = test_headless_server();
         let workspace = crate::workspace::Workspace::test_new("headless-subprocess-watchdog");
@@ -11670,14 +11672,12 @@ next_tab = ""
         );
         terminal.set_foreground_process(Some("cargo".into()), true, now);
 
+        assert_eq!(server.app.state.next_agent_watchdog_deadline(), None);
         server.handle_scheduled_tasks_headless(
-            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            now + server.app.state.agent_stale_after + Duration::from_secs(1),
             false,
         );
         assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
-
-        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
-        assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
     }
 
     #[tokio::test]
@@ -11715,12 +11715,15 @@ next_tab = ""
         terminal.set_active_subagents(Some(1));
 
         server.handle_scheduled_tasks_headless(
-            now + server.app.state.agent_stale_after - Duration::from_secs(1),
+            now + server.app.state.agent_subagent_stale_after - Duration::from_secs(1),
             false,
         );
         assert!(!server.app.state.terminals[&terminal_id].supervisor_stale);
 
-        server.handle_scheduled_tasks_headless(now + server.app.state.agent_stale_after, false);
+        server.handle_scheduled_tasks_headless(
+            now + server.app.state.agent_subagent_stale_after,
+            false,
+        );
         assert!(server.app.state.terminals[&terminal_id].supervisor_stale);
     }
 
@@ -12503,6 +12506,7 @@ next_tab = ""
                 eta_s: None,
                 reported_at: None,
                 session_ref: None,
+                closing_block: None,
             })
         );
         assert!(
@@ -18506,6 +18510,7 @@ next_tab = ""
                     gates: None,
                     items: None,
                     decisions: None,
+                    agents: None,
                 }),
             },
             respond_to,

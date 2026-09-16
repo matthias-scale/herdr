@@ -133,6 +133,9 @@ pub struct PaneSnapshot {
     /// Unix timestamp of the pane's last meaningful activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<u64>,
+    /// Unix timestamp of the latest changed detection-buffer output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection_output_at: Option<u64>,
     /// Unix timestamp of the latest observed not-quiet to quiet transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_since_at: Option<u64>,
@@ -588,6 +591,10 @@ fn capture_tab(
                 last_activity_at: pane.map(|pane| {
                     pane.activity
                         .unix_timestamp_at(captured_at, captured_at_unix)
+                }),
+                detection_output_at: pane.and_then(|pane| {
+                    pane.activity
+                        .detection_output_unix_timestamp_at(captured_at, captured_at_unix)
                 }),
                 quiet_since_at: pane.and_then(|pane| {
                     pane.activity
@@ -1690,6 +1697,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 last_activity_at: None,
+                detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: Some(1_725_000_000),
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
@@ -1708,6 +1716,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 last_activity_at: None,
+                detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
@@ -2399,6 +2408,34 @@ mod tests {
     }
 
     #[test]
+    fn capture_keeps_detection_output_older_than_later_input_activity() {
+        let mut state = state_with_workspaces(&["output-clock"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let now = Instant::now();
+        let pane = state.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        assert!(!pane.activity.observe_detection_snapshot(
+            1,
+            Some(crate::detect::Agent::Claude),
+            "waiting",
+            now - Duration::from_secs(180),
+        ));
+        assert!(pane.activity.observe_detection_snapshot(
+            2,
+            Some(crate::detect::Agent::Claude),
+            "subagent completed",
+            now - Duration::from_secs(120),
+        ));
+        pane.activity.note(now - Duration::from_secs(60));
+
+        let captured = capture_from_state(&state);
+        let json = serde_json::to_string(&captured).unwrap();
+        let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let saved = &restored.workspaces[0].tabs[0].panes[&pane_id.raw()];
+
+        assert!(saved.last_activity_at > saved.detection_output_at);
+    }
+
+    #[test]
     fn pane_snapshot_without_a_quiet_clock_stays_compatible() {
         let legacy = serde_json::json!({
             "cwd": "/tmp",
@@ -2408,6 +2445,7 @@ mod tests {
         let pane: PaneSnapshot = serde_json::from_value(legacy).unwrap();
 
         assert_eq!(pane.quiet_since_at, None);
+        assert_eq!(pane.detection_output_at, None);
     }
 
     #[test]
@@ -2438,6 +2476,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 last_activity_at: None,
+                detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,
@@ -2458,6 +2497,7 @@ mod tests {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 last_activity_at: None,
+                detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,

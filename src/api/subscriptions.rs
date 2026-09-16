@@ -70,6 +70,7 @@ struct PanePresentationSnapshot {
     wait: Option<String>,
     eta_s: Option<u64>,
     reported_at: Option<String>,
+    waiting_on_agents: bool,
 }
 
 impl PanePresentationSnapshot {
@@ -81,6 +82,7 @@ impl PanePresentationSnapshot {
             wait: pane.wait.clone(),
             eta_s: pane.eta_s,
             reported_at: pane.reported_at.clone(),
+            waiting_on_agents: pane.waiting_on_agents,
         }
     }
 
@@ -91,6 +93,7 @@ impl PanePresentationSnapshot {
         wait: &Option<String>,
         eta_s: Option<u64>,
         reported_at: &Option<String>,
+        waiting_on_agents: bool,
     ) -> Self {
         Self {
             title: title.clone(),
@@ -99,6 +102,7 @@ impl PanePresentationSnapshot {
             wait: wait.clone(),
             eta_s,
             reported_at: reported_at.clone(),
+            waiting_on_agents,
         }
     }
 }
@@ -233,6 +237,7 @@ impl ActiveSubscription {
                         pane_id: probe.pane_id.clone(),
                         workspace_id: probe.workspace_id,
                         agent_status: probe.agent_status,
+                        waiting_on_agents: probe.waiting_on_agents,
                         wait: probe.wait,
                         eta_s: probe.eta_s,
                         reported_at: probe.reported_at,
@@ -368,6 +373,7 @@ impl ActiveAgentStatusChangedSubscription {
                 pane_id,
                 workspace_id,
                 agent_status,
+                waiting_on_agents,
                 wait,
                 eta_s,
                 reported_at,
@@ -394,6 +400,7 @@ impl ActiveAgentStatusChangedSubscription {
                 &wait,
                 eta_s,
                 &reported_at,
+                waiting_on_agents,
             );
             self.last_status = Some(agent_status);
             self.last_presentation = Some(current_presentation);
@@ -411,6 +418,7 @@ impl ActiveAgentStatusChangedSubscription {
                     pane_id,
                     workspace_id,
                     agent_status,
+                    waiting_on_agents,
                     wait,
                     eta_s,
                     reported_at,
@@ -480,6 +488,7 @@ impl ActiveAgentStatusChangedSubscription {
                 pane_id: pane.pane_id,
                 workspace_id: pane.workspace_id,
                 agent_status: current_status,
+                waiting_on_agents: pane.waiting_on_agents,
                 wait: pane.wait,
                 eta_s: pane.eta_s,
                 reported_at: pane.reported_at,
@@ -629,6 +638,7 @@ mod tests {
                 pane_id: "pane_1".into(),
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
+                waiting_on_agents: false,
                 wait: None,
                 eta_s: None,
                 reported_at: None,
@@ -667,6 +677,7 @@ mod tests {
             terminal_title_stripped: None,
             display_agent: None,
             agent_status: AgentStatus::Unknown,
+            waiting_on_agents: false,
             wait: None,
             eta_s: None,
             reported_at: None,
@@ -781,6 +792,7 @@ mod tests {
                 wait: None,
                 eta_s: None,
                 reported_at: None,
+                waiting_on_agents: false,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -808,6 +820,46 @@ mod tests {
     }
 
     #[test]
+    fn agent_status_subscription_forwards_a_waiting_projection_change() {
+        let event_hub = EventHub::default();
+        let mut subscription = ActiveAgentStatusChangedSubscription {
+            pane_id: "pane_1".into(),
+            status_filter: None,
+            last_status: Some(AgentStatus::Working),
+            last_presentation: Some(PanePresentationSnapshot {
+                title: None,
+                display_agent: None,
+                state_labels: HashMap::new(),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                waiting_on_agents: false,
+            }),
+            last_sequence: event_hub.current_sequence(),
+            initial_event: None,
+            request_prefix: "test".into(),
+        };
+        let mut event = presentation_event(None);
+        let EventData::PaneAgentStatusChanged {
+            waiting_on_agents, ..
+        } = &mut event.data
+        else {
+            panic!("waiting event")
+        };
+        *waiting_on_agents = true;
+        event_hub.push(event);
+
+        let event = subscription
+            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("waiting projection event");
+        let SubscriptionEventData::PaneAgentStatusChanged(data) = event.data else {
+            panic!("wrong event data");
+        };
+        assert_eq!(data.agent_status, AgentStatus::Working);
+        assert!(data.waiting_on_agents);
+    }
+
+    #[test]
     fn agent_status_subscription_prefers_setup_window_events_over_initial_snapshot() {
         let event_hub = EventHub::default();
         let mut subscription = ActiveAgentStatusChangedSubscription {
@@ -821,12 +873,14 @@ mod tests {
                 wait: None,
                 eta_s: None,
                 reported_at: None,
+                waiting_on_agents: false,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
                 pane_id: "pane_1".into(),
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
+                waiting_on_agents: false,
                 wait: None,
                 eta_s: None,
                 reported_at: None,
@@ -872,12 +926,14 @@ mod tests {
                 wait: None,
                 eta_s: None,
                 reported_at: None,
+                waiting_on_agents: false,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
                 pane_id: "pane_1".into(),
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
+                waiting_on_agents: false,
                 wait: None,
                 eta_s: None,
                 reported_at: None,

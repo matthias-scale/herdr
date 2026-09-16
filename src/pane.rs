@@ -981,6 +981,7 @@ fn spawn_basic_detection_task(
                         pane_id,
                         holds_shell,
                         stale_resolution,
+                        observed_at: now,
                     })
                     .await
                 {
@@ -3132,6 +3133,7 @@ impl PaneRuntime {
                                     pane_id,
                                     holds_shell,
                                     stale_resolution,
+                                    observed_at: now,
                                 })
                                 .await
                             {

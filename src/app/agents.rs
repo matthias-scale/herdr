@@ -444,6 +444,7 @@ impl App {
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
             usage_limited: terminal.usage_limited,
+            waiting_on_agents: pane.waiting_on_agents,
             wait: pane.wait,
             eta_s: pane.eta_s,
             reported_at: pane.reported_at,

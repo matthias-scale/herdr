@@ -1402,8 +1402,18 @@ impl App {
             return invalid_agent(id);
         };
         let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION))
-            .then(|| params.gates.zip(params.items).zip(params.decisions))
+            .then(|| {
+                params.gates.zip(params.items).zip(params.decisions).map(
+                    |((gates, items), decisions)| crate::events::ClosingBlockReport {
+                        gates,
+                        items,
+                        decisions,
+                        agents: params.agents,
+                    },
+                )
+            })
             .flatten();
+        let has_closing_block = closing_block.is_some();
         let hook_state_report_accepted = self
             .handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,
@@ -1421,24 +1431,11 @@ impl App {
                 wait: params.wait,
                 eta_s: params.eta_s,
                 reported_at: params.reported_at,
+                closing_block,
             })
             .unwrap_or(false);
-        if hook_state_report_accepted {
-            if let Some(((gates, items), decisions)) = closing_block {
-                let changed = self
-                    .state
-                    .workspaces
-                    .get(ws_idx)
-                    .and_then(|workspace| workspace.pane_state(pane_id))
-                    .map(|pane| pane.attached_terminal_id.clone())
-                    .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
-                    .is_some_and(|terminal| {
-                        terminal.apply_closing_block_payload(gates, items, decisions)
-                    });
-                if changed {
-                    self.emit_pane_updated(ws_idx, pane_id);
-                }
-            }
+        if hook_state_report_accepted && has_closing_block {
+            self.emit_pane_updated(ws_idx, pane_id);
         }
         let _ = self.sync_terminal_titles();
 
@@ -2394,7 +2391,42 @@ mod tests {
             gates: Some(gates),
             items: Some(Vec::new()),
             decisions: Some(Vec::new()),
+            agents: Some(0),
         }
+    }
+
+    #[test]
+    fn closing_report_projects_waiting_on_agents_until_a_zero_agent_close() {
+        let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        let mut waiting = closing_block_report(&public_pane_id, 1, Vec::new());
+        waiting.state = crate::api::schema::PaneAgentState::Working;
+        waiting.agents = Some(3);
+
+        let response = app.handle_pane_report_agent("waiting-agents".into(), waiting);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let pane = app.pane_info(0, pane_id).expect("waiting pane info");
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+        assert!(pane.waiting_on_agents);
+        assert!(app.state.terminals[&terminal_id].waiting_on_agents());
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_active_subagents(Some(7));
+        let response = app.handle_pane_report_agent(
+            "agents-finished".into(),
+            closing_block_report(&public_pane_id, 2, Vec::new()),
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let pane = app.pane_info(0, pane_id).expect("finished pane info");
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Done);
+        assert!(!pane.waiting_on_agents);
+        assert_eq!(
+            app.state.terminals[&terminal_id].effective_active_subagents(),
+            Some(0),
+            "the current zero declaration outranks an older live scan"
+        );
     }
 
     fn test_gate() -> crate::api::schema::ClosingBlockItem {
@@ -2728,6 +2760,7 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5379,6 +5412,7 @@ mod tests {
                 gates: Some(gates),
                 items: Some(items),
                 decisions: Some(decisions),
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5532,6 +5566,7 @@ mod tests {
                 gates: Some(Vec::new()),
                 items: Some(Vec::new()),
                 decisions: Some(Vec::new()),
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5630,6 +5665,7 @@ mod tests {
                 gates: Some(Vec::new()),
                 items: Some(Vec::new()),
                 decisions: Some(Vec::new()),
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5691,6 +5727,7 @@ mod tests {
             }]),
             items: Some(Vec::new()),
             decisions: Some(Vec::new()),
+            agents: None,
         };
 
         let _: SuccessResponse = serde_json::from_str(
@@ -5756,6 +5793,7 @@ mod tests {
                 }]),
                 items: Some(Vec::new()),
                 decisions: Some(Vec::new()),
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5804,6 +5842,7 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -5828,6 +5867,7 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                agents: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -6832,6 +6872,7 @@ mod tests {
                 gates: None,
                 items: None,
                 decisions: None,
+                agents: None,
             },
         );
         let _: SuccessResponse =

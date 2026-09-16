@@ -406,6 +406,8 @@ pub struct PaneReportAgentParams {
     pub items: Option<Vec<ClosingBlockItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decisions: Option<Vec<ClosingBlockDecision>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<u32>,
 }
 
 impl<'de> Deserialize<'de> for PaneReportAgentParams {
@@ -445,6 +447,8 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             items: Option<serde_json::Value>,
             #[serde(default)]
             decisions: Option<serde_json::Value>,
+            #[serde(default)]
+            agents: Option<u32>,
         }
 
         fn typed<T, E>(value: Option<serde_json::Value>, strict: bool) -> Result<Option<T>, E>
@@ -482,6 +486,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 gates: None,
                 items: None,
                 decisions: None,
+                agents: None,
             });
         }
 
@@ -504,6 +509,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             gates: typed(raw.gates, strict)?,
             items: typed(raw.items, strict)?,
             decisions: typed(raw.decisions, strict)?,
+            agents: raw.agents,
         })
     }
 }
@@ -676,6 +682,8 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub waiting_on_agents: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

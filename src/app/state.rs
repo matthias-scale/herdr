@@ -3986,6 +3986,7 @@ pub struct AppState {
     pub auto_nudge_stalled_agents: bool,
     /// Quiet period before an agent status report becomes stale.
     pub agent_stale_after: std::time::Duration,
+    pub agent_subagent_stale_after: std::time::Duration,
     /// Initial quiet period before a stalled pane is nudged.
     pub nudge_after: std::time::Duration,
     /// Maximum nudges sent during one stale-status episode.
@@ -6420,6 +6421,7 @@ impl AppState {
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
             agent_stale_after: std::time::Duration::from_secs(5 * 60),
+            agent_subagent_stale_after: std::time::Duration::from_secs(60 * 60),
             nudge_after: std::time::Duration::from_secs(5 * 60),
             max_nudges: 3,
             stall_nudge_message:

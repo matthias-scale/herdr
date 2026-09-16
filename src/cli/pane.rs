@@ -1496,6 +1496,7 @@ fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
         gates: None,
         items: None,
         decisions: None,
+        agents: None,
     }))
 }
 
