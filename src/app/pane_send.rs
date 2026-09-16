@@ -211,6 +211,118 @@ mod tests {
         (app, panes)
     }
 
+    fn app_with_agent_workspaces(count: usize) -> (App, Vec<PaneId>) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = (0..count)
+            .map(|_| crate::workspace::Workspace::test_new("test"))
+            .collect();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 1;
+        app.state.ensure_test_terminals();
+
+        let panes = app
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.tabs[0].root_pane)
+            .collect::<Vec<_>>();
+        for (ws_idx, pane_id) in panes.iter().copied().enumerate() {
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("pane terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .detected_agent = Some(crate::detect::Agent::Claude);
+        }
+        (app, panes)
+    }
+
+    fn prepare_blocked_background_agent(
+        app: &mut App,
+        ws_idx: usize,
+        pane_id: PaneId,
+    ) -> (
+        crate::terminal::TerminalId,
+        tokio::sync::mpsc::Receiver<Bytes>,
+    ) {
+        assert_ne!(app.state.active, Some(ws_idx));
+        let terminal_id = app.state.workspaces[ws_idx]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("pane terminal");
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        let (runtime, rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 1024, b"", 8,
+            );
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        (terminal_id, rx)
+    }
+
+    fn assert_input_retirement_is_not_completion(
+        app: &App,
+        ws_idx: usize,
+        pane_id: PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        event_start: u64,
+    ) {
+        assert_eq!(
+            app.state.terminals[terminal_id].raw_agent_state(),
+            crate::detect::AgentState::Idle
+        );
+        assert!(!app.state.pending_agent_notifications.contains_key(&pane_id));
+        assert!(!matches!(
+            app.state.toast.as_ref().map(|toast| toast.kind),
+            Some(crate::app::state::ToastKind::Finished)
+        ));
+        assert_eq!(
+            app.agent_info(ws_idx, pane_id)
+                .expect("agent info")
+                .agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+        let statuses = app
+            .event_hub
+            .events_after(event_start)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::PaneAgentStatusChanged { agent_status, .. } => {
+                    Some(agent_status)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec![crate::api::schema::AgentStatus::Idle]);
+    }
+
     /// The pane you right-clicked is not a place to send its own text.
     #[test]
     fn the_clicked_agent_is_not_one_of_its_own_targets() {
@@ -294,6 +406,90 @@ mod tests {
 
         assert!(app.state.agent_picker.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn single_target_send_does_not_complete_a_blocked_background_agent() {
+        let (mut app, panes) = app_with_agent_workspaces(2);
+        let target_ws = 1;
+        let target_pane = panes[target_ws];
+        let (terminal_id, mut rx) =
+            prepare_blocked_background_agent(&mut app, target_ws, target_pane);
+        let event_start = app.event_hub.current_sequence();
+
+        app.send_text_to_chosen_agent(0, panes[0], "continue".into());
+
+        assert!(rx.try_recv().is_ok(), "send text was not written");
+        assert_input_retirement_is_not_completion(
+            &app,
+            target_ws,
+            target_pane,
+            &terminal_id,
+            event_start,
+        );
+
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id: target_pane,
+            agent: Some(crate::detect::Agent::Claude),
+            state: crate::detect::AgentState::Working,
+            visible_blocker: false,
+            visible_working: true,
+            usage_limited: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id: target_pane,
+            agent: Some(crate::detect::Agent::Claude),
+            state: crate::detect::AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            usage_limited: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let deadline = app
+            .state
+            .next_pending_agent_notification_deadline()
+            .expect("genuine completion notification");
+        let deliveries = app.state.drain_due_agent_notifications(deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].kind, crate::app::state::ToastKind::Finished);
+        assert_eq!(deliveries[0].sound, Some(crate::sound::Sound::Done));
+        assert_eq!(
+            app.agent_info(target_ws, target_pane)
+                .expect("agent info")
+                .agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn picker_selection_does_not_complete_a_blocked_background_agent() {
+        let (mut app, panes) = app_with_agent_workspaces(3);
+        app.send_text_to_chosen_agent(0, panes[0], "continue".into());
+        let candidate = app
+            .state
+            .agent_picker
+            .as_ref()
+            .expect("agent picker")
+            .candidates[0]
+            .clone();
+        let (terminal_id, mut rx) =
+            prepare_blocked_background_agent(&mut app, candidate.ws_idx, candidate.pane_id);
+        let event_start = app.event_hub.current_sequence();
+
+        app.handle_agent_picker_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
+
+        assert!(rx.try_recv().is_ok(), "send text was not written");
+        assert_input_retirement_is_not_completion(
+            &app,
+            candidate.ws_idx,
+            candidate.pane_id,
+            &terminal_id,
+            event_start,
+        );
     }
 
     /// AC6: pane-send abandons the pending stall-nudge Enter before writing its own turn.

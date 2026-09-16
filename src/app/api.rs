@@ -918,6 +918,7 @@ impl App {
         self.handle_internal_event(AppEvent::HookAuthorityRetired {
             pane_id,
             observed_at,
+            suppress_completion: true,
         });
     }
 

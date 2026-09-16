@@ -1480,8 +1480,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agent_prompt_retires_blocked_hook_authority_after_forwarding() {
+    async fn agent_prompt_retires_blocked_hook_without_completing_background_agent() {
         let mut app = app_with_agent();
+        app.state.active = None;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 1;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -1498,6 +1501,7 @@ mod tests {
         );
         let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
+        let event_start = app.event_hub.current_sequence();
 
         let response = app.handle_agent_prompt(
             "req".into(),
@@ -1519,6 +1523,27 @@ mod tests {
             AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        assert!(!app.state.pending_agent_notifications.contains_key(&pane_id));
+        assert!(!matches!(
+            app.state.toast.as_ref().map(|toast| toast.kind),
+            Some(crate::app::state::ToastKind::Finished)
+        ));
+        assert_eq!(
+            app.agent_info(0, pane_id).expect("agent info").agent_status,
+            AgentStatus::Idle
+        );
+        let statuses = app
+            .event_hub
+            .events_after(event_start)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::PaneAgentStatusChanged { agent_status, .. } => {
+                    Some(agent_status)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec![AgentStatus::Idle]);
     }
 
     #[tokio::test(flavor = "current_thread")]

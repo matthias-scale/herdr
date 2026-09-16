@@ -814,6 +814,7 @@ async fn poll_full_lifecycle_hook_retirement(
                 .send(AppEvent::HookAuthorityRetired {
                     pane_id: ports.pane_id,
                     observed_at,
+                    suppress_completion: false,
                 })
                 .await;
         }
