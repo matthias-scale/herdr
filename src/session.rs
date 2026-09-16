@@ -63,6 +63,14 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
             let Some(value) = args.get(index + 1) else {
                 return Err("missing value for --session".to_string());
             };
+            if cleaned.get(1).map(String::as_str) == Some("pane")
+                && cleaned.get(2).map(String::as_str) == Some("send-text-if")
+            {
+                cleaned.push(arg.clone());
+                cleaned.push(value.clone());
+                index += 2;
+                continue;
+            }
             requested_session = Some(value.clone());
             index += 2;
             continue;
@@ -665,6 +673,99 @@ mod tests {
         assert_eq!(std::env::var(SESSION_ENV_VAR).as_deref(), Ok("api"));
         assert!(explicit_session_requested());
         assert_eq!(cleaned, vec!["herdr", "server", "stop"]);
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn configure_from_args_preserves_send_text_if_agent_session() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        let args = [
+            "herdr",
+            "pane",
+            "send-text-if",
+            "w1:p2",
+            "continue",
+            "--workspace",
+            "w1",
+            "--terminal",
+            "term_123",
+            "--agent-ref",
+            "ub2::w1:p2",
+            "--agent-source",
+            "herdr:claude",
+            "--agent",
+            "claude",
+            "--session-kind",
+            "id",
+            "--session",
+            "d654cd19-e15f-4aa1-b431-78e7573f32c8",
+            "--condition",
+            "detection-snapshot-unchanged",
+            "--observation-token",
+            "token-123",
+        ]
+        .map(str::to_string)
+        .to_vec();
+
+        let cleaned = configure_from_args(&args).unwrap();
+
+        assert_eq!(cleaned, args);
+        assert!(std::env::var(SESSION_ENV_VAR).is_err());
+        assert!(!explicit_session_requested());
+    }
+
+    #[test]
+    fn configure_from_args_supports_global_and_send_text_if_sessions_together() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        let args = [
+            "herdr",
+            "--session",
+            "work",
+            "pane",
+            "send-text-if",
+            "w1:p2",
+            "continue",
+            "--workspace",
+            "w1",
+            "--terminal",
+            "term_123",
+            "--agent-ref",
+            "ub2::w1:p2",
+            "--agent-source",
+            "herdr:claude",
+            "--agent",
+            "claude",
+            "--session-kind",
+            "id",
+            "--session",
+            "d654cd19-e15f-4aa1-b431-78e7573f32c8",
+            "--condition",
+            "detection-snapshot-unchanged",
+            "--observation-token",
+            "token-123",
+        ]
+        .map(str::to_string)
+        .to_vec();
+
+        let cleaned = configure_from_args(&args).unwrap();
+
+        assert_eq!(std::env::var(SESSION_ENV_VAR).as_deref(), Ok("work"));
+        assert!(explicit_session_requested());
+        assert_eq!(
+            cleaned,
+            std::iter::once(args[0].clone())
+                .chain(args[3..].iter().cloned())
+                .collect::<Vec<_>>()
+        );
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
     }
