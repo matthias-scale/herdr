@@ -233,7 +233,12 @@ fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
 }
 
 fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
-    if entry.waiting_on_agents && !entry_is_blocked(entry) {
+    // Waiting on subagents never hides a pane that owes the human something.
+    let attention = entry_attention_tier(entry);
+    let owes_human = attention == AttentionTier::Attention
+        || (attention == AttentionTier::Blocked
+            && (entry.state != AgentState::Working || entry.usage_limited));
+    if entry.waiting_on_agents && !owes_human {
         return "◌";
     }
     compact_dot_for_state(
@@ -5573,10 +5578,10 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
         "usage"
     } else if attention == AttentionTier::Blocked {
         "blocked"
-    } else if entry.waiting_on_agents {
-        "waiting_on_agents"
     } else if attention == AttentionTier::Attention {
         return "Needs attention".to_string();
+    } else if entry.waiting_on_agents {
+        "waiting_on_agents"
     } else {
         agent_panel_status_key(entry.state, entry.seen)
     };
@@ -11212,6 +11217,19 @@ pub(crate) mod tests {
         entry.open_blockers = true;
         assert_eq!(compact_row_color(&entry, &palette), palette.red);
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+    }
+
+    #[test]
+    fn waiting_on_agents_does_not_hide_a_pane_that_needs_attention() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
+        entry.waiting_on_agents = true;
+        entry.active_subagents = Some(2);
+        entry.attention_tier = Some(AttentionTier::Attention);
+
+        assert_ne!(compact_row_dot(&entry), "◌");
+        assert_eq!(compact_row_color(&entry, &palette), palette.peach);
+        assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
     }
 
     fn aggregation_entry(
