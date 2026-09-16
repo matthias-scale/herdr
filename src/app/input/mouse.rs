@@ -1653,15 +1653,26 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some(target) = self.sidebar_settled_target_at(mouse.row) {
+                    if self.sidebar_settled_target_at(mouse.row).is_some() {
                         self.sidebar_selected_work_group = None;
-                        if !self.settled_target_has_resume_plan(&target) {
-                            self.sidebar_selected_settled = None;
-                            self.mode = Mode::Terminal;
-                            return Some(MouseAction::FocusLiveSettledPane(target));
+                        self.sidebar_selected_settled = None;
+                        self.mode = Mode::Terminal;
+                        if let Some((ws_idx, tab_idx)) =
+                            self.tab_target_at(mouse.row).or_else(|| {
+                                self.agent_detail_target_at(mouse.row)
+                                    .map(|(ws_idx, tab_idx, _)| (ws_idx, tab_idx))
+                            })
+                        {
+                            self.tab_presses.insert(
+                                source_id,
+                                TabPressState {
+                                    ws_idx,
+                                    tab_idx,
+                                    start_col: mouse.column,
+                                    start_row: mouse.row,
+                                },
+                            );
                         }
-                        self.sidebar_selected_settled = Some(target);
-                        self.mode = Mode::Navigate;
                         return None;
                     }
 
@@ -3060,11 +3071,18 @@ impl AppState {
     ) -> Option<MouseAction> {
         if let Some(press) = workspace_press {
             self.mode = Mode::Terminal;
+            if let Some(target) = self.sidebar_settled_target_at(press.start_row) {
+                return Some(MouseAction::FocusLiveSettledPane(target));
+            }
             return Some(MouseAction::FocusWorkspace {
                 ws_idx: press.ws_idx,
             });
         }
         if let Some(press) = tab_press {
+            if let Some(target) = self.sidebar_settled_target_at(press.start_row) {
+                self.mode = Mode::Terminal;
+                return Some(MouseAction::FocusLiveSettledPane(target));
+            }
             if self.active == Some(press.ws_idx) {
                 self.mode = Mode::Terminal;
                 return Some(MouseAction::FocusTab {
@@ -4886,6 +4904,12 @@ mod tests {
                 Some(ControlId::SidebarFooter(item))
             );
         }
+        let bell = app.state.view.notification_hit_area;
+        app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::Notifications))
+        );
         let linear = areas[3];
 
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
@@ -8680,6 +8704,55 @@ mod tests {
     }
 
     #[test]
+    fn clicking_notification_bell_persists_both_transitions() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-notification-bell-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "# per-machine config\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+        let bell = app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+        assert!(!app.state.notifications_enabled());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            bell.x,
+            bell.y,
+        ));
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        assert!(app.state.sound.enabled);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            bell.x,
+            bell.y,
+        ));
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Off
+        );
+        assert!(!app.state.sound.enabled);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid config");
+        assert_eq!(saved.ui.toast.delivery, crate::config::ToastDelivery::Off);
+        assert!(!saved.ui.sound.enabled);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn sidebar_footer_order_hit_areas_settings_and_hover_are_complete() {
         use crate::app::state::SidebarFooterItem;
 
@@ -8700,6 +8773,16 @@ mod tests {
         ];
         assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
         assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+
+        let bell = app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+        app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(crate::app::state::ControlId::SidebarFooter(
+                SidebarFooterItem::Notifications
+            ))
+        );
 
         let linear = areas[3];
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));

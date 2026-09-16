@@ -11,7 +11,7 @@ use super::loops::{LoopInfo, LoopRunInfo};
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
-    PaneSwapResult, PaneZoomResult,
+    PaneSendTextIfOutcome, PaneSwapResult, PaneZoomResult,
 };
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
@@ -201,6 +201,9 @@ pub enum ResponseResult {
     },
     PaneRead {
         read: PaneReadResult,
+    },
+    PaneTextSend {
+        outcome: PaneSendTextIfOutcome,
     },
     PaneGraphicsFrameAck {
         sequence: u64,

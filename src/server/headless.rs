@@ -3731,6 +3731,9 @@ impl HeadlessServer {
         }
         self.app.state.request_client_config_reload = false;
         self.send_to_all_clients(ServerMessage::ReloadSoundConfig);
+        self.send_to_all_clients(ServerMessage::NotificationConfig {
+            sound_enabled: self.app.state.sound.enabled,
+        });
     }
 
     /// Encodes a server message into a length-prefixed frame.
@@ -4256,6 +4259,13 @@ impl HeadlessServer {
             self.sync_foreground_client_state();
         }
 
+        if let Some(sound_enabled) = self.app.state.request_client_notification_config.take() {
+            self.send_to_client(
+                client_id,
+                ServerMessage::NotificationConfig { sound_enabled },
+            );
+        }
+
         if let Some(width) = self.app.state.take_dock_width_persistence_request() {
             self.send_to_client(client_id, ServerMessage::DockWidth { width });
         }
@@ -4402,6 +4412,12 @@ impl HeadlessServer {
                         crate::client::presentation::load_sidebar_group_sorts();
                 }
                 if !direct_attach_requested {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::NotificationConfig {
+                            sound_enabled: self.app.state.sound.enabled,
+                        },
+                    );
                     self.foreground_client_id = Some(client_id);
                 }
                 if first_app_client {
@@ -10979,13 +10995,17 @@ next_tab = ""
                     "fallback".into(),
                     api::schema::PaneReadResult {
                         pane_id: "w1:p1".into(),
+                        terminal_id: terminal_id_string.clone(),
                         workspace_id: "w1".into(),
                         tab_id: "w1:t1".into(),
+                        agent_ref: None,
+                        agent_session: None,
                         source: api::schema::ReadSource::Recent,
                         format: api::schema::ReadFormat::Text,
                         text: String::new(),
                         revision: 0,
                         truncated: false,
+                        input_observation: None,
                     },
                     120,
                     false,
@@ -11024,7 +11044,7 @@ next_tab = ""
     #[test]
     fn pane_read_cancels_alt_screen_history_capture_before_serving_live_content() {
         with_terminal_session_test_server(
-            |server, terminal_id, _terminal_id_string, public_pane_id| {
+            |server, terminal_id, terminal_id_string, public_pane_id| {
                 let runtime = server
                     .app
                     .terminal_runtimes
@@ -11072,13 +11092,17 @@ next_tab = ""
                         "fallback".into(),
                         api::schema::PaneReadResult {
                             pane_id: public_pane_id.clone(),
+                            terminal_id: terminal_id_string.clone(),
                             workspace_id: "w1".into(),
                             tab_id: "w1:t1".into(),
+                            agent_ref: None,
+                            agent_session: None,
                             source: api::schema::ReadSource::Recent,
                             format: api::schema::ReadFormat::Text,
                             text: String::new(),
                             revision: baseline.revision,
                             truncated: false,
+                            input_observation: None,
                         },
                         200,
                         false,
@@ -17349,6 +17373,344 @@ next_tab = ""
     }
 
     #[test]
+    fn notification_bell_updates_the_initiating_clients_local_effective_config() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-remote-notification-toggle-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let server_path = directory.join("server.toml");
+        let client_path = directory.join("client.toml");
+        std::fs::write(&server_path, "# server config\n").expect("seed server config");
+        std::fs::write(
+            &client_path,
+            "[ui.toast]\nterminal_backend = \"osc99\"\n[ui.sound]\nenabled = false\n",
+        )
+        .expect("seed client config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(
+            &mut server.app.state,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+        let bell = server.app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+
+        let (initiator_tx, initiator_control_rx, _initiator_render_rx) = test_client_writer();
+        let (other_tx, other_control_rx, _other_render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(initiator_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(other_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let click_bell = |server: &mut HeadlessServer| {
+            assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+                client_id: 1,
+                events: vec![crate::protocol::ClientInputEvent::Mouse {
+                    kind: crate::protocol::ClientMouseKind::Down(
+                        crate::protocol::ClientMouseButton::Left,
+                    ),
+                    column: bell.x,
+                    row: bell.y,
+                    modifiers: 0,
+                }],
+            }));
+            server.drain_client_config_reload_request();
+        };
+
+        let mut apply_client_message = |message: ServerMessage| {
+            let ServerMessage::NotificationConfig { sound_enabled } = message else {
+                panic!("expected initiating client notification config update, got {message:?}");
+            };
+            env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
+            let mut sound = crate::config::SoundConfig::default();
+            let mut backend = crate::config::TerminalNotificationBackend::Auto;
+            crate::client::reload_local_notification_config(
+                &mut sound,
+                &mut backend,
+                sound_enabled,
+            );
+            env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+            (sound, backend)
+        };
+
+        click_bell(&mut server);
+        let (client_sound, client_backend) = apply_client_message(read_server_message(
+            initiator_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initiating client config update"),
+        ));
+        let saved = crate::config::Config::load().config;
+        assert_eq!(
+            saved.ui.toast.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        assert!(saved.ui.sound.enabled);
+        assert!(client_sound.enabled, "initiating client stayed muted");
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
+        assert!(
+            other_control_rx
+                .recv_timeout(Duration::from_millis(20))
+                .is_err(),
+            "notification toggle reached a non-initiating client"
+        );
+
+        click_bell(&mut server);
+        let (client_sound, client_backend) = apply_client_message(read_server_message(
+            initiator_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initiating client config update"),
+        ));
+        let saved = crate::config::Config::load().config;
+        assert_eq!(saved.ui.toast.delivery, crate::config::ToastDelivery::Off);
+        assert!(!saved.ui.sound.enabled);
+        assert!(!client_sound.enabled);
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn notification_permission_survives_reconnect_after_bell_toggle() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-notification-reconnect-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let server_path = directory.join("server.toml");
+        let client_path = directory.join("client.toml");
+        std::fs::write(&server_path, "# server config\n").expect("seed server config");
+        std::fs::write(
+            &client_path,
+            "[ui.toast]\nterminal_backend = \"osc99\"\n[ui.sound]\nenabled = false\n",
+        )
+        .expect("seed client config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(
+            &mut server.app.state,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+        let bell = server.app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            keybindings: None,
+            writer,
+            render_encoding: RenderEncoding::SemanticFrame,
+            direct_attach_requested: false,
+            direct_graphics: false,
+        }));
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("muted notification config on initial attach")
+            ),
+            ServerMessage::NotificationConfig {
+                sound_enabled: false
+            }
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Down(
+                    crate::protocol::ClientMouseButton::Left,
+                ),
+                column: bell.x,
+                row: bell.y,
+                modifiers: 0,
+            }],
+        }));
+        server.drain_client_config_reload_request();
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("notification config after enabling bell")
+            ),
+            ServerMessage::NotificationConfig {
+                sound_enabled: true
+            }
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 1 }));
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            keybindings: None,
+            writer,
+            render_encoding: RenderEncoding::SemanticFrame,
+            direct_attach_requested: false,
+            direct_graphics: false,
+        }));
+
+        let reconnect_config = read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("server notification config on reconnect"),
+        );
+        let ServerMessage::NotificationConfig { sound_enabled } = reconnect_config else {
+            panic!("expected reconnect notification config, got {reconnect_config:?}");
+        };
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
+        let mut client_sound = crate::config::SoundConfig::default();
+        let mut client_backend = crate::config::TerminalNotificationBackend::Auto;
+        crate::client::reload_local_notification_config(
+            &mut client_sound,
+            &mut client_backend,
+            sound_enabled,
+        );
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+        assert!(client_sound.enabled, "reconnected client stayed muted");
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99,
+            "server permission must not replace the client's terminal backend"
+        );
+
+        server.app.state.request_client_config_reload = true;
+        server.drain_client_config_reload_request();
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("local config reload request")
+            ),
+            ServerMessage::ReloadSoundConfig
+        ));
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
+        let local_config = crate::config::Config::load().config;
+        client_sound = local_config.ui.sound;
+        client_backend = local_config.ui.toast.terminal_backend;
+        assert!(
+            !client_sound.enabled,
+            "client fixture must reproduce the local config reset"
+        );
+        let restored = read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("server notification config after local config reload"),
+        );
+        let ServerMessage::NotificationConfig { sound_enabled } = restored else {
+            panic!("expected restored notification config, got {restored:?}");
+        };
+        crate::client::reload_local_notification_config(
+            &mut client_sound,
+            &mut client_backend,
+            sound_enabled,
+        );
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+        assert!(
+            client_sound.enabled,
+            "local config reload reverted the server's effective permission"
+        );
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
+
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "notify-after-reconnect".into(),
+                    method: api::schema::Method::NotificationShow(
+                        api::schema::NotificationShowParams {
+                            title: "build finished".into(),
+                            body: None,
+                            position: None,
+                            sound: api::schema::NotificationShowSound::Done,
+                        },
+                    ),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            })
+        );
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("notification response");
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: api::schema::NotificationShowReason::Shown,
+            }
+        );
+        let delivered = read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("sound notification after reconnect"),
+        );
+        assert!(
+            matches!(
+                delivered,
+                ServerMessage::Notify {
+                    kind: protocol::NotifyKind::Sound,
+                    message,
+                    body: None,
+                } if message == "agent done"
+            ) && client_sound.enabled,
+            "client must play the delivered sound after reconnect"
+        );
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
     fn terminal_bell_targets_foreground_client_only() {
         let mut server = test_headless_server();
         let (background_tx, background_control_rx, _background_rx) = test_client_writer();
@@ -18505,6 +18867,7 @@ next_tab = ""
         server.app.state.mode = crate::app::Mode::Terminal;
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
+        server.app.state.sound.enabled = true;
 
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
         server.clients.insert(
@@ -18594,6 +18957,7 @@ next_tab = ""
         server.app.state.mode = crate::app::Mode::Terminal;
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
+        server.app.state.sound.enabled = true;
 
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
         server.clients.insert(

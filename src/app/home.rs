@@ -1820,6 +1820,46 @@ impl crate::app::state::AppState {
         home
     }
 
+    fn home_target_for_directory(&self, directory: &Path) -> HomeTarget {
+        let direct_match = self
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                !workspace.repo_binding_cleared
+                    && (workspace.identity_cwd == directory
+                        || workspace
+                            .tabs
+                            .iter()
+                            .flat_map(|tab| tab.panes.values())
+                            .any(|pane| {
+                                self.terminals
+                                    .get(&pane.attached_terminal_id)
+                                    .is_some_and(|terminal| terminal.cwd == directory)
+                            }))
+            })
+            .map(|workspace| workspace.id.clone());
+        let observed_repo = self.terminals.values().find_map(|terminal| {
+            (terminal.cwd == directory)
+                .then(|| terminal.work_context.git_observed_repo())
+                .flatten()
+        });
+        let matched_id = direct_match.or_else(|| {
+            let repo = observed_repo?;
+            self.workspaces
+                .iter()
+                .find(|workspace| {
+                    !workspace.repo_binding_cleared
+                        && workspace.repo_binding.as_deref().is_some_and(|binding| {
+                            crate::work_context::repo_slugs_match(binding, repo)
+                        })
+                })
+                .map(|workspace| workspace.id.clone())
+        });
+        matched_id
+            .map(HomeTarget::Existing)
+            .unwrap_or(HomeTarget::NewSpace)
+    }
+
     /// Open home as the launch screen, if the config wants it.
     ///
     /// Deliberately not done in `App::new`: that constructor is what dozens of
@@ -1853,23 +1893,7 @@ impl crate::app::state::AppState {
             home.directory = directory.clone();
             home.ref_directory = directory.clone();
             if home.workspace == HomeWorkspace::CurrentCheckout {
-                home.target = self
-                    .workspaces
-                    .iter()
-                    .find(|workspace| {
-                        workspace.identity_cwd == directory
-                            || workspace
-                                .tabs
-                                .iter()
-                                .flat_map(|tab| tab.panes.values())
-                                .any(|pane| {
-                                    self.terminals
-                                        .get(&pane.attached_terminal_id)
-                                        .is_some_and(|terminal| terminal.cwd == directory)
-                                })
-                    })
-                    .map(|workspace| HomeTarget::Existing(workspace.id.clone()))
-                    .unwrap_or(HomeTarget::NewSpace);
+                home.target = self.home_target_for_directory(&directory);
             }
         }
         home.dispatch_plan()
@@ -1887,8 +1911,11 @@ impl crate::app::state::AppState {
         self.release_surface_focus_to_pane();
         let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt.clear();
-        home.directory = directory;
+        home.directory = directory.clone();
         home.workspace = workspace;
+        if home.workspace == HomeWorkspace::CurrentCheckout {
+            home.target = self.home_target_for_directory(&directory);
+        }
         home.focus = Some(HomeFocus::Prompt);
         home.picker = None;
         self.inbox = None;
@@ -2884,6 +2911,125 @@ mod tests {
         assert_eq!(
             state.home.as_ref().and_then(|home| home.focus),
             Some(HomeFocus::Prompt)
+        );
+    }
+
+    #[test]
+    fn opening_the_composer_reuses_a_space_with_the_selected_directory() {
+        let directory = PathBuf::from("/repo/matching");
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("matching");
+        workspace.identity_cwd = directory.clone();
+        let workspace_id = workspace.id.clone();
+        state.workspaces.push(workspace);
+
+        state.open_home_composer_in_directory(directory, HomeWorkspace::CurrentCheckout);
+
+        assert_eq!(
+            state.home.as_ref().map(|home| &home.target),
+            Some(&HomeTarget::Existing(workspace_id))
+        );
+    }
+
+    #[test]
+    fn opening_the_composer_reuses_the_space_bound_to_the_observed_repository() {
+        let directory = PathBuf::from("/repo/selected");
+        let mut state = crate::app::state::AppState::test_new();
+        let mut observer = crate::workspace::Workspace::test_new("observer");
+        observer.repo_binding_cleared = true;
+        let mut bound = crate::workspace::Workspace::test_new("bound");
+        bound.repo_binding = Some("owner/repo".into());
+        let bound_id = bound.id.clone();
+        let observer_terminal_id = observer.tabs[0].panes[&observer.tabs[0].root_pane]
+            .attached_terminal_id
+            .clone();
+        state.workspaces = vec![observer, bound];
+        state.ensure_test_terminals();
+        let terminal = state
+            .terminals
+            .get_mut(&observer_terminal_id)
+            .expect("observer terminal");
+        terminal.cwd = directory.clone();
+        terminal
+            .replace_git_work_context(crate::work_context::PaneWorkContext {
+                repo: Some("OWNER/REPO".into()),
+                ..Default::default()
+            })
+            .expect("valid observed repository");
+
+        state.open_home_composer_in_directory(directory, HomeWorkspace::CurrentCheckout);
+
+        assert_eq!(
+            state.home.as_ref().map(|home| &home.target),
+            Some(&HomeTarget::Existing(bound_id))
+        );
+    }
+
+    #[test]
+    fn opening_the_composer_prefers_the_checkout_space_over_its_bound_sibling() {
+        let directory = PathBuf::from("/repo/sibling");
+        let mut state = crate::app::state::AppState::test_new();
+        let mut bound = crate::workspace::Workspace::test_new("bound");
+        bound.repo_binding = Some("owner/repo".into());
+        let sibling = crate::workspace::Workspace::test_new("sibling");
+        let sibling_id = sibling.id.clone();
+        let sibling_terminal_id = sibling.tabs[0].panes[&sibling.tabs[0].root_pane]
+            .attached_terminal_id
+            .clone();
+        state.workspaces = vec![bound, sibling];
+        state.ensure_test_terminals();
+        let terminal = state
+            .terminals
+            .get_mut(&sibling_terminal_id)
+            .expect("sibling terminal");
+        terminal.cwd = directory.clone();
+        terminal
+            .replace_git_work_context(crate::work_context::PaneWorkContext {
+                repo: Some("owner/repo".into()),
+                ..Default::default()
+            })
+            .expect("valid observed repository");
+
+        state.open_home_composer_in_directory(directory, HomeWorkspace::CurrentCheckout);
+
+        assert_eq!(
+            state.home.as_ref().map(|home| &home.target),
+            Some(&HomeTarget::Existing(sibling_id))
+        );
+    }
+
+    #[test]
+    fn opening_the_composer_does_not_reuse_a_space_with_a_cleared_binding() {
+        let directory = PathBuf::from("/repo/cleared");
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("cleared");
+        workspace.identity_cwd = directory.clone();
+        workspace.repo_binding_cleared = true;
+        state.workspaces.push(workspace);
+
+        state.open_home_composer_in_directory(directory, HomeWorkspace::CurrentCheckout);
+
+        assert_eq!(
+            state.home.as_ref().map(|home| &home.target),
+            Some(&HomeTarget::NewSpace)
+        );
+    }
+
+    #[test]
+    fn opening_the_composer_uses_new_space_when_no_eligible_space_matches() {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut home = state.new_home_state();
+        home.target = HomeTarget::Existing("stale-space".into());
+        state.home = Some(home);
+
+        state.open_home_composer_in_directory(
+            PathBuf::from("/repo/unmatched"),
+            HomeWorkspace::CurrentCheckout,
+        );
+
+        assert_eq!(
+            state.home.as_ref().map(|home| &home.target),
+            Some(&HomeTarget::NewSpace)
         );
     }
 

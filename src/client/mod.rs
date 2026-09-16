@@ -141,6 +141,7 @@ fn environment_host_appearance_request(
 
 struct ClientLoopConfig {
     sound_config: crate::config::SoundConfig,
+    terminal_notification_backend: crate::config::TerminalNotificationBackend,
     mouse_scroll_lines: usize,
     redraw_on_focus_gained: bool,
     host_cursor: crate::config::HostCursorModeConfig,
@@ -164,6 +165,10 @@ struct ClientState {
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
     sound_config: crate::config::SoundConfig,
+    /// Protocol selected by this machine for terminal-delivered notifications.
+    terminal_notification_backend: crate::config::TerminalNotificationBackend,
+    /// Suppresses repeated diagnostics when automatic terminal detection fails.
+    missing_terminal_notification_backend_warned: bool,
     /// Whether this client may write Kitty graphics bytes to its host terminal.
     kitty_graphics_enabled: bool,
     /// One bounded matcher, inactive unless a direct transmission is armed.
@@ -1574,6 +1579,7 @@ fn run_client_with_mode(
     let host_appearance_override = host_appearance_override_at_attach(configured_host_appearance);
     let loop_config = ClientLoopConfig {
         sound_config: loaded_config.config.ui.sound,
+        terminal_notification_backend: loaded_config.config.ui.toast.terminal_backend,
         mouse_scroll_lines,
         redraw_on_focus_gained,
         host_cursor,
@@ -1768,6 +1774,8 @@ async fn run_client_loop(
         keyboard_report_all_active: false,
         reported_size: (cols, rows),
         sound_config: config.sound_config,
+        terminal_notification_backend: config.terminal_notification_backend,
+        missing_terminal_notification_backend_warned: false,
         kitty_graphics_enabled: config.kitty_graphics_enabled,
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
@@ -2296,7 +2304,14 @@ async fn run_client_loop(
                     message,
                     body,
                 } => {
-                    handle_notify(kind, &message, body.as_deref(), &state.sound_config);
+                    handle_notify(
+                        kind,
+                        &message,
+                        body.as_deref(),
+                        &state.sound_config,
+                        state.terminal_notification_backend,
+                        &mut state.missing_terminal_notification_backend_warned,
+                    );
                 }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
@@ -2311,9 +2326,17 @@ async fn run_client_loop(
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_client_config(
                         &mut state.sound_config,
+                        &mut state.terminal_notification_backend,
                         &mut state.redraw_on_focus_gained,
                         &mut state.draw_host_cursor,
                         &mut state.remote_image_paste_key,
+                    );
+                }
+                ServerMessage::NotificationConfig { sound_enabled } => {
+                    reload_local_notification_config(
+                        &mut state.sound_config,
+                        &mut state.terminal_notification_backend,
+                        sound_enabled,
                     );
                 }
                 ServerMessage::DockWidth { width } => {
@@ -2565,6 +2588,7 @@ fn client_remote_image_paste_key(
 
 fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
+    terminal_notification_backend: &mut crate::config::TerminalNotificationBackend,
     redraw_on_focus_gained: &mut bool,
     draw_host_cursor: &mut bool,
     remote_image_paste_key: &mut Option<(
@@ -2572,22 +2596,44 @@ fn reload_local_client_config(
         crossterm::event::KeyModifiers,
     )>,
 ) {
+    let Some(config) = load_local_client_config() else {
+        return;
+    };
+    let loaded_remote_image_paste_key = client_remote_image_paste_key(&config);
+    *sound_config = config.ui.sound;
+    *terminal_notification_backend = config.ui.toast.terminal_backend;
+    *redraw_on_focus_gained = config.ui.redraw_on_focus_gained;
+    *draw_host_cursor = should_draw_host_cursor(config.ui.host_cursor);
+    *remote_image_paste_key = loaded_remote_image_paste_key;
+    debug!("reloaded local client config");
+}
+
+fn load_local_client_config() -> Option<crate::config::Config> {
     match crate::config::load_live_config() {
         Ok(loaded) => {
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
-            let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
-            *sound_config = loaded.config.ui.sound;
-            *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
-            *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
-            *remote_image_paste_key = loaded_remote_image_paste_key;
-            debug!("reloaded local client config");
+            Some(loaded.config)
         }
         Err(diagnostics) => {
             warn!(diagnostics = ?diagnostics, "failed to reload local client config; keeping current client config");
+            None
         }
     }
+}
+
+pub(crate) fn reload_local_notification_config(
+    sound_config: &mut crate::config::SoundConfig,
+    terminal_notification_backend: &mut crate::config::TerminalNotificationBackend,
+    sound_enabled: bool,
+) {
+    if let Some(config) = load_local_client_config() {
+        *sound_config = config.ui.sound;
+        *terminal_notification_backend = config.ui.toast.terminal_backend;
+    }
+    sound_config.enabled = sound_enabled;
+    debug!(sound_enabled, "reloaded local notification config");
 }
 
 fn handle_notify(
@@ -2595,12 +2641,16 @@ fn handle_notify(
     message: &str,
     body: Option<&str>,
     sound_config: &crate::config::SoundConfig,
+    terminal_notification_backend: crate::config::TerminalNotificationBackend,
+    missing_terminal_notification_backend_warned: &mut bool,
 ) {
     handle_notify_with_notifiers(
         kind,
         message,
         body,
         sound_config,
+        terminal_notification_backend,
+        missing_terminal_notification_backend_warned,
         crate::terminal_notify::show_notification,
         crate::platform::show_desktop_notification,
     );
@@ -2611,9 +2661,15 @@ fn handle_notify_with_notifiers(
     message: &str,
     body: Option<&str>,
     sound_config: &crate::config::SoundConfig,
-    mut show_terminal_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
+    terminal_notification_backend: crate::config::TerminalNotificationBackend,
+    missing_terminal_notification_backend_warned: &mut bool,
+    mut show_terminal_notification: impl FnMut(
+        &str,
+        Option<&str>,
+        crate::config::TerminalNotificationBackend,
+    ) -> io::Result<bool>,
     mut show_system_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
-) {
+) -> bool {
     match kind {
         NotifyKind::Sound => {
             let Some(sound) = sound_from_notify_message(message) else {
@@ -2621,7 +2677,7 @@ fn handle_notify_with_notifiers(
                     message = message,
                     "received unknown sound notification from server"
                 );
-                return;
+                return false;
             };
             if sound_config.enabled {
                 crate::sound::play(sound, sound_config);
@@ -2632,8 +2688,16 @@ fn handle_notify_with_notifiers(
                 message = message,
                 "received terminal toast notification from server"
             );
-            if let Err(err) = show_terminal_notification(message, body) {
-                warn!(err = %err, "failed to emit terminal notification");
+            match show_terminal_notification(message, body, terminal_notification_backend) {
+                Ok(false) if !*missing_terminal_notification_backend_warned => {
+                    *missing_terminal_notification_backend_warned = true;
+                    warn!(
+                        "terminal notification backend could not be detected; set ui.toast.terminal_backend to osc9 or osc99"
+                    );
+                    return true;
+                }
+                Ok(_) => {}
+                Err(err) => warn!(err = %err, "failed to emit terminal notification"),
             }
         }
         NotifyKind::SystemToast => {
@@ -2646,6 +2710,7 @@ fn handle_notify_with_notifiers(
             }
         }
     }
+    false
 }
 
 fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
@@ -4360,18 +4425,20 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\n",
+            "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\n[ui.toast]\nterminal_backend = \"osc99\"\n",
         )
         .unwrap();
         let path_string = path.to_string_lossy().to_string();
         let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
         let mut sound_config = crate::config::SoundConfig::default();
+        let mut terminal_notification_backend = crate::config::TerminalNotificationBackend::Auto;
         let mut redraw_on_focus_gained = true;
         let mut draw_host_cursor = false;
         let mut remote_image_paste_key = None;
 
         reload_local_client_config(
             &mut sound_config,
+            &mut terminal_notification_backend,
             &mut redraw_on_focus_gained,
             &mut draw_host_cursor,
             &mut remote_image_paste_key,
@@ -4379,6 +4446,10 @@ mod tests {
 
         assert!(!redraw_on_focus_gained);
         assert!(draw_host_cursor);
+        assert_eq!(
+            terminal_notification_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -4386,13 +4457,17 @@ mod tests {
     fn toast_notify_from_server_is_emitted_even_when_attach_config_was_off() {
         let sound_config = crate::config::SoundConfig::default();
         let mut emitted = None;
+        let mut missing_backend_warned = false;
 
         handle_notify_with_notifiers(
             NotifyKind::Toast,
             "pi finished",
             Some("workspace 1"),
             &sound_config,
-            |title, body| {
+            crate::config::TerminalNotificationBackend::Osc9,
+            &mut missing_backend_warned,
+            |title, body, backend| {
+                assert_eq!(backend, crate::config::TerminalNotificationBackend::Osc9);
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)
             },
@@ -4409,13 +4484,16 @@ mod tests {
     fn system_toast_notify_from_server_uses_system_notifier() {
         let sound_config = crate::config::SoundConfig::default();
         let mut emitted = None;
+        let mut missing_backend_warned = false;
 
         handle_notify_with_notifiers(
             NotifyKind::SystemToast,
             "pi finished",
             Some("workspace 1"),
             &sound_config,
-            |_, _| Ok(false),
+            crate::config::TerminalNotificationBackend::Auto,
+            &mut missing_backend_warned,
+            |_, _, _| Ok(false),
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)
@@ -4432,13 +4510,16 @@ mod tests {
     fn system_toast_notify_preserves_colon_in_title() {
         let sound_config = crate::config::SoundConfig::default();
         let mut emitted = None;
+        let mut missing_backend_warned = false;
 
         handle_notify_with_notifiers(
             NotifyKind::SystemToast,
             "build: failed",
             Some("api workspace"),
             &sound_config,
-            |_, _| Ok(false),
+            crate::config::TerminalNotificationBackend::Auto,
+            &mut missing_backend_warned,
+            |_, _, _| Ok(false),
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)
@@ -4452,6 +4533,36 @@ mod tests {
                 Some("api workspace".to_string())
             ))
         );
+    }
+
+    #[test]
+    fn unresolved_terminal_backend_warns_once_per_client_session() {
+        let sound_config = crate::config::SoundConfig::default();
+        let mut missing_backend_warned = false;
+
+        let first_warned = handle_notify_with_notifiers(
+            NotifyKind::Toast,
+            "pi finished",
+            None,
+            &sound_config,
+            crate::config::TerminalNotificationBackend::Auto,
+            &mut missing_backend_warned,
+            |_, _, _| Ok(false),
+            |_, _| Ok(false),
+        );
+        let second_warned = handle_notify_with_notifiers(
+            NotifyKind::Toast,
+            "pi finished again",
+            None,
+            &sound_config,
+            crate::config::TerminalNotificationBackend::Auto,
+            &mut missing_backend_warned,
+            |_, _, _| Ok(false),
+            |_, _| Ok(false),
+        );
+
+        assert!(first_warned);
+        assert!(!second_warned);
     }
 
     #[test]

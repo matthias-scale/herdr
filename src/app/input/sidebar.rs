@@ -446,12 +446,25 @@ impl AppState {
             .or_else(|| {
                 self.agent_detail_target_at(row)
                     .map(|(ws_idx, _, pane_id)| (ws_idx, pane_id))
-            })?;
+            })
+            .or_else(|| self.sidebar_settled_workspace_target_at(row))?;
         self.pane_is_settled(target.0, target.1)
             .then(|| crate::app::state::PaneFocusTarget {
                 workspace_id: self.workspaces[target.0].id.clone(),
                 pane_id: target.1,
             })
+    }
+
+    fn sidebar_settled_workspace_target_at(
+        &self,
+        row: u16,
+    ) -> Option<(usize, crate::layout::PaneId)> {
+        let (cards, _) = crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
+        let card = cards
+            .iter()
+            .find(|card| row >= card.rect.y && row < card.rect.bottom())?;
+        let pane_id = card.settled_pane_id?;
+        Some((card.ws_idx, pane_id))
     }
 
     pub(crate) fn sidebar_settled_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -1697,6 +1710,18 @@ mod tests {
         app.state.set_sidebar_group_mode(mode);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let before = sidebar_order_signature(&app.state);
+        let before_storage = app
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.root_pane)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
             .into_iter()
             .nth(2)
@@ -1718,16 +1743,13 @@ mod tests {
         ));
 
         if settled {
-            let selected = app
-                .state
-                .sidebar_selected_settled
-                .as_ref()
-                .expect("settled click selects its row");
+            assert_eq!(app.state.active, Some(target_ws_idx));
             assert_eq!(
-                selected.workspace_id,
-                app.state.workspaces[target_ws_idx].id
+                app.state.workspaces[target_ws_idx].focused_pane_id(),
+                Some(target_pane_id)
             );
-            assert_eq!(selected.pane_id, target_pane_id);
+            assert!(!app.state.pane_is_settled(target_ws_idx, target_pane_id));
+            assert!(app.state.sidebar_selected_settled.is_none());
         } else {
             assert_eq!(app.state.active, Some(target_ws_idx));
             assert_eq!(
@@ -1735,9 +1757,26 @@ mod tests {
                 target_tab_idx
             );
         }
+        if !settled {
+            assert_eq!(
+                sidebar_order_signature(&app.state),
+                before,
+                "{mode:?}, settled={settled}"
+            );
+        }
         assert_eq!(
-            sidebar_order_signature(&app.state),
-            before,
+            app.state
+                .workspaces
+                .iter()
+                .map(|workspace| {
+                    workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| tab.root_pane)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            before_storage,
             "{mode:?}, settled={settled}"
         );
     }
@@ -1748,6 +1787,221 @@ mod tests {
             assert_sidebar_click_preserves_order(mode, false);
             assert_sidebar_click_preserves_order(mode, true);
         }
+    }
+
+    #[test]
+    fn clicking_resumable_settled_row_focuses_and_unsettles_its_pane() {
+        for mode in SidebarGroupMode::ALL {
+            let mut app = sidebar_order_app(true);
+            app.state.set_sidebar_group_mode(mode);
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .nth(2)
+                .expect("third settled sidebar tab row");
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                target.rect.x + 1,
+                target.rect.y,
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                target.rect.x + 1,
+                target.rect.y,
+            ));
+
+            assert_eq!(app.state.active, Some(target.ws_idx), "{mode:?}");
+            assert_eq!(
+                app.state.workspaces[target.ws_idx].focused_pane_id(),
+                Some(target.pane_id),
+                "{mode:?}"
+            );
+            assert!(
+                !app.state.pane_is_settled(target.ws_idx, target.pane_id),
+                "{mode:?}"
+            );
+            assert!(app.state.sidebar_selected_settled.is_none(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn clicking_settled_workspace_header_focuses_and_unsettles_its_pane() {
+        for mode in [
+            SidebarGroupMode::Repo,
+            SidebarGroupMode::RepoWorktree,
+            SidebarGroupMode::Spaces,
+        ] {
+            let mut app = sidebar_order_app(true);
+            let target_ws_idx = 1;
+            let hidden_sibling =
+                app.state.workspaces[target_ws_idx].test_split(Direction::Horizontal);
+            app.state.workspaces[target_ws_idx].tabs[0]
+                .panes
+                .get_mut(&hidden_sibling)
+                .expect("hidden sibling")
+                .settled_at = Some(1_725_000_001);
+            app.state.ensure_test_terminals();
+            app.state.set_sidebar_group_mode(mode);
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let target_pane_id =
+                crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+                    .into_iter()
+                    .find(|card| card.ws_idx == target_ws_idx && card.tab_idx == 0)
+                    .map(|card| card.pane_id)
+                    .expect("represented settled pane");
+            assert_ne!(target_pane_id, hidden_sibling);
+            let target =
+                crate::ui::compute_workspace_card_areas(&app.state, app.state.view.sidebar_rect)
+                    .into_iter()
+                    .find(|card| {
+                        card.ws_idx == target_ws_idx && card.settled_pane_id == Some(target_pane_id)
+                    })
+                    .expect("settled workspace header");
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                target.rect.x + 8,
+                target.rect.y,
+            ));
+            app.handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                target.rect.x + 8,
+                target.rect.y,
+            ));
+
+            assert_eq!(app.state.active, Some(target_ws_idx), "{mode:?}");
+            assert_eq!(
+                app.state.workspaces[target_ws_idx].focused_pane_id(),
+                Some(target_pane_id),
+                "{mode:?}"
+            );
+            assert!(
+                !app.state.pane_is_settled(target_ws_idx, target_pane_id),
+                "{mode:?}"
+            );
+            assert!(
+                app.state.pane_is_settled(target_ws_idx, hidden_sibling),
+                "{mode:?}: group header resumed an unrelated hidden sibling"
+            );
+            assert!(app.state.sidebar_selected_settled.is_none(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn settled_workspace_header_targets_its_settled_pane_in_a_mixed_workspace() {
+        let mut app = sidebar_order_app(false);
+        app.state.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        let target_ws_idx = 0;
+        let target_tab_idx = 2;
+        let target_pane_id = app.state.workspaces[target_ws_idx].tabs[target_tab_idx].root_pane;
+        app.state.workspaces[target_ws_idx].tabs[target_tab_idx]
+            .panes
+            .get_mut(&target_pane_id)
+            .expect("target pane")
+            .settled_at = Some(1_725_000_000);
+        let terminal_id = app.state.workspaces[target_ws_idx].tabs[target_tab_idx].panes
+            [&target_pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("target terminal")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("mixed-settled")
+                    .expect("valid session id"),
+            });
+        app.state.reconcile_sidebar_presentation();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        assert_ne!(
+            app.state.workspaces[target_ws_idx].focused_pane_id(),
+            Some(target_pane_id)
+        );
+        let cards =
+            crate::ui::compute_workspace_card_areas(&app.state, app.state.view.sidebar_rect);
+        assert!(cards
+            .iter()
+            .any(|card| { card.ws_idx == target_ws_idx && card.settled_pane_id.is_none() }));
+        let target = cards
+            .into_iter()
+            .find(|card| {
+                card.ws_idx == target_ws_idx && card.settled_pane_id == Some(target_pane_id)
+            })
+            .expect("mixed workspace settled header");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.rect.x + 8,
+            target.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            target.rect.x + 8,
+            target.rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(target_ws_idx));
+        assert_eq!(
+            app.state.workspaces[target_ws_idx].active_tab_index(),
+            target_tab_idx
+        );
+        assert_eq!(
+            app.state.workspaces[target_ws_idx].focused_pane_id(),
+            Some(target_pane_id)
+        );
+        assert!(!app.state.pane_is_settled(target_ws_idx, target_pane_id));
+        assert!(app.state.sidebar_selected_settled.is_none());
+    }
+
+    #[test]
+    fn dragging_a_settled_row_does_not_resume_it() {
+        let mut app = sidebar_order_app(true);
+        app.state.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let cards =
+            crate::ui::compute_workspace_card_areas(&app.state, app.state.view.sidebar_rect);
+        let source = cards
+            .iter()
+            .find(|card| card.ws_idx == 0 && card.settled_pane_id.is_some())
+            .expect("settled source workspace row");
+        let destination = cards
+            .iter()
+            .find(|card| card.ws_idx == 1 && card.settled_pane_id.is_some())
+            .expect("settled destination workspace row");
+        let workspace_id = app.state.workspaces[source.ws_idx].id.clone();
+        let pane_id = source.settled_pane_id.expect("settled source pane");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            source.rect.x + 8,
+            source.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            destination.rect.x + 8,
+            destination.rect.y,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::WorkspaceReorder { .. })
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            destination.rect.x + 8,
+            destination.rect.y,
+        ));
+
+        let ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .expect("moved workspace");
+        assert!(app.state.pane_is_settled(ws_idx, pane_id));
+        assert!(app.state.sidebar_selected_settled.is_none());
     }
 
     /// One workspace with three tabs in a single flat repo group, named so the
@@ -2338,11 +2592,36 @@ mod tests {
             row.x + 1,
             row.y,
         ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            row.x + 1,
+            row.y,
+        ));
 
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
         assert!(!app.state.pane_is_settled(0, pane_id));
         assert!(app.state.sidebar_settled_menu_target.is_none());
+    }
+
+    #[test]
+    fn keyboard_enter_still_opens_the_settled_menu() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.sidebar_selected_settled = Some(target.clone());
+
+        assert!(
+            app.handle_sidebar_settled_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),))
+        );
+
+        assert_eq!(app.state.sidebar_settled_menu_target, Some(target.clone()));
+        let ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)
+            .expect("settled target workspace");
+        assert!(app.state.pane_is_settled(ws_idx, target.pane_id));
     }
 
     #[test]
@@ -2692,6 +2971,7 @@ mod tests {
             ws_idx: 0,
             rect: cards[0].rect,
             indented: false,
+            settled_pane_id: None,
         }];
 
         assert_eq!(app.state.workspace_at_row(target_row), Some(1));
