@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -73,6 +73,7 @@ pub(crate) struct PtyIoActorConfig {
     pub on_read: ReadCallback,
     pub on_reader_exit: Option<ReaderExitCallback>,
     pub on_user_writes_poisoned: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub pending_user_input: Arc<AtomicU64>,
 }
 
 enum PtyIoDataCommand {
@@ -117,6 +118,7 @@ pub(crate) struct PtyIoActorHandle {
     on_user_writes_poisoned: Option<Arc<dyn Fn() + Send + Sync>>,
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
+    pending_user_input: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -176,6 +178,7 @@ impl PtyIoActorHandle {
         }
         permit.send(PtyIoDataCommand::WriteUserInput { bytes });
         user_writes.pending_local_writes += 1;
+        self.pending_user_input.fetch_add(1, Ordering::AcqRel);
         drop(user_writes);
         self.wake_actor();
         Ok(())
@@ -200,6 +203,7 @@ impl PtyIoActorHandle {
         {
             Ok(()) => {
                 user_writes.pending_local_writes += 1;
+                self.pending_user_input.fetch_add(1, Ordering::AcqRel);
                 drop(user_writes);
                 self.wake_actor();
                 Ok(())
@@ -517,6 +521,7 @@ impl PtyIoActor {
             on_user_writes_poisoned: config.on_user_writes_poisoned.clone(),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
+            pending_user_input: Arc::clone(&config.pending_user_input),
         };
 
         let mut runner = PtyIoActorRunner {
@@ -538,6 +543,7 @@ impl PtyIoActor {
             on_user_writes_poisoned: config.on_user_writes_poisoned,
             controls,
             response_order,
+            pending_user_input: config.pending_user_input,
             on_read: config.on_read,
             on_reader_exit: config.on_reader_exit,
             poll_observer,
@@ -574,6 +580,7 @@ struct PtyIoActorRunner {
     on_user_writes_poisoned: Option<Arc<dyn Fn() + Send + Sync>>,
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
+    pending_user_input: Arc<AtomicU64>,
     on_read: ReadCallback,
     on_reader_exit: Option<ReaderExitCallback>,
     poll_observer: Option<std_mpsc::Sender<()>>,
@@ -611,6 +618,12 @@ impl PtyIoActorRunner {
         } else {
             user_writes.pending_local_writes -= count;
         }
+        let count = count as u64;
+        let _ =
+            self.pending_user_input
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                    Some(pending.saturating_sub(count))
+                });
     }
 
     fn discard_local_write(&self) {
@@ -1132,6 +1145,7 @@ mod tests {
             }),
             on_reader_exit: None,
             on_user_writes_poisoned: None,
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         };
         let handle = if let Some(poll_observer) = poll_observer {
             PtyIoActor::spawn_with_poll_observer(config, poll_observer)
@@ -1169,6 +1183,7 @@ mod tests {
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::new(AtomicU64::new(1)),
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             on_user_writes_poisoned: None,
@@ -1284,6 +1299,7 @@ mod tests {
             }),
             on_reader_exit: None,
             on_user_writes_poisoned: None,
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         })
         .expect("real PTY actor spawn");
         if prefill_input {
@@ -2026,6 +2042,7 @@ mod tests {
             }),
             on_reader_exit: None,
             on_user_writes_poisoned: None,
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         })
         .expect("actor spawn");
 
@@ -2243,6 +2260,7 @@ mod tests {
             on_user_writes_poisoned: None,
             controls: Arc::clone(&controls),
             response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         };
 
         handle.resize(20, 80, 8, 16, vec![Bytes::from_static(b"old")]);
@@ -2310,6 +2328,7 @@ mod tests {
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
+            pending_user_input: Arc::new(AtomicU64::new(0)),
             on_read: Box::new(move |_| PtyReadResult {
                 terminal_responses: vec![if query_light.load(Ordering::Acquire) {
                     Bytes::from_static(b"query-light")
@@ -2336,6 +2355,7 @@ mod tests {
             on_user_writes_poisoned: None,
             controls,
             response_order,
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         };
         let (changed_tx, changed_rx) = std_mpsc::channel();
         let (continue_tx, continue_rx) = std_mpsc::channel();
@@ -2414,6 +2434,7 @@ mod tests {
             on_user_writes_poisoned: None,
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         };
 
         let write = tokio::spawn(async move {
@@ -2468,6 +2489,7 @@ mod tests {
             on_user_writes_poisoned: None,
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         };
         let write_handle = handle.clone();
         let write = tokio::spawn(async move {
@@ -2531,6 +2553,7 @@ mod tests {
             on_user_writes_poisoned: None,
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::new(AtomicU64::new(0)),
         };
 
         let handoff = std::thread::spawn(move || handle.begin_handoff(Duration::from_secs(1)));
@@ -2583,6 +2606,7 @@ mod tests {
             user_writes_poisoned: Arc::new(AtomicBool::new(false)),
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::new(AtomicU64::new(1)),
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             on_user_writes_poisoned: None,

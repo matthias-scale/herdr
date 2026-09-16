@@ -105,7 +105,7 @@ Raw socket method names use dot notation:
 | Loop | `loop.list`, `loop.run_history` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.work_context.set`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.work_context.set`, `pane.send_text`, `pane.send_text_if`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.focus.status`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -926,10 +926,16 @@ herdr pane read w1:p1 --source visible --lines 80
 herdr pane read w1:p1 --source recent --lines 120
 herdr pane read w1:p1 --source recent-unwrapped --lines 120
 herdr pane read w1:p1 --source detection
+herdr pane read w1:p1 --source detection --json
 ```
 
 `recent-unwrapped` is useful for logs because it ignores soft wrapping.
 `detection` returns the bottom-buffer snapshot used by agent screen detection.
+The JSON form of an unbounded text detection read may include an
+`input_observation.token` plus exact pane, workspace, terminal, agent reference,
+and agent session identity. Send those unchanged to `pane.send_text_if` with the
+`detection_snapshot_unchanged` condition. The response is `pane_text_send` with
+`outcome` set to `sent` or `condition_mismatch`; mismatch sends zero bytes.
 
 ## Waiting for state
 

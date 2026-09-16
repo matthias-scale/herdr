@@ -243,15 +243,19 @@ impl App {
                     pane_id: self
                         .public_pane_id(resolved.ws_idx, resolved.pane_id)
                         .unwrap_or_else(|| params.target.clone()),
+                    terminal_id: resolved.terminal_id,
                     workspace_id,
                     tab_id: self
                         .public_tab_id(resolved.ws_idx, resolved.tab_idx)
                         .unwrap(),
+                    agent_ref: None,
+                    agent_session: None,
                     source: params.source,
                     format: params.format,
                     text: snapshot.text,
                     revision: pane.content_revision(),
                     truncated: snapshot.truncated,
+                    input_observation: None,
                 },
             },
         )
