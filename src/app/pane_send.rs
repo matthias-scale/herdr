@@ -411,6 +411,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn single_target_send_does_not_complete_a_blocked_background_agent() {
         let (mut app, panes) = app_with_agent_workspaces(2);
+        app.state.sound.enabled = true;
         let target_ws = 1;
         let target_pane = panes[target_ws];
         let (terminal_id, mut rx) =
