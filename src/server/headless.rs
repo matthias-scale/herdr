@@ -3731,6 +3731,9 @@ impl HeadlessServer {
         }
         self.app.state.request_client_config_reload = false;
         self.send_to_all_clients(ServerMessage::ReloadSoundConfig);
+        self.send_to_all_clients(ServerMessage::NotificationConfig {
+            sound_enabled: self.app.state.sound.enabled,
+        });
     }
 
     /// Encodes a server message into a length-prefixed frame.
@@ -4409,6 +4412,12 @@ impl HeadlessServer {
                         crate::client::presentation::load_sidebar_group_sorts();
                 }
                 if !direct_attach_requested {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::NotificationConfig {
+                            sound_enabled: self.app.state.sound.enabled,
+                        },
+                    );
                     self.foreground_client_id = Some(client_id);
                 }
                 if first_app_client {
@@ -17470,6 +17479,213 @@ next_tab = ""
         assert_eq!(
             client_backend,
             crate::config::TerminalNotificationBackend::Osc99
+        );
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn notification_permission_survives_reconnect_after_bell_toggle() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-notification-reconnect-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let server_path = directory.join("server.toml");
+        let client_path = directory.join("client.toml");
+        std::fs::write(&server_path, "# server config\n").expect("seed server config");
+        std::fs::write(
+            &client_path,
+            "[ui.toast]\nterminal_backend = \"osc99\"\n[ui.sound]\nenabled = false\n",
+        )
+        .expect("seed client config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(
+            &mut server.app.state,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+        let bell = server.app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            keybindings: None,
+            writer,
+            render_encoding: RenderEncoding::SemanticFrame,
+            direct_attach_requested: false,
+            direct_graphics: false,
+        }));
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("muted notification config on initial attach")
+            ),
+            ServerMessage::NotificationConfig {
+                sound_enabled: false
+            }
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Down(
+                    crate::protocol::ClientMouseButton::Left,
+                ),
+                column: bell.x,
+                row: bell.y,
+                modifiers: 0,
+            }],
+        }));
+        server.drain_client_config_reload_request();
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("notification config after enabling bell")
+            ),
+            ServerMessage::NotificationConfig {
+                sound_enabled: true
+            }
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 1 }));
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            keybindings: None,
+            writer,
+            render_encoding: RenderEncoding::SemanticFrame,
+            direct_attach_requested: false,
+            direct_graphics: false,
+        }));
+
+        let reconnect_config = read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("server notification config on reconnect"),
+        );
+        let ServerMessage::NotificationConfig { sound_enabled } = reconnect_config else {
+            panic!("expected reconnect notification config, got {reconnect_config:?}");
+        };
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
+        let mut client_sound = crate::config::SoundConfig::default();
+        let mut client_backend = crate::config::TerminalNotificationBackend::Auto;
+        crate::client::reload_local_notification_config(
+            &mut client_sound,
+            &mut client_backend,
+            sound_enabled,
+        );
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+        assert!(client_sound.enabled, "reconnected client stayed muted");
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99,
+            "server permission must not replace the client's terminal backend"
+        );
+
+        server.app.state.request_client_config_reload = true;
+        server.drain_client_config_reload_request();
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("local config reload request")
+            ),
+            ServerMessage::ReloadSoundConfig
+        ));
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
+        let local_config = crate::config::Config::load().config;
+        client_sound = local_config.ui.sound;
+        client_backend = local_config.ui.toast.terminal_backend;
+        assert!(
+            !client_sound.enabled,
+            "client fixture must reproduce the local config reset"
+        );
+        let restored = read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("server notification config after local config reload"),
+        );
+        let ServerMessage::NotificationConfig { sound_enabled } = restored else {
+            panic!("expected restored notification config, got {restored:?}");
+        };
+        crate::client::reload_local_notification_config(
+            &mut client_sound,
+            &mut client_backend,
+            sound_enabled,
+        );
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+        assert!(
+            client_sound.enabled,
+            "local config reload reverted the server's effective permission"
+        );
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
+
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "notify-after-reconnect".into(),
+                    method: api::schema::Method::NotificationShow(
+                        api::schema::NotificationShowParams {
+                            title: "build finished".into(),
+                            body: None,
+                            position: None,
+                            sound: api::schema::NotificationShowSound::Done,
+                        },
+                    ),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            })
+        );
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("notification response");
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: api::schema::NotificationShowReason::Shown,
+            }
+        );
+        let delivered = read_server_message(
+            control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("sound notification after reconnect"),
+        );
+        assert!(
+            matches!(
+                delivered,
+                ServerMessage::Notify {
+                    kind: protocol::NotifyKind::Sound,
+                    message,
+                    body: None,
+                } if message == "agent done"
+            ) && client_sound.enabled,
+            "client must play the delivered sound after reconnect"
         );
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);

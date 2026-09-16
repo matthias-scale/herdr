@@ -863,8 +863,8 @@ pub enum ServerMessage {
     /// The remote server refused guarded terminal control.
     ControlError { code: String, message: String },
 
-    /// Reload notification settings on the client that toggled the bell and
-    /// apply the server-side toggle as its effective sound permission.
+    /// Reload client-local notification settings and apply the server's
+    /// effective sound permission after attach, config reload, or bell toggle.
     NotificationConfig { sound_enabled: bool },
 }
 
