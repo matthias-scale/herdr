@@ -1532,6 +1532,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
     pub(crate) sort_menu: Option<SidebarSortMenuState>,
+    pub(crate) subgroup_picker: Option<SidebarSubgroupPickerState>,
     /// Per-group sort choices, keyed by the group's canonical key. Client
     /// presentation: two attaches may sort the same group differently.
     pub(crate) group_sorts: std::collections::HashMap<String, SidebarSortMode>,
@@ -1621,8 +1622,8 @@ pub(crate) struct SidebarSortMenuState {
 
 /// Picker that assigns a window to a named sidebar subgroup. Opened from the
 /// window's context menu; the typed query doubles as the new-subgroup name.
-/// Transient like the context menu that opened it, so it lives on `AppState`
-/// directly rather than in the per-attach presentation swap.
+/// Transient like the context menu that opened it, and swapped through the
+/// attach-local sidebar presentation state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarSubgroupPickerState {
     pub(crate) ws_idx: usize,
@@ -5041,6 +5042,10 @@ impl AppState {
         );
         std::mem::swap(&mut self.sidebar_object_menu, &mut other.object_menu);
         std::mem::swap(&mut self.sidebar_sort_menu, &mut other.sort_menu);
+        std::mem::swap(
+            &mut self.sidebar_subgroup_picker,
+            &mut other.subgroup_picker,
+        );
         std::mem::swap(&mut self.sidebar_group_sorts, &mut other.group_sorts);
         std::mem::swap(
             &mut self.sidebar_unassigned_expanded_views,
@@ -6862,7 +6867,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     type SurfaceSetup = (&'static str, fn(&mut AppState));
 
@@ -7035,6 +7040,65 @@ mod tests {
         assert!(app.sidebar_refreshing);
         assert_eq!(app.sidebar_new_menu, None);
         assert_eq!(presentation.new_menu.map(|menu| menu.selected), Some(2));
+    }
+
+    #[test]
+    fn subgroup_picker_is_isolated_between_sidebar_presentations() {
+        let mut app = AppState::test_new();
+        let mut first_client = SidebarPresentationState::default();
+        let mut second_client = SidebarPresentationState::default();
+        app.sidebar_subgroup_picker = Some(SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        app.swap_sidebar_presentation(&mut first_client);
+        assert!(
+            app.sidebar_subgroup_picker.is_none(),
+            "the first client's picker must leave shared app state"
+        );
+
+        app.swap_sidebar_presentation(&mut second_client);
+        assert!(!app.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        )));
+        assert!(!app.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty(),
+        )));
+        app.swap_sidebar_presentation(&mut second_client);
+
+        app.swap_sidebar_presentation(&mut first_client);
+        assert!(app.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+        )));
+        assert_eq!(
+            app.sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("a")
+        );
+        app.swap_sidebar_presentation(&mut first_client);
+
+        app.swap_sidebar_presentation(&mut second_client);
+        assert!(app.sidebar_subgroup_picker.is_none());
+        assert!(!app.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+        )));
+        app.swap_sidebar_presentation(&mut second_client);
+
+        app.swap_sidebar_presentation(&mut first_client);
+        assert_eq!(
+            app.sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("a")
+        );
     }
 
     #[test]
