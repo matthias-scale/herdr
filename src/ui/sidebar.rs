@@ -234,11 +234,7 @@ fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
 
 fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
     // Waiting on subagents never hides a pane that owes the human something.
-    let attention = entry_attention_tier(entry);
-    let owes_human = attention == AttentionTier::Attention
-        || (attention == AttentionTier::Blocked
-            && (entry.state != AgentState::Working || entry.usage_limited));
-    if entry.waiting_on_agents && !owes_human {
+    if entry.waiting_on_agents && entry_attention_tier(entry) == AttentionTier::None {
         return "◌";
     }
     compact_dot_for_state(
@@ -11215,6 +11211,7 @@ pub(crate) mod tests {
         assert_eq!(agent_dot_tooltip(&entry), "Waiting on agents");
 
         entry.open_blockers = true;
+        assert_ne!(compact_row_dot(&entry), "◌");
         assert_eq!(compact_row_color(&entry, &palette), palette.red);
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
     }
