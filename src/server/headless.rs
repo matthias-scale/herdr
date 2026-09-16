@@ -5313,12 +5313,12 @@ impl HeadlessServer {
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
-        let response = if matches!(
+        let (response, api_pane_state_updates) = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
         ) {
             let report = self.reload_server_config(true);
-            serde_json::to_string(&api::schema::SuccessResponse {
+            let response = serde_json::to_string(&api::schema::SuccessResponse {
                 id: msg.request.id.clone(),
                 result: api::schema::ResponseResult::ConfigReload {
                     status: report.status,
@@ -5334,10 +5334,11 @@ impl HeadlessServer {
                     },
                 })
                 .unwrap_or_else(|_| "{}".to_string())
-            })
+            });
+            (response, Vec::new())
         } else {
             self.app
-                .handle_api_request_after_internal_events_drained(msg.request)
+                .handle_api_request_after_internal_events_drained_with_pane_updates(msg.request)
         };
         if let (Some(params), Some(active)) = (stream_open.as_ref(), stream_active) {
             self.app
@@ -5421,6 +5422,12 @@ impl HeadlessServer {
             if new_state == *prev_state {
                 continue;
             }
+            let suppress_completion = api_pane_state_updates.iter().any(|update| {
+                update.pane_id == *pane_id
+                    && update.previous_state == *prev_state
+                    && update.state == new_state
+                    && update.suppress_completion
+            });
 
             let is_active_tab = self.app.state.pane_is_in_active_tab(*ws_idx, *pane_id);
             let suppress_active_tab_notifications =
@@ -5438,7 +5445,8 @@ impl HeadlessServer {
                 "pane effective state changed during API request, checking notification"
             );
 
-            if !forwarded_toast_from_state
+            if !suppress_completion
+                && !forwarded_toast_from_state
                 && self.app.state.toast_config.delay_seconds == 0
                 && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
             {
@@ -5487,7 +5495,9 @@ impl HeadlessServer {
 
             // Forward sound notification when server-side sound policy allows it.
             // Clients still decide locally whether they can execute the side effect.
-            if self.app.state.toast_config.delay_seconds == 0 && self.app.state.sound.allows(agent)
+            if !suppress_completion
+                && self.app.state.toast_config.delay_seconds == 0
+                && self.app.state.sound.allows(agent)
             {
                 if let Some(sound) =
                     crate::app::actions::notification_sound_for_state_change_with_agent_labels(
@@ -18593,6 +18603,255 @@ next_tab = ""
                 .is_err(),
             "startup readiness should not forward a completion notification"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_agent_prompt_does_not_notify_when_it_retires_a_blocked_closing_gate() {
+        let mut server = test_headless_server();
+        let background = crate::workspace::Workspace::test_new("background");
+        let pane_id = background.tabs[0].root_pane;
+        let public_pane_id = format!("{}:p1", background.id);
+        let foreground = crate::workspace::Workspace::test_new("foreground");
+        server.app.state.workspaces = vec![background, foreground];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(1);
+        server.app.state.selected = 1;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+        server.app.state.toast_config.delay_seconds = 0;
+        server.app.state.sound.enabled = true;
+
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("pane terminal");
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "prompt".into(),
+                    method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                        target: public_pane_id,
+                        text: "continue".into(),
+                        wait: None,
+                    }),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            })
+        );
+
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("agent.prompt response");
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            parsed.result,
+            api::schema::ResponseResult::AgentPrompted { .. }
+        ));
+        assert_eq!(
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
+            crate::detect::AgentState::Idle
+        );
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "retiring the input gate must not forward a Finished toast or done sound"
+        );
+    }
+
+    #[test]
+    fn headless_api_genuine_completion_still_forwards_finished_toast_and_done_sound() {
+        let mut server = test_headless_server();
+        let background = crate::workspace::Workspace::test_new("background");
+        let pane_id = background.tabs[0].root_pane;
+        let public_pane_id = format!("{}:p1", background.id);
+        let foreground = crate::workspace::Workspace::test_new("foreground");
+        server.app.state.workspaces = vec![background, foreground];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(1);
+        server.app.state.selected = 1;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+        server.app.state.toast_config.delay_seconds = 0;
+        server.app.state.sound.enabled = true;
+
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("pane terminal");
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Idle,
+            );
+        let session_path = std::env::current_dir()
+            .unwrap()
+            .join("headless-pi-completion.jsonl")
+            .display()
+            .to_string();
+        let session_ref = crate::agent_resume::AgentSessionRef::path(&session_path).unwrap();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
+                session_ref: session_ref.clone(),
+            });
+        assert!(server
+            .app
+            .handle_internal_event(AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:pi".into(),
+                agent_label: "pi".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                seq: Some(20),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                session_ref: Some(session_ref),
+            })
+            .unwrap_or(false));
+        assert_eq!(
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
+            crate::detect::AgentState::Working
+        );
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "complete".into(),
+                    method: api::schema::Method::PaneReportAgent(
+                        api::schema::PaneReportAgentParams {
+                            pane_id: public_pane_id,
+                            source: "herdr:pi".into(),
+                            agent: "pi".into(),
+                            state: api::schema::PaneAgentState::Idle,
+                            v: None,
+                            message: None,
+                            seq: Some(21),
+                            wait: None,
+                            eta_s: None,
+                            reported_at: None,
+                            agent_session_id: None,
+                            agent_session_path: Some(session_path),
+                            gates: None,
+                            items: None,
+                            decisions: None,
+                        },
+                    ),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            })
+        );
+        assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
+        assert_eq!(
+            server.app.state.terminals[&terminal_id].raw_agent_state(),
+            crate::detect::AgentState::Idle
+        );
+
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("Finished toast"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::Toast);
+                assert_eq!(message, "pi finished");
+                assert_eq!(body.as_deref(), Some("background · 1"));
+            }
+            other => panic!("expected Finished toast, got {other:?}"),
+        }
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("done sound"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::Sound);
+                assert_eq!(message, "agent done");
+                assert!(body.is_none());
+            }
+            other => panic!("expected done sound, got {other:?}"),
+        }
     }
 
     #[test]

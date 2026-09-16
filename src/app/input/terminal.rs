@@ -2151,7 +2151,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn forwarded_input_retires_a_blocked_hook_and_allows_screen_state() {
+    async fn forwarded_input_retires_blocked_hook_without_completing_agent() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
@@ -2166,6 +2166,9 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.outer_terminal_focus = Some(false);
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 1;
         app.state.view.pane_infos = pane_infos;
 
         let terminal_id = app.state.workspaces[0]
@@ -2188,6 +2191,7 @@ mod tests {
             app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Blocked
         );
+        let event_start = app.event_hub.current_sequence();
 
         app.handle_terminal_key_headless(TerminalKey::new(
             KeyCode::Char('x'),
@@ -2200,6 +2204,22 @@ mod tests {
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        assert!(!app.state.pending_agent_notifications.contains_key(&pane_id));
+        assert_eq!(
+            app.agent_info(0, pane_id).expect("agent info").agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+        assert!(app
+            .event_hub
+            .events_after(event_start)
+            .into_iter()
+            .all(|(_, event)| !matches!(
+                event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    agent_status: crate::api::schema::AgentStatus::Done,
+                    ..
+                }
+            )));
 
         app.state
             .terminals

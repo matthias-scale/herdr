@@ -815,6 +815,7 @@ async fn poll_full_lifecycle_hook_retirement(
                 .send(AppEvent::HookAuthorityRetired {
                     pane_id: ports.pane_id,
                     observed_at,
+                    suppress_completion: false,
                 })
                 .await;
         }
@@ -4947,6 +4948,23 @@ mod tests {
             }
         }
 
+        fn from_terminal(
+            baseline: u64,
+            terminal: &crate::terminal::TerminalState,
+            state_events: mpsc::Sender<AppEvent>,
+        ) -> Self {
+            let authority_active = terminal.full_lifecycle_hook_authority_active();
+            Self {
+                detection_content_seq: AtomicU64::new(baseline),
+                baseline_content_seq: AtomicU64::new(baseline),
+                authority_active: AtomicBool::new(authority_active),
+                blocked: AtomicBool::new(terminal.hook_authority_output_retirement_eligible()),
+                state_events,
+                retirement: FullLifecycleHookOutputRetirement::default(),
+                lifecycle_authority_active: authority_active,
+            }
+        }
+
         async fn poll(&mut self, content_seq: u64, at: std::time::Instant) {
             self.detection_content_seq
                 .store(content_seq, Ordering::Release);
@@ -5005,6 +5023,40 @@ mod tests {
             events.try_recv(),
             Ok(AppEvent::HookAuthorityRetired { observed_at, .. }) if observed_at == resumed_at
         ));
+    }
+
+    #[tokio::test]
+    async fn steady_output_does_not_retire_a_blocked_closing_gate() {
+        let reported_at = std::time::Instant::now();
+        let mut terminal = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/tmp".into(),
+        );
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            reported_at,
+        );
+        let (state_events, mut events) = mpsc::channel(4);
+        let mut harness = RetirementHarness::from_terminal(10, &terminal, state_events);
+
+        for tick in 0..18 {
+            harness
+                .poll(
+                    11 + tick,
+                    reported_at + std::time::Duration::from_millis(300) * tick as u32,
+                )
+                .await;
+        }
+
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
+        assert!(!harness.blocked.load(Ordering::Acquire));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]

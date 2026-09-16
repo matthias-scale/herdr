@@ -3116,14 +3116,10 @@ impl TerminalState {
             authority.retired_at.is_none()
                 && authority.state != AgentState::Working
                 && self.hook_authority_is_effective(authority)
-                && (crate::detect::full_lifecycle_hook_authority(
+                && crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
                     &authority.agent_label,
-                ) || (authority.state == AgentState::Blocked
-                    && crate::detect::is_closing_block_source(
-                        &authority.source,
-                        &authority.agent_label,
-                    )))
+                )
         })
     }
 
@@ -5479,7 +5475,7 @@ mod tests {
             now + Duration::from_millis(1),
         );
         assert!(!terminal.full_lifecycle_hook_authority_active());
-        assert!(terminal.hook_authority_output_retirement_eligible());
+        assert!(!terminal.hook_authority_output_retirement_eligible());
         assert_eq!(
             terminal.state,
             AgentState::Blocked,
@@ -6576,7 +6572,7 @@ mod tests {
 
         assert_eq!(terminal.state, AgentState::Blocked);
         assert!(!terminal.full_lifecycle_hook_authority_active());
-        assert!(terminal.hook_authority_output_retirement_eligible());
+        assert!(!terminal.hook_authority_output_retirement_eligible());
         assert_eq!(terminal.effective_agent_label(), Some("claude"));
     }
 
@@ -6724,9 +6720,7 @@ mod tests {
     }
 
     #[test]
-    fn a_blocked_closing_block_report_ends_when_a_new_turn_retires_it() {
-        // The confirmed production drop: the pane keeps a stale spinner title,
-        // so retirement must be the only thing that hands the pane back to it.
+    fn explicit_input_retires_a_blocked_closing_block_report() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
@@ -6745,7 +6739,7 @@ mod tests {
             .retire_blocked_full_lifecycle_hook_authority_at(
                 observed + std::time::Duration::from_secs(6),
             )
-            .expect("sustained new-turn output retires the gate");
+            .expect("explicit input retires the gate");
 
         assert_eq!(terminal.state, AgentState::Working);
     }
@@ -6778,7 +6772,7 @@ mod tests {
 
         assert_eq!(terminal.state, AgentState::Blocked);
         assert!(!terminal.full_lifecycle_hook_authority_active());
-        assert!(terminal.hook_authority_output_retirement_eligible());
+        assert!(!terminal.hook_authority_output_retirement_eligible());
         assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
     }
 
@@ -6815,7 +6809,7 @@ mod tests {
         assert!(fresh.is_some());
         assert_eq!(terminal.state, AgentState::Blocked);
         assert!(!terminal.full_lifecycle_hook_authority_active());
-        assert!(terminal.hook_authority_output_retirement_eligible());
+        assert!(!terminal.hook_authority_output_retirement_eligible());
         assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
     }
 

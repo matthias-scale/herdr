@@ -3489,10 +3489,15 @@ impl AppState {
             AppEvent::HookAuthorityRetired {
                 pane_id,
                 observed_at,
+                suppress_completion,
             } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
-                })
+                .update_terminal_state_suppressing_completion(
+                    pane_id,
+                    suppress_completion,
+                    |terminal| {
+                        terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
+                    },
+                )
                 .into_iter()
                 .collect(),
             AppEvent::HookAgentReleased {
@@ -3571,7 +3576,24 @@ impl AppState {
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
-        self.update_terminal_state_at(pane_id, Instant::now(), update)
+        self.update_terminal_state_suppressing_completion_at(pane_id, Instant::now(), false, update)
+    }
+
+    fn update_terminal_state_suppressing_completion<F>(
+        &mut self,
+        pane_id: PaneId,
+        suppress_completion: bool,
+        update: F,
+    ) -> Option<PaneStateUpdate>
+    where
+        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
+    {
+        self.update_terminal_state_suppressing_completion_at(
+            pane_id,
+            Instant::now(),
+            suppress_completion,
+            update,
+        )
     }
 
     fn apply_pane_process_state(
@@ -3638,6 +3660,19 @@ impl AppState {
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
+        self.update_terminal_state_suppressing_completion_at(pane_id, now, false, update)
+    }
+
+    fn update_terminal_state_suppressing_completion_at<F>(
+        &mut self,
+        pane_id: PaneId,
+        now: Instant,
+        suppress_completion: bool,
+        update: F,
+    ) -> Option<PaneStateUpdate>
+    where
+        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
+    {
         let ws_idx = self
             .workspaces
             .iter()
@@ -3699,7 +3734,7 @@ impl AppState {
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
         let suppress_completion = change.state == AgentState::Idle
-            && (managed_launch_pending || suppress_acquisition_completion);
+            && (suppress_completion || managed_launch_pending || suppress_acquisition_completion);
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {

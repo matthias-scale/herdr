@@ -201,6 +201,7 @@ pub enum AppEvent {
     HookAuthorityRetired {
         pane_id: PaneId,
         observed_at: Instant,
+        suppress_completion: bool,
     },
     /// The current detected agent gracefully released this pane back to the shell.
     HookAgentReleased {
