@@ -1833,12 +1833,24 @@ mod tests {
             SidebarGroupMode::Spaces,
         ] {
             let mut app = sidebar_order_app(true);
+            let target_ws_idx = 1;
+            let hidden_sibling =
+                app.state.workspaces[target_ws_idx].test_split(Direction::Horizontal);
+            app.state.workspaces[target_ws_idx].tabs[0]
+                .panes
+                .get_mut(&hidden_sibling)
+                .expect("hidden sibling")
+                .settled_at = Some(1_725_000_001);
+            app.state.ensure_test_terminals();
             app.state.set_sidebar_group_mode(mode);
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-            let target_ws_idx = 1;
-            let target_pane_id = app.state.workspaces[target_ws_idx]
-                .focused_pane_id()
-                .expect("settled workspace focused pane");
+            let target_pane_id =
+                crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+                    .into_iter()
+                    .find(|card| card.ws_idx == target_ws_idx && card.tab_idx == 0)
+                    .map(|card| card.pane_id)
+                    .expect("represented settled pane");
+            assert_ne!(target_pane_id, hidden_sibling);
             let target =
                 crate::ui::compute_workspace_card_areas(&app.state, app.state.view.sidebar_rect)
                     .into_iter()
@@ -1867,6 +1879,10 @@ mod tests {
             assert!(
                 !app.state.pane_is_settled(target_ws_idx, target_pane_id),
                 "{mode:?}"
+            );
+            assert!(
+                app.state.pane_is_settled(target_ws_idx, hidden_sibling),
+                "{mode:?}: group header resumed an unrelated hidden sibling"
             );
             assert!(app.state.sidebar_selected_settled.is_none(), "{mode:?}");
         }
