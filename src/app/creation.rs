@@ -806,6 +806,7 @@ impl App {
                 pane.seen,
                 terminal.supervisor_stale,
             ),
+            waiting_on_agents: pane.settled_at.is_none() && terminal.waiting_on_agents(),
             wait: terminal
                 .hook_authority
                 .as_ref()

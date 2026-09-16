@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 """Claude Code `AskUserQuestion` hooks -> herdr blocked/working status.
 
 Installed beside `herdr-closing-block.py` and reporting through the same
@@ -21,10 +21,8 @@ cover it either -- the dialog opens *mid*-turn, and the turn only ends after a
 human answers. Without this hook the pane shows `working` for the entire time
 it is actually waiting on a human.
 
-`UserPromptSubmit` is a recovery path only. Escape cancels the dialog and the
-whole turn without firing `PostToolUse`, so an open gate is cleared by the next
-thing the human does. It reports nothing when no gate is outstanding, so it
-never claims authority on an ordinary prompt.
+`UserPromptSubmit` starts a new working turn. It also recovers from Escape
+cancelling the dialog without firing `PostToolUse` by clearing any open gate.
 
 Fails silent and non-blocking in every path.
 """
@@ -133,9 +131,8 @@ def close_gate(payload: dict, pane_id: str, *, require_marker: bool) -> dict | N
     the model is still replying, so the state is named explicitly. The next
     `Stop` report supersedes this one with the real turn-end reading.
 
-    `PostToolUse` for this tool means a human just answered, which is true
-    whether or not the marker survived, so it reports unconditionally. A prompt
-    submit only means the turn resumed when a gate was actually outstanding.
+    `PostToolUse` for this tool means a human just answered. `UserPromptSubmit`
+    also starts a turn. Both report unconditionally even if no marker survived.
     """
     session_id = payload.get("session_id")
     marker = read_marker(pane_id)
@@ -184,7 +181,7 @@ def main() -> int:
     elif event == "PostToolUse":
         outcome = close_gate(payload, pane_id, require_marker=False)
     elif event == "UserPromptSubmit":
-        outcome = close_gate(payload, pane_id, require_marker=True)
+        outcome = close_gate(payload, pane_id, require_marker=False)
     else:
         return 0
 

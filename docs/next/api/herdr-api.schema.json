@@ -887,6 +887,9 @@
                     "null"
                   ]
                 },
+                "waiting_on_agents": {
+                  "type": "boolean"
+                },
                 "workspace_id": {
                   "type": "string"
                 }
@@ -1238,6 +1241,9 @@
                 "string",
                 "null"
               ]
+            },
+            "waiting_on_agents": {
+              "type": "boolean"
             },
             "work_context": {
               "$ref": "#/schemas/event/$defs/PaneWorkContext",
@@ -3511,6 +3517,14 @@
             "agent_session_path": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "agents": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             },
@@ -7445,6 +7459,9 @@
                 "null"
               ]
             },
+            "waiting_on_agents": {
+              "type": "boolean"
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -7838,6 +7855,9 @@
                 "string",
                 "null"
               ]
+            },
+            "waiting_on_agents": {
+              "type": "boolean"
             },
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
@@ -8807,6 +8827,9 @@
                     "null"
                   ]
                 },
+                "waiting_on_agents": {
+                  "type": "boolean"
+                },
                 "workspace_id": {
                   "type": "string"
                 }
@@ -9723,6 +9746,9 @@
                 "string",
                 "null"
               ]
+            },
+            "waiting_on_agents": {
+              "type": "boolean"
             },
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",

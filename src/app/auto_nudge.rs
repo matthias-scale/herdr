@@ -1175,6 +1175,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
+            closing_block: None,
         });
         let report_at = app
             .state
@@ -1232,6 +1233,7 @@ mod tests {
             eta_s: Some(120),
             reported_at: None,
             session_ref: None,
+            closing_block: None,
         });
         let reported_at = app.state.terminals[&terminal_id]
             .status_reported_at()
@@ -1279,21 +1281,88 @@ mod tests {
 
         assert_eq!(
             app.state.next_agent_watchdog_deadline(),
-            now.checked_add(app.state.agent_stale_after)
+            now.checked_add(app.state.agent_subagent_stale_after)
         );
         assert!(!app.state.terminals[&terminal_id].supervisor_stale);
 
         app.handle_scheduled_tasks(
-            now + app.state.agent_stale_after - Duration::from_secs(1),
+            now + app.state.agent_subagent_stale_after - Duration::from_secs(1),
             false,
         );
         assert!(!app.state.terminals[&terminal_id].supervisor_stale);
 
-        app.handle_scheduled_tasks(now + app.state.agent_stale_after, false);
+        app.handle_scheduled_tasks(now + app.state.agent_subagent_stale_after, false);
 
         assert!(app.state.terminals[&terminal_id].supervisor_stale);
         assert!(app.stall_nudge_episodes.is_empty());
         assert_eq!(drain(&mut rx), "");
+    }
+
+    #[tokio::test]
+    async fn subagent_wait_uses_changed_output_not_pane_input_for_its_budget() {
+        let now = Instant::now();
+        let (mut app, pane_id, terminal_id, _rx) = app_with_stalled_pane(now);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_hook_authority_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Idle,
+                None,
+                None,
+                Some(1),
+                now,
+            );
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal")
+            .set_active_subagents(Some(1));
+
+        let input_at = now + Duration::from_secs(10 * 60);
+        app.state.note_pane_activity_at(pane_id, input_at);
+        assert_eq!(
+            app.state.next_agent_watchdog_deadline(),
+            now.checked_add(app.state.agent_subagent_stale_after),
+            "pane input alone must not extend a silent subagent wait"
+        );
+        assert!(!app.state.observe_pane_detection_snapshot_at(
+            pane_id,
+            1,
+            Some(Agent::Claude),
+            "waiting",
+            input_at,
+        ));
+        let output_at = now + Duration::from_secs(15 * 60);
+        let _ = app.state.observe_pane_detection_snapshot_at(
+            pane_id,
+            2,
+            Some(Agent::Claude),
+            "subagent completed",
+            output_at,
+        );
+        assert_eq!(
+            app.state.next_agent_watchdog_deadline(),
+            output_at.checked_add(app.state.agent_subagent_stale_after)
+        );
+
+        assert!(app
+            .state
+            .mark_due_agent_status_stale_at(
+                output_at + app.state.agent_subagent_stale_after - Duration::from_secs(1),
+            )
+            .is_empty());
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+
+        assert_eq!(
+            app.state
+                .mark_due_agent_status_stale_at(output_at + app.state.agent_subagent_stale_after)
+                .len(),
+            1
+        );
+        assert!(app.state.terminals[&terminal_id].supervisor_stale);
     }
 
     #[tokio::test]
@@ -1308,7 +1377,7 @@ mod tests {
             .expect("root terminal");
         terminal.supervisor_stale = false;
         terminal.set_hook_authority_at(
-            "herdr:claude-closing-block".into(),
+            "custom:watchdog".into(),
             "claude".into(),
             AgentState::Idle,
             None,
@@ -1473,33 +1542,48 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.session.auto_nudge_stalled_agents = true;
         config.session.agent_stale_after_minutes = 9;
+        config.session.agent_subagent_stale_after_minutes = 75;
         config.session.nudge_after_minutes = 12;
         config.session.max_nudges = 5;
         config.session.stall_nudge_message = "report".into();
         let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
         assert!(app.state.auto_nudge_stalled_agents);
         assert_eq!(app.state.agent_stale_after, Duration::from_secs(9 * 60));
+        assert_eq!(
+            app.state.agent_subagent_stale_after,
+            Duration::from_secs(75 * 60)
+        );
         assert_eq!(app.state.nudge_after, Duration::from_secs(12 * 60));
         assert_eq!(app.state.max_nudges, 5);
         assert_eq!(app.state.stall_nudge_message, "report");
 
         config.session.auto_nudge_stalled_agents = false;
         config.session.agent_stale_after_minutes = 4;
+        config.session.agent_subagent_stale_after_minutes = 65;
         config.session.nudge_after_minutes = 7;
         config.session.max_nudges = 2;
         config.session.stall_nudge_message = "still working?".into();
         app.apply_live_config(&config, &[], &[], false);
         assert!(!app.state.auto_nudge_stalled_agents);
         assert_eq!(app.state.agent_stale_after, Duration::from_secs(4 * 60));
+        assert_eq!(
+            app.state.agent_subagent_stale_after,
+            Duration::from_secs(65 * 60)
+        );
         assert_eq!(app.state.nudge_after, Duration::from_secs(7 * 60));
         assert_eq!(app.state.max_nudges, 2);
         assert_eq!(app.state.stall_nudge_message, "still working?");
 
         config.session.agent_stale_after_minutes = u64::MAX;
+        config.session.agent_subagent_stale_after_minutes = u64::MAX;
         config.session.nudge_after_minutes = u64::MAX;
         app.apply_live_config(&config, &[], &[], false);
         assert_eq!(
             app.state.agent_stale_after,
+            Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)
+        );
+        assert_eq!(
+            app.state.agent_subagent_stale_after,
             Duration::from_secs(crate::config::MAX_NUDGE_AFTER_MINUTES * 60)
         );
         assert_eq!(

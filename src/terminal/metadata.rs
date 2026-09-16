@@ -393,6 +393,7 @@ impl TerminalState {
             session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
     pub fn effective_title(&self) -> Option<String> {
@@ -478,6 +479,7 @@ impl TerminalState {
             session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
 

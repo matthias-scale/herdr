@@ -1056,6 +1056,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         report = rpc.call_args_list[1].args
         self.assertEqual(report[2], "pane.report_agent")
         self.assertEqual(report[3]["v"], 2)
+        self.assertEqual(report[3]["agents"], 1)
         self.assertEqual(report[3]["gates"], outcome["payload"]["gates"])
         self.assertEqual(report[3]["items"], outcome["payload"]["items"])
         self.assertEqual(report[3]["decisions"], outcome["payload"]["decisions"])
@@ -1661,16 +1662,20 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(len(reports), 2)
         self.assertEqual(reports[1]["state"], "working")
 
-    def test_a_prompt_submit_without_an_open_gate_reports_nothing(self):
+    def test_an_ordinary_prompt_submit_starts_a_working_turn(self):
         self._run(
             {
                 "session_id": "sess-1",
+                "transcript_path": "/tmp/sess-1.jsonl",
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "ordinary work",
             }
         )
 
-        self.assertEqual(self._reports(), [])
+        reports = self._reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["state"], "working")
+        self.assertEqual(reports[0]["gates"], [])
 
     def test_a_gate_is_only_cleared_by_the_session_that_opened_it(self):
         self._run(self._PRE)

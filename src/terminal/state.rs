@@ -14,6 +14,8 @@ use crate::terminal::TerminalId;
 
 pub(crate) const AGENT_BUSY_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
 pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
+#[cfg(test)]
+pub(crate) const DEFAULT_SUBAGENT_STALE_SILENCE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletionTier {
@@ -199,6 +201,8 @@ pub struct TerminalStateMutation {
     pub session_replaced: bool,
     pub hook_work_context_changed: bool,
     pub agent_released: bool,
+    /// A cached sidebar fact changed without changing the four-state lifecycle.
+    pub sidebar_projection_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +256,8 @@ pub(crate) struct TerminalAgentHandoffState {
     closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     #[serde(default)]
+    closing_report_subagents: Option<u32>,
+    #[serde(default)]
     closing_idle: Option<bool>,
     #[serde(default)]
     closing_contract: Option<String>,
@@ -259,6 +265,8 @@ pub(crate) struct TerminalAgentHandoffState {
     closing_contract_met: Option<bool>,
     #[serde(default)]
     closing_contract_met_elapsed: Option<Duration>,
+    #[serde(default)]
+    unreported_turn_started_elapsed: Option<Duration>,
 }
 
 #[cfg(unix)]
@@ -492,6 +500,9 @@ pub struct TerminalState {
     pub closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     pub closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     pub closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    /// Subagents declared by the current closing report. `Some(0)` deliberately
+    /// overrides an older live transcript count.
+    closing_report_subagents: Option<u32>,
     pub closing_idle: Option<bool>,
     pub closing_contract: Option<String>,
     pub closing_contract_met: Option<bool>,
@@ -533,6 +544,9 @@ pub struct TerminalState {
     /// When this pane most recently entered `Blocked`. Cleared on any transition
     /// out of it, so it always measures the current wait rather than a past one.
     pub blocked_since: Option<Instant>,
+    /// Visible work can start a turn before the next lifecycle hook fires.
+    /// This timestamp owns that gap and its watchdog budget.
+    unreported_turn_started_at: Option<Instant>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
     agent_activity_owner: Option<AgentActivityOwner>,
@@ -584,6 +598,7 @@ impl TerminalState {
             closing_gates: Vec::new(),
             closing_items: Vec::new(),
             closing_decisions: Vec::new(),
+            closing_report_subagents: None,
             closing_idle: None,
             closing_contract: None,
             closing_contract_met: None,
@@ -612,6 +627,7 @@ impl TerminalState {
             foreground_process_active: false,
             last_agent_state_change_seq: None,
             blocked_since: None,
+            unreported_turn_started_at: None,
             agent_active_since: None,
             agent_last_active_at: None,
             agent_activity_owner: None,
@@ -685,6 +701,33 @@ impl TerminalState {
         self.closing_decisions = decisions;
         self.revision = self.revision.saturating_add(1);
         true
+    }
+
+    pub(crate) fn apply_closing_report_subagents_at(
+        &mut self,
+        agents: Option<u32>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if self.closing_report_subagents == agents {
+            return None;
+        }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.closing_report_subagents = agents;
+        self.revision = self.revision.saturating_add(1);
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            sidebar_projection_changed: true,
+            ..TerminalStateMutation::default()
+        })
     }
 
     pub(crate) fn has_blocking_closing_items(&self) -> bool {
@@ -846,14 +889,67 @@ impl TerminalState {
         &mut self,
         holds_shell: bool,
         stale_resolution: Option<(AgentState, bool)>,
-    ) -> bool {
-        if self.holds_shell == holds_shell && self.stale_resolution == stale_resolution {
-            return false;
+        observed_at: Instant,
+    ) -> (bool, Option<TerminalStateMutation>) {
+        let stale_resolution = if self
+            .hook_authority
+            .as_ref()
+            .is_none_or(|authority| authority.reported_at < observed_at)
+        {
+            stale_resolution
+        } else {
+            self.stale_resolution
+        };
+        let clears_stale = self.supervisor_stale
+            && stale_resolution.is_some_and(|(state, _)| state != AgentState::Working);
+        if self.holds_shell == holds_shell
+            && self.stale_resolution == stale_resolution
+            && !clears_stale
+        {
+            return (false, None);
         }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation =
+            self.effective_presentation_for_state_at(previous_state, observed_at);
         self.holds_shell = holds_shell;
         self.stale_resolution = stale_resolution;
+        if let Some((state, _)) = stale_resolution.filter(|_| clears_stale) {
+            if let Some(authority) = self.hook_authority.as_mut() {
+                authority.retired_at = Some(observed_at);
+            }
+            self.state = state;
+            self.fallback_state = state;
+            self.fallback_visible_blocker = false;
+            self.fallback_visible_working = false;
+            self.fallback_visible_working_observed_at = None;
+            self.fallback_working_observed_at = None;
+            self.fallback_observed_at = Some(observed_at);
+            self.supervisor_stale = false;
+            self.unreported_turn_started_at = None;
+        }
         self.revision = self.revision.wrapping_add(1);
-        true
+        let mutation = clears_stale.then(|| {
+            let agent_label = self.effective_agent_label().map(str::to_string);
+            let known_agent = self.effective_known_agent();
+            let state = self.state;
+            TerminalStateMutation {
+                effective_state_change: Some(EffectiveStateChange {
+                    previous_agent_label,
+                    previous_known_agent,
+                    previous_state,
+                    previous_presentation,
+                    agent_label,
+                    known_agent,
+                    state,
+                    presentation: self.effective_presentation_for_state_at(state, observed_at),
+                }),
+                sidebar_projection_changed: true,
+                ..TerminalStateMutation::default()
+            }
+        });
+        (true, mutation)
     }
 
     pub(crate) fn sidebar_projection(&self, seen: bool) -> (AgentState, bool) {
@@ -862,6 +958,16 @@ impl TerminalState {
         } else {
             (self.state, seen)
         }
+    }
+
+    pub(crate) fn clear_stale_for_settlement(&mut self) -> bool {
+        if !self.supervisor_stale && self.stale_resolution.is_none() {
+            return false;
+        }
+        self.supervisor_stale = false;
+        self.stale_resolution = None;
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
 
     pub(crate) fn set_active_subagents(&mut self, count: Option<u32>) -> bool {
@@ -1077,10 +1183,23 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        let previous_screen_settled_after_report =
+            self.hook_authority.as_ref().is_some_and(|authority| {
+                self.fallback_state != AgentState::Working
+                    && self
+                        .fallback_observed_at
+                        .is_some_and(|observed_at| observed_at > authority.reported_at)
+            });
         let visible_working_signal = visible_working && fallback_state == AgentState::Working;
         self.fallback_visible_working = visible_working_signal;
         self.fallback_visible_working_observed_at = visible_working_signal.then_some(now);
         self.fallback_working_observed_at = (fallback_state == AgentState::Working).then_some(now);
+        let sidebar_projection_changed = self.reconcile_new_turn_or_stale_screen_resolution(
+            fallback_state,
+            visible_working_signal,
+            previous_screen_settled_after_report,
+            now,
+        );
         let newer_custom_authority = process_exited
             && self.hook_authority.as_ref().is_some_and(|authority| {
                 crate::detect::parse_agent_label(&authority.agent_label) == agent
@@ -1120,6 +1239,7 @@ impl TerminalState {
                     && previous_session != self.current_session_identity_for_persistence(),
                 hook_work_context_changed: false,
                 agent_released: false,
+                sidebar_projection_changed,
             };
         }
         let replacement_process_detected = !process_exited
@@ -1142,6 +1262,7 @@ impl TerminalState {
                     && previous_session != self.current_session_identity_for_persistence(),
                 hook_work_context_changed: false,
                 agent_released: false,
+                sidebar_projection_changed,
             };
         }
         self.detected_agent = agent;
@@ -1364,13 +1485,63 @@ impl TerminalState {
             session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released,
+            sidebar_projection_changed,
         }
+    }
+
+    fn reconcile_new_turn_or_stale_screen_resolution(
+        &mut self,
+        fallback_state: AgentState,
+        visible_working: bool,
+        previous_screen_settled_after_report: bool,
+        now: Instant,
+    ) -> bool {
+        let closing_report_is_older = self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.reported_at < now
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        });
+        let starts_turn = visible_working
+            && closing_report_is_older
+            && previous_screen_settled_after_report
+            && self.hook_authority.as_ref().is_some_and(|authority| {
+                authority
+                    .reported_at
+                    .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                    .is_some_and(|stable_at| now >= stable_at)
+            });
+        let resolves_stale = self.supervisor_stale
+            && matches!(fallback_state, AgentState::Idle | AgentState::Blocked)
+            && self
+                .hook_authority
+                .as_ref()
+                .is_none_or(|authority| authority.reported_at < now);
+        if !starts_turn && !resolves_stale {
+            return false;
+        }
+
+        if let Some(authority) = self.hook_authority.as_mut() {
+            authority.retired_at = Some(now);
+        }
+        self.supervisor_stale = false;
+        self.stale_resolution = None;
+        self.unreported_turn_started_at = starts_turn.then_some(now);
+        if closing_report_is_older {
+            self.closing_gates.clear();
+            self.closing_items.clear();
+            self.closing_decisions.clear();
+            self.closing_report_subagents = Some(0);
+            self.closing_idle = None;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
 
     fn replace_hook_authority(&mut self, authority: Option<HookAuthority>) {
         self.hook_authority = authority;
         self.supervisor_stale = false;
         self.stale_resolution = None;
+        self.unreported_turn_started_at = None;
     }
 
     #[cfg(test)]
@@ -1519,6 +1690,7 @@ impl TerminalState {
         if !self.accept_hook_report(&source, seq) {
             return None;
         }
+        let closing_report = crate::detect::is_closing_block_source(&source, &agent_label);
 
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
@@ -1544,6 +1716,12 @@ impl TerminalState {
         }
         self.persisted_agent_session = None;
         let (wait, eta_s) = normalize_declared_wait(state, wait, eta_s);
+        if closing_report {
+            // The preceding screen sample belongs to the turn that just ended.
+            // A forced post-report rescan establishes the baseline from which
+            // a later visible Working signal can prove a new turn.
+            self.fallback_observed_at = None;
+        }
         self.replace_hook_authority(Some(HookAuthority {
             source,
             agent_label,
@@ -1575,6 +1753,7 @@ impl TerminalState {
             session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
 
@@ -1591,9 +1770,11 @@ impl TerminalState {
     }
 
     pub fn status_reported_at(&self) -> Option<Instant> {
-        self.hook_authority
-            .as_ref()
-            .map(|authority| authority.reported_at)
+        self.unreported_turn_started_at.or_else(|| {
+            self.hook_authority
+                .as_ref()
+                .map(|authority| authority.reported_at)
+        })
     }
 
     /// True while the pane only reads as working because sub-process evidence
@@ -1618,12 +1799,24 @@ impl TerminalState {
     /// written without a TTL, and transcript rows simply stop arriving when the
     /// parent stalls. So a parent that said "3 agents running" keeps reading busy
     /// forever unless the watchdog ages the claim out.
+    fn current_closing_report_subagents(&self) -> Option<u32> {
+        self.hook_authority.as_ref().filter(|authority| {
+            authority.retired_at.is_none()
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        })?;
+        self.closing_report_subagents
+            .or_else(|| {
+                self.metadata_tokens
+                    .get("closing_agents")
+                    .and_then(|value| value.parse::<u32>().ok())
+            })
+            .or(self.active_subagents)
+    }
+
     pub(crate) fn effective_active_subagents(&self) -> Option<u32> {
-        self.active_subagents.or_else(|| {
-            self.metadata_tokens
-                .get("closing_agents")
-                .and_then(|value| value.parse::<u32>().ok())
-        })
+        self.current_closing_report_subagents()
+            .or(self.active_subagents)
     }
 
     pub(crate) fn declares_running_subagents(&self) -> bool {
@@ -1631,10 +1824,62 @@ impl TerminalState {
             .is_some_and(|count| count > 0)
     }
 
+    pub(crate) fn waiting_on_agents(&self) -> bool {
+        !self.supervisor_stale
+            && self.hook_authority.as_ref().is_some_and(|authority| {
+                authority.retired_at.is_none()
+                    && authority.state != AgentState::Blocked
+                    && self.hook_authority_is_effective(authority)
+                    && crate::detect::is_closing_block_source(
+                        &authority.source,
+                        &authority.agent_label,
+                    )
+            })
+            && self
+                .current_closing_report_subagents()
+                .is_some_and(|count| count > 0)
+    }
+
+    fn finished_closing_report(&self) -> bool {
+        self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.retired_at.is_none()
+                && authority.state == AgentState::Idle
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+                && self.current_closing_report_subagents().unwrap_or_default() == 0
+        })
+    }
+
+    #[cfg(test)]
     pub fn agent_status_watchdog_deadline(&self, stale_after: Duration) -> Option<Instant> {
-        let authority = self.hook_authority.as_ref()?;
+        self.agent_status_watchdog_deadline_with_activity(
+            stale_after,
+            DEFAULT_SUBAGENT_STALE_SILENCE,
+            None,
+        )
+    }
+
+    pub fn agent_status_watchdog_deadline_with_activity(
+        &self,
+        stale_after: Duration,
+        subagent_stale_after: Duration,
+        pane_activity_at: Option<Instant>,
+    ) -> Option<Instant> {
         if self.supervisor_stale || self.state == AgentState::Blocked {
             return None;
+        }
+        if let Some(turn_started_at) = self.unreported_turn_started_at {
+            return turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE);
+        }
+        let authority = self
+            .hook_authority
+            .as_ref()
+            .filter(|authority| authority.retired_at.is_none())?;
+        if self.waiting_on_agents() {
+            let quiet_since = pane_activity_at
+                .filter(|activity_at| *activity_at > authority.reported_at)
+                .unwrap_or(authority.reported_at);
+            return quiet_since.checked_add(subagent_stale_after);
         }
         let age = match authority.state {
             AgentState::Working => authority
@@ -1646,30 +1891,53 @@ impl TerminalState {
             // A declared wait belongs to a working report; a finished report that
             // is still holding sub-processes gets the plain silence budget.
             _ if self.subprocess_held_working() => stale_after,
-            // A parent parked on subagents has ended its own turn, so it reports idle
-            // with an idle screen and neither branch above can see it. The claim is
-            // still a declaration nobody has re-verified, and it earns the same silence
-            // budget as any other.
-            _ if self.declares_running_subagents() => stale_after,
             _ => return None,
         };
         authority.reported_at.checked_add(age)
     }
 
+    #[cfg(test)]
     pub fn mark_agent_status_stale_at(
         &mut self,
         now: Instant,
         stale_after: Duration,
     ) -> Option<TerminalStateMutation> {
+        self.mark_agent_status_stale_at_with_activity(
+            now,
+            stale_after,
+            DEFAULT_SUBAGENT_STALE_SILENCE,
+            None,
+        )
+    }
+
+    pub fn mark_agent_status_stale_at_with_activity(
+        &mut self,
+        now: Instant,
+        stale_after: Duration,
+        subagent_stale_after: Duration,
+        pane_activity_at: Option<Instant>,
+    ) -> Option<TerminalStateMutation> {
         if self.supervisor_stale
             || self
-                .agent_status_watchdog_deadline(stale_after)
+                .agent_status_watchdog_deadline_with_activity(
+                    stale_after,
+                    subagent_stale_after,
+                    pane_activity_at,
+                )
                 .is_none_or(|deadline| now < deadline)
         {
             return None;
         }
+        let expired_subagent_wait = self.waiting_on_agents();
         self.supervisor_stale = true;
-        Some(TerminalStateMutation::default())
+        if expired_subagent_wait {
+            self.closing_report_subagents = Some(0);
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Some(TerminalStateMutation {
+            sidebar_projection_changed: expired_subagent_wait,
+            ..TerminalStateMutation::default()
+        })
     }
 
     fn hook_authority_not_newer_than(&self, observed_at: Instant) -> bool {
@@ -2514,6 +2782,7 @@ impl TerminalState {
                         && previous_session != current_session,
                     hook_work_context_changed,
                     agent_released: false,
+                    sidebar_projection_changed: false,
                 });
             }
             return None;
@@ -2622,6 +2891,7 @@ impl TerminalState {
             session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
 
@@ -2742,6 +3012,7 @@ impl TerminalState {
             session_replaced: previous_session.is_some(),
             hook_work_context_changed,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
 
@@ -2787,6 +3058,7 @@ impl TerminalState {
             session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
 
@@ -2835,6 +3107,7 @@ impl TerminalState {
             session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
+            sidebar_projection_changed: false,
         })
     }
 
@@ -2906,6 +3179,7 @@ impl TerminalState {
             session_replaced: previous_session.is_some() && previous_session != current_session,
             hook_work_context_changed,
             agent_released: !process_owns_agent,
+            sidebar_projection_changed: false,
         })
     }
 
@@ -3001,6 +3275,7 @@ impl TerminalState {
             && self.closing_gates.is_empty()
             && self.closing_items.is_empty()
             && self.closing_decisions.is_empty()
+            && self.closing_report_subagents.is_none()
             && self.closing_idle.is_none()
             && self.closing_contract.is_none()
             && self.closing_contract_met.is_none()
@@ -3028,12 +3303,16 @@ impl TerminalState {
             closing_gates: self.closing_gates.clone(),
             closing_items: self.closing_items.clone(),
             closing_decisions: self.closing_decisions.clone(),
+            closing_report_subagents: self.closing_report_subagents,
             closing_idle: self.closing_idle,
             closing_contract: self.closing_contract.clone(),
             closing_contract_met: self.closing_contract_met,
             closing_contract_met_elapsed: self
                 .closing_contract_met_at
                 .map(|reported_at| now.saturating_duration_since(reported_at)),
+            unreported_turn_started_elapsed: self
+                .unreported_turn_started_at
+                .map(|started_at| now.saturating_duration_since(started_at)),
         })
     }
 
@@ -3065,11 +3344,15 @@ impl TerminalState {
         self.closing_gates = handoff.closing_gates;
         self.closing_items = handoff.closing_items;
         self.closing_decisions = handoff.closing_decisions;
+        self.closing_report_subagents = handoff.closing_report_subagents;
         self.closing_idle = handoff.closing_idle;
         self.closing_contract = handoff.closing_contract;
         self.closing_contract_met = handoff.closing_contract_met;
         self.closing_contract_met_at = handoff
             .closing_contract_met_elapsed
+            .and_then(|elapsed| now.checked_sub(elapsed));
+        self.unreported_turn_started_at = handoff
+            .unreported_turn_started_elapsed
             .and_then(|elapsed| now.checked_sub(elapsed));
     }
 
@@ -3150,6 +3433,7 @@ impl TerminalState {
             authority.retired_at.is_none()
                 && self.hook_authority_is_effective(authority)
                 && authority.state != AgentState::Blocked
+                && !self.waiting_on_agents()
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
                 && self
                     .fallback_observed_at
@@ -3183,6 +3467,7 @@ impl TerminalState {
         if detected_state == AgentState::Idle
             && self.effective_agent_label().is_some()
             && self.foreground_process_active
+            && !self.finished_closing_report()
         {
             (AgentState::Working, "foreground_process")
         } else {
@@ -3195,6 +3480,8 @@ impl TerminalState {
             (AgentState::Blocked, "visible_blocker_over_hook")
         } else if self.closing_block_gate_authority() {
             (AgentState::Blocked, "closing_block_gate")
+        } else if self.waiting_on_agents() {
+            (AgentState::Working, "closing_block_subagents")
         } else if self.closing_block_non_gate_yields_to_screen() {
             (self.fallback_state, "screen")
         } else if self.visible_working_overrides_idle_hook()
@@ -3491,6 +3778,7 @@ impl TerminalState {
         self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
         self.replace_hook_authority(None);
+        self.closing_report_subagents = None;
         self.persisted_agent_session = None;
         self.claude_transcript_session_id = None;
         self.claude_transcript_path = None;
@@ -3662,6 +3950,7 @@ mod tests {
     }
 
     const TEST_AGENT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
+    const TEST_SUBAGENT_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
@@ -5496,11 +5785,10 @@ mod tests {
         assert_ne!(terminal.state, AgentState::Blocked);
     }
 
-    /// A turn-end report describes the agent, not the work it left running. A
-    /// `run_in_background` command outlives the turn, and the pane stays Working
-    /// until that process tree is quiet -- then the reported idle stands.
+    /// A finished closing report describes the whole parent turn. A lingering
+    /// child after the idle prompt is not evidence that the parent resumed.
     #[test]
-    fn a_live_agent_subprocess_holds_a_turn_end_report_working() {
+    fn a_finished_closing_report_stays_idle_with_a_lingering_child() {
         let mut terminal = test_terminal();
         let now = Instant::now();
 
@@ -5526,8 +5814,8 @@ mod tests {
         terminal.set_foreground_process(Some("codex".into()), true, now);
         assert_eq!(
             terminal.state,
-            AgentState::Working,
-            "a live sub-process must outrank the turn-end report"
+            AgentState::Idle,
+            "the finished turn-end report must outrank a lingering child"
         );
 
         terminal.set_foreground_process(None, false, now);
@@ -5538,20 +5826,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn visible_working_after_a_closing_gate_starts_a_new_turn() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal.supervisor_stale = true;
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        let turn_started = now + Duration::from_secs(2);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            turn_started,
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().retired_at,
+            Some(turn_started)
+        );
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            turn_started.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+    }
+
+    #[test]
+    fn a_retired_report_never_arms_the_watchdog_through_a_child() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal.set_foreground_process(Some("codex".into()), true, now);
+        terminal.hook_authority.as_mut().unwrap().retired_at = Some(now + Duration::from_secs(1));
+
+        assert!(terminal
+            .hook_authority
+            .as_ref()
+            .unwrap()
+            .retired_at
+            .is_some());
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
+    }
+
     /// Builds a pane whose agent has reported idle but is still holding a live
     /// sub-process tree, which is the shape the watchdog has to cover.
     fn subprocess_held_terminal(now: Instant) -> TerminalState {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        terminal.set_agent_session_ref_for_session_start(
-            "herdr:claude".into(),
-            "claude".into(),
-            crate::agent_resume::AgentSessionRef::path(test_session_path("watchdog.jsonl")),
-            Some(999),
-            Some("startup".into()),
-        );
         terminal.set_hook_authority_at(
-            "herdr:claude-closing-block".into(),
+            "custom:watchdog".into(),
             "claude".into(),
             AgentState::Idle,
             None,
@@ -5649,7 +6008,7 @@ mod tests {
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
-            AgentState::Idle,
+            AgentState::Working,
             None,
             None,
             Some(1000),
@@ -5662,12 +6021,10 @@ mod tests {
             Some(999),
             Some("startup".into()),
         );
-        assert!(terminal.metadata_tokens.patch(
-            HashMap::from([("closing_agents".into(), Some("3".into()))]),
-            None,
-            now,
-        ));
-        assert_eq!(terminal.state, AgentState::Idle);
+        terminal
+            .apply_closing_report_subagents_at(Some(3), now)
+            .expect("observed closing report declares three agents");
+        assert_eq!(terminal.state, AgentState::Working);
         terminal
     }
 
@@ -5692,16 +6049,16 @@ mod tests {
         assert!(active.declares_running_subagents());
         assert_eq!(
             active.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
-            now.checked_add(TEST_AGENT_STALE_AFTER)
+            now.checked_add(TEST_SUBAGENT_STALE_AFTER)
         );
         assert!(active
             .mark_agent_status_stale_at(
-                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                now + TEST_SUBAGENT_STALE_AFTER - Duration::from_secs(1),
                 TEST_AGENT_STALE_AFTER,
             )
             .is_none());
         assert!(active
-            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
+            .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(active.supervisor_stale);
 
@@ -5735,14 +6092,267 @@ mod tests {
 
         assert!(terminal
             .mark_agent_status_stale_at(
-                now + TEST_AGENT_STALE_AFTER - Duration::from_secs(1),
+                now + TEST_SUBAGENT_STALE_AFTER - Duration::from_secs(1),
                 TEST_AGENT_STALE_AFTER,
             )
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
+            .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn a_subagent_closing_report_waits_through_an_idle_screen_on_the_long_budget() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        terminal.set_foreground_process(Some("codex".into()), true, now + Duration::from_secs(1));
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.waiting_on_agents());
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                Duration::from_secs(60 * 60),
+                Some(now),
+            ),
+            now.checked_add(Duration::from_secs(60 * 60))
+        );
+    }
+
+    #[test]
+    fn pane_output_restarts_the_subagent_wait_budget() {
+        let now = Instant::now();
+        let terminal = subagent_claim_terminal(now);
+        let activity_at = now + Duration::from_secs(10 * 60);
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                Duration::from_secs(60 * 60),
+                Some(activity_at),
+            ),
+            activity_at.checked_add(Duration::from_secs(60 * 60))
+        );
+    }
+
+    #[test]
+    fn an_omitted_agent_count_restores_the_legacy_metadata_fallback() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal
+            .apply_closing_report_subagents_at(Some(0), now + Duration::from_secs(1))
+            .expect("explicit zero overrides the previous declaration");
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), Some("4".into()))]),
+            None,
+            now + Duration::from_secs(2),
+        ));
+        assert_eq!(terminal.effective_active_subagents(), Some(0));
+
+        terminal
+            .apply_closing_report_subagents_at(None, now + Duration::from_secs(3))
+            .expect("legacy report omits the direct count");
+
+        assert_eq!(terminal.effective_active_subagents(), Some(4));
+        assert!(terminal.waiting_on_agents());
+    }
+
+    #[test]
+    fn a_later_closing_report_without_agents_ends_the_wait() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        assert!(terminal.waiting_on_agents());
+
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1001),
+            now + Duration::from_secs(1),
+        );
+        terminal
+            .apply_closing_report_subagents_at(Some(0), now + Duration::from_secs(1))
+            .expect("later closing report declares no agents");
+
+        assert!(!terminal.waiting_on_agents());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
+    }
+
+    #[test]
+    fn an_idle_screen_clears_a_stale_working_report() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER)
+            .expect("silent report becomes stale");
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + AGENT_BUSY_STALE_SILENCE + Duration::from_secs(1),
+        );
+
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn a_blocked_screen_clears_a_stale_working_report() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_BUSY_STALE_SILENCE, TEST_AGENT_STALE_AFTER)
+            .expect("silent report becomes stale");
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            false,
+            now + AGENT_BUSY_STALE_SILENCE + Duration::from_secs(1),
+        );
+
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.state, AgentState::Blocked);
+    }
+
+    #[test]
+    fn a_repeated_idle_process_projection_clears_a_later_stale_mark() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        let (changed, mutation) =
+            terminal.set_process_state(false, Some((AgentState::Idle, false)), now);
+        assert!(changed);
+        assert!(mutation.is_none());
+        terminal.supervisor_stale = true;
+
+        let (changed, mutation) = terminal.set_process_state(
+            false,
+            Some((AgentState::Idle, false)),
+            now + Duration::from_secs(1),
+        );
+        assert!(changed);
+        assert!(mutation.is_some());
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn an_old_process_sample_cannot_resolve_a_newer_stale_report() {
+        let old_observation = Instant::now();
+        let reported_at = old_observation + Duration::from_secs(1);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1000),
+            reported_at,
+        );
+        terminal.supervisor_stale = true;
+
+        let (changed, mutation) =
+            terminal.set_process_state(false, Some((AgentState::Idle, false)), old_observation);
+
+        assert!(!changed);
+        assert!(mutation.is_none());
+        assert!(terminal.supervisor_stale);
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+        assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
+        assert_eq!(terminal.stale_resolution, None);
+    }
+
+    #[test]
+    fn a_process_idle_baseline_then_visible_working_arms_a_new_turn_watchdog() {
+        let reported_at = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1000),
+            reported_at,
+        );
+        terminal
+            .mark_agent_status_stale_at(
+                reported_at + AGENT_BUSY_STALE_SILENCE,
+                TEST_AGENT_STALE_AFTER,
+            )
+            .expect("silent report becomes stale");
+
+        let baseline_at = reported_at + AGENT_BUSY_STALE_SILENCE + Duration::from_secs(1);
+        let (_, mutation) =
+            terminal.set_process_state(false, Some((AgentState::Idle, false)), baseline_at);
+        assert!(mutation.is_some());
+        assert!(!terminal.supervisor_stale);
+
+        let turn_started_at = baseline_at + Duration::from_secs(1);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            turn_started_at,
+        );
+
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
     }
 
     #[test]
@@ -5770,7 +6380,7 @@ mod tests {
             .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
             .is_none());
         assert!(terminal
-            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
+            .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .is_none());
         assert!(!terminal.supervisor_stale);
     }
@@ -5781,7 +6391,7 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
+            .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the subagent claim stale");
         assert!(terminal.supervisor_stale);
         assert!(crate::app::settled::pane_has_resume_plan(&terminal));
@@ -5836,28 +6446,62 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_wait_suppresses_an_old_live_subagent_count() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal.set_active_subagents(Some(3));
+        terminal
+            .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
+            .expect("watchdog expires the subagent wait");
+        assert_eq!(terminal.effective_active_subagents(), Some(0));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + TEST_SUBAGENT_STALE_AFTER + Duration::from_secs(1),
+        );
+
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.effective_active_subagents(), Some(3));
+        assert!(!session_is_quiet(
+            terminal.state,
+            false,
+            terminal.effective_active_subagents(),
+            terminal.holds_shell,
+        ));
+    }
+
+    #[test]
     fn a_fresh_report_resets_the_subagent_claim_watchdog() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
-            .mark_agent_status_stale_at(now + TEST_AGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
+            .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog should mark the subagent claim stale");
 
-        let refreshed_at = now + TEST_AGENT_STALE_AFTER + Duration::from_secs(1);
+        let refreshed_at = now + TEST_SUBAGENT_STALE_AFTER + Duration::from_secs(1);
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
-            AgentState::Idle,
+            AgentState::Working,
             None,
             None,
             Some(1001),
             refreshed_at,
         );
+        terminal
+            .apply_closing_report_subagents_at(Some(3), refreshed_at)
+            .expect("fresh report restores its direct subagent count");
 
         assert!(!terminal.supervisor_stale);
         assert_eq!(
             terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
-            refreshed_at.checked_add(TEST_AGENT_STALE_AFTER)
+            refreshed_at.checked_add(TEST_SUBAGENT_STALE_AFTER)
         );
     }
 
@@ -5865,11 +6509,18 @@ mod tests {
     fn a_non_working_authority_without_a_subagent_claim_has_no_watchdog() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
-        assert!(terminal.metadata_tokens.patch(
-            HashMap::from([("closing_agents".into(), None)]),
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
             None,
-            now,
-        ));
+            None,
+            Some(1001),
+            now + Duration::from_secs(1),
+        );
+        terminal
+            .apply_closing_report_subagents_at(Some(0), now + Duration::from_secs(1))
+            .expect("later closing report declares no agents");
 
         assert!(terminal
             .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)

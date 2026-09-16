@@ -10,6 +10,14 @@ use crate::layout::PaneId;
 use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
 
 #[derive(Debug)]
+pub struct ClosingBlockReport {
+    pub gates: Vec<crate::api::schema::ClosingBlockItem>,
+    pub items: Vec<crate::api::schema::ClosingBlockItem>,
+    pub decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    pub agents: Option<u32>,
+}
+
+#[derive(Debug)]
 pub struct ApiWorktreeAddRequest {
     pub id: String,
     pub operation_id: u64,
@@ -152,6 +160,7 @@ pub enum AppEvent {
         pane_id: PaneId,
         holds_shell: bool,
         stale_resolution: Option<(AgentState, bool)>,
+        observed_at: Instant,
     },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
@@ -165,6 +174,7 @@ pub enum AppEvent {
         eta_s: Option<u64>,
         reported_at: Option<String>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        closing_block: Option<ClosingBlockReport>,
     },
     /// Agent session identity was reported without state authority.
     AgentSessionReported {

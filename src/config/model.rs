@@ -350,10 +350,12 @@ pub struct SessionConfig {
     /// activity have gone quiet. Default: false.
     pub auto_nudge_stalled_agents: bool,
     /// Mark an unattended agent status report stale after this many quiet
-    /// minutes: a finished report still holding sub-processes, or a pane parked
-    /// on an unverified subagent claim. A working report keeps the 20-minute
-    /// busy budget. Default: 5.
+    /// minutes when a finished report still has unreported child work. A
+    /// working report keeps the 20-minute busy budget. Default: 5.
     pub agent_stale_after_minutes: u64,
+    /// Quiet period before a parent waiting on declared subagents becomes
+    /// stale. Default: 60.
+    pub agent_subagent_stale_after_minutes: u64,
     /// Initial quiet period before a stalled pane is nudged. Default: 5.
     pub nudge_after_minutes: u64,
     /// Maximum nudges sent during one stale-status episode. Default: 3.
@@ -380,6 +382,7 @@ impl Default for SessionConfig {
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
             agent_stale_after_minutes: 5,
+            agent_subagent_stale_after_minutes: 60,
             nudge_after_minutes: 5,
             max_nudges: 3,
             stall_nudge_message:
@@ -450,6 +453,10 @@ impl Config {
         self.session.agent_stale_after_minutes = self
             .session
             .agent_stale_after_minutes
+            .min(MAX_NUDGE_AFTER_MINUTES);
+        self.session.agent_subagent_stale_after_minutes = self
+            .session
+            .agent_subagent_stale_after_minutes
             .min(MAX_NUDGE_AFTER_MINUTES);
         self.session.nudge_after_minutes = self
             .session
@@ -2308,6 +2315,7 @@ mod tests {
         let session = SessionConfig::default();
         assert!(!session.auto_nudge_stalled_agents);
         assert_eq!(session.agent_stale_after_minutes, 5);
+        assert_eq!(session.agent_subagent_stale_after_minutes, 60);
         assert_eq!(session.nudge_after_minutes, 5);
         assert_eq!(session.max_nudges, 3);
         assert_eq!(

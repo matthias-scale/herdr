@@ -1236,6 +1236,9 @@ impl App {
             agent_stale_after: auto_nudge::nudge_after_duration(
                 config.session.agent_stale_after_minutes,
             ),
+            agent_subagent_stale_after: auto_nudge::nudge_after_duration(
+                config.session.agent_subagent_stale_after_minutes,
+            ),
             nudge_after: auto_nudge::nudge_after_duration(config.session.nudge_after_minutes),
             max_nudges: config.session.max_nudges,
             stall_nudge_message: config.session.stall_nudge_message.clone(),
@@ -2429,6 +2432,8 @@ impl App {
             self.state.auto_nudge_stalled_agents = config.session.auto_nudge_stalled_agents;
             self.state.agent_stale_after =
                 auto_nudge::nudge_after_duration(config.session.agent_stale_after_minutes);
+            self.state.agent_subagent_stale_after =
+                auto_nudge::nudge_after_duration(config.session.agent_subagent_stale_after_minutes);
             self.state.nudge_after =
                 auto_nudge::nudge_after_duration(config.session.nudge_after_minutes);
             self.state.max_nudges = config.session.max_nudges;

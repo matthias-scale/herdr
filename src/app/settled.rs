@@ -140,18 +140,24 @@ impl AppState {
         pane_id: PaneId,
         settled_at: u64,
     ) -> bool {
-        let Some(pane) = self.workspaces.get_mut(ws_idx).and_then(|workspace| {
-            workspace
-                .tabs
-                .iter_mut()
-                .find_map(|tab| tab.panes.get_mut(&pane_id))
-        }) else {
-            return false;
+        let terminal_id = {
+            let Some(pane) = self.workspaces.get_mut(ws_idx).and_then(|workspace| {
+                workspace
+                    .tabs
+                    .iter_mut()
+                    .find_map(|tab| tab.panes.get_mut(&pane_id))
+            }) else {
+                return false;
+            };
+            if pane.settled_at.is_some() {
+                return false;
+            }
+            pane.settled_at = Some(settled_at);
+            pane.attached_terminal_id.clone()
         };
-        if pane.settled_at.is_some() {
-            return false;
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.clear_stale_for_settlement();
         }
-        pane.settled_at = Some(settled_at);
         let workspace_id = self.workspaces[ws_idx].id.clone();
         self.pending_pane_settlement_changes
             .push(PaneSettlementChange {
@@ -1159,6 +1165,7 @@ mod tests {
             pane_id,
             holds_shell: false,
             stale_resolution: screen_state.map(|state| (state, false)),
+            observed_at: quiet_since + Duration::from_nanos(1),
         });
         let _ = state.refresh_settled_panes_at(None, quiet_since, 1_724_999_999);
         (state, pane_id)
@@ -1174,6 +1181,24 @@ mod tests {
         let (mut state, pane_id) = done_state(true, now - Duration::from_secs(31 * 60));
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_031), 1);
         assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn settling_clears_a_stale_supervisor_mark() {
+        let now = Instant::now();
+        let (mut state, pane_id) = stale_state(None, now);
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        assert!(state.terminals[&terminal_id].supervisor_stale);
+
+        assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+        assert!(!state.terminals[&terminal_id].supervisor_stale);
+        assert!(state.next_agent_watchdog_deadline().is_none());
+        assert!(state
+            .mark_due_agent_status_stale_at(now + Duration::from_secs(2 * 60 * 60))
+            .is_empty());
+        assert!(!state.terminals[&terminal_id].supervisor_stale);
     }
 
     #[test]
@@ -1324,6 +1349,7 @@ mod tests {
             pane_id,
             holds_shell: false,
             stale_resolution: Some((AgentState::Idle, false)),
+            observed_at: now,
         });
 
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_040), 0);
@@ -1350,6 +1376,7 @@ mod tests {
             pane_id,
             holds_shell: true,
             stale_resolution: Some((AgentState::Idle, false)),
+            observed_at: now,
         });
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_042), 0);
 
@@ -1357,6 +1384,7 @@ mod tests {
             pane_id,
             holds_shell: false,
             stale_resolution: Some((AgentState::Idle, false)),
+            observed_at: now,
         });
 
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_043), 0);
@@ -1375,27 +1403,89 @@ mod tests {
     }
 
     #[test]
-    fn stale_resolution_event_unsettles_an_active_projection() {
+    fn stale_blocked_resolution_event_unsettles_an_active_projection() {
         let now = Instant::now();
-        for active_state in [AgentState::Working, AgentState::Blocked] {
-            let (mut state, pane_id) = stale_state(Some(AgentState::Idle), now);
-            state.workspaces[0].tabs[0]
-                .panes
-                .get_mut(&pane_id)
-                .expect("root pane")
-                .settled_at = Some(1_725_000_044);
+        let (mut state, pane_id) = stale_state(None, now);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_044);
 
-            state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
-                pane_id,
-                holds_shell: false,
-                stale_resolution: Some((active_state, false)),
-            });
+        state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
+            pane_id,
+            holds_shell: false,
+            stale_resolution: Some((AgentState::Blocked, false)),
+            observed_at: now + Duration::from_nanos(1),
+        });
 
-            assert!(
-                !state.pane_is_settled(0, pane_id),
-                "stale {active_state:?} projection stayed settled"
-            );
-        }
+        assert!(
+            !state.pane_is_settled(0, pane_id),
+            "stale Blocked projection stayed settled"
+        );
+    }
+
+    #[test]
+    fn waiting_on_agents_is_not_settled_until_a_zero_agent_close() {
+        let now = Instant::now();
+        let (mut state, pane_id) = state_with_context(Default::default());
+        state.active = None;
+        state.auto_settle_inactive = false;
+        state.auto_settle_finished = false;
+        state.auto_settle_done = true;
+        state.settle_done_after = Duration::ZERO;
+        state.handle_app_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: Some(crate::events::ClosingBlockReport {
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                agents: Some(3),
+            }),
+        });
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now);
+
+        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_045), 0);
+        assert!(!state.pane_is_settled(0, pane_id));
+
+        state.handle_app_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(2),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: Some(crate::events::ClosingBlockReport {
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                agents: Some(0),
+            }),
+        });
+        let settled_at = now + Duration::from_secs(1);
+        assert_eq!(
+            state.refresh_settled_panes_at(None, settled_at, 1_725_000_046),
+            1
+        );
+        assert!(state.pane_is_settled(0, pane_id));
     }
 
     #[test]
@@ -1603,6 +1693,7 @@ mod tests {
             pane_id,
             holds_shell: true,
             stale_resolution: None,
+            observed_at: now,
         });
         state.auto_settle_inactive = true;
         assert!(
@@ -1626,6 +1717,7 @@ mod tests {
             pane_id,
             holds_shell: false,
             stale_resolution: None,
+            observed_at: now,
         });
         state.auto_settle_inactive = false;
         assert_eq!(

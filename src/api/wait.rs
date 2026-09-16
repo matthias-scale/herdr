@@ -776,6 +776,7 @@ fn wait_matched_response(request_id: &str, event: serde_json::Value) -> String {
                     pane_id: data.pane_id,
                     workspace_id: data.workspace_id,
                     agent_status: data.agent_status,
+                    waiting_on_agents: data.waiting_on_agents,
                     wait: data.wait,
                     eta_s: data.eta_s,
                     reported_at: data.reported_at,
@@ -793,6 +794,38 @@ fn wait_matched_response(request_id: &str, event: serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn waiting_agent(
+        status: crate::api::schema::AgentStatus,
+        waiting_on_agents: bool,
+    ) -> crate::api::schema::AgentInfo {
+        serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal-1",
+            "agent_status": status,
+            "waiting_on_agents": waiting_on_agents,
+            "workspace_id": "workspace-1",
+            "tab_id": "tab-1",
+            "pane_id": "pane-1",
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("valid waiting agent")
+    }
+
+    #[test]
+    fn a_parent_waiting_on_agents_does_not_satisfy_an_idle_wait() {
+        let until = agent_wait_statuses(Vec::new());
+        assert!(!agent_wait_matches(
+            &waiting_agent(crate::api::schema::AgentStatus::Working, true),
+            &until,
+            None,
+        ));
+        assert!(agent_wait_matches(
+            &waiting_agent(crate::api::schema::AgentStatus::Done, false),
+            &until,
+            None,
+        ));
+    }
 
     #[test]
     fn agent_wait_probe_only_translates_agent_disappearance() {
