@@ -18765,6 +18765,7 @@ next_tab = ""
                 eta_s: None,
                 reported_at: None,
                 session_ref: Some(session_ref),
+                closing_block: None,
             })
             .unwrap_or(false));
         assert_eq!(
@@ -18810,6 +18811,7 @@ next_tab = ""
                             gates: None,
                             items: None,
                             decisions: None,
+                            agents: None,
                         },
                     ),
                 },
