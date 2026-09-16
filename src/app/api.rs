@@ -1135,6 +1135,9 @@ impl App {
     }
 
     pub(crate) fn emit_pane_state_update(&mut self, update: &crate::app::actions::PaneStateUpdate) {
+        if let Some(captured) = self.api_pane_state_updates.as_mut() {
+            captured.push(update.clone());
+        }
         let Some(pane_id) = self.public_pane_id(update.ws_idx, update.pane_id) else {
             return;
         };
@@ -1811,6 +1814,20 @@ impl App {
         };
 
         serde_json::to_string(&response).unwrap()
+    }
+
+    pub(crate) fn handle_api_request_after_internal_events_drained_with_pane_updates(
+        &mut self,
+        request: crate::api::schema::Request,
+    ) -> (String, Vec<crate::app::actions::PaneStateUpdate>) {
+        assert!(
+            self.api_pane_state_updates.is_none(),
+            "nested API pane-state capture"
+        );
+        self.api_pane_state_updates = Some(Vec::new());
+        let response = self.handle_api_request_after_internal_events_drained(request);
+        let pane_updates = self.api_pane_state_updates.take().unwrap_or_default();
+        (response, pane_updates)
     }
 
     fn handle_notification_show(
