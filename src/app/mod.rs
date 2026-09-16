@@ -959,6 +959,7 @@ impl App {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            request_client_notification_config: None,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
@@ -2604,7 +2605,10 @@ impl App {
                     self.state.mark_sidebar_projection_changed();
                 }
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
-                if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
+                if !self.state.local_sound_playback
+                    && self.state.request_client_notification_config.is_none()
+                    && self.state.sound != config.ui.sound
+                {
                     self.state.request_client_config_reload = true;
                 }
                 self.state.sound = config.ui.sound.clone();

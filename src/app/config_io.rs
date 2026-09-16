@@ -141,14 +141,21 @@ impl App {
 
     pub(super) fn toggle_notifications(&mut self) {
         let enabled = self.state.notifications_enabled();
+        let next_enabled = !enabled;
+        if !self.state.local_sound_playback {
+            self.state.request_client_notification_config = Some(next_enabled);
+        }
         self.save_config_edit(crate::app::settings_general::ConfigEdit::Notifications {
             delivery: if enabled {
                 crate::config::ToastDelivery::Off
             } else {
                 self.state.last_non_off_toast_delivery
             },
-            sound_enabled: !enabled,
+            sound_enabled: next_enabled,
         });
+        if self.state.notifications_enabled() != next_enabled {
+            self.state.request_client_notification_config = None;
+        }
     }
 
     /// Persist one captured keybinding and reload.

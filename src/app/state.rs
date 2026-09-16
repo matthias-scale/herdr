@@ -3638,6 +3638,9 @@ pub struct AppState {
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
+    /// Effective sound permission requested by the notification toggle for
+    /// the client that supplied the input.
+    pub(crate) request_client_notification_config: Option<bool>,
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
@@ -6145,6 +6148,7 @@ impl AppState {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            request_client_notification_config: None,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,

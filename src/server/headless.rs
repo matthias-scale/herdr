@@ -4256,6 +4256,13 @@ impl HeadlessServer {
             self.sync_foreground_client_state();
         }
 
+        if let Some(sound_enabled) = self.app.state.request_client_notification_config.take() {
+            self.send_to_client(
+                client_id,
+                ServerMessage::NotificationConfig { sound_enabled },
+            );
+        }
+
         if let Some(width) = self.app.state.take_dock_width_persistence_request() {
             self.send_to_client(client_id, ServerMessage::DockWidth { width });
         }
@@ -17336,6 +17343,137 @@ next_tab = ""
             other => panic!("expected ReloadSoundConfig, got {other:?}"),
         }
         assert!(!server.app.state.request_client_config_reload);
+    }
+
+    #[test]
+    fn notification_bell_updates_the_initiating_clients_local_effective_config() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-remote-notification-toggle-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let server_path = directory.join("server.toml");
+        let client_path = directory.join("client.toml");
+        std::fs::write(&server_path, "# server config\n").expect("seed server config");
+        std::fs::write(
+            &client_path,
+            "[ui.toast]\nterminal_backend = \"osc99\"\n[ui.sound]\nenabled = false\n",
+        )
+        .expect("seed client config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.sidebar_collapsed = false;
+        crate::ui::compute_view(
+            &mut server.app.state,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+        let bell = server.app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+
+        let (initiator_tx, initiator_control_rx, _initiator_render_rx) = test_client_writer();
+        let (other_tx, other_control_rx, _other_render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(initiator_tx),
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(other_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let click_bell = |server: &mut HeadlessServer| {
+            assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+                client_id: 1,
+                events: vec![crate::protocol::ClientInputEvent::Mouse {
+                    kind: crate::protocol::ClientMouseKind::Down(
+                        crate::protocol::ClientMouseButton::Left,
+                    ),
+                    column: bell.x,
+                    row: bell.y,
+                    modifiers: 0,
+                }],
+            }));
+            server.drain_client_config_reload_request();
+        };
+
+        let mut apply_client_message = |message: ServerMessage| {
+            let ServerMessage::NotificationConfig { sound_enabled } = message else {
+                panic!("expected initiating client notification config update, got {message:?}");
+            };
+            env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
+            let mut sound = crate::config::SoundConfig::default();
+            let mut backend = crate::config::TerminalNotificationBackend::Auto;
+            crate::client::reload_local_notification_config(
+                &mut sound,
+                &mut backend,
+                sound_enabled,
+            );
+            env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
+            (sound, backend)
+        };
+
+        click_bell(&mut server);
+        let (client_sound, client_backend) = apply_client_message(read_server_message(
+            initiator_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initiating client config update"),
+        ));
+        let saved = crate::config::Config::load().config;
+        assert_eq!(
+            saved.ui.toast.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        assert!(saved.ui.sound.enabled);
+        assert!(client_sound.enabled, "initiating client stayed muted");
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
+        assert!(
+            other_control_rx
+                .recv_timeout(Duration::from_millis(20))
+                .is_err(),
+            "notification toggle reached a non-initiating client"
+        );
+
+        click_bell(&mut server);
+        let (client_sound, client_backend) = apply_client_message(read_server_message(
+            initiator_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initiating client config update"),
+        ));
+        let saved = crate::config::Config::load().config;
+        assert_eq!(saved.ui.toast.delivery, crate::config::ToastDelivery::Off);
+        assert!(!saved.ui.sound.enabled);
+        assert!(!client_sound.enabled);
+        assert_eq!(
+            client_backend,
+            crate::config::TerminalNotificationBackend::Osc99
+        );
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]

@@ -2332,6 +2332,13 @@ async fn run_client_loop(
                         &mut state.remote_image_paste_key,
                     );
                 }
+                ServerMessage::NotificationConfig { sound_enabled } => {
+                    reload_local_notification_config(
+                        &mut state.sound_config,
+                        &mut state.terminal_notification_backend,
+                        sound_enabled,
+                    );
+                }
                 ServerMessage::DockWidth { width } => {
                     presentation::save_dock_width(width);
                 }
@@ -2589,23 +2596,44 @@ fn reload_local_client_config(
         crossterm::event::KeyModifiers,
     )>,
 ) {
+    let Some(config) = load_local_client_config() else {
+        return;
+    };
+    let loaded_remote_image_paste_key = client_remote_image_paste_key(&config);
+    *sound_config = config.ui.sound;
+    *terminal_notification_backend = config.ui.toast.terminal_backend;
+    *redraw_on_focus_gained = config.ui.redraw_on_focus_gained;
+    *draw_host_cursor = should_draw_host_cursor(config.ui.host_cursor);
+    *remote_image_paste_key = loaded_remote_image_paste_key;
+    debug!("reloaded local client config");
+}
+
+fn load_local_client_config() -> Option<crate::config::Config> {
     match crate::config::load_live_config() {
         Ok(loaded) => {
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
-            let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
-            *sound_config = loaded.config.ui.sound;
-            *terminal_notification_backend = loaded.config.ui.toast.terminal_backend;
-            *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
-            *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
-            *remote_image_paste_key = loaded_remote_image_paste_key;
-            debug!("reloaded local client config");
+            Some(loaded.config)
         }
         Err(diagnostics) => {
             warn!(diagnostics = ?diagnostics, "failed to reload local client config; keeping current client config");
+            None
         }
     }
+}
+
+pub(crate) fn reload_local_notification_config(
+    sound_config: &mut crate::config::SoundConfig,
+    terminal_notification_backend: &mut crate::config::TerminalNotificationBackend,
+    sound_enabled: bool,
+) {
+    if let Some(config) = load_local_client_config() {
+        *sound_config = config.ui.sound;
+        *terminal_notification_backend = config.ui.toast.terminal_backend;
+    }
+    sound_config.enabled = sound_enabled;
+    debug!(sound_enabled, "reloaded local notification config");
 }
 
 fn handle_notify(

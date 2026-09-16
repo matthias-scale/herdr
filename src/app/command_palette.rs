@@ -564,6 +564,7 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
+        app.state.local_sound_playback = false;
         app.state.open_command_palette();
         app.state.command_palette.query = "toggle notifications".to_string();
         assert_eq!(
@@ -579,6 +580,7 @@ mod tests {
             crate::config::ToastDelivery::Terminal
         );
         assert!(app.state.sound.enabled);
+        assert_eq!(app.state.request_client_notification_config, Some(true));
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         std::fs::remove_dir_all(&directory).ok();
     }
