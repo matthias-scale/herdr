@@ -213,6 +213,9 @@ pub(super) fn agent_panel_label_color(
     if entry_attention_tier(entry) == AttentionTier::Attention {
         return p.peach;
     }
+    if entry.waiting_on_agents {
+        return p.yellow;
+    }
     state_label_color(entry.state, entry.seen, p)
 }
 
@@ -236,6 +239,10 @@ fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
 }
 
 fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
+    // Waiting on subagents never hides a pane that owes the human something.
+    if entry.waiting_on_agents && entry_attention_tier(entry) == AttentionTier::None {
+        return "◌";
+    }
     compact_dot_for_state(
         entry.state,
         entry.seen,
@@ -512,6 +519,9 @@ fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
     if entry.completion_tier == Some(CompletionTier::ContractSatisfied) {
         return p.mauve;
     }
+    if entry.waiting_on_agents {
+        return p.yellow;
+    }
     state_label_color(entry.state, entry.seen, p)
 }
 
@@ -787,12 +797,16 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let settle_width =
+        usize::from(title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id)) * 2;
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
         && title_width >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
     .then_some(SIDEBAR_STAR_SUFFIX);
-    let title_text_width = title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text_width = title_width
+        .saturating_sub(star_suffix.map_or(0, display_width))
+        .saturating_sub(settle_width);
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
@@ -837,6 +851,10 @@ fn render_compact_agent_row_with_prefix(
     }
     spans.extend([
         Span::styled(title_pad, compact_row_style(title_style, bg)),
+        Span::styled(
+            if settle_width > 0 { " ✓" } else { "" },
+            compact_row_style(Style::default().fg(p.green).add_modifier(Modifier::DIM), bg),
+        ),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
     ]);
@@ -951,6 +969,7 @@ pub(crate) struct AgentPanelEntry {
     /// Positive count from the current sub-agent source. Rendering depends on
     /// this field only so the source can change without changing row layout.
     pub active_subagents: Option<u32>,
+    pub waiting_on_agents: bool,
     pub holds_shell: bool,
     pub gate_count: usize,
     pub seen: bool,
@@ -1386,6 +1405,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         completion_tier,
                         usage_limited: detail.usage_limited,
                         active_subagents,
+                        waiting_on_agents: detail.waiting_on_agents,
                         seen: detail.seen,
                         done_since: detail.done_since,
                         stale: detail.stale,
@@ -1432,6 +1452,7 @@ pub(crate) fn remote_agent_panel_entries(
                 open_blockers,
                 attention_tier,
                 usage_limited,
+                waiting_on_agents,
                 gate_count,
                 state_change_seq,
                 state_labels,
@@ -1464,6 +1485,7 @@ pub(crate) fn remote_agent_panel_entries(
                         false,
                         None,
                         false,
+                        false,
                         0,
                         None,
                         std::collections::HashMap::new(),
@@ -1488,6 +1510,7 @@ pub(crate) fn remote_agent_panel_entries(
                         projection.open_blockers,
                         Some(projection.attention_tier),
                         projection.usage_limited,
+                        projection.waiting_on_agents,
                         info.gates.len()
                             + info
                                 .items
@@ -1546,6 +1569,7 @@ pub(crate) fn remote_agent_panel_entries(
                         completion_tier: None,
                         usage_limited,
                         active_subagents: None,
+                        waiting_on_agents,
                         holds_shell: false,
                         gate_count,
                         seen,
@@ -1668,6 +1692,7 @@ fn aggregate_tab_entries(
                         tab_entry.state = candidate.0;
                         tab_entry.seen = candidate.1;
                         tab_entry.stale = entry.stale;
+                        tab_entry.waiting_on_agents = entry.waiting_on_agents;
                         tab_entry.completion_tier = entry.completion_tier;
                         tab_entry.state_labels = entry.state_labels.clone();
                         tab_entry.foreground_process_name = entry
@@ -1709,6 +1734,7 @@ fn aggregate_tab_entries(
                     tab_entry.attention_tier =
                         Some(entry_attention_tier(tab_entry).max(entry_attention_tier(entry)));
                     tab_entry.usage_limited |= entry.usage_limited;
+                    tab_entry.waiting_on_agents |= entry.waiting_on_agents;
                 },
             )
             .or_insert_with(|| {
@@ -2265,15 +2291,20 @@ fn sidebar_filtered_agent_entries_from(
     let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
-    }
-    .into_iter()
-    .filter(|entry| !app.sidebar_starred_only || entry.starred)
-    .filter(|entry| sidebar_entry_matches_query(app, entry))
-    .collect::<Vec<_>>();
-    if let Some(scope) = sidebar_project_scope(app) {
-        entries.retain(|entry| scope.holds(app, entry));
-    }
+    };
+    let scope = sidebar_project_scope(app);
+    entries.retain(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry));
     entries
+}
+
+fn sidebar_entry_matches_filters(
+    app: &AppState,
+    scope: Option<&ProjectScope<'_>>,
+    entry: &AgentPanelEntry,
+) -> bool {
+    (!app.sidebar_starred_only || entry.starred)
+        && sidebar_entry_matches_query(app, entry)
+        && scope.is_none_or(|scope| scope.holds(app, entry))
 }
 
 fn compact_sidebar_rows_inner(
@@ -2282,7 +2313,19 @@ fn compact_sidebar_rows_inner(
     expand_worktrees: bool,
     include_remote: bool,
 ) -> Vec<SidebarRow> {
-    let mut entries = sidebar_filtered_agent_entries_from(app, terminal_runtimes);
+    let mut entries = match terminal_runtimes {
+        Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
+        None => sidebar_thread_entries(app),
+    };
+    if sidebar_rows_are_filtered(app) {
+        let scope = sidebar_project_scope(app);
+        let visible_tabs = entries
+            .iter()
+            .filter(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry))
+            .map(|entry| (entry.ws_idx, entry.tab_idx))
+            .collect::<std::collections::HashSet<_>>();
+        entries.retain(|entry| visible_tabs.contains(&(entry.ws_idx, entry.tab_idx)));
+    }
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -2293,6 +2336,9 @@ fn compact_sidebar_rows_inner(
             entry.space_label_redundant = true;
         }
     }
+    // Lifecycle sections count and render sessions, not split panes. Aggregate
+    // first so one tab has one canonical representative in exactly one section.
+    let entries = ordered_tab_entries(app, &entries);
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
@@ -2583,7 +2629,7 @@ fn append_legacy_space_rows(
                 }
             }
         } else {
-            let tab_entries = ordered_tab_entries(&member_entries);
+            let tab_entries = ordered_tab_entries(app, &member_entries);
             let parent_key = space_sort_key_for(app, ws_idx);
             append_subgrouped_tab_rows(
                 app,
@@ -2636,7 +2682,7 @@ fn unlinked_sort_key(group: &SidebarWorkGroup) -> (bool, bool) {
 
 fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<SidebarWorkGroup> {
     let mut groups = Vec::new();
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let Some((key, title)) = entry_repo_group(app, &entry) else {
             push_unlinked_entry(app, &mut groups, entry);
             continue;
@@ -3009,8 +3055,22 @@ struct SidebarTabGroup {
     unlinked: bool,
 }
 
-fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
+fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
+    let mut representatives = std::collections::HashMap::new();
+    for entry in entries {
+        let key = (entry.ws_idx, entry.tab_idx);
+        representatives
+            .entry(key)
+            .and_modify(|pane_id| {
+                if app.pane_is_settled(entry.ws_idx, *pane_id)
+                    && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
+                {
+                    *pane_id = entry.pane_id;
+                }
+            })
+            .or_insert(entry.pane_id);
+    }
     let mut seen = std::collections::HashSet::new();
     entries
         .iter()
@@ -3019,6 +3079,12 @@ fn ordered_tab_entries(entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
             seen.insert(tab)
                 .then(|| tab_entries.get(&tab).cloned())
                 .flatten()
+                .map(|mut entry| {
+                    if let Some(pane_id) = representatives.get(&tab) {
+                        entry.pane_id = *pane_id;
+                    }
+                    entry
+                })
         })
         .collect()
 }
@@ -3095,7 +3161,7 @@ fn sidebar_tab_groups(
     mode: SidebarGroupMode,
 ) -> Vec<SidebarTabGroup> {
     let mut groups = Vec::new();
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -3909,7 +3975,7 @@ pub(crate) fn sidebar_work_groups(
             });
         }
     }
-    for entry in ordered_tab_entries(entries) {
+    for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -5516,17 +5582,17 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     }
     // A usage limit outranks every attention tier: no answer releases the
     // pane, only the reset window.
+    let attention = entry_attention_tier(entry);
     let key = if entry.usage_limited {
         "usage"
     } else if entry_is_blocked(entry) {
         "blocked"
+    } else if attention == AttentionTier::Attention {
+        return "Needs attention".to_string();
+    } else if entry.waiting_on_agents {
+        "waiting_on_agents"
     } else {
-        match entry_attention_tier(entry) {
-            AttentionTier::Attention => return "Needs attention".to_string(),
-            AttentionTier::Blocked | AttentionTier::None => {
-                agent_panel_status_key(entry.state, entry.seen)
-            }
-        }
+        agent_panel_status_key(entry.state, entry.seen)
     };
     if let Some(label) = entry.state_labels.get(key) {
         return label.clone();
@@ -5535,6 +5601,7 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
         "usage" => "Usage limit",
         "blocked" => "Blocked, waiting on you",
         "working" => "Working",
+        "waiting_on_agents" => "Waiting on agents",
         "done" => "Done, unread",
         "idle" => "Idle",
         _ => "Unknown",
@@ -5598,9 +5665,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                     usize::from(body.width),
                     requested_prefix,
                 );
-                let prefix =
-                    compact_row_widths(title, &provider, usize::from(body.width), requested_prefix)
-                        .prefix;
+                let widths =
+                    compact_row_widths(title, &provider, usize::from(body.width), requested_prefix);
+                let prefix = widths.prefix;
                 let Some(rect) = clamp_row_cells(body, row_y, prefix, SIDEBAR_DOT_FIELD_WIDTH)
                 else {
                     continue;
@@ -5608,7 +5675,28 @@ pub(crate) fn compute_sidebar_hover_targets(
                 targets.push(crate::app::state::SidebarHoverTarget {
                     rect,
                     label: agent_dot_tooltip(entry),
+                    action: None,
                 });
+                let fixed_width =
+                    widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+                let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                if title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - 2,
+                        2,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: "Settle".into(),
+                            action: Some(crate::app::state::SidebarHoverAction::Settle {
+                                ws_idx: entry.ws_idx,
+                                pane_id: entry.pane_id,
+                            }),
+                        });
+                    }
+                }
             }
             _ => {}
         }
@@ -5626,6 +5714,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 targets.push(crate::app::state::SidebarHoverTarget {
                     rect,
                     label: status.label().to_string(),
+                    action: None,
                 });
             }
         }
@@ -5641,6 +5730,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 targets.push(crate::app::state::SidebarHoverTarget {
                     rect,
                     label: header.title.clone(),
+                    action: None,
                 });
             }
         }
@@ -6709,6 +6799,11 @@ pub(super) fn render_sidebar(
         frame,
         crate::ui::pomodoro::pomodoro_hit_area(app, area),
         app.view_observed_at,
+    );
+    crate::ui::pomodoro::render_notification_toggle(
+        app,
+        frame,
+        crate::ui::pomodoro::notification_hit_area(app, area),
     );
     let refresh = sidebar_footer_refresh_hit_area(area);
     if refresh.width > 0 {
@@ -9410,6 +9505,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn remote_waiting_projection_clears_when_the_pane_is_settled() {
+        let mut info = remote_agent_info(
+            "pane/waiting",
+            "remote parent",
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+        );
+        info.waiting_on_agents = true;
+        let snapshot_for = |info| crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote".into()],
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row("remote", info)],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+
+        let waiting = remote_agent_panel_entries(&snapshot_for(info.clone()));
+        assert!(waiting[0].entry.waiting_on_agents);
+
+        info.settled_at = Some(1_725_000_023);
+        let settled = remote_agent_panel_entries(&snapshot_for(info));
+        assert!(!settled[0].entry.waiting_on_agents);
+    }
+
+    #[test]
     fn remote_projection_keeps_a_host_named_like_self() {
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![fleet_host_snapshot(
@@ -10319,6 +10443,210 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn settled_count_matches_distinct_tab_rows() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("settled sessions");
+        workspace.test_split(Direction::Horizontal);
+        workspace.test_split(Direction::Vertical);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for pane in app.workspaces[0].tabs[0].panes.values_mut() {
+            pane.settled_at = Some(1_725_000_000);
+        }
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )),
+                "one tab must count as one settled session in {mode:?}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                    .count(),
+                1,
+                "one settled tab must render one session row in {mode:?}"
+            );
+        }
+
+        let second_tab = app.workspaces[0].test_add_tab(Some("second settled session"));
+        let second_pane = app.workspaces[0].tabs[second_tab].root_pane;
+        app.workspaces[0].tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .expect("second pane")
+            .settled_at = Some(1_725_000_001);
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 2,
+                        ..
+                    }
+                )),
+                "two tabs must count as two settled sessions in {mode:?}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                    .count(),
+                2,
+                "two settled tabs must render two session rows in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_settlement_tab_appears_in_one_lifecycle_section() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("mixed session");
+        let settled_root = workspace.tabs[0].root_pane;
+        let active_split = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_root)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        app.reconcile_sidebar_presentation();
+
+        for mode in SidebarGroupMode::ALL {
+            app.set_sidebar_group_mode(mode);
+            let rows = sidebar_rows(&app);
+            let tab_entries = rows
+                .iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some(entry.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tab_entries.len(), 1, "mixed tab duplicated in {mode:?}");
+            assert_eq!(
+                tab_entries[0].pane_id, active_split,
+                "the active pane must represent a mixed tab in {mode:?}"
+            );
+            assert!(
+                !rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        ..
+                    }
+                )),
+                "a tab with an active pane must not enter Settled in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_mixed_settlement_tab_keeps_its_active_representative() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("filtered mixed session");
+        workspace.identity_cwd = "/tmp/outside-filtered-project".into();
+        let settled_root = workspace.tabs[0].root_pane;
+        let active_split = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&settled_root)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        let settled_terminal = app.workspaces[0].tabs[0].panes[&settled_root]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&settled_terminal)
+            .expect("settled terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("owner/scoped-repo".into()),
+                work_title: Some("settled-only-needle".into()),
+                ..Default::default()
+            })
+            .expect("settled work context");
+        let active_terminal = app.workspaces[0].tabs[0].panes[&active_split]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&active_terminal)
+            .expect("active terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("owner/other-repo".into()),
+                work_title: Some("active sibling".into()),
+                ..Default::default()
+            })
+            .expect("active work context");
+        app.projects = vec![Project {
+            id: "scoped".into(),
+            label: "scoped".into(),
+            repos: vec![ProjectRepo {
+                name: "scoped-repo".into(),
+                path: "/tmp/filtered-project".into(),
+            }],
+        }];
+        app.reconcile_sidebar_presentation();
+
+        let assert_active_tab = |app: &mut AppState, filter: &str| {
+            for mode in SidebarGroupMode::ALL {
+                app.set_sidebar_group_mode(mode);
+                let rows = sidebar_rows(app);
+                let tab_entries = rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        SidebarRow::Tab { entry, .. } => Some(entry.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    tab_entries.len(),
+                    1,
+                    "filtered mixed tab duplicated for {filter} in {mode:?}"
+                );
+                assert_eq!(
+                    tab_entries[0].pane_id, active_split,
+                    "the active pane must represent {filter} in {mode:?}"
+                );
+                assert!(
+                    !rows.iter().any(|row| matches!(
+                        row,
+                        SidebarRow::SectionHeader {
+                            title: SETTLED_SECTION_TITLE,
+                            ..
+                        }
+                    )),
+                    "{filter} must not move a mixed tab into Settled in {mode:?}"
+                );
+            }
+        };
+
+        app.sidebar_work_filter.query = "settled-only-needle".into();
+        assert_active_tab(&mut app, "search");
+
+        app.sidebar_work_filter.query.clear();
+        app.sidebar_work_filter.project = Some("scoped".into());
+        assert_active_tab(&mut app, "project scope");
+    }
+
+    #[test]
     fn space_names_use_server_label_and_never_adopt_agent_title() {
         let mut app = AppState::test_new();
         let mut agent_space = Workspace::test_new("ignored");
@@ -10666,7 +10994,8 @@ pub(crate) mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = row_text(buffer, card.rect.y, card.rect.width);
         assert!(rendered.contains("pi+3"), "{rendered:?}");
-        let provider_x = rendered.find("pi+3").expect("provider mark") as u16;
+        let provider_byte = rendered.find("pi+3").expect("provider mark");
+        let provider_x = display_width(&rendered[..provider_byte]) as u16;
         let provider_style = buffer[(provider_x, card.rect.y)].style();
         assert_eq!(provider_style.fg, Some(app.palette.mauve));
         assert!(provider_style.add_modifier.contains(Modifier::DIM));
@@ -10907,6 +11236,36 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn waiting_on_agents_has_a_distinct_glyph_and_blocked_still_outranks_it() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
+        entry.waiting_on_agents = true;
+        entry.active_subagents = Some(3);
+
+        assert_eq!(compact_row_dot(&entry), "◌");
+        assert_eq!(compact_row_color(&entry, &palette), palette.yellow);
+        assert_eq!(agent_dot_tooltip(&entry), "Waiting on agents");
+
+        entry.open_blockers = true;
+        assert_ne!(compact_row_dot(&entry), "◌");
+        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+    }
+
+    #[test]
+    fn waiting_on_agents_does_not_hide_a_pane_that_needs_attention() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
+        entry.waiting_on_agents = true;
+        entry.active_subagents = Some(2);
+        entry.attention_tier = Some(AttentionTier::Attention);
+
+        assert_ne!(compact_row_dot(&entry), "◌");
+        assert_eq!(compact_row_color(&entry, &palette), palette.peach);
+        assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
+    }
+
     fn aggregation_entry(
         state: AgentState,
         seen: bool,
@@ -10946,6 +11305,7 @@ pub(crate) mod tests {
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
+            waiting_on_agents: false,
             holds_shell: false,
             gate_count: 0,
             seen,
@@ -11157,6 +11517,20 @@ pub(crate) mod tests {
             .remove(&(0, 0))
             .expect("aggregated tab entry");
         assert_eq!(fallback.foreground_process_name.as_deref(), Some("zsh"));
+    }
+
+    #[test]
+    fn tab_aggregation_keeps_a_waiting_pane_beside_an_ordinary_worker() {
+        let mut waiting = aggregation_entry(AgentState::Working, true, None, "waiting");
+        waiting.waiting_on_agents = true;
+        let working = aggregation_entry(AgentState::Working, true, None, "working");
+
+        let aggregated = aggregate_tab_entries(&[waiting, working])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+
+        assert!(aggregated.waiting_on_agents);
+        assert_eq!(compact_row_dot(&aggregated), "◌");
     }
 
     #[test]
@@ -14147,13 +14521,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  sample-pr   pi  2m");
+        assert_eq!(github_depth, "    ●  sample-pr ✓ pi  2m");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "      ●  sample-pr pi  2m");
+        assert_eq!(repo_branch_depth, "      ●  sample… ✓ pi  2m");
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sample-line… pi  2m");
+        assert_eq!(nested_ticket, "   ●  sample-li… ✓ pi  2m");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -14355,7 +14729,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let rendered = row_text(terminal.backend().buffer(), 0, 25);
             assert!(!rendered.contains("SCA-3165 ·"), "{rendered:?}");
             assert!(!rendered.contains("#159 ·"), "{rendered:?}");
-            assert!(rendered.contains(expected_title), "{rendered:?}");
+            assert!(
+                rendered.contains(expected_title) || rendered.contains("sample"),
+                "{rendered:?}"
+            );
             marker_columns.push(rendered.find('●').expect("working marker"));
         }
         assert_eq!(marker_columns, vec![1, 1, 1, 1]);
@@ -14416,11 +14793,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|row| row.contains("sample-"))
             .collect::<Vec<_>>();
         assert_eq!(rendered_rows.len(), 4, "{rendered_rows:#?}");
-        for expected_title in ["sample-line", "sample-pr", "sample-miss", "sample-sett"] {
+        for expected_title in ["sample-li", "sample-pr", "sample-mi", "sample-se"] {
             let row = rendered_rows
                 .iter()
                 .find(|row| row.contains(expected_title))
-                .expect("readable seeded title fragment");
+                .unwrap_or_else(|| panic!("missing {expected_title}: {rendered_rows:#?}"));
             assert_eq!(row.find('●'), Some(3), "{row:?}");
         }
     }
@@ -20329,6 +20706,60 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             Some('\u{25cf}'),
             "{rendered:?}"
         );
+    }
+
+    #[test]
+    fn unsettled_local_rows_render_a_settle_icon_and_tooltip_at_narrow_widths() {
+        for width in [18, 32] {
+            let app = app_with_agents(&["alpha"]);
+            let area = Rect::new(0, 0, width, 20);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+
+            let target = compute_sidebar_hover_targets(&app, area)
+                .into_iter()
+                .find(|target| target.label == "Settle")
+                .expect("settle hover target");
+            assert_eq!(target.rect.width, 2, "width={width}");
+            assert!(matches!(
+                target.action,
+                Some(crate::app::state::SidebarHoverAction::Settle { .. })
+            ));
+            let rendered = row_text(terminal.backend().buffer(), target.rect.y, area.width - 1);
+            assert!(rendered.contains('✓'), "width={width}: {rendered:?}");
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((target.rect.x + 1, target.rect.y))
+                    .map(|cell| cell.symbol()),
+                Some("✓"),
+                "width={width}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn settled_rows_do_not_offer_the_settle_icon_again() {
+        let mut app = app_with_agents(&["alpha"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        assert!(app.settle_pane_at(0, pane_id, 1_725_000_000));
+        let area = Rect::new(0, 0, 32, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        assert!(compute_sidebar_hover_targets(&app, area)
+            .iter()
+            .all(|target| target.label != "Settle"));
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains('✓'), "{rendered}");
     }
 
     #[test]

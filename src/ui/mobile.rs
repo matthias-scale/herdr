@@ -963,6 +963,8 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
     let status = if super::sidebar::gate_overrides_label(entry) {
         super::sidebar::gate_override_label(entry)
+    } else if entry.waiting_on_agents {
+        "waiting on agents".to_string()
     } else {
         entry
             .state_labels
@@ -1548,6 +1550,7 @@ mod tests {
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
+            waiting_on_agents: false,
             holds_shell: false,
             gate_count: 0,
             seen: true,

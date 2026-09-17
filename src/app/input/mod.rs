@@ -190,7 +190,7 @@ impl App {
     ) -> Option<super::TerminalInputTarget> {
         // A due break reminder outranks every other surface, panes included:
         // an overlay that can be typed past is not a reminder.
-        if self.intercept_notepad_key_with_prompt_visibility(&key, prompt_visible) {
+        if prompt_visible && self.intercept_notepad_key_with_prompt_visibility(&key, true) {
             return None;
         }
         if self.state.popup_pane.is_some() {
@@ -201,6 +201,9 @@ impl App {
         // gated: it opens from a right-click menu that never claims the
         // sidebar's bare-key focus.
         if self.state.handle_sidebar_subgroup_picker_key(key_event) {
+            return None;
+        }
+        if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
             return None;
         }
         // Every sidebar shortcut below is a bare key the operator also types
@@ -4414,16 +4417,18 @@ impl App {
         {
             return;
         }
-        if self.state.home.is_some() {
-            self.handle_home_text_commit(text);
-            return;
-        }
         if self.state.popup_pane.is_some() {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
             } else {
                 self.close_popup_pane();
             }
+            return;
+        }
+        if self.route_text_to_sidebar_subgroup_picker(text) {
+            return;
+        }
+        if self.try_route_text_to_home(text) {
             return;
         }
         if self.state.mode != Mode::Terminal || self.state.notepad.focused {
@@ -4446,6 +4451,11 @@ impl App {
                     .get(ws_idx)
                     .and_then(|workspace| workspace.terminal_id(pane_id).cloned())
             });
+            if !text.is_empty() {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4484,16 +4494,18 @@ impl App {
         {
             return;
         }
-        if self.state.home.is_some() {
-            self.handle_home_text_commit(&text);
-            return;
-        }
         if self.state.popup_pane.is_some() {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.send_bytes(Bytes::from(text)).await;
             } else {
                 self.close_popup_pane();
             }
+            return;
+        }
+        if self.route_text_to_sidebar_subgroup_picker(&text) {
+            return;
+        }
+        if self.try_route_text_to_home(&text) {
             return;
         }
         if self.state.mode != Mode::Terminal {
@@ -4510,6 +4522,11 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            if !text.is_empty() {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4528,22 +4545,18 @@ impl App {
         }
     }
 
-    pub(super) fn try_route_paste_to_overlay(&mut self, text: &str) -> bool {
+    pub(super) fn try_route_paste_to_overlay(&self) -> bool {
         if self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.dock_object_preview.is_some()
         {
             return true;
         }
-        if self.state.home.is_some() {
-            self.handle_home_text_commit(text);
-            return true;
-        }
         false
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
-        if self.try_route_paste_to_overlay(&text) {
+        if self.try_route_paste_to_overlay() {
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -4552,6 +4565,12 @@ impl App {
             } else {
                 self.close_popup_pane();
             }
+            return;
+        }
+        if self.route_text_to_sidebar_subgroup_picker(&text) {
+            return;
+        }
+        if self.try_route_text_to_home(&text) {
             return;
         }
         if self.state.mode != Mode::Terminal {
@@ -4572,6 +4591,11 @@ impl App {
                 .and_then(|workspace| workspace.focused_pane_id());
             let draft = text.clone();
             let has_text = !text.is_empty();
+            if has_text {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4585,6 +4609,27 @@ impl App {
                 self.note_human_text(pane_id, &draft);
             }
         }
+    }
+
+    pub(super) fn route_text_to_sidebar_subgroup_picker(&mut self, text: &str) -> bool {
+        if self.state.sidebar_subgroup_picker.is_none() {
+            return false;
+        }
+        for character in text.chars().filter(|character| !character.is_control()) {
+            self.state.handle_sidebar_subgroup_picker_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            ));
+        }
+        true
+    }
+
+    pub(super) fn try_route_text_to_home(&mut self, text: &str) -> bool {
+        if self.state.home.is_none() {
+            return false;
+        }
+        self.handle_home_text_commit(text);
+        true
     }
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
@@ -4860,6 +4905,14 @@ impl App {
         if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
+            let notifications = self.state.view.notification_hit_area;
+            if self
+                .state
+                .point_in_rect(notifications, mouse.column, mouse.row)
+            {
+                self.toggle_notifications();
+                return;
+            }
             let settings = self.state.view.sidebar_footer_settings_hit_area;
             if self.state.point_in_rect(settings, mouse.column, mouse.row) {
                 settings::open_settings(&mut self.state);
@@ -5067,7 +5120,9 @@ impl App {
             self.start_home_ref_refresh_if_requested();
             self.start_home_github_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                if !self.state.pane_is_settled_anywhere(pane_id) {
+                    self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                }
             }
             if let Some(action) = action {
                 match action {
@@ -5077,8 +5132,9 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
-                    MouseAction::FocusLiveSettledPane(target) => {
-                        self.focus_live_settled_pane(target)
+                    MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
+                    MouseAction::SettlePane { ws_idx, pane_id } => {
+                        self.settle_sidebar_pane(ws_idx, pane_id)
                     }
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
@@ -9267,6 +9323,80 @@ navigate_workspace_down = "ctrl+j"
         app.handle_text_commit_headless("continue");
         assert!(rx.try_recv().is_ok());
         assert_blocked_hook_retired(&app, &terminal_id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_text_and_paste_are_consumed_by_subgroup_picker_before_home() {
+        let (mut app, _terminal_id, mut pane_input) = terminal_app_with_blocked_hook();
+        app.state.toggle_home();
+        let home_prompt_before = app
+            .state
+            .home
+            .as_ref()
+            .map(|home| home.prompt.clone())
+            .expect("home");
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("ap"),
+            ))
+            .await
+        );
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Paste("i".into()))
+                .await
+        );
+
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("api")
+        );
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some(home_prompt_before.as_str())
+        );
+        assert!(
+            pane_input.try_recv().is_err(),
+            "picker-owned text must not reach the pane"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_subgroup_picker_takes_keys_before_focused_notepad() {
+        let (mut app, _terminal_id, mut pane_input) = terminal_app_with_blocked_hook();
+        app.state.notepad.enabled = true;
+        app.state.notepad.focused = true;
+        let note_before = app.state.notepad.body().to_string();
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        let target = app
+            .handle_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()))
+            .await;
+
+        assert!(target.is_none());
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("a")
+        );
+        assert_eq!(app.state.notepad.body(), note_before);
+        assert!(pane_input.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

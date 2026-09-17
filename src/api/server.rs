@@ -457,6 +457,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneRename(_) => "pane.rename",
         Method::PaneWorkContextSet(_) => "pane.work_context.set",
         Method::PaneSendText(_) => "pane.send_text",
+        Method::PaneSendTextIf(_) => "pane.send_text_if",
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",
         Method::PaneRead(_) => "pane.read",
@@ -971,6 +972,7 @@ mod tests {
             terminal_title_stripped: None,
             display_agent: None,
             agent_status,
+            waiting_on_agents: false,
             wait: None,
             eta_s: None,
             reported_at: None,
@@ -1364,13 +1366,17 @@ mod tests {
                             result: ResponseResult::PaneRead {
                                 read: crate::api::schema::PaneReadResult {
                                     pane_id: "pane_1".into(),
+                                    terminal_id: "term_1".into(),
                                     workspace_id: "ws_1".into(),
                                     tab_id: "tab_1".into(),
+                                    agent_ref: None,
+                                    agent_session: None,
                                     source: crate::api::schema::ReadSource::RecentUnwrapped,
                                     format: crate::api::schema::ReadFormat::Text,
                                     text: String::new(),
                                     revision: 0,
                                     truncated: false,
+                                    input_observation: None,
                                 },
                             },
                         })

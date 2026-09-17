@@ -926,6 +926,21 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Tab {
+                ws_idx,
+                settle_pane_id: Some(pane_id),
+                ..
+            },
+            Some(crate::app::state::SETTLE_ITEM),
+        ) => {
+            state.settle_pane_at(
+                ws_idx,
+                pane_id,
+                crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+            );
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Tab {
                 ws_idx, tab_idx, ..
             },
             Some("Close"),
@@ -1471,6 +1486,22 @@ impl App {
                 Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
             ) => {
                 self.state.clear_tab_subgroup(ws_idx, tab_idx);
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx,
+                    settle_pane_id: Some(pane_id),
+                    ..
+                },
+                Some(crate::app::state::SETTLE_ITEM),
+            ) => {
+                self.state.settle_pane_at(
+                    ws_idx,
+                    pane_id,
+                    crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+                );
+                self.flush_pane_settlement_events();
                 leave_modal(&mut self.state);
             }
             (
@@ -2812,6 +2843,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                settle_pane_id: None,
             },
             x: 0,
             y: 0,
@@ -2838,6 +2870,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                settle_pane_id: None,
             },
             x: 0,
             y: 0,
@@ -2860,6 +2893,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: true,
+                settle_pane_id: None,
             },
             x: 0,
             y: 0,
@@ -2880,6 +2914,34 @@ mod tests {
     }
 
     #[test]
+    fn api_sidebar_context_menu_settles_the_exact_pane() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: false,
+                settle_pane_id: Some(pane_id),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == crate::app::state::SETTLE_ITEM)
+            .expect("settle item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
     fn api_context_menu_move_to_subgroup_opens_the_picker_at_the_menu() {
         let mut app = app_with_test_workspaces(&["main"]);
         let menu = ContextMenuState {
@@ -2888,6 +2950,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                settle_pane_id: None,
             },
             x: 7,
             y: 4,
@@ -2920,6 +2983,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: true,
+                settle_pane_id: None,
             },
             x: 0,
             y: 0,

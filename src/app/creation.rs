@@ -794,6 +794,7 @@ impl App {
                 projection.seen,
                 projection.stale,
             ),
+            waiting_on_agents: pane.settled_at.is_none() && terminal.waiting_on_agents(),
             wait: terminal
                 .hook_authority
                 .as_ref()
@@ -874,7 +875,7 @@ impl App {
     }
 }
 
-fn terminal_agent_session_info(
+pub(crate) fn terminal_agent_session_info(
     terminal: &crate::terminal::TerminalState,
 ) -> Option<crate::api::schema::AgentSessionInfo> {
     if let Some(authority) = terminal.hook_authority.as_ref() {

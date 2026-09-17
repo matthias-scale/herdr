@@ -280,6 +280,8 @@ pub struct AgentInfo {
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub usage_limited: bool,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub waiting_on_agents: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,6 +331,7 @@ pub(crate) struct AgentInfoProjection {
     pub(crate) open_blockers: bool,
     pub(crate) usage_limited: bool,
     pub(crate) settled: bool,
+    pub(crate) waiting_on_agents: bool,
 }
 
 impl AgentInfoProjection {
@@ -351,6 +354,7 @@ impl AgentInfo {
                 open_blockers: false,
                 usage_limited: false,
                 settled: true,
+                waiting_on_agents: false,
             };
         }
         let (state, seen, stale) = match self.agent_status {
@@ -380,6 +384,9 @@ impl AgentInfo {
             open_blockers,
             usage_limited: self.usage_limited,
             settled: false,
+            waiting_on_agents: self.waiting_on_agents
+                && !stale
+                && state != crate::detect::AgentState::Blocked,
         }
     }
 }

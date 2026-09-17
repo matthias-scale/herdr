@@ -21,10 +21,8 @@ cover it either -- the dialog opens *mid*-turn, and the turn only ends after a
 human answers. Without this hook the pane shows `working` for the entire time
 it is actually waiting on a human.
 
-`UserPromptSubmit` is a recovery path only. Escape cancels the dialog and the
-whole turn without firing `PostToolUse`, so an open gate is cleared by the next
-thing the human does. It reports nothing when no gate is outstanding, so it
-never claims authority on an ordinary prompt.
+`UserPromptSubmit` starts a new working turn. It also recovers from Escape
+cancelling the dialog without firing `PostToolUse` by clearing any open gate.
 
 Fails silent and non-blocking in every path.
 """
@@ -179,17 +177,17 @@ def open_gate(payload: dict, pane_id: str) -> dict:
     return outcome
 
 
-def close_gate(payload: dict, pane_id: str, *, require_marker: bool) -> dict | None:
+def close_gate(payload: dict, pane_id: str, *, match_tool: bool) -> dict | None:
     """Hand the pane back to `working`; the turn resumed, it did not end.
 
     Zero counts alone would resolve to `idle` and publish a finished turn while
     the model is still replying, so the state is named explicitly. The next
     `Stop` report supersedes this one with the real turn-end reading.
 
-    A markerless `PostToolUse` still reports `working`, but its CAP arrays are
-    non-authoritative because the complete prior set is unknown. A matching,
-    current marker can restore its saved set; stale or mismatched events cannot.
-    A prompt submit only resumes a gate that was actually outstanding.
+    A markerless event still reports `working`, but its CAP arrays are
+    non-authoritative because the complete prior set is unknown. `PostToolUse`
+    must match the question tool before it can restore a marker. A prompt submit
+    starts a turn and restores an outstanding same-session gate when present.
     """
     session_id = payload.get("session_id")
     marker = read_marker(pane_id)
@@ -201,7 +199,7 @@ def close_gate(payload: dict, pane_id: str, *, require_marker: bool) -> dict | N
         marked_session = marker.get("session_id")
         if marked_session and session_id and marked_session != session_id:
             return None
-        if not require_marker:
+        if match_tool:
             marked_tool = marker.get("tool_use_id")
             answered_tool = payload.get("tool_use_id")
             if not marked_tool or marked_tool != answered_tool:
@@ -226,8 +224,6 @@ def close_gate(payload: dict, pane_id: str, *, require_marker: bool) -> dict | N
             prior = marker["prior"]
             prior_available = True
         clear_marker(pane_id)
-    elif require_marker:
-        return None
     return report(
         agent="claude",
         blocking=int(prior.get("blocking") or 0),
@@ -270,9 +266,9 @@ def main() -> int:
     if event == "PreToolUse":
         outcome = open_gate(payload, pane_id)
     elif event == "PostToolUse":
-        outcome = close_gate(payload, pane_id, require_marker=False)
+        outcome = close_gate(payload, pane_id, match_tool=True)
     elif event == "UserPromptSubmit":
-        outcome = close_gate(payload, pane_id, require_marker=True)
+        outcome = close_gate(payload, pane_id, match_tool=False)
     else:
         return 0
 

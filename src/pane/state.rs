@@ -11,6 +11,7 @@ pub(crate) struct PaneAgentProjection {
     pub open_blockers: bool,
     pub gate_count: usize,
     pub usage_limited: bool,
+    pub waiting_on_agents: bool,
 }
 
 impl PaneAgentProjection {
@@ -32,6 +33,9 @@ impl PaneAgentProjection {
         }
         if self.stale {
             return "stale";
+        }
+        if self.waiting_on_agents {
+            return "waiting_on_agents";
         }
         match (self.state, self.seen) {
             (AgentState::Blocked, _) => "blocked",
@@ -94,6 +98,7 @@ impl PaneState {
                 open_blockers: false,
                 gate_count: 0,
                 usage_limited: false,
+                waiting_on_agents: false,
             };
         }
         let (state, seen) = terminal.sidebar_projection(self.seen);
@@ -116,6 +121,7 @@ impl PaneState {
             open_blockers,
             gate_count: terminal.closing_gates.len() + blocking_item_count,
             usage_limited: terminal.usage_limited,
+            waiting_on_agents: terminal.waiting_on_agents(),
         }
     }
 }
@@ -133,6 +139,7 @@ mod tests {
             open_blockers: attention_tier == AttentionTier::Blocked,
             gate_count: usize::from(attention_tier == AttentionTier::Blocked),
             usage_limited: false,
+            waiting_on_agents: false,
         }
     }
 

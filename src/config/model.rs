@@ -72,6 +72,19 @@ pub enum ToastDelivery {
     System,
 }
 
+/// Outer-terminal protocol used for `ui.toast.delivery = "terminal"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalNotificationBackend {
+    /// Detect the protocol from the attaching terminal's environment.
+    #[default]
+    Auto,
+    /// OSC 9, supported by WezTerm, iTerm2, and Ghostty.
+    Osc9,
+    /// OSC 99, supported by Kitty.
+    Osc99,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema, Default,
 )]
@@ -211,6 +224,8 @@ fn parse_right_click_passthrough_modifier(value: &str) -> Option<Option<KeyModif
 #[derive(Debug, Clone)]
 pub struct ToastConfig {
     pub delivery: ToastDelivery,
+    /// Outer-terminal protocol for terminal delivery. Auto detects the attaching terminal.
+    pub terminal_backend: TerminalNotificationBackend,
     pub delay_seconds: u64,
     pub herdr: HerdrToastConfig,
     pub clipboard: ClipboardToastConfig,
@@ -335,10 +350,12 @@ pub struct SessionConfig {
     /// activity have gone quiet. Default: false.
     pub auto_nudge_stalled_agents: bool,
     /// Mark an unattended agent status report stale after this many quiet
-    /// minutes: a finished report still holding sub-processes, or a pane parked
-    /// on an unverified subagent claim. A working report keeps the 20-minute
-    /// busy budget. Default: 5.
+    /// minutes when a finished report still has unreported child work. A
+    /// working report keeps the 20-minute busy budget. Default: 5.
     pub agent_stale_after_minutes: u64,
+    /// Quiet period before a parent waiting on declared subagents becomes
+    /// stale. Default: 60.
+    pub agent_subagent_stale_after_minutes: u64,
     /// Initial quiet period before a stalled pane is nudged. Default: 5.
     pub nudge_after_minutes: u64,
     /// Maximum nudges sent during one stale-status episode. Default: 3.
@@ -365,6 +382,7 @@ impl Default for SessionConfig {
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
             agent_stale_after_minutes: 5,
+            agent_subagent_stale_after_minutes: 60,
             nudge_after_minutes: 5,
             max_nudges: 3,
             stall_nudge_message:
@@ -435,6 +453,10 @@ impl Config {
         self.session.agent_stale_after_minutes = self
             .session
             .agent_stale_after_minutes
+            .min(MAX_NUDGE_AFTER_MINUTES);
+        self.session.agent_subagent_stale_after_minutes = self
+            .session
+            .agent_subagent_stale_after_minutes
             .min(MAX_NUDGE_AFTER_MINUTES);
         self.session.nudge_after_minutes = self
             .session
@@ -2203,6 +2225,7 @@ impl Default for ToastConfig {
     fn default() -> Self {
         Self {
             delivery: ToastDelivery::Off,
+            terminal_backend: TerminalNotificationBackend::Auto,
             delay_seconds: 1,
             herdr: HerdrToastConfig::default(),
             clipboard: ClipboardToastConfig::default(),
@@ -2236,6 +2259,7 @@ impl<'de> Deserialize<'de> for ToastConfig {
         #[serde(default)]
         struct RawToastConfig {
             delivery: Option<ToastDelivery>,
+            terminal_backend: TerminalNotificationBackend,
             enabled: Option<bool>,
             delay_seconds: Option<u64>,
             herdr: HerdrToastConfig,
@@ -2257,6 +2281,7 @@ impl<'de> Deserialize<'de> for ToastConfig {
         }
         Ok(Self {
             delivery,
+            terminal_backend: raw.terminal_backend,
             delay_seconds,
             herdr: raw.herdr,
             clipboard: raw.clipboard,
@@ -2290,6 +2315,7 @@ mod tests {
         let session = SessionConfig::default();
         assert!(!session.auto_nudge_stalled_agents);
         assert_eq!(session.agent_stale_after_minutes, 5);
+        assert_eq!(session.agent_subagent_stale_after_minutes, 60);
         assert_eq!(session.nudge_after_minutes, 5);
         assert_eq!(session.max_nudges, 3);
         assert_eq!(
@@ -2967,6 +2993,10 @@ position = "top-center"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
+        assert_eq!(
+            config.ui.toast.terminal_backend,
+            TerminalNotificationBackend::Auto
+        );
         assert_eq!(config.ui.toast.delay_seconds, 2);
         assert_eq!(config.ui.toast.herdr.position, ToastHerdrPosition::TopLeft);
         assert!(!config.ui.toast.clipboard.enabled);
@@ -2980,6 +3010,10 @@ position = "top-center"
     fn toast_config_defaults_preserve_existing_behavior_with_delay() {
         let config = Config::default();
         assert_eq!(config.ui.toast.delivery, ToastDelivery::Off);
+        assert_eq!(
+            config.ui.toast.terminal_backend,
+            TerminalNotificationBackend::Auto
+        );
         assert_eq!(config.ui.toast.delay_seconds, 1);
         assert_eq!(
             config.ui.toast.herdr.position,
@@ -2989,6 +3023,23 @@ position = "top-center"
         assert_eq!(
             config.ui.toast.clipboard.position,
             ToastClipboardPosition::BottomCenter
+        );
+    }
+
+    #[test]
+    fn toast_config_parses_explicit_terminal_backend() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.toast]
+delivery = "terminal"
+terminal_backend = "osc99"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.ui.toast.terminal_backend,
+            TerminalNotificationBackend::Osc99
         );
     }
 

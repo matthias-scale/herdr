@@ -461,6 +461,10 @@ impl PaneTerminal {
         self.ghostty.detection_text()
     }
 
+    pub(crate) fn with_detection_text<R>(&self, operation: impl FnOnce(&str) -> R) -> Option<R> {
+        self.ghostty.with_detection_text(operation)
+    }
+
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.ghostty.recent_text_snapshot(lines)
     }
@@ -2025,6 +2029,12 @@ impl GhosttyPaneTerminal {
             .ok()
             .and_then(|mut core| ghostty_detection_text(&mut core).ok())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn with_detection_text<R>(&self, operation: impl FnOnce(&str) -> R) -> Option<R> {
+        let mut core = self.core.lock().ok()?;
+        let text = ghostty_detection_text(&mut core).ok()?;
+        Some(operation(&text))
     }
 
     #[cfg(test)]

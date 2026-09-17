@@ -42,6 +42,10 @@ pub(super) enum MouseAction {
         index: usize,
     },
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
+    SettlePane {
+        ws_idx: usize,
+        pane_id: PaneId,
+    },
     SidebarNewMenu {
         action: crate::app::state::SidebarNewMenuAction,
     },
@@ -863,6 +867,21 @@ impl AppState {
             in_sidebar || in_dock,
         ) {
             return None;
+        }
+
+        if in_sidebar
+            && self.mode == Mode::Terminal
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            if let Some(crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id }) = self
+                .view
+                .sidebar_hover_targets
+                .iter()
+                .find(|target| rect_contains(target.rect, mouse.column, mouse.row))
+                .and_then(|target| target.action.clone())
+            {
+                return Some(MouseAction::SettlePane { ws_idx, pane_id });
+            }
         }
 
         if self.mode == Mode::OpenExistingWorktree {
@@ -1692,12 +1711,15 @@ impl AppState {
                     if self.mode != Mode::Terminal {
                         self.mode = Mode::Terminal;
                     }
-                    self.note_pane_activity_at(info.id, std::time::Instant::now());
                     // Clicking pane content aims the keyboard at the shell, and
                     // it reaches here even when that pane already held focus, so
                     // the surface flags are dropped here rather than only on a
                     // focus change.
                     self.release_surface_focus_to_pane();
+
+                    if !self.pane_is_settled_anywhere(info.id) {
+                        self.note_pane_activity_at(info.id, std::time::Instant::now());
+                    }
 
                     if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                         self.selection = None;
@@ -2148,11 +2170,16 @@ impl AppState {
                     self.agent_detail_target_at(mouse.row)
                         .map(|(w, t, _)| (w, t))
                 }) {
+                    let settle_pane_id = self
+                        .sidebar_local_pane_at(mouse.row)
+                        .map(|(_, _, pane_id)| pane_id)
+                        .filter(|pane_id| !self.pane_is_settled(ws_idx, *pane_id));
                     self.selected = ws_idx;
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab {
                             ws_idx,
                             tab_idx,
+                            settle_pane_id,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             has_subgroup: self
                                 .workspaces
@@ -2222,6 +2249,7 @@ impl AppState {
                         kind: ContextMenuKind::Tab {
                             ws_idx,
                             tab_idx,
+                            settle_pane_id: None,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             has_subgroup: self
                                 .workspaces
@@ -4904,6 +4932,12 @@ mod tests {
                 Some(ControlId::SidebarFooter(item))
             );
         }
+        let bell = app.state.view.notification_hit_area;
+        app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::Notifications))
+        );
         let linear = areas[3];
 
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));
@@ -5003,6 +5037,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                settle_pane_id: Some(target.pane_id),
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -5012,6 +5047,7 @@ mod tests {
             menu.items()
         );
         assert!(menu.items().contains(&"Rename"));
+        assert!(menu.items().contains(&crate::app::state::SETTLE_ITEM));
     }
 
     #[test]
@@ -5049,6 +5085,45 @@ mod tests {
             .items();
         assert!(items.contains(&crate::app::state::UNSTAR_ITEM), "{items:?}");
         assert!(!items.contains(&crate::app::state::STAR_ITEM), "{items:?}");
+    }
+
+    #[test]
+    fn settled_session_rows_do_not_offer_settle_again() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.pane_id == pane_id)
+            .expect("settled session row");
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                target.rect.x + 2,
+                target.rect.y,
+            ),
+        );
+
+        let items = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("settled session menu")
+            .items();
+        assert!(
+            !items.contains(&crate::app::state::SETTLE_ITEM),
+            "{items:?}"
+        );
     }
 
     #[test]
@@ -8172,6 +8247,7 @@ mod tests {
                 tab_idx: 1,
                 starred: false,
                 has_subgroup: false,
+                settle_pane_id: None,
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -8698,6 +8774,55 @@ mod tests {
     }
 
     #[test]
+    fn clicking_notification_bell_persists_both_transitions() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-notification-bell-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "# per-machine config\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+        let bell = app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+        assert!(!app.state.notifications_enabled());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            bell.x,
+            bell.y,
+        ));
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        assert!(app.state.sound.enabled);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            bell.x,
+            bell.y,
+        ));
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Off
+        );
+        assert!(!app.state.sound.enabled);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid config");
+        assert_eq!(saved.ui.toast.delivery, crate::config::ToastDelivery::Off);
+        assert!(!saved.ui.sound.enabled);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn sidebar_footer_order_hit_areas_settings_and_hover_are_complete() {
         use crate::app::state::SidebarFooterItem;
 
@@ -8718,6 +8843,16 @@ mod tests {
         ];
         assert!(areas.iter().all(|area| area.width == 2 && area.height == 1));
         assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
+
+        let bell = app.state.view.notification_hit_area;
+        assert_eq!(bell.width, 2);
+        app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(crate::app::state::ControlId::SidebarFooter(
+                SidebarFooterItem::Notifications
+            ))
+        );
 
         let linear = areas[3];
         app.handle_mouse(mouse(MouseEventKind::Moved, linear.x, linear.y));

@@ -572,6 +572,65 @@ fn unknown_method_is_rejected() {
 }
 
 #[test]
+fn pane_send_text_if_is_a_distinct_method_that_legacy_servers_reject_before_send() {
+    #[derive(serde::Deserialize)]
+    struct LegacyRequest {
+        #[serde(flatten)]
+        method: LegacyMethod,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "method", content = "params")]
+    enum LegacyMethod {
+        #[serde(rename = "pane.send_text")]
+        PaneSendText(PaneSendTextParams),
+    }
+
+    fn legacy_dispatch(encoded: &str, sent: &mut Vec<u8>) -> Result<(), serde_json::Error> {
+        let legacy = serde_json::from_str::<LegacyRequest>(encoded)?;
+        match legacy.method {
+            LegacyMethod::PaneSendText(params) => sent.extend_from_slice(params.text.as_bytes()),
+        }
+        Ok(())
+    }
+
+    let legacy_request = Request {
+        id: "legacy".into(),
+        method: Method::PaneSendText(PaneSendTextParams {
+            pane_id: "workspace-1".into(),
+            text: "legacy".into(),
+        }),
+    };
+    let mut sent = Vec::new();
+    legacy_dispatch(&serde_json::to_string(&legacy_request).unwrap(), &mut sent).unwrap();
+    assert_eq!(sent, b"legacy");
+    sent.clear();
+
+    let request = Request {
+        id: "guarded".into(),
+        method: Method::PaneSendTextIf(PaneSendTextIfParams {
+            pane_id: "workspace-1".into(),
+            text: "answer".into(),
+            workspace_id: "workspace".into(),
+            terminal_id: "terminal".into(),
+            agent_ref: AgentRef::new("host", "workspace-1").unwrap(),
+            agent_session: AgentSessionInfo {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "session".into(),
+            },
+            condition: PaneSendTextCondition::DetectionSnapshotUnchanged,
+            observation_token: "token".into(),
+        }),
+    };
+    let encoded = serde_json::to_string(&request).unwrap();
+    assert!(encoded.contains(r#""method":"pane.send_text_if""#));
+
+    assert!(legacy_dispatch(&encoded, &mut sent).is_err());
+    assert!(sent.is_empty());
+}
+
+#[test]
 fn missing_required_params_are_rejected() {
     let json = r#"{"id":"req_1","method":"pane.send_text","params":{"pane_id":"p_1"}}"#;
     let err = serde_json::from_str::<Request>(json)
@@ -846,13 +905,17 @@ fn subscription_event_envelope_round_trips() {
             matched_line: "auth: received".into(),
             read: PaneReadResult {
                 pane_id: "p_1_1".into(),
+                terminal_id: "term_1".into(),
                 workspace_id: "w_1".into(),
                 tab_id: "t_1_1".into(),
+                agent_ref: None,
+                agent_session: None,
                 source: ReadSource::Recent,
                 format: ReadFormat::Text,
                 text: "auth: received\n".into(),
                 revision: 0,
                 truncated: false,
+                input_observation: None,
             },
         }),
     };
@@ -1005,6 +1068,7 @@ fn worktree_request_and_response_round_trip() {
                 terminal_title_stripped: None,
                 display_agent: None,
                 agent_status: AgentStatus::Unknown,
+                waiting_on_agents: false,
                 wait: None,
                 eta_s: None,
                 reported_at: None,
@@ -1480,6 +1544,7 @@ fn create_response_round_trips_with_root_pane() {
                 terminal_title_stripped: None,
                 display_agent: None,
                 agent_status: AgentStatus::Unknown,
+                waiting_on_agents: false,
                 wait: None,
                 eta_s: None,
                 reported_at: None,

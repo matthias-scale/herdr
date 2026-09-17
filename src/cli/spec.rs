@@ -613,7 +613,8 @@ fn pane_command() -> Command {
                 .arg(option("lines", "N"))
                 .arg(text_ansi_format_option())
                 .arg(flag("ansi"))
-                .arg(flag("raw")),
+                .arg(flag("raw"))
+                .arg(flag("json")),
         )
         .subcommand(
             Command::new("rename")
@@ -701,6 +702,29 @@ fn pane_command() -> Command {
                 .after_help(
                     "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
                 ),
+        )
+        .subcommand(
+            Command::new("send-text-if")
+                .about("Send text only if pane identity and terminal observation still match")
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(required("text", "TEXT"))
+                .arg(option("workspace", "ID").required(true))
+                .arg(option("terminal", "ID").required(true))
+                .arg(option("agent-ref", "HOST::PANE").required(true))
+                .arg(option("agent-source", "SOURCE").required(true))
+                .arg(option("agent", "LABEL").required(true))
+                .arg(
+                    option("session-kind", "KIND")
+                        .required(true)
+                        .value_parser(["id", "path"]),
+                )
+                .arg(option("session", "VALUE").required(true))
+                .arg(
+                    option("condition", "CONDITION")
+                        .required(true)
+                        .value_parser(["detection-snapshot-unchanged"]),
+                )
+                .arg(option("observation-token", "TOKEN").required(true)),
         )
         .subcommand(
             Command::new("send-keys")

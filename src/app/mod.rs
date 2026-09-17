@@ -174,6 +174,7 @@ pub struct App {
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
+    pub(crate) api_pane_state_updates: Option<Vec<crate::app::actions::PaneStateUpdate>>,
     pub(crate) loop_history_reader: Option<crate::loop_runs::ReceiptReader>,
     pub(crate) loop_receipt_watch_health: Arc<crate::loop_runs::ReceiptWatchHealth>,
     pub(crate) _loop_receipt_watcher: Option<notify::RecommendedWatcher>,
@@ -202,6 +203,7 @@ pub struct App {
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
+    pub(crate) missing_terminal_notification_backend_warned: std::cell::Cell<bool>,
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) last_git_repo_discovery_refresh: Instant,
     pub(crate) git_refresh_in_flight: Option<GitRefreshInFlight>,
@@ -958,6 +960,7 @@ impl App {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            request_client_notification_config: None,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
@@ -1014,6 +1017,7 @@ impl App {
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
+                notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
@@ -1232,6 +1236,9 @@ impl App {
             agent_stale_after: auto_nudge::nudge_after_duration(
                 config.session.agent_stale_after_minutes,
             ),
+            agent_subagent_stale_after: auto_nudge::nudge_after_duration(
+                config.session.agent_subagent_stale_after_minutes,
+            ),
             nudge_after: auto_nudge::nudge_after_duration(config.session.nudge_after_minutes),
             max_nudges: config.session.max_nudges,
             stall_nudge_message: config.session.stall_nudge_message.clone(),
@@ -1272,6 +1279,10 @@ impl App {
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
+            last_non_off_toast_delivery: match config.ui.toast.delivery {
+                crate::config::ToastDelivery::Off => crate::config::ToastDelivery::Terminal,
+                delivery => delivery,
+            },
             keybinds: config.keybinds(),
             palette: theme_palette,
             theme_name,
@@ -1363,6 +1374,7 @@ impl App {
             toast_deadline: None,
             copy_feedback_deadline: None,
             last_api_notification_at: None,
+            missing_terminal_notification_backend_warned: std::cell::Cell::new(false),
             state,
             pane_graphics: pane_graphics::Runtime::default(),
             pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
@@ -1391,6 +1403,7 @@ impl App {
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
+            api_pane_state_updates: None,
             loop_history_reader,
             loop_receipt_watch_health,
             _loop_receipt_watcher: loop_receipt_watcher,
@@ -2419,6 +2432,8 @@ impl App {
             self.state.auto_nudge_stalled_agents = config.session.auto_nudge_stalled_agents;
             self.state.agent_stale_after =
                 auto_nudge::nudge_after_duration(config.session.agent_stale_after_minutes);
+            self.state.agent_subagent_stale_after =
+                auto_nudge::nudge_after_duration(config.session.agent_subagent_stale_after_minutes);
             self.state.nudge_after =
                 auto_nudge::nudge_after_duration(config.session.nudge_after_minutes);
             self.state.max_nudges = config.session.max_nudges;
@@ -2597,10 +2612,19 @@ impl App {
                     self.state.mark_sidebar_projection_changed();
                 }
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
-                if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
+                if !self.state.local_sound_playback
+                    && self.state.request_client_notification_config.is_none()
+                    && self.state.sound != config.ui.sound
+                {
                     self.state.request_client_config_reload = true;
                 }
                 self.state.sound = config.ui.sound.clone();
+                if self.state.toast_config.terminal_backend != config.ui.toast.terminal_backend {
+                    self.state.request_client_config_reload = true;
+                }
+                if config.ui.toast.delivery != crate::config::ToastDelivery::Off {
+                    self.state.last_non_off_toast_delivery = config.ui.toast.delivery;
+                }
                 self.state.toast_config = config.ui.toast.clone();
             }
         }
@@ -2805,10 +2829,18 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
+    fn headless_overlay_precedes_subgroup_picker(&self) -> bool {
+        self.state.loop_run_history_detail.is_some()
+            || self.state.usage_view.is_some()
+            || self.state.inbox.is_some()
+            || self.try_route_paste_to_overlay()
+    }
+
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         // Full-frame overlays bypass ordinary pane context. The inbox routes keys
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
+            || self.state.loop_run_history_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
@@ -3065,12 +3097,35 @@ impl App {
                     }
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
-                            // Before the pane-context decision below: a focused
-                            // notepad and a due break reminder outrank the pane.
-                            if self.intercept_notepad_key_with_prompt_visibility(
-                                &key,
-                                pomodoro_presentation.prompt.is_some(),
-                            ) {
+                            // A due break reminder still outranks every other
+                            // input surface visible beneath it.
+                            if pomodoro_presentation.prompt.is_some()
+                                && self.intercept_notepad_key_with_prompt_visibility(&key, true)
+                            {
+                                pomodoro_changed = true;
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            // Popup input is routed below by its terminal context.
+                            // Non-Home full-frame overlays keep input precedence;
+                            // otherwise the floating subgroup picker owns keys
+                            // before a stale notepad or sidebar focus can take them.
+                            if self.state.popup_pane.is_none()
+                                && !self.headless_overlay_precedes_subgroup_picker()
+                                && self
+                                    .state
+                                    .handle_sidebar_subgroup_picker_key(key.as_key_event())
+                            {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
                                 pomodoro_changed = true;
                                 self.input_leases.insert_consumed(
                                     lease_key,
@@ -3131,6 +3186,15 @@ impl App {
                                 continue;
                             }
                             if self.handle_dock_chooser_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.state.popup_pane.is_none()
+                                && self.state.dock_object_preview.is_some()
+                            {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
@@ -3234,10 +3298,12 @@ impl App {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                         if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                            self.retire_blocked_hook_authority_for_pane(
-                                pane_id,
-                                std::time::Instant::now(),
-                            );
+                            if !self.state.pane_is_settled_anywhere(pane_id) {
+                                self.retire_blocked_hook_authority_for_pane(
+                                    pane_id,
+                                    std::time::Instant::now(),
+                                );
+                            }
                         }
                     }
                 }
@@ -3247,21 +3313,33 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
-                    if self.try_route_paste_to_overlay(&text)
+                    if self.try_route_paste_to_overlay()
                         || self.try_route_paste_to_popup(&text)
+                        || self.route_text_to_sidebar_subgroup_picker(&text)
+                        || self.try_route_text_to_home(&text)
                     {
                     } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
                         self.paste_into_active_text_input(&text);
                     } else {
                         if let Some(ws_idx) = self.state.active {
+                            let focused = self
+                                .state
+                                .workspaces
+                                .get(ws_idx)
+                                .and_then(|workspace| workspace.focused_pane_id());
+                            let has_text = !text.is_empty();
+                            if has_text {
+                                if let Some(focused) = focused {
+                                    self.resume_settled_pane_before_input(focused);
+                                }
+                            }
                             if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
+                                if let Some(focused) = focused {
                                     if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
                                         &self.terminal_runtimes,
                                         ws_idx,
                                         focused,
                                     ) {
-                                        let has_text = !text.is_empty();
                                         if has_text {
                                             if let Some(terminal_id) =
                                                 ws.terminal_id(focused).cloned()
@@ -8815,6 +8893,130 @@ last_pane = "prefix+tab"
     }
 
     #[tokio::test]
+    async fn headless_subgroup_picker_takes_keys_before_focused_notepad() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut pane_input) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.notepad.enabled = true;
+        app.state.notepad.focused = true;
+        let note_before = app.state.notepad.body().to_string();
+        app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('a'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("a")
+        );
+        assert_eq!(app.state.notepad.body(), note_before);
+        assert!(pane_input.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn headless_full_frame_overlays_take_keys_before_subgroup_picker() {
+        for overlay in [
+            "Symphony",
+            "Loop History",
+            "Usage",
+            "Work",
+            "dock preview",
+            "Inbox",
+        ] {
+            let mut app = test_app();
+            let mut workspace = Workspace::test_new("test");
+            let focused = workspace.focused_pane_id().unwrap();
+            let (runtime, mut pane_input) = TerminalRuntime::test_with_channel(80, 24);
+            workspace.tabs[0].runtimes.insert(focused, runtime);
+            app.state.workspaces = vec![workspace];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
+                ws_idx: 0,
+                tab_idx: 0,
+                anchor: (7, 4),
+                filter: crate::ui::dropdown::DropdownFilterState::default(),
+            });
+            match overlay {
+                "Symphony" => app.state.toggle_symphony(),
+                "Loop History" => app.state.toggle_loop_run_history(),
+                "Usage" => app.state.toggle_usage_view(),
+                "Work" => {
+                    app.state.work_view = Some(state::WorkViewState::new(false, None));
+                }
+                "dock preview" => {
+                    app.state.dock_collapsed = true;
+                    app.state.dock_object_preview = Some(state::DockObjectRef {
+                        surface: state::DockSurface::Linear,
+                        key: "SCA-1".into(),
+                    });
+                }
+                "Inbox" => app.state.toggle_inbox(),
+                _ => unreachable!(),
+            }
+
+            let key = if matches!(overlay, "Loop History" | "Inbox") {
+                KeyCode::Esc
+            } else {
+                KeyCode::Char('7')
+            };
+
+            app.route_client_events_from(
+                42,
+                vec![raw_key(key, KeyModifiers::empty(), KeyEventKind::Press)],
+                false,
+            );
+
+            assert_eq!(
+                app.state
+                    .sidebar_subgroup_picker
+                    .as_ref()
+                    .map(|picker| picker.filter.query.as_str()),
+                Some(""),
+                "{overlay} must retain input precedence over the subgroup picker"
+            );
+            assert!(
+                pane_input.try_recv().is_err(),
+                "{overlay} must not leak keys into the focused pane"
+            );
+            if overlay == "Usage" {
+                assert_eq!(
+                    app.state.usage_view.as_ref().map(|view| view.range),
+                    Some(state::UsageRange::Days7)
+                );
+            }
+            if overlay == "Loop History" {
+                assert!(app.state.loop_run_history_detail.is_none());
+            }
+            if overlay == "Inbox" {
+                assert!(app.state.inbox.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn disconnected_input_source_releases_owned_report_all_keys() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("test");
@@ -9315,6 +9517,34 @@ last_pane = "prefix+tab"
             Some("first second third")
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_paste_resumes_settled_pane_before_forwarding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("settled-client-paste");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut input_rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        assert!(app.flush_pane_settlement_events());
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("reply".into())],
+            false,
+        );
+
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded paste").as_ref(),
+            b"reply"
+        );
+        assert!(!app.state.pane_is_settled(0, pane_id));
+        assert!(app.state.pending_pane_settlement_changes.is_empty());
     }
 
     #[cfg(unix)]

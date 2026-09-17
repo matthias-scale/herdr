@@ -19,6 +19,7 @@ pub(crate) struct PaneActivity {
     content_revision: Option<u64>,
     detection_agent: Option<crate::detect::Agent>,
     detection_snapshot: Option<String>,
+    detection_output_at: Option<Instant>,
 }
 
 impl PaneActivity {
@@ -31,6 +32,7 @@ impl PaneActivity {
             content_revision: None,
             detection_agent: None,
             detection_snapshot: None,
+            detection_output_at: None,
         }
     }
 
@@ -66,6 +68,7 @@ impl PaneActivity {
             None => false,
         };
         if changed {
+            self.detection_output_at = Some(now);
             self.note(now);
         }
         changed
@@ -84,6 +87,30 @@ impl PaneActivity {
     #[cfg(test)]
     pub(crate) fn last_at(&self) -> Instant {
         self.last_at
+    }
+
+    pub(crate) fn detection_output_at(&self) -> Option<Instant> {
+        self.detection_output_at
+    }
+
+    pub(crate) fn detection_output_unix_timestamp_at(
+        &self,
+        now: Instant,
+        now_unix: u64,
+    ) -> Option<u64> {
+        self.detection_output_at.map(|observed_at| {
+            now_unix.saturating_sub(now.saturating_duration_since(observed_at).as_secs())
+        })
+    }
+
+    pub(crate) fn restore_detection_output_unix_timestamp_at(
+        &mut self,
+        observed_at_unix: u64,
+        now: Instant,
+        now_unix: u64,
+    ) {
+        let elapsed = Duration::from_secs(now_unix.saturating_sub(observed_at_unix));
+        self.detection_output_at = now.checked_sub(elapsed).or(Some(now));
     }
 
     pub(crate) fn unix_timestamp_at(&self, now: Instant, now_unix: u64) -> u64 {
@@ -365,5 +392,18 @@ mod tests {
             activity.quiet_deadline_after(Duration::from_secs(60)),
             Some(started + Duration::from_secs(100))
         );
+    }
+
+    #[test]
+    fn detection_output_clock_ignores_non_output_activity() {
+        let started = Instant::now();
+        let mut activity = PaneActivity::new(started);
+        assert!(!activity.observe_detection_snapshot(1, None, "prompt", started));
+        activity.note(started + Duration::from_secs(1));
+        assert_eq!(activity.detection_output_at(), None);
+
+        let output_at = started + Duration::from_secs(2);
+        assert!(activity.observe_detection_snapshot(2, None, "notification", output_at));
+        assert_eq!(activity.detection_output_at(), Some(output_at));
     }
 }

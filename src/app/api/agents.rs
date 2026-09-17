@@ -243,15 +243,19 @@ impl App {
                     pane_id: self
                         .public_pane_id(resolved.ws_idx, resolved.pane_id)
                         .unwrap_or_else(|| params.target.clone()),
+                    terminal_id: resolved.terminal_id,
                     workspace_id,
                     tab_id: self
                         .public_tab_id(resolved.ws_idx, resolved.tab_idx)
                         .unwrap(),
+                    agent_ref: None,
+                    agent_session: None,
                     source: params.source,
                     format: params.format,
                     text: snapshot.text,
                     revision: pane.content_revision(),
                     truncated: snapshot.truncated,
+                    input_observation: None,
                 },
             },
         )
@@ -1059,6 +1063,7 @@ mod tests {
                     eta_s: None,
                     reported_at: None,
                     session_ref: None,
+                    closing_block: None,
                 }),
                 Some(true)
             );
@@ -1076,6 +1081,98 @@ mod tests {
                 .hook_authority_output_baseline_for_test(),
             1,
             "an accepted same-state report rearms from current content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_closing_report_requests_a_baseline_for_a_no_input_wake() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let screen = include_bytes!(
+            "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+        );
+        let (runtime, mut detection_events) =
+            crate::terminal::TerminalRuntime::test_with_live_detection_screen_bytes(
+                pane_id,
+                Agent::Claude,
+                AgentState::Idle,
+                true,
+                false,
+                false,
+                screen,
+            );
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        assert_eq!(
+            app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: AgentState::Blocked,
+                message: None,
+                seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                session_ref: None,
+                closing_block: None,
+            }),
+            Some(true)
+        );
+        let rescanned = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let event = detection_events.recv().await.expect("detector event");
+                if matches!(event, crate::events::AppEvent::StateChanged { .. }) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("blocked closing report requests a screen rescan");
+        let baseline_at = match &rescanned {
+            crate::events::AppEvent::StateChanged {
+                state: AgentState::Idle,
+                observed_at,
+                ..
+            } => *observed_at,
+            _ => panic!("expected the forced idle baseline"),
+        };
+        let _ = app.handle_internal_event(rescanned);
+
+        let reported_at = app.state.terminals[&terminal_id]
+            .status_reported_at()
+            .expect("blocked report timestamp");
+        assert!(baseline_at >= reported_at);
+        let turn_started_at = reported_at + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH;
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: true,
+            usage_limited: false,
+            process_exited: false,
+            observed_at: turn_started_at,
+        });
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().retired_at,
+            Some(turn_started_at)
+        );
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(app.state.agent_stale_after),
+            turn_started_at.checked_add(crate::terminal::state::AGENT_BUSY_STALE_SILENCE)
         );
     }
 
@@ -1126,6 +1223,7 @@ mod tests {
                     eta_s: None,
                     reported_at: None,
                     session_ref: None,
+                    closing_block: None,
                 }),
                 Some(true)
             );
@@ -1206,6 +1304,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 session_ref: None,
+                closing_block: None,
             });
             let target = app.public_pane_id(0, pane_id).unwrap();
 
@@ -1495,8 +1594,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agent_prompt_retires_blocked_hook_authority_after_forwarding() {
+    async fn agent_prompt_retires_blocked_hook_without_completing_background_agent() {
         let mut app = app_with_agent();
+        app.state.active = None;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 1;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -1513,6 +1615,7 @@ mod tests {
         );
         let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
+        let event_start = app.event_hub.current_sequence();
 
         let response = app.handle_agent_prompt(
             "req".into(),
@@ -1534,6 +1637,27 @@ mod tests {
             AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        assert!(!app.state.pending_agent_notifications.contains_key(&pane_id));
+        assert!(!matches!(
+            app.state.toast.as_ref().map(|toast| toast.kind),
+            Some(crate::app::state::ToastKind::Finished)
+        ));
+        assert_eq!(
+            app.agent_info(0, pane_id).expect("agent info").agent_status,
+            AgentStatus::Idle
+        );
+        let statuses = app
+            .event_hub
+            .events_after(event_start)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::PaneAgentStatusChanged { agent_status, .. } => {
+                    Some(agent_status)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec![AgentStatus::Idle]);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -10,6 +10,7 @@ use crate::app::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteCommand {
     BuiltIn(NavigateAction),
+    ToggleNotifications,
     UserAction(usize),
     CustomCommand(usize),
 }
@@ -213,6 +214,18 @@ impl AppState {
             });
         }
 
+        let group = "global";
+        let label = "toggle notifications";
+        if let Some(score) = score_entry(group, label, query) {
+            entries.push(PaletteEntry {
+                group: group.to_string(),
+                label: label.to_string(),
+                key: String::new(),
+                command: PaletteCommand::ToggleNotifications,
+                score,
+            });
+        }
+
         let repo = self.focused_repo_slug();
         for (index, action) in self.keybinds.user_actions.iter().enumerate() {
             if !action.applies_to_repo(repo.as_deref()) {
@@ -411,6 +424,7 @@ impl App {
             PaletteCommand::BuiltIn(action) => {
                 self.execute_tui_navigate_action(action, ActionContext::Prefix);
             }
+            PaletteCommand::ToggleNotifications => self.toggle_notifications(),
             PaletteCommand::UserAction(index) => {
                 if self.state.keybinds.user_actions.get(index).is_some() {
                     self.state.request_user_action = Some(index);
@@ -529,6 +543,46 @@ mod tests {
                 "query {query:?}"
             );
         }
+    }
+
+    #[test]
+    fn command_palette_toggles_notifications_for_this_machine() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-notification-palette-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "# per-machine config\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.local_sound_playback = false;
+        app.state.open_command_palette();
+        app.state.command_palette.query = "toggle notifications".to_string();
+        assert_eq!(
+            app.state.selected_command_palette_command(),
+            Some(PaletteCommand::ToggleNotifications)
+        );
+
+        app.accept_command_palette_selection();
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        assert!(app.state.sound.enabled);
+        assert_eq!(app.state.request_client_notification_config, Some(true));
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     /// The dispatch pair list and the settings/palette table are independent

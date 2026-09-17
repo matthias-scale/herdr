@@ -268,6 +268,31 @@ pub struct PaneSendTextParams {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSendTextCondition {
+    DetectionSnapshotUnchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSendTextIfParams {
+    pub pane_id: String,
+    pub text: String,
+    pub workspace_id: String,
+    pub terminal_id: String,
+    pub agent_ref: super::AgentRef,
+    pub agent_session: AgentSessionInfo,
+    pub condition: PaneSendTextCondition,
+    pub observation_token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSendTextIfOutcome {
+    Sent,
+    ConditionMismatch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneSendKeysParams {
     pub pane_id: String,
@@ -434,6 +459,8 @@ pub struct PaneReportAgentParams {
     /// A previously reported worker disappeared without terminal evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers_unknown: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<u32>,
 }
 
 impl<'de> Deserialize<'de> for PaneReportAgentParams {
@@ -481,6 +508,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             parse_status: Option<ClosingParseStatus>,
             #[serde(default)]
             workers_unknown: Option<bool>,
+            agents: Option<u32>,
         }
 
         fn typed<T, E>(value: Option<serde_json::Value>, strict: bool) -> Result<Option<T>, E>
@@ -522,6 +550,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 external_wait: None,
                 parse_status: None,
                 workers_unknown: None,
+                agents: None,
             });
         }
 
@@ -548,6 +577,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             external_wait: raw.external_wait,
             parse_status: raw.parse_status,
             workers_unknown: raw.workers_unknown,
+            agents: raw.agents,
         })
     }
 }
@@ -729,6 +759,8 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub waiting_on_agents: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -951,11 +983,24 @@ pub enum PaneResizeReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReadResult {
     pub pane_id: String,
+    #[serde(default)]
+    pub terminal_id: String,
     pub workspace_id: String,
     pub tab_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<super::AgentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<AgentSessionInfo>,
     pub source: ReadSource,
     pub format: ReadFormat,
     pub text: String,
     pub revision: u64,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_observation: Option<PaneInputObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneInputObservation {
+    pub token: String,
 }

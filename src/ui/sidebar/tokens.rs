@@ -248,6 +248,7 @@ mod tests {
             open_blockers: false,
             completion_tier: None,
             active_subagents: None,
+            waiting_on_agents: false,
             holds_shell: false,
             gate_count: 0,
             seen: true,

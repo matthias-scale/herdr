@@ -62,10 +62,14 @@ impl App {
             }
         }
 
+        let key_event = key.as_key_event();
+        if self.state.handle_sidebar_subgroup_picker_key(key_event) {
+            return None;
+        }
+
         // This is the key already on its way to a pane, so the sidebar may only
         // intercept it while the sidebar owns the keyboard.
         if self.state.sidebar_focused {
-            let key_event = key.as_key_event();
             if self.state.handle_sidebar_new_menu_key(key_event) {
                 return None;
             }
@@ -92,6 +96,11 @@ impl App {
         let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let has_bytes = !input.bytes.is_empty();
+        if has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
+                self.resume_settled_pane_before_input(pane_id);
+            }
+        }
         let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
             if has_bytes {
                 #[cfg(unix)]
@@ -508,6 +517,11 @@ impl App {
         let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(crate::app::LOCAL_INPUT_SOURCE, key)?;
         let has_bytes = !input.bytes.is_empty();
+        if has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
+                self.resume_settled_pane_before_input(pane_id);
+            }
+        }
         let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
             runtime.send_bytes(input.bytes).await.is_ok()
         } else {
@@ -650,6 +664,98 @@ mod tests {
             app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
         assert!(target.is_none());
         assert!(app.state.sidebar_new_thread.is_none());
+    }
+
+    #[tokio::test]
+    async fn headless_subgroup_picker_owns_key_text_and_paste_input() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("subgroup-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_focused = false;
+        app.state.toggle_home();
+        let home_prompt_before = app
+            .state
+            .home
+            .as_ref()
+            .map(|home| home.prompt.clone())
+            .expect("home");
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('a'),
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Text(
+                crate::input::TextCommit::new("p"),
+            )],
+            false,
+        );
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("i".into())],
+            false,
+        );
+
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.filter.query.as_str()),
+            Some("api")
+        );
+        assert!(
+            pane_input.try_recv().is_err(),
+            "picker-owned input must not reach the pane"
+        );
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some(home_prompt_before.as_str())
+        );
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("api")
+        );
+        assert!(app.state.sidebar_subgroup_picker.is_none());
+        assert!(pane_input.try_recv().is_err());
+
+        app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
+            ws_idx: 0,
+            tab_idx: 0,
+            anchor: (7, 4),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Esc,
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+        assert!(app.state.sidebar_subgroup_picker.is_none());
+        assert!(pane_input.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2009,19 +2115,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicking_settled_pane_content_removes_it_from_settled_sidebar_section() {
+    async fn text_reply_routed_to_settled_pane_unsettles_it() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("settled-text-reply");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            pane_infos[0].inner_rect.width,
+            pane_infos[0].inner_rect.height,
+        );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+
+        app.handle_text_commit_headless("reply");
+
+        assert_eq!(rx.try_recv().expect("forwarded reply").as_ref(), b"reply");
+        assert!(!app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[tokio::test]
+    async fn clicking_settled_pane_content_keeps_it_in_settled_sidebar_section() {
         let mut app = app_for_mouse_test();
         let mut workspace = Workspace::test_new("settled-mouse-input");
         let pane_id = workspace.tabs[0].root_pane;
         let pane_infos = workspace.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        workspace.insert_test_runtime(
-            pane_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+        let (runtime, mut mouse_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
                 pane_infos[0].inner_rect.width,
                 pane_infos[0].inner_rect.height,
-                b"settled shell",
-            ),
-        );
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2044,8 +2176,15 @@ mod tests {
             inner.y,
         ));
 
-        assert!(!app.state.pane_is_settled(0, pane_id));
-        assert!(!crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
+        assert_eq!(
+            mouse_input
+                .try_recv()
+                .expect("forwarded mouse input")
+                .as_ref(),
+            b"\x1b[<0;1;1M"
+        );
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert!(crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
             matches!(
                 row,
                 crate::ui::SidebarRow::SectionHeader { title, .. }
@@ -2054,8 +2193,42 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn clicking_active_pane_content_refreshes_its_inactivity_clock() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("active-mouse-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let stale_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        workspace.tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(stale_at);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos.clone();
+
+        let inner = pane_infos[0].inner_rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            inner.x,
+            inner.y,
+        ));
+
+        assert!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .last_at()
+                > stale_at
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn forwarded_input_retires_a_blocked_hook_and_allows_screen_state() {
+    async fn forwarded_input_retires_blocked_hook_without_completing_agent() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
@@ -2070,6 +2243,9 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.outer_terminal_focus = Some(false);
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 1;
         app.state.view.pane_infos = pane_infos;
 
         let terminal_id = app.state.workspaces[0]
@@ -2092,6 +2268,7 @@ mod tests {
             app.state.terminals[&terminal_id].raw_agent_state(),
             crate::detect::AgentState::Blocked
         );
+        let event_start = app.event_hub.current_sequence();
 
         app.handle_terminal_key_headless(TerminalKey::new(
             KeyCode::Char('x'),
@@ -2104,6 +2281,22 @@ mod tests {
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        assert!(!app.state.pending_agent_notifications.contains_key(&pane_id));
+        assert_eq!(
+            app.agent_info(0, pane_id).expect("agent info").agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+        assert!(app
+            .event_hub
+            .events_after(event_start)
+            .into_iter()
+            .all(|(_, event)| !matches!(
+                event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    agent_status: crate::api::schema::AgentStatus::Done,
+                    ..
+                }
+            )));
 
         app.state
             .terminals

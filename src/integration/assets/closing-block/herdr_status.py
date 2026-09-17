@@ -352,6 +352,7 @@ def report(
 
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
                     "state": state, "seq": seq, "v": VERSION,
+                    "agents": agents,
                     "reported_at": reported_at,
                     "gates": gate_objects, "items": item_objects,
                     "decisions": decision_objects,

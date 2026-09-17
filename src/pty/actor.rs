@@ -7,6 +7,7 @@ pub(crate) use unix::*;
 #[cfg(windows)]
 mod windows {
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{mpsc as std_mpsc, Arc, Mutex};
     use std::time::Duration;
 
@@ -41,6 +42,7 @@ mod windows {
         pub initially_quiesced: bool,
         pub on_read: ReadCallback,
         pub on_reader_exit: Option<ReaderExitCallback>,
+        pub pending_user_input: Arc<AtomicU64>,
     }
 
     enum PtyIoControlCommand {
@@ -52,9 +54,10 @@ mod windows {
     pub(crate) struct PtyIoActorHandle {
         data_tx: mpsc::Sender<Bytes>,
         control_tx: std_mpsc::Sender<PtyIoControlCommand>,
-        write_tx: std_mpsc::Sender<Bytes>,
+        write_tx: std_mpsc::Sender<(Bytes, bool)>,
         response_order: Arc<Mutex<()>>,
         accepting: Arc<Mutex<bool>>,
+        pending_user_input: Arc<AtomicU64>,
     }
 
     impl PtyIoActorHandle {
@@ -69,7 +72,21 @@ mod windows {
             {
                 return Err(mpsc::error::SendError(bytes));
             }
-            self.data_tx.send(bytes).await
+            let permit = self
+                .data_tx
+                .reserve()
+                .await
+                .map_err(|_| mpsc::error::SendError(bytes.clone()))?;
+            if !*self
+                .accepting
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            {
+                return Err(mpsc::error::SendError(bytes));
+            }
+            self.pending_user_input.fetch_add(1, Ordering::AcqRel);
+            permit.send(bytes);
+            Ok(())
         }
 
         pub(crate) fn try_write_user_input(
@@ -83,7 +100,14 @@ mod windows {
             {
                 return Err(mpsc::error::TrySendError::Closed(bytes));
             }
-            self.data_tx.try_send(bytes)
+            self.pending_user_input.fetch_add(1, Ordering::AcqRel);
+            match self.data_tx.try_send(bytes) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    self.pending_user_input.fetch_sub(1, Ordering::AcqRel);
+                    Err(err)
+                }
+            }
         }
 
         pub(crate) fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
@@ -92,7 +116,7 @@ mod windows {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(bytes) = response().filter(|bytes| !bytes.is_empty()) {
-                let _ = self.write_tx.send(bytes);
+                let _ = self.write_tx.send((bytes, false));
             }
         }
 
@@ -135,6 +159,7 @@ mod windows {
                 initially_quiesced,
                 mut on_read,
                 on_reader_exit,
+                pending_user_input,
             } = config;
 
             let mut reader = master
@@ -145,13 +170,23 @@ mod windows {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
             let (data_tx, mut data_rx) = mpsc::channel::<Bytes>(1024);
             let (control_tx, control_rx) = std_mpsc::channel::<PtyIoControlCommand>();
-            let (write_tx, write_rx) = std_mpsc::channel::<Bytes>();
+            let (write_tx, write_rx) = std_mpsc::channel::<(Bytes, bool)>();
             let response_order = Arc::new(Mutex::new(()));
             let accepting = Arc::new(Mutex::new(!initially_quiesced));
 
+            let pending_user_input_for_writer = Arc::clone(&pending_user_input);
             std::thread::spawn(move || {
-                for bytes in write_rx {
-                    if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                while let Ok((bytes, user_input)) = write_rx.recv() {
+                    let failed = writer.write_all(&bytes).is_err() || writer.flush().is_err();
+                    if user_input {
+                        pending_user_input_for_writer.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    if failed {
+                        while let Ok((_, user_input)) = write_rx.try_recv() {
+                            if user_input {
+                                pending_user_input_for_writer.fetch_sub(1, Ordering::AcqRel);
+                            }
+                        }
                         break;
                     }
                 }
@@ -160,9 +195,14 @@ mod windows {
 
             {
                 let write_tx = write_tx.clone();
+                let pending_user_input_for_data = Arc::clone(&pending_user_input);
                 std::thread::spawn(move || {
                     while let Some(bytes) = data_rx.blocking_recv() {
-                        if write_tx.send(bytes).is_err() {
+                        if write_tx.send((bytes, true)).is_err() {
+                            pending_user_input_for_data.fetch_sub(1, Ordering::AcqRel);
+                            while data_rx.try_recv().is_ok() {
+                                pending_user_input_for_data.fetch_sub(1, Ordering::AcqRel);
+                            }
                             break;
                         }
                     }
@@ -186,7 +226,7 @@ mod windows {
                                 if result
                                     .terminal_responses
                                     .into_iter()
-                                    .any(|response| write_tx.send(response).is_err())
+                                    .any(|response| write_tx.send((response, false)).is_err())
                                 {
                                     break;
                                 }
@@ -222,7 +262,7 @@ mod windows {
                                 if request
                                     .terminal_responses
                                     .into_iter()
-                                    .any(|response| write_tx.send(response).is_err())
+                                    .any(|response| write_tx.send((response, false)).is_err())
                                 {
                                     break;
                                 }
@@ -240,6 +280,7 @@ mod windows {
                 write_tx,
                 response_order,
                 accepting,
+                pending_user_input,
             })
         }
     }

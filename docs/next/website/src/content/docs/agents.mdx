@@ -43,7 +43,9 @@ Herdr first detects the foreground process in each pane. After that, each pane h
 
 For agents with complete lifecycle hooks, a fresh accepted integration report is authoritative for ordinary `idle`, `working`, and `blocked` arbitration. Herdr still evaluates the screen manifest. A newer, structurally anchored native permission, trust, login, tool-approval, or question control can override a non-blocked hook report because those controls may not emit lifecycle events. Fresh hook state still wins over ordinary prompt and working-screen evidence.
 
-Full-lifecycle authority expires when no accepted report arrives within `agent_detection.full_lifecycle_hook_authority_timeout_seconds`. The default is 600 seconds and the valid range is 30–3600. Contradictory pane output can retire blocked hook authority earlier. After retirement, the current screen result decides the pane state. A later valid lifecycle report can take authority again. Turn-end `herdr:<agent>-closing-block` reports can carry a live gate, but they do not claim the full lifecycle or suppress newer screen evidence.
+Full-lifecycle authority expires when no accepted report arrives within `agent_detection.full_lifecycle_hook_authority_timeout_seconds`. The default is 600 seconds and the valid range is 30–3600. Contradictory pane output can retire blocked full-lifecycle authority earlier. After retirement, the current screen result decides the pane state. A later valid lifecycle report can take authority again. Turn-end `herdr:<agent>-closing-block` reports can carry a live gate without claiming the full lifecycle. A blocked closing gate remains authoritative across terminal output; explicit input, a fresh report that clears the gate, agent replacement, or process exit releases it.
+
+A turn-end report that declares running subagents is shown as `waiting on agents`, with a hollow yellow dot, instead of done or ordinary working. Changed detection-buffer output restarts its quiet clock; input alone does not. The default 60-minute budget is configured with `session.agent_subagent_stale_after_minutes`; a later closing report with zero running agents ends the wait. A finished closing report remains done even if a child process lingers.
 
 For agents without complete lifecycle hooks, Herdr identifies the foreground process and reads the live bottom-buffer screen snapshot. It evaluates TOML manifests against that snapshot to classify `idle`, `working`, and `blocked`. For agents that emit them, manifests can also match terminal title and progress (OSC) sequences as detection evidence; when that evidence is absent, screen rules carry detection on their own.
 
@@ -100,7 +102,7 @@ Herdr can run inside tmux as the outer terminal environment. Agent detection doe
 
 The sidebar rolls state upward.
 
-A blocked agent makes its pane, tab, and workspace look blocked. A working agent makes the workspace look active. A done agent stays visible until you view it. If a working agent misses a declared deadline or goes silent without a declared wait, the server derives `stale`; it is shown separately from a plain-shell `unknown` state until a fresh report arrives.
+A blocked agent makes its pane, tab, and workspace look blocked. A parent waiting on subagents uses the hollow yellow `waiting on agents` state. A working agent makes the workspace look active. A done agent stays visible until you view it. If a working agent misses a declared deadline or goes silent without a declared wait, or a subagent wait exceeds its quiet budget, the server derives `stale`; it is shown separately from a plain-shell `unknown` state until fresh activity or a report resolves it.
 
 This is the main Herdr workflow: start several agents, let them work in parallel, and use the sidebar to see which project needs a decision, which one is still running, and which one is ready to review.
 

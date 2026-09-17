@@ -203,6 +203,8 @@ pub enum Method {
     PaneWorkContextSet(PaneWorkContextSetParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
+    #[serde(rename = "pane.send_text_if")]
+    PaneSendTextIf(PaneSendTextIfParams),
     #[serde(rename = "pane.send_keys")]
     PaneSendKeys(PaneSendKeysParams),
     #[serde(rename = "pane.send_input")]

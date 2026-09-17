@@ -516,33 +516,50 @@ fn discover_git_input(
         .arg(cwd)
         .args(["rev-parse", "--show-toplevel"]);
     let root_output = crate::noninteractive_process::output_with_deadline(root_command, deadline);
-    let root_output = match root_output {
-        Ok(output) if output.status.success() => output,
+    let repo_root = match root_output {
+        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
+            .ok()
+            .map(|root| PathBuf::from(root.trim()))
+            .filter(|root| !root.as_os_str().is_empty())
+            .map(|root| std::fs::canonicalize(&root).unwrap_or(root)),
         Ok(_) => {
-            return Some(GitWorkContextInput {
-                cwd: cwd.to_path_buf(),
-                repo_root: None,
-                branch: None,
-                repo: None,
-                origin_unparsed: false,
-            });
+            let mut git_dir_command = crate::noninteractive_process::command(git_program);
+            git_dir_command
+                .arg("-C")
+                .arg(cwd)
+                .args(["rev-parse", "--git-dir"]);
+            match crate::noninteractive_process::output_with_deadline(git_dir_command, deadline) {
+                Ok(output) if output.status.success() => {
+                    let git_dir = String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|path| PathBuf::from(path.trim()))
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .map(|path| {
+                            if path.is_absolute() {
+                                path
+                            } else {
+                                cwd.join(path)
+                            }
+                        })
+                        .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+                    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+                    let expected_git_dir = cwd.join(".git");
+                    let expected_git_dir =
+                        std::fs::canonicalize(&expected_git_dir).unwrap_or(expected_git_dir);
+                    git_dir
+                        .filter(|git_dir| {
+                            git_dir == &expected_git_dir && has_working_tree_entry(&cwd, git_dir)
+                        })
+                        .map(|_| cwd)
+                }
+                Ok(_) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return None,
+                Err(_) => None,
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return None,
-        Err(_) => {
-            return Some(GitWorkContextInput {
-                cwd: cwd.to_path_buf(),
-                repo_root: None,
-                branch: None,
-                repo: None,
-                origin_unparsed: false,
-            });
-        }
+        Err(_) => None,
     };
-    let repo_root = String::from_utf8(root_output.stdout)
-        .ok()
-        .map(|root| PathBuf::from(root.trim()))
-        .filter(|root| !root.as_os_str().is_empty())
-        .map(|root| std::fs::canonicalize(&root).unwrap_or(root));
     let Some(repo_root) = repo_root else {
         return Some(GitWorkContextInput {
             cwd: cwd.to_path_buf(),
@@ -578,6 +595,16 @@ fn discover_git_input(
         branch,
         repo,
         origin_unparsed,
+    })
+}
+
+fn has_working_tree_entry(cwd: &Path, git_dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(cwd) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let path = entry.path();
+        std::fs::canonicalize(&path).unwrap_or(path) != git_dir
     })
 }
 
@@ -939,6 +966,78 @@ mod tests {
 
         let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
         assert_eq!(output.observations[0].context.ticket_ids, vec!["MAT-123"]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_out_repo_misconfigured_as_bare_still_has_work_context() {
+        // `core.bare=true` hides the working tree from `--show-toplevel`.
+        let dir = fixture_dir("checked-out-bare-config");
+        let git = dir.join("git");
+        let checkout = dir.join("checkout");
+        let empty_checkout = dir.join("empty-checkout");
+        let bare = dir.join("bare.git");
+        let timeout = dir.join("timeout");
+        std::fs::create_dir(&checkout).expect("create checkout fixture");
+        std::fs::create_dir(checkout.join(".git")).expect("create checkout git directory");
+        std::fs::write(checkout.join("README.md"), "checked out\n")
+            .expect("create checked-out file");
+        std::fs::create_dir(&empty_checkout).expect("create empty checkout fixture");
+        std::fs::create_dir(empty_checkout.join(".git"))
+            .expect("create empty checkout git directory");
+        std::fs::create_dir(&bare).expect("create bare repository fixture");
+        std::fs::create_dir(&timeout).expect("create timeout fixture");
+        write_executable(
+            &git,
+            r#"#!/bin/sh
+case "$*" in
+  *'rev-parse --show-toplevel'*) exit 128 ;;
+  *'rev-parse --git-dir'*)
+    case "$2" in
+      *bare.git) printf '%s\n' '.' ;;
+      *timeout) sleep 2; printf '%s\n' '.git' ;;
+      *) printf '%s\n' '.git' ;;
+    esac
+    ;;
+  *'symbolic-ref --quiet --short HEAD'*) printf '%s\n' 'feat/MAT-314-bare-config' ;;
+  *'config --get remote.origin.url'*) printf '%s\n' 'git@github.com:herdrdev/herdr.git' ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let checkout_input = discover_git_input(&checkout, deadline, &git)
+            .expect("checked-out repository discovery should complete");
+        assert_eq!(
+            checkout_input.repo_root,
+            Some(std::fs::canonicalize(&checkout).expect("canonical checkout"))
+        );
+        assert_eq!(
+            checkout_input.branch.as_deref(),
+            Some("feat/MAT-314-bare-config")
+        );
+        assert_eq!(checkout_input.repo.as_deref(), Some("herdrdev/herdr"));
+
+        let empty_input = discover_git_input(&empty_checkout, deadline, &git)
+            .expect("empty repository discovery should complete");
+        assert_eq!(empty_input.repo_root, None);
+        assert_eq!(empty_input.branch, None);
+        assert_eq!(empty_input.repo, None);
+
+        let bare_input = discover_git_input(&bare, deadline, &git)
+            .expect("bare repository discovery should complete");
+        assert_eq!(bare_input.repo_root, None);
+        assert_eq!(bare_input.branch, None);
+        assert_eq!(bare_input.repo, None);
+
+        assert_eq!(
+            discover_git_input(&timeout, Instant::now() + Duration::from_millis(100), &git,),
+            None,
+            "the fallback git-dir probe must keep the discovery deadline",
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

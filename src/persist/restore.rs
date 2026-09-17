@@ -74,6 +74,13 @@ fn restore_pane_activity(pane: &mut PaneState, saved: Option<&super::snapshot::P
         pane.activity
             .restore_unix_timestamp_at(last_activity_at, now, now_unix);
     }
+    if let Some(detection_output_at) = saved.detection_output_at {
+        pane.activity.restore_detection_output_unix_timestamp_at(
+            detection_output_at,
+            now,
+            now_unix,
+        );
+    }
     if let Some(quiet_since_at) = saved.quiet_since_at {
         pane.activity
             .restore_quiet_unix_timestamp_at(quiet_since_at, now, now_unix);
@@ -1126,14 +1133,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn restore_pane_activity_restores_the_quiet_clock() {
+    fn restore_pane_activity_restores_distinct_output_and_input_clocks() {
         let now_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let saved = super::super::snapshot::PaneSnapshot {
             cwd: "/tmp".into(),
-            last_activity_at: Some(now_unix.saturating_sub(120)),
+            last_activity_at: Some(now_unix.saturating_sub(60)),
+            detection_output_at: Some(now_unix.saturating_sub(120)),
             quiet_since_at: Some(now_unix.saturating_sub(60)),
             settled_at: None,
             settled_work_key: None,
@@ -1153,6 +1161,11 @@ mod tests {
         let quiet_for = pane.activity.quiet_for(Instant::now()).unwrap();
         assert!(quiet_for >= Duration::from_secs(60));
         assert!(quiet_for < Duration::from_secs(65));
+        let output_for =
+            Instant::now().saturating_duration_since(pane.activity.detection_output_at().unwrap());
+        assert!(output_for >= Duration::from_secs(120));
+        assert!(output_for < Duration::from_secs(125));
+        assert!(pane.activity.inactive_for(Instant::now()) < output_for);
     }
 
     fn agent_session_snapshot(
@@ -1648,6 +1661,7 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             last_activity_at: None,
+                            detection_output_at: None,
                             quiet_since_at: None,
                             settled_at: None,
                             settled_work_key: None,
@@ -1784,6 +1798,7 @@ mod tests {
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
                                 last_activity_at: None,
+                                detection_output_at: None,
                                 quiet_since_at: None,
                                 settled_at: None,
                                 settled_work_key: None,
@@ -1802,6 +1817,7 @@ mod tests {
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
                                 last_activity_at: None,
+                                detection_output_at: None,
                                 quiet_since_at: None,
                                 settled_at: None,
                                 settled_work_key: None,
@@ -1867,6 +1883,7 @@ mod tests {
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
                     last_activity_at: None,
+                    detection_output_at: None,
                     quiet_since_at: None,
                     settled_at: None,
                     settled_work_key: None,
@@ -1884,6 +1901,7 @@ mod tests {
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
             last_activity_at: None,
+            detection_output_at: None,
             quiet_since_at: None,
             settled_at: None,
             settled_work_key: None,
@@ -2081,6 +2099,7 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             last_activity_at: None,
+                            detection_output_at: None,
                             quiet_since_at: None,
                             settled_at: None,
                             settled_work_key: None,
@@ -2332,6 +2351,7 @@ mod tests {
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
                 last_activity_at: None,
+                detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
                 settled_work_key: None,

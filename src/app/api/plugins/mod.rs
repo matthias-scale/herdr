@@ -2954,6 +2954,7 @@ action = "missing"
                 external_wait: None,
                 parse_status: None,
                 workers_unknown: None,
+                agents: None,
             },
         );
 

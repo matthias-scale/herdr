@@ -11,6 +11,7 @@ use portable_pty::CommandBuilder;
 #[cfg(all(test, unix))]
 use portable_pty::{native_pty_system, PtySize};
 use ratatui::{layout::Rect, Frame};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use tokio::sync::watch;
 use tokio::sync::{mpsc, Notify};
@@ -814,6 +815,7 @@ async fn poll_full_lifecycle_hook_retirement(
                 .send(AppEvent::HookAuthorityRetired {
                     pane_id: ports.pane_id,
                     observed_at,
+                    suppress_completion: false,
                 })
                 .await;
         }
@@ -980,6 +982,7 @@ fn spawn_basic_detection_task(
                         pane_id,
                         holds_shell,
                         stale_resolution,
+                        observed_at: now,
                     })
                     .await
                 {
@@ -1289,6 +1292,10 @@ pub struct PaneRuntime {
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     content_seq: Arc<AtomicU64>,
+    input_admission: Arc<Mutex<InputAdmissionState>>,
+    pending_input_reservations: Arc<AtomicU64>,
+    input_delivery_seq: Arc<AtomicU64>,
+    reflected_input_seq: Arc<AtomicU64>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
@@ -1302,6 +1309,90 @@ pub struct PaneRuntime {
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: Option<tokio::task::AbortHandle>,
+}
+
+#[derive(Debug)]
+struct InputAdmissionState {
+    generation: u64,
+    revision: u64,
+}
+
+struct PendingInputReservation {
+    pending: Arc<AtomicU64>,
+    input_delivery_seq: Arc<AtomicU64>,
+    delivered: bool,
+}
+
+impl PendingInputReservation {
+    fn new(pending: &Arc<AtomicU64>, input_delivery_seq: &Arc<AtomicU64>) -> Self {
+        pending.fetch_add(1, Ordering::AcqRel);
+        Self {
+            pending: Arc::clone(pending),
+            input_delivery_seq: Arc::clone(input_delivery_seq),
+            delivered: false,
+        }
+    }
+
+    fn mark_delivered(&mut self) {
+        self.delivered = true;
+    }
+}
+
+impl Drop for PendingInputReservation {
+    fn drop(&mut self) {
+        if self.delivered {
+            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
+        }
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn mark_input_reflected_through(reflected_input_seq: &AtomicU64, input_delivery_seq: u64) {
+    reflected_input_seq.fetch_max(input_delivery_seq, Ordering::AcqRel);
+}
+
+static NEXT_INPUT_ADMISSION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+impl Default for InputAdmissionState {
+    fn default() -> Self {
+        Self {
+            generation: NEXT_INPUT_ADMISSION_GENERATION.fetch_add(1, Ordering::Relaxed),
+            revision: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InputObservation {
+    pub(crate) text: String,
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionalInputResult {
+    Sent,
+    ConditionMismatch,
+    Failed,
+}
+
+fn input_observation_token(
+    generation: u64,
+    input_revision: u64,
+    content_sequence: u64,
+    content_revision: u64,
+    text: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(generation.to_le_bytes());
+    digest.update(input_revision.to_le_bytes());
+    digest.update(content_sequence.to_le_bytes());
+    digest.update(content_revision.to_le_bytes());
+    digest.update(text.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Outbound messages from a remote focus proxy pane to its wire transport.
@@ -1710,14 +1801,20 @@ impl PaneRuntimeIo {
         }
     }
 
-    fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
+    fn send_bytes_after(
+        &self,
+        bytes: Bytes,
+        delay: std::time::Duration,
+        mut reservation: PendingInputReservation,
+    ) {
         match self {
             PaneRuntimeIo::Actor(actor) => {
                 let actor = actor.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    if let Err(err) = actor.write_user_input(bytes).await {
-                        warn!(error = %err, "failed to send delayed PTY input");
+                    match actor.write_user_input(bytes).await {
+                        Ok(()) => reservation.mark_delivered(),
+                        Err(err) => warn!(error = %err, "failed to send delayed PTY input"),
                     }
                 });
             }
@@ -1754,6 +1851,7 @@ impl PaneRuntimeIo {
                         return;
                     }
                     permit.send(ProxyOutbound::Input(bytes));
+                    reservation.mark_delivered();
                 });
             }
             #[cfg(test)]
@@ -1773,7 +1871,9 @@ impl PaneRuntimeIo {
                     {
                         return;
                     }
-                    let _ = sender.send(bytes).await;
+                    if sender.send(bytes).await.is_ok() {
+                        reservation.mark_delivered();
+                    }
                 });
             }
         }
@@ -2200,6 +2300,10 @@ impl PaneRuntime {
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 content_seq: Arc::new(AtomicU64::new(0)),
+                input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
+                pending_input_reservations: Arc::new(AtomicU64::new(0)),
+                input_delivery_seq: Arc::new(AtomicU64::new(0)),
+                reflected_input_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -2640,6 +2744,10 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let content_seq = Arc::new(AtomicU64::new(0));
+        let input_admission = Arc::new(Mutex::new(InputAdmissionState::default()));
+        let pending_input_reservations = Arc::new(AtomicU64::new(0));
+        let input_delivery_seq = Arc::new(AtomicU64::new(0));
+        let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
@@ -2650,6 +2758,9 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let content_seq = content_seq.clone();
+            let pending_input_for_read = Arc::clone(&pending_input_reservations);
+            let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
+            let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
@@ -2658,11 +2769,20 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let input_delivery_seq_at_read_start =
+                    input_delivery_seq_for_read.load(Ordering::Acquire);
+                let input_was_pending = pending_input_for_read.load(Ordering::Acquire) != 0;
                 content_seq.fetch_add(1, Ordering::AcqRel);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
+                if !input_was_pending {
+                    mark_input_reflected_through(
+                        &reflected_input_seq_for_read,
+                        input_delivery_seq_at_read_start,
+                    );
+                }
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 observe_agent_output(bytes, &agent_output_seq);
@@ -2717,6 +2837,7 @@ impl PaneRuntime {
                         warn!(pane = pane_id.raw(), err = %err, "failed to report poisoned PTY user-write gate");
                     }
                 })),
+                pending_user_input: Arc::clone(&pending_input_reservations),
             })?)
         };
 
@@ -2760,6 +2881,10 @@ impl PaneRuntime {
             child_wait_completed: None,
             kitty_keyboard_flags,
             content_seq,
+            input_admission,
+            pending_input_reservations,
+            input_delivery_seq,
+            reflected_input_seq,
             detection_content_seq,
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
@@ -2830,6 +2955,10 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let content_seq = Arc::new(AtomicU64::new(0));
+        let input_admission = Arc::new(Mutex::new(InputAdmissionState::default()));
+        let pending_input_reservations = Arc::new(AtomicU64::new(0));
+        let input_delivery_seq = Arc::new(AtomicU64::new(0));
+        let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
@@ -2873,6 +3002,9 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let content_seq = content_seq.clone();
+            let pending_input_for_read = Arc::clone(&pending_input_reservations);
+            let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
+            let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
             let first_output = Arc::new(AtomicBool::new(false));
@@ -2884,6 +3016,9 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let input_delivery_seq_at_read_start =
+                    input_delivery_seq_for_read.load(Ordering::Acquire);
+                let input_was_pending = pending_input_for_read.load(Ordering::Acquire) != 0;
                 content_seq.fetch_add(1, Ordering::AcqRel);
                 if !bytes.is_empty() && !first_output_for_read.swap(true, Ordering::AcqRel) {
                     crate::logging::pane_first_output(pane_id.raw(), bytes.len());
@@ -2892,6 +3027,12 @@ impl PaneRuntime {
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
+                if !input_was_pending {
+                    mark_input_reflected_through(
+                        &reflected_input_seq_for_read,
+                        input_delivery_seq_at_read_start,
+                    );
+                }
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
@@ -2946,6 +3087,7 @@ impl PaneRuntime {
                         warn!(pane = pane_id.raw(), err = %err, "failed to report poisoned PTY user-write gate");
                     }
                 })),
+                pending_user_input: Arc::clone(&pending_input_reservations),
             })?)
         };
 
@@ -3131,6 +3273,7 @@ impl PaneRuntime {
                                     pane_id,
                                     holds_shell,
                                     stale_resolution,
+                                    observed_at: now,
                                 })
                                 .await
                             {
@@ -3436,6 +3579,10 @@ impl PaneRuntime {
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             content_seq,
+            input_admission,
+            pending_input_reservations,
+            input_delivery_seq,
+            reflected_input_seq,
             detection_content_seq,
             full_lifecycle_hook_baseline_content_seq,
             full_lifecycle_authority_active,
@@ -3567,6 +3714,10 @@ impl PaneRuntime {
         if self.current_size.get() == size {
             return;
         }
+        let mut admission = self
+            .input_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(test)]
         self.resize_count
             .set(self.resize_count.get().saturating_add(1));
@@ -3588,6 +3739,7 @@ impl PaneRuntime {
             cell_height_px,
             terminal_responses,
         );
+        admission.revision = admission.revision.saturating_add(1);
     }
 
     #[cfg(unix)]
@@ -3808,14 +3960,119 @@ impl PaneRuntime {
         if self.suspended {
             return Ok(());
         }
-        self.io.send_bytes(bytes).await
+        let mut reservation = {
+            let mut admission = self
+                .input_admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Reserve this write before awaiting queue capacity. A conditional
+            // sender must treat pending input as intervening input.
+            admission.revision = admission.revision.saturating_add(1);
+            PendingInputReservation::new(&self.pending_input_reservations, &self.input_delivery_seq)
+        };
+        let result = self.io.send_bytes(bytes).await;
+        if result.is_ok() {
+            reservation.mark_delivered();
+        }
+        result
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         if self.suspended {
             return Ok(());
         }
-        self.io.try_send_bytes(bytes)
+        let mut admission = self
+            .input_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let result = self.io.try_send_bytes(bytes);
+        if result.is_ok() {
+            admission.revision = admission.revision.saturating_add(1);
+            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
+        }
+        result
+    }
+
+    pub(crate) fn input_observation(&self) -> Option<InputObservation> {
+        if self.is_remote_proxy() {
+            return None;
+        }
+        let admission = self.input_admission.lock().ok()?;
+        if self.pending_input_reservations.load(Ordering::Acquire) != 0
+            || self.input_delivery_seq.load(Ordering::Acquire)
+                != self.reflected_input_seq.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        let before = self.content_seq();
+        if !before.is_multiple_of(2) {
+            return None;
+        }
+        self.terminal
+            .with_detection_text(|text| {
+                let content_revision = self.content_revision();
+                let after = self.content_seq();
+                (before == after).then(|| InputObservation {
+                    token: input_observation_token(
+                        admission.generation,
+                        admission.revision,
+                        after,
+                        content_revision,
+                        text,
+                    ),
+                    text: text.to_string(),
+                })
+            })
+            .flatten()
+    }
+
+    pub(crate) fn try_send_bytes_if_observation(
+        &self,
+        observation_token: &str,
+        bytes: Bytes,
+    ) -> ConditionalInputResult {
+        if self.suspended || self.is_remote_proxy() {
+            return ConditionalInputResult::Failed;
+        }
+        let mut admission = self
+            .input_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.pending_input_reservations.load(Ordering::Acquire) != 0
+            || self.input_delivery_seq.load(Ordering::Acquire)
+                != self.reflected_input_seq.load(Ordering::Acquire)
+        {
+            return ConditionalInputResult::ConditionMismatch;
+        }
+        let before = self.content_seq();
+        if !before.is_multiple_of(2) {
+            return ConditionalInputResult::ConditionMismatch;
+        }
+        self.terminal
+            .with_detection_text(|text| {
+                let content_revision = self.content_revision();
+                let after = self.content_seq();
+                if before != after
+                    || input_observation_token(
+                        admission.generation,
+                        admission.revision,
+                        after,
+                        content_revision,
+                        text,
+                    ) != observation_token
+                {
+                    return ConditionalInputResult::ConditionMismatch;
+                }
+                match self.io.try_send_bytes(bytes) {
+                    Ok(()) => {
+                        admission.revision = admission.revision.saturating_add(1);
+                        self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
+                        ConditionalInputResult::Sent
+                    }
+                    Err(_) => ConditionalInputResult::Failed,
+                }
+            })
+            .unwrap_or(ConditionalInputResult::ConditionMismatch)
     }
 
     #[cfg(unix)]
@@ -3842,14 +4099,36 @@ impl PaneRuntime {
         if self.suspended {
             return ControlledWriteResult::Refused;
         }
-        self.io.try_send_controlled_bytes(owner_id, bytes)
+        let mut admission = self
+            .input_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let result = self.io.try_send_controlled_bytes(owner_id, bytes);
+        if matches!(
+            result,
+            ControlledWriteResult::Written | ControlledWriteResult::DeliveryUnknown { .. }
+        ) {
+            admission.revision = admission.revision.saturating_add(1);
+            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
+        }
+        result
     }
 
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
         if self.suspended {
             return;
         }
-        self.io.send_bytes_after(bytes, delay);
+        let reservation = {
+            let mut admission = self
+                .input_admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Scheduling is already pending input, even before the delayed write
+            // reaches the PTY queue.
+            admission.revision = admission.revision.saturating_add(1);
+            PendingInputReservation::new(&self.pending_input_reservations, &self.input_delivery_seq)
+        };
+        self.io.send_bytes_after(bytes, delay, reservation);
     }
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
@@ -4105,10 +4384,18 @@ impl PaneRuntime {
     }
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
+        let input_delivery_seq_at_read_start = self.input_delivery_seq.load(Ordering::Acquire);
+        let input_was_pending = self.pending_input_reservations.load(Ordering::Acquire) != 0;
         self.content_seq.fetch_add(1, Ordering::AcqRel);
         let (tx, _rx) = mpsc::channel(1);
         let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
         self.content_seq.fetch_add(1, Ordering::Release);
+        if !input_was_pending {
+            mark_input_reflected_through(
+                &self.reflected_input_seq,
+                input_delivery_seq_at_read_start,
+            );
+        }
     }
 
     pub(crate) fn test_mark_detection_content_changed(&self) {
@@ -4156,6 +4443,10 @@ impl PaneRuntime {
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 content_seq: Arc::new(AtomicU64::new(0)),
+                input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
+                pending_input_reservations: Arc::new(AtomicU64::new(0)),
+                input_delivery_seq: Arc::new(AtomicU64::new(0)),
+                reflected_input_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -4178,6 +4469,168 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    #[tokio::test]
+    async fn conditional_input_token_sends_once_and_replay_sends_nothing() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let observation = runtime.input_observation().expect("coherent observation");
+
+        assert_eq!(
+            runtime
+                .try_send_bytes_if_observation(&observation.token, Bytes::from_static(b"answer")),
+            ConditionalInputResult::Sent
+        );
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"answer")));
+
+        assert_eq!(
+            runtime
+                .try_send_bytes_if_observation(&observation.token, Bytes::from_static(b"replay")),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pending_async_input_invalidates_a_conditional_input_token() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let observation = runtime.input_observation().expect("coherent observation");
+
+        runtime
+            .send_bytes(Bytes::from_static(b"human"))
+            .await
+            .expect("ordinary input");
+        assert_eq!(
+            runtime.try_send_bytes_if_observation(
+                &observation.token,
+                Bytes::from_static(b"automation")
+            ),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"human")));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn delayed_input_invalidates_a_conditional_input_token_before_delivery() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let observation = runtime.input_observation().expect("coherent observation");
+
+        runtime.send_bytes_after(Bytes::from_static(b"later"), Duration::from_secs(60));
+        assert_eq!(
+            runtime.try_send_bytes_if_observation(
+                &observation.token,
+                Bytes::from_static(b"automation")
+            ),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn delayed_input_prevents_a_new_observation_while_pending() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+
+        runtime.send_bytes_after(Bytes::from_static(b"later"), Duration::from_secs(60));
+
+        assert!(runtime.input_observation().is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn capacity_blocked_input_prevents_a_new_observation_until_settled() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel_capacity(80, 24, 1);
+        let PaneRuntimeIo::TestChannel { sender, .. } = &runtime.io else {
+            panic!("test runtime must use a channel");
+        };
+        sender
+            .try_send(Bytes::from_static(b"fill"))
+            .expect("fill input queue");
+
+        let send = runtime.send_bytes(Bytes::from_static(b"waiting"));
+        tokio::pin!(send);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut send)
+            .await
+            .is_err());
+        assert!(runtime.input_observation().is_none());
+
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"fill")));
+        send.await.expect("pending send settles");
+        assert!(runtime.input_observation().is_none());
+        runtime.test_process_pty_bytes(b"reflected");
+        assert!(runtime.input_observation().is_some());
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"waiting")));
+    }
+
+    #[tokio::test]
+    async fn observation_token_is_not_reusable_across_runtimes() {
+        let (first, _first_rx) = PaneRuntime::test_with_channel(80, 24);
+        let observation = first.input_observation().expect("first observation");
+        let (second, mut second_rx) = PaneRuntime::test_with_channel(80, 24);
+
+        assert_eq!(
+            second.try_send_bytes_if_observation(
+                &observation.token,
+                Bytes::from_static(b"automation")
+            ),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert!(second_rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn controlled_input_invalidates_an_observation_before_writing() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let observation = runtime.input_observation().expect("coherent observation");
+        assert!(runtime.acquire_remote_owner(7));
+
+        assert_eq!(
+            runtime.try_send_controlled_bytes(7, b"controlled"),
+            ControlledWriteResult::Written
+        );
+        assert_eq!(
+            runtime.try_send_bytes_if_observation(
+                &observation.token,
+                Bytes::from_static(b"automation")
+            ),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"controlled")));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_output_completion_cannot_reflect_newer_input() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let input_sequence_when_output_started = runtime.input_delivery_seq.load(Ordering::Acquire);
+
+        runtime
+            .try_send_bytes(Bytes::from_static(b"newer-input"))
+            .expect("input queues");
+        mark_input_reflected_through(
+            &runtime.reflected_input_seq,
+            input_sequence_when_output_started,
+        );
+
+        assert!(runtime.input_observation().is_none());
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"newer-input")));
+    }
+
+    #[tokio::test]
+    async fn terminal_resize_invalidates_a_conditional_input_token() {
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        let observation = runtime.input_observation().expect("coherent observation");
+
+        runtime.resize(30, 100, 0, 0);
+        assert_eq!(
+            runtime.try_send_bytes_if_observation(
+                &observation.token,
+                Bytes::from_static(b"automation")
+            ),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert!(rx.try_recv().is_err());
+    }
     use std::time::Duration;
 
     #[test]
@@ -4497,6 +4950,23 @@ mod tests {
             }
         }
 
+        fn from_terminal(
+            baseline: u64,
+            terminal: &crate::terminal::TerminalState,
+            state_events: mpsc::Sender<AppEvent>,
+        ) -> Self {
+            let authority_active = terminal.full_lifecycle_hook_authority_active();
+            Self {
+                detection_content_seq: AtomicU64::new(baseline),
+                baseline_content_seq: AtomicU64::new(baseline),
+                authority_active: AtomicBool::new(authority_active),
+                blocked: AtomicBool::new(terminal.hook_authority_output_retirement_eligible()),
+                state_events,
+                retirement: FullLifecycleHookOutputRetirement::default(),
+                lifecycle_authority_active: authority_active,
+            }
+        }
+
         async fn poll(&mut self, content_seq: u64, at: std::time::Instant) {
             self.detection_content_seq
                 .store(content_seq, Ordering::Release);
@@ -4555,6 +5025,40 @@ mod tests {
             events.try_recv(),
             Ok(AppEvent::HookAuthorityRetired { observed_at, .. }) if observed_at == resumed_at
         ));
+    }
+
+    #[tokio::test]
+    async fn steady_output_does_not_retire_a_blocked_closing_gate() {
+        let reported_at = std::time::Instant::now();
+        let mut terminal = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/tmp".into(),
+        );
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            reported_at,
+        );
+        let (state_events, mut events) = mpsc::channel(4);
+        let mut harness = RetirementHarness::from_terminal(10, &terminal, state_events);
+
+        for tick in 0..18 {
+            harness
+                .poll(
+                    11 + tick,
+                    reported_at + std::time::Duration::from_millis(300) * tick as u32,
+                )
+                .await;
+        }
+
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
+        assert!(!harness.blocked.load(Ordering::Acquire));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -5170,6 +5674,10 @@ mod tests {
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
+            input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
+            pending_input_reservations: Arc::new(AtomicU64::new(0)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
+            reflected_input_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
@@ -5211,6 +5719,10 @@ mod tests {
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
+            input_admission: Arc::new(Mutex::new(InputAdmissionState::default())),
+            pending_input_reservations: Arc::new(AtomicU64::new(0)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
+            reflected_input_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_hook_baseline_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
