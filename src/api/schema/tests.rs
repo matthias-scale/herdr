@@ -1733,7 +1733,7 @@ fn closing_item_blocking_defaults_true() {
     .unwrap();
 
     assert!(legacy.blocking);
-    assert!(!legacy_false.blocking);
+    assert!(legacy_false.blocking);
     assert!(legacy.requires_human_input());
     assert!(legacy_false.requires_human_input());
     assert_eq!(serde_json::to_value(legacy).unwrap()["blocking"], true);
@@ -1746,6 +1746,15 @@ fn closing_item_blocking_defaults_true() {
     }))
     .unwrap();
     assert!(!informational.requires_human_input());
+    assert!(!informational.blocking);
+    assert_eq!(
+        serde_json::to_value(legacy_false).unwrap()["blocking"],
+        true
+    );
+    assert_eq!(
+        serde_json::to_value(informational).unwrap()["blocking"],
+        false
+    );
 }
 
 #[test]

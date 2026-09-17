@@ -6075,6 +6075,40 @@ mod tests {
     }
 
     #[test]
+    fn api_republishes_blocking_from_the_effective_item_label() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let params: PaneReportAgentParams = serde_json::from_value(serde_json::json!({
+            "pane_id": pane_id,
+            "source": "herdr:codex-closing-block",
+            "agent": "codex",
+            "state": "idle",
+            "v": 2,
+            "seq": 1,
+            "gates": [],
+            "items": [{
+                "n": 1,
+                "label": "Answer",
+                "text": "Choose the release path",
+                "blocking": false
+            }],
+            "decisions": [],
+            "completion": "incomplete",
+            "parse_status": "ok",
+            "workers_unknown": false,
+            "agents": 0
+        }))
+        .expect("adapter payload should deserialize");
+
+        let response = app.handle_pane_report_agent("contradictory-item".into(), params);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let pane = app.pane_info(0, internal_pane_id).expect("pane info");
+
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Blocked);
+        assert!(pane.items[0].blocking);
+    }
+
+    #[test]
     fn registered_external_wait_projects_as_in_progress_without_an_eta() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();

@@ -635,18 +635,20 @@ impl<'de> Deserialize<'de> for ClosingBlockItem {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let _ = (wire.default, wire.default_at);
-        Ok(Self {
+        let _ = (wire.blocking, wire.default, wire.default_at);
+        let mut item = Self {
             n: wire.n,
             label: wire.label,
             text: wire.text,
-            blocking: wire.blocking,
+            blocking: false,
             pr: wire.pr,
             ticket: wire.ticket,
             url: wire.url,
             default: None,
             default_at: None,
-        })
+        };
+        item.blocking = item.requires_human_input();
+        Ok(item)
     }
 }
 
