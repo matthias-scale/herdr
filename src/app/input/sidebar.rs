@@ -2070,6 +2070,9 @@ mod tests {
     #[test]
     fn clicking_sidebar_settle_icon_settles_the_exact_pane() {
         let mut app = sidebar_order_app(false);
+        // Nested rows need room for both selected-row controls. The 26-column
+        // default intentionally preserves the title instead of drawing them.
+        app.state.sidebar_width = 40;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let target = app
             .state
