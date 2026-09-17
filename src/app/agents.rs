@@ -455,6 +455,7 @@ impl App {
             items: pane.items,
             decisions: pane.decisions,
             settled_at: pane.settled_at,
+            snoozed_until: pane.snoozed_until,
             agent_session: pane.agent_session,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,

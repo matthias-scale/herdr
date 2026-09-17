@@ -119,8 +119,8 @@ use self::sidebar::{
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
-    copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
-    render_toast_notification, toast_notification_rect,
+    config_diagnostic_marker_rect, copy_feedback_rect, render_config_diagnostic,
+    render_copy_feedback, render_status_bar, render_toast_notification, toast_notification_rect,
 };
 use self::symphony::render as render_symphony;
 pub(crate) use self::tab_surface::{
@@ -822,6 +822,7 @@ fn compute_view_internal(
         },
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
+        config_diagnostic_hit_area: config_diagnostic_marker_rect(area),
         toast_hit_area,
         home_row_hit_areas,
         home_hit_areas,
@@ -1109,6 +1110,7 @@ fn compute_mobile_view(
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
+        config_diagnostic_hit_area: config_diagnostic_marker_rect(terminal_area),
         toast_hit_area,
         home_row_hit_areas,
         home_hit_areas,
@@ -1355,7 +1357,13 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
         } else {
             frame.area()
         };
-        render_config_diagnostic(frame, diagnostic_area, message, &app.palette);
+        render_config_diagnostic(
+            frame,
+            diagnostic_area,
+            message,
+            app.hovered_control == Some(crate::app::state::ControlId::ConfigDiagnostic),
+            &app.palette,
+        );
     }
     let mut copy_feedback_offset = u16::from(has_config_diagnostic);
     let mut toast_rect = None;
@@ -2301,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_config_diagnostic_keeps_command_visible() {
+    fn config_diagnostic_renders_as_a_three_cell_marker_when_idle() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
@@ -2311,6 +2319,33 @@ mod tests {
 
         let area = Rect::new(0, 0, 44, 20);
         compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row = buffer_row_text(terminal.backend().buffer(), area, app.view.terminal_area.y);
+        let marker = app.view.config_diagnostic_hit_area;
+        let marker_text = (marker.x..marker.right())
+            .map(|x| terminal.backend().buffer()[(x, marker.y)].symbol())
+            .collect::<String>();
+
+        assert_eq!(marker.width, 3);
+        assert_eq!(marker.right(), app.view.terminal_area.right());
+        assert_eq!(marker_text, " ! ");
+        assert!(!row.contains("config.toml:100:10"), "{row}");
+        assert!(!row.contains("herdr config check"), "{row}");
+    }
+
+    #[test]
+    fn hovering_config_diagnostic_marker_renders_the_full_message() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.config_diagnostic = Some("config.toml:100:10; herdr config check".into());
+
+        let area = Rect::new(0, 0, 44, 20);
+        compute_view(&mut app, area);
+        app.hovered_control = Some(crate::app::state::ControlId::ConfigDiagnostic);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal.draw(|frame| render(&app, frame)).unwrap();
         let row = buffer_row_text(terminal.backend().buffer(), area, app.view.terminal_area.y);

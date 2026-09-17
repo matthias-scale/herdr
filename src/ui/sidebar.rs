@@ -903,12 +903,7 @@ fn render_compact_agent_row_with_prefix(
         Span::styled(title_pad, working_row_style(app, fade, title_style, bg)),
         Span::styled(
             if settle_width > 0 { " ✓" } else { "" },
-            working_row_style(
-                app,
-                fade,
-                Style::default().fg(p.green).add_modifier(Modifier::DIM),
-                bg,
-            ),
+            working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
         ),
         Span::styled(provider, working_row_style(app, fade, provider_style, bg)),
         Span::styled(age, working_row_style(app, fade, age_style, bg)),
@@ -21028,6 +21023,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 Some("✓"),
                 "width={width}: {rendered:?}"
             );
+            let icon = terminal
+                .backend()
+                .buffer()
+                .cell((target.rect.x + 1, target.rect.y))
+                .expect("settle icon cell");
+            assert_eq!(icon.fg, app.palette.overlay0, "width={width}");
+            assert_ne!(icon.fg, app.palette.green, "width={width}");
         }
     }
 

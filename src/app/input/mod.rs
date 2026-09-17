@@ -4815,6 +4815,24 @@ impl App {
             }
             return;
         }
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left)
+                if self
+                    .pending_config_diagnostic_click_sources
+                    .contains(&source_id) =>
+            {
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self
+                    .pending_config_diagnostic_click_sources
+                    .remove(&source_id) =>
+            {
+                self.state.clear_hovered_control();
+                return;
+            }
+            _ => {}
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) {
             let hovered = crate::ui::hovered_control_at(&self.state, mouse.column, mouse.row);
             self.state
@@ -4843,6 +4861,25 @@ impl App {
                     }
                 }
             }
+            return;
+        }
+        if self.state.config_diagnostic.is_some()
+            && self.state.point_in_rect(
+                self.state.view.config_diagnostic_hit_area,
+                mouse.column,
+                mouse.row,
+            )
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.pending_config_diagnostic_click_sources
+                    .insert(source_id);
+            }
+            self.state.config_diagnostic = None;
+            self.config_diagnostic_deadline = None;
             return;
         }
         if self.state.usage_view.is_some() {

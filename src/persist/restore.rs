@@ -628,6 +628,7 @@ fn restore_tab(
                 saved_pane.and_then(|pane| pane.settled_auto_label.clone());
             let mut pane = PaneState::new(terminal_id);
             pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
+            pane.set_snoozed_until(saved_pane.and_then(|pane| pane.snoozed_until));
             pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
             restore_pane_activity(&mut pane, saved_pane);
             panes.insert(*id, pane);
@@ -758,6 +759,7 @@ fn restore_tab(
                 }
                 let mut pane = PaneState::new(terminal_id.clone());
                 pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
+                pane.set_snoozed_until(saved_pane.and_then(|pane| pane.snoozed_until));
                 pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
                 restore_pane_activity(&mut pane, saved_pane);
                 #[cfg(unix)]
@@ -1144,6 +1146,7 @@ mod tests {
             detection_output_at: Some(now_unix.saturating_sub(120)),
             quiet_since_at: Some(now_unix.saturating_sub(60)),
             settled_at: None,
+            snoozed_until: None,
             settled_work_key: None,
             settled_auto_label: None,
             work_context: Default::default(),
@@ -1637,6 +1640,11 @@ mod tests {
 
     #[tokio::test]
     async fn ac3_restore_carries_persisted_agent_session_and_work_context() {
+        let snoozed_until = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_add(300);
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1664,6 +1672,7 @@ mod tests {
                             detection_output_at: None,
                             quiet_since_at: None,
                             settled_at: None,
+                            snoozed_until: Some(snoozed_until),
                             settled_work_key: None,
                             settled_auto_label: Some("#3 Restore context".into()),
                             work_context: crate::work_context::PaneWorkContext {
@@ -1713,7 +1722,7 @@ mod tests {
         };
         let (events, _event_rx) = mpsc::channel(4);
 
-        let (_workspaces, terminals, _runtimes) = restore(
+        let (workspaces, terminals, _runtimes) = restore(
             &snapshot,
             None,
             24,
@@ -1731,6 +1740,15 @@ mod tests {
             .values()
             .next()
             .expect("restored terminal should exist");
+        assert_eq!(
+            workspaces[0].tabs[0]
+                .panes
+                .values()
+                .next()
+                .unwrap()
+                .snoozed_until(),
+            Some(snoozed_until)
+        );
         assert_eq!(
             terminal.settled_auto_label.as_deref(),
             Some("#3 Restore context")
@@ -1801,6 +1819,7 @@ mod tests {
                                 detection_output_at: None,
                                 quiet_since_at: None,
                                 settled_at: None,
+                                snoozed_until: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
                                 work_context: Default::default(),
@@ -1820,6 +1839,7 @@ mod tests {
                                 detection_output_at: None,
                                 quiet_since_at: None,
                                 settled_at: None,
+                                snoozed_until: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
                                 work_context: Default::default(),
@@ -1886,6 +1906,7 @@ mod tests {
                     detection_output_at: None,
                     quiet_since_at: None,
                     settled_at: None,
+                    snoozed_until: None,
                     settled_work_key: None,
                     settled_auto_label: None,
                     work_context: Default::default(),
@@ -1904,6 +1925,7 @@ mod tests {
             detection_output_at: None,
             quiet_since_at: None,
             settled_at: None,
+            snoozed_until: None,
             settled_work_key: None,
             settled_auto_label: None,
             work_context: Default::default(),
@@ -2102,6 +2124,7 @@ mod tests {
                             detection_output_at: None,
                             quiet_since_at: None,
                             settled_at: None,
+                            snoozed_until: None,
                             settled_work_key: None,
                             settled_auto_label: None,
                             work_context: Default::default(),
@@ -2354,6 +2377,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                snoozed_until: None,
                 settled_work_key: None,
                 settled_auto_label: None,
                 work_context: Default::default(),

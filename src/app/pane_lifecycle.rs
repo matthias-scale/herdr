@@ -87,6 +87,7 @@ impl AppState {
         self.done_panes()
             .filter(|(ws_idx, tab_idx, pane_id, pane, terminal)| {
                 pane.settled_at.is_none()
+                    && pane.snoozed_until().is_none()
                     && pane_is_quiet(pane, terminal)
                     && !self.is_active_pane(*ws_idx, *tab_idx, *pane_id)
                     && !self.workspaces[*ws_idx].tabs[*tab_idx].pinned
@@ -225,7 +226,7 @@ pub(crate) fn pane_is_done(
     pane: &crate::pane::PaneState,
     terminal: &crate::terminal::TerminalState,
 ) -> bool {
-    if pane.settled_at.is_some() {
+    if pane.settled_at.is_some() || pane.snoozed_until().is_some() {
         return false;
     }
     let (state, seen) = terminal.sidebar_projection(pane.seen);

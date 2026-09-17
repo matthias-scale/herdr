@@ -60,6 +60,10 @@ pub enum Subscription {
     PaneSettled {},
     #[serde(rename = "pane.unsettled")]
     PaneUnsettled {},
+    #[serde(rename = "pane.snoozed")]
+    PaneSnoozed {},
+    #[serde(rename = "pane.unsnoozed")]
+    PaneUnsnoozed {},
     #[serde(rename = "pane.focused")]
     PaneFocused {},
     #[serde(rename = "pane.moved")]
@@ -220,6 +224,8 @@ pub enum EventKind {
     PaneUpdated,
     PaneSettled,
     PaneUnsettled,
+    PaneSnoozed,
+    PaneUnsnoozed,
     PaneFocused,
     PaneMoved,
     PaneOutputChanged,
@@ -254,6 +260,8 @@ impl EventKind {
             EventKind::PaneUpdated => "pane.updated",
             EventKind::PaneSettled => "pane.settled",
             EventKind::PaneUnsettled => "pane.unsettled",
+            EventKind::PaneSnoozed => "pane.snoozed",
+            EventKind::PaneUnsnoozed => "pane.unsnoozed",
             EventKind::PaneFocused => "pane.focused",
             EventKind::PaneMoved => "pane.moved",
             EventKind::PaneOutputChanged => "pane.output_changed",
@@ -289,6 +297,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneUpdated,
     EventKind::PaneSettled,
     EventKind::PaneUnsettled,
+    EventKind::PaneSnoozed,
+    EventKind::PaneUnsnoozed,
     EventKind::PaneFocused,
     EventKind::PaneMoved,
     EventKind::PaneOutputChanged,
@@ -318,6 +328,8 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneClosed,
     EventKind::PaneSettled,
     EventKind::PaneUnsettled,
+    EventKind::PaneSnoozed,
+    EventKind::PaneUnsnoozed,
     EventKind::PaneFocused,
     EventKind::PaneMoved,
     EventKind::PaneExited,
@@ -540,6 +552,16 @@ pub enum EventData {
         pane_id: String,
         workspace_id: String,
     },
+    PaneSnoozed {
+        pane_id: String,
+        workspace_id: String,
+        snoozed_until: u64,
+    },
+    PaneUnsnoozed {
+        pane_id: String,
+        workspace_id: String,
+        reason: PaneUnsnoozeReason,
+    },
     PaneFocused {
         pane_id: String,
         workspace_id: String,
@@ -601,4 +623,12 @@ pub enum EventData {
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneUnsnoozeReason {
+    Explicit,
+    Expired,
+    Attention,
 }

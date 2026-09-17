@@ -2321,6 +2321,8 @@ pub struct ViewState {
     pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
+    /// Client-side hover and click target for the compact diagnostic marker.
+    pub(crate) config_diagnostic_hit_area: Rect,
     pub toast_hit_area: Rect,
     /// `(queue index, row rect)` for each row the home view is showing.
     pub home_row_hit_areas: Vec<(usize, Rect)>,
@@ -3464,6 +3466,14 @@ pub(crate) struct PaneSettlementChange {
     pub(crate) settled_at: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneSnoozeChange {
+    pub(crate) workspace_id: String,
+    pub(crate) pane_id: PaneId,
+    pub(crate) deadline: Option<u64>,
+    pub(crate) reason: Option<crate::api::schema::PaneUnsnoozeReason>,
+}
+
 /// Renderer selected for the full terminal area before overlays are applied.
 pub(crate) enum TerminalAreaSurface<'a> {
     EditorPreview,
@@ -3738,6 +3748,7 @@ pub struct AppState {
     /// the confirming second press. Only armed while `ui.confirm_close` is on.
     pub(crate) sidebar_settled_menu_delete_armed: bool,
     pub(crate) pending_pane_settlement_changes: Vec<PaneSettlementChange>,
+    pub(crate) pending_pane_snooze_changes: Vec<PaneSnoozeChange>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -4337,6 +4348,7 @@ pub(crate) enum SidebarFooterItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlId {
+    ConfigDiagnostic,
     SidebarNewThread,
     SidebarStarFilter,
     SidebarNewMenu,
@@ -6213,6 +6225,7 @@ impl AppState {
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
+            pending_pane_snooze_changes: Vec::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -6278,6 +6291,7 @@ impl AppState {
                 info_panel_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
+                config_diagnostic_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 home_row_hit_areas: Vec::new(),
                 home_hit_areas: Vec::new(),

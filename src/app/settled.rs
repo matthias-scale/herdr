@@ -2,7 +2,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::layout::PaneId;
 
-use super::{state::PaneSettlementChange, App, AppState};
+use super::{
+    state::{PaneSettlementChange, PaneSnoozeChange},
+    App, AppState,
+};
+
+pub(crate) const MAX_SNOOZE_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// UNIX deadlines survive restarts; converting at the scheduler boundary avoids
+/// relying on a monotonic Instant from the previous process.
+pub(crate) fn snooze_instant(deadline: u64, now_unix: u64, now: Instant) -> Instant {
+    now.checked_add(Duration::from_secs(
+        deadline.saturating_sub(now_unix).min(MAX_SNOOZE_SECONDS),
+    ))
+    .unwrap_or(now)
+}
 
 struct PaneSettlementCandidate {
     agent_ref: crate::api::schema::AgentRef,
@@ -105,6 +119,102 @@ fn derived_pane_label(state: &AppState, ws_idx: usize, pane_id: PaneId) -> Optio
 }
 
 impl AppState {
+    pub(crate) fn next_snooze_deadline_at(&self, now: Instant, now_unix: u64) -> Option<Instant> {
+        self.workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(crate::pane::PaneState::snoozed_until)
+            .map(|deadline| snooze_instant(deadline, now_unix, now))
+            .min()
+    }
+
+    pub(crate) fn snooze_pane_at(&mut self, ws_idx: usize, pane_id: PaneId, deadline: u64) -> bool {
+        let Some(workspace) = self.workspaces.get_mut(ws_idx) else {
+            return false;
+        };
+        let Some(pane) = workspace.pane_state_mut(pane_id) else {
+            return false;
+        };
+        if pane.settled_at.is_some() || pane.snoozed_until() == Some(deadline) {
+            return false;
+        }
+        if deadline == 0 {
+            return false;
+        }
+        pane.set_snoozed_until(Some(deadline));
+        let workspace_id = workspace.id.clone();
+        self.pending_pane_snooze_changes.push(PaneSnoozeChange {
+            workspace_id,
+            pane_id,
+            deadline: Some(deadline),
+            reason: None,
+        });
+        self.mark_session_dirty();
+        self.mark_sidebar_projection_changed();
+        true
+    }
+
+    pub(crate) fn unsnooze_pane_at(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        reason: crate::api::schema::PaneUnsnoozeReason,
+        now: Instant,
+    ) -> bool {
+        let Some(workspace) = self.workspaces.get_mut(ws_idx) else {
+            return false;
+        };
+        let Some(pane) = workspace.pane_state_mut(pane_id) else {
+            return false;
+        };
+        if pane.take_snoozed_until().is_none() {
+            return false;
+        }
+        if reason == crate::api::schema::PaneUnsnoozeReason::Expired {
+            pane.seen = false;
+            pane.done_since = Some(now);
+            // A long-quiet Done pane must not auto-settle in the same tick that
+            // returns it to the unread queue.
+            pane.activity.note(now);
+        }
+        let workspace_id = workspace.id.clone();
+        self.pending_pane_snooze_changes.push(PaneSnoozeChange {
+            workspace_id,
+            pane_id,
+            deadline: None,
+            reason: Some(reason),
+        });
+        self.mark_session_dirty();
+        self.mark_sidebar_projection_changed();
+        true
+    }
+
+    pub(crate) fn refresh_snoozes_at(&mut self, now: Instant, now_unix: u64) -> bool {
+        let expired = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| {
+                ws.tabs.iter().flat_map(move |tab| {
+                    tab.panes.iter().filter_map(move |(id, pane)| {
+                        pane.snoozed_until()
+                            .filter(|deadline| *deadline <= now_unix)
+                            .map(|_| (ws_idx, *id))
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        for (ws_idx, id) in &expired {
+            self.unsnooze_pane_at(
+                *ws_idx,
+                *id,
+                crate::api::schema::PaneUnsnoozeReason::Expired,
+                now,
+            );
+        }
+        !expired.is_empty()
+    }
     fn settle_owned_candidates(
         &mut self,
         candidates: &[PaneSettlementCandidate],
@@ -166,7 +276,7 @@ impl AppState {
             }) else {
                 return false;
             };
-            if pane.settled_at.is_some() {
+            if pane.settled_at.is_some() || pane.snoozed_until().is_some() {
                 return false;
             }
             pane.settled_at = Some(settled_at);
@@ -258,7 +368,7 @@ impl AppState {
                     let projection = pane.agent_projection(terminal);
                     let quiet = crate::app::pane_lifecycle::pane_is_quiet(pane, terminal);
                     let quiet_observation_changed = pane.activity.quiet_observation_changes(quiet);
-                    if pane.settled_at.is_some() {
+                    if pane.settled_at.is_some() || pane.snoozed_until().is_some() {
                         if quiet_observation_changed {
                             arm_writes.push((ws_idx, *pane_id, pane.finished_since, quiet));
                         }
@@ -361,7 +471,60 @@ impl AppState {
 }
 
 impl App {
+    pub(crate) fn flush_pane_snooze_events(&mut self) -> bool {
+        let changes = std::mem::take(&mut self.state.pending_pane_snooze_changes);
+        if changes.is_empty() {
+            return false;
+        }
+        for change in changes {
+            let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|ws| ws.id == change.workspace_id)
+            else {
+                continue;
+            };
+            let Some(pane_id) = self.public_pane_id(ws_idx, change.pane_id) else {
+                continue;
+            };
+            let workspace_id = self.public_workspace_id(ws_idx);
+            let (event, data) = match change.deadline {
+                Some(snoozed_until) => (
+                    crate::api::schema::EventKind::PaneSnoozed,
+                    crate::api::schema::EventData::PaneSnoozed {
+                        pane_id,
+                        workspace_id,
+                        snoozed_until,
+                    },
+                ),
+                None => (
+                    crate::api::schema::EventKind::PaneUnsnoozed,
+                    crate::api::schema::EventData::PaneUnsnoozed {
+                        pane_id,
+                        workspace_id,
+                        reason: change
+                            .reason
+                            .unwrap_or(crate::api::schema::PaneUnsnoozeReason::Explicit),
+                    },
+                ),
+            };
+            self.emit_event(crate::api::schema::EventEnvelope { event, data });
+            self.emit_pane_updated(ws_idx, change.pane_id);
+        }
+        self.schedule_session_save();
+        true
+    }
+
     pub(crate) fn refresh_pane_settlement_at(&mut self, now: Instant) -> bool {
+        self.refresh_pane_settlement_at_with_wall_clock(now, unix_seconds(SystemTime::now()))
+    }
+
+    pub(crate) fn refresh_pane_settlement_at_with_wall_clock(
+        &mut self,
+        now: Instant,
+        now_unix: u64,
+    ) -> bool {
         let snapshots = self
             .state
             .workspaces
@@ -388,11 +551,12 @@ impl App {
                 .state
                 .observe_pane_detection_snapshot_at(pane_id, revision, agent, &snapshot, now);
         }
-        changed |= self.state.refresh_settled_panes_at(
-            self.work_index_snapshot.as_ref(),
-            now,
-            unix_seconds(SystemTime::now()),
-        ) > 0;
+        changed |= self.state.refresh_snoozes_at(now, now_unix);
+        changed |= self.flush_pane_snooze_events();
+        changed |=
+            self.state
+                .refresh_settled_panes_at(self.work_index_snapshot.as_ref(), now, now_unix)
+                > 0;
         changed |= self.flush_pane_settlement_events();
         changed
     }
@@ -535,6 +699,21 @@ mod tests {
         workspace::Workspace,
     };
 
+    #[test]
+    fn snooze_deadline_converts_wall_clock_to_timer_and_survives_due_time() {
+        let now = Instant::now();
+        assert_eq!(
+            snooze_instant(1_725_000_059, 1_725_000_000, now),
+            now + Duration::from_secs(59)
+        );
+        assert_eq!(snooze_instant(1_725_000_000, 1_725_000_000, now), now);
+        assert_eq!(snooze_instant(1_725_000_001, 1_725_000_100, now), now);
+        assert_eq!(
+            snooze_instant(u64::MAX, 1_725_000_000, now),
+            now + Duration::from_secs(MAX_SNOOZE_SECONDS)
+        );
+    }
+
     fn app_with_runtime(
         config: &crate::config::Config,
         context: crate::work_context::PaneWorkContext,
@@ -573,13 +752,14 @@ mod tests {
     }
 
     fn set_persisted_session(app: &mut App, terminal_id: &TerminalId, source: &str) {
+        let agent = source.rsplit_once(':').map_or(source, |(_, agent)| agent);
         app.state
             .terminals
             .get_mut(terminal_id)
             .expect("root terminal")
             .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
                 source: source.into(),
-                agent: "codex".into(),
+                agent: agent.into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("settled-session")
                     .expect("valid session id"),
             });
@@ -2007,6 +2187,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suspending_a_settled_agent_is_not_foreground_activity() {
+        let (mut app, pane_id, terminal_id, _rx) =
+            app_with_runtime(&crate::config::Config::default(), Default::default());
+        set_persisted_session(&mut app, &terminal_id, "herdr:claude");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_foreground_process(Some("claude".into()), true, Instant::now());
+        let shell_pid = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(TerminalRuntime::child_pid);
+
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_014));
+        assert!(app.flush_pane_settlement_events());
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .is_some_and(TerminalRuntime::is_suspended));
+        app.last_foreground_process_refresh_generation += 1;
+        let generation = app.last_foreground_process_refresh_generation;
+        let _ = app.handle_foreground_processes_refreshed(
+            generation,
+            vec![
+                crate::app::foreground_process::ForegroundProcessObservation {
+                    pane_id,
+                    shell_pid,
+                    process_name: None,
+                    process_active: false,
+                },
+            ],
+        );
+        let _ = app.flush_pane_settlement_events();
+
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .is_some_and(TerminalRuntime::is_suspended));
+    }
+
+    #[tokio::test]
     async fn settling_unresumable_pane_keeps_runtime_live() {
         let (mut app, pane_id, terminal_id, _rx) =
             app_with_runtime(&crate::config::Config::default(), Default::default());
@@ -2022,6 +2245,31 @@ mod tests {
             .terminal_runtimes
             .get(&terminal_id)
             .is_some_and(|runtime| !runtime.is_suspended()));
+    }
+
+    #[tokio::test]
+    async fn snoozing_preserves_the_live_agent_runtime_and_session() {
+        let (mut app, pane_id, terminal_id, _rx) =
+            app_with_runtime(&crate::config::Config::default(), Default::default());
+        set_persisted_session(&mut app, &terminal_id, "herdr:codex");
+        let session = app.state.terminals[&terminal_id]
+            .persisted_agent_session
+            .clone();
+
+        assert!(app.state.snooze_pane_at(0, pane_id, 1_725_000_060));
+        assert!(app.flush_pane_snooze_events());
+
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .is_some_and(|runtime| !runtime.is_suspended()));
+        assert_eq!(
+            app.state.terminals[&terminal_id].persisted_agent_session,
+            session
+        );
+        assert!(app.state.terminals[&terminal_id]
+            .pending_agent_resume_plan
+            .is_none());
     }
 
     #[cfg(unix)]

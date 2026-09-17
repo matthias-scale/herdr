@@ -3745,6 +3745,11 @@ impl AppState {
             .attached_terminal_id
             .clone();
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
+        let previous_attention = {
+            let pane = self.workspaces[ws_idx].pane_state(pane_id)?;
+            let terminal = self.terminals.get(&terminal_id)?;
+            pane.agent_projection(terminal).needs_human_attention()
+        };
         let (
             mutation,
             managed_changed,
@@ -3803,6 +3808,19 @@ impl AppState {
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
+        let fresh_attention = {
+            let pane = self.workspaces[ws_idx].pane_state(pane_id)?;
+            let terminal = self.terminals.get(&terminal_id)?;
+            !previous_attention && pane.agent_projection(terminal).needs_human_attention()
+        };
+        if fresh_attention {
+            self.unsnooze_pane_at(
+                ws_idx,
+                pane_id,
+                crate::api::schema::PaneUnsnoozeReason::Attention,
+                now,
+            );
+        }
         let suppress_completion = change.state == AgentState::Idle
             && (suppress_completion || managed_launch_pending || suppress_acquisition_completion);
         if change.previous_state != change.state {
