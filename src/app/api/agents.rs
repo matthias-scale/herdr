@@ -2129,4 +2129,77 @@ mod tests {
         assert_eq!(record["customTitle"], "Review billing retries");
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn agent_rename_writes_codex_names_and_survives_write_failure() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "herdr-agent-rename-codex-session-name-{}-{nonce}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let index = root.join("session_index.jsonl");
+        std::fs::write(
+            &index,
+            b"{\"id\":\"codex-thread\",\"thread_name\":\"Original thread\"}\n",
+        )
+        .unwrap();
+
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-thread").unwrap(),
+        });
+        terminal.set_session_name_write_target(Some(
+            crate::work_title::SessionNameWriteTarget::new(
+                crate::work_title::WorkTitleProvider::Codex,
+                "codex-thread".into(),
+                index.clone(),
+            ),
+        ));
+
+        let response = app.handle_agent_rename(
+            "rename".into(),
+            AgentRenameParams {
+                target: public_pane_id.clone(),
+                name: Some("Review Codex session names".into()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::AgentInfo { .. }));
+        let written = std::fs::read_to_string(&index).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(written.lines().last().unwrap()).unwrap();
+        assert_eq!(record["thread_name"], "Review Codex session names");
+
+        std::fs::remove_file(&index).unwrap();
+        let failure_response = app.handle_agent_rename(
+            "write-failure".into(),
+            AgentRenameParams {
+                target: public_pane_id,
+                name: Some("Keep local Codex name".into()),
+            },
+        );
+        let failure_success: SuccessResponse = serde_json::from_str(&failure_response).unwrap();
+        assert!(matches!(
+            failure_success.result,
+            ResponseResult::AgentInfo { .. }
+        ));
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("Keep local Codex name")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

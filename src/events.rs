@@ -185,7 +185,7 @@ pub enum AppEvent {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         claude_transcript_path: Option<std::path::PathBuf>,
         session_name_write_target: Option<crate::work_title::SessionNameWriteTarget>,
-        session_name_path_reported: bool,
+        session_name_target_evaluated: bool,
         session_start_source: Option<String>,
     },
     /// Display-only agent metadata was reported for a pane.

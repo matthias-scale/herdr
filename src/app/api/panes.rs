@@ -1603,7 +1603,7 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
@@ -1626,38 +1626,79 @@ impl App {
             ("herdr:codex", "codex") => Some(crate::work_title::WorkTitleProvider::Codex),
             _ => None,
         };
-        let session_name_path = match session_name_provider {
-            Some(crate::work_title::WorkTitleProvider::Claude) => claude_transcript_path.clone(),
+        let existing_write_target = self.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.session_name_write_target())
+            .cloned();
+        let session_name_write_target = match (session_name_provider, session_ref.as_ref()) {
+            (Some(provider), Some(session_ref))
+                if session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id =>
+            {
+                if provider == crate::work_title::WorkTitleProvider::Codex
+                    && params.agent_session_path.is_none()
+                    && existing_write_target.as_ref().is_some_and(|target| {
+                        target.matches_provider_session(provider, &session_ref.value)
+                    })
+                {
+                    existing_write_target.clone()
+                } else {
+                    let candidate_path = match provider {
+                        crate::work_title::WorkTitleProvider::Claude => {
+                            claude_transcript_path.clone()
+                        }
+                        crate::work_title::WorkTitleProvider::Codex => params
+                            .agent_session_path
+                            .as_deref()
+                            .map(std::path::PathBuf::from)
+                            .or_else(|| {
+                                crate::integration::codex_dir()
+                                    .ok()
+                                    .map(|home| home.join("session_index.jsonl"))
+                            }),
+                    };
+                    candidate_path.and_then(|path| {
+                        if existing_write_target.as_ref().is_some_and(|target| {
+                            target.matches_binding(provider, &session_ref.value, &path)
+                        }) {
+                            return existing_write_target.clone();
+                        }
+                        let path = match provider {
+                            crate::work_title::WorkTitleProvider::Claude => Some(path),
+                            crate::work_title::WorkTitleProvider::Codex => {
+                                crate::work_title::validated_codex_session_index_path(
+                                    path.to_str(),
+                                    &session_ref.value,
+                                )
+                            }
+                        }?;
+                        Some(crate::work_title::SessionNameWriteTarget::new(
+                            provider,
+                            session_ref.value.clone(),
+                            path,
+                        ))
+                    })
+                }
+            }
+            _ => None,
+        };
+        let session_name_target_evaluated = match session_name_provider {
+            Some(crate::work_title::WorkTitleProvider::Claude) => {
+                params.agent_session_path.is_some()
+            }
             Some(crate::work_title::WorkTitleProvider::Codex) => {
-                session_ref.as_ref().and_then(|session_ref| {
-                    crate::work_title::validated_codex_session_index_path(
-                        params.agent_session_path.as_deref(),
-                        &session_ref.value,
-                    )
+                session_ref.as_ref().is_some_and(|session| {
+                    session.kind == crate::agent_resume::AgentSessionRefKind::Id
                 })
             }
-            None => None,
+            None => false,
         };
-        let session_name_write_target = session_name_provider
-            .zip(session_ref.as_ref())
-            .zip(session_name_path)
-            .and_then(|((provider, session_ref), path)| {
-                (session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id).then(|| {
-                    crate::work_title::SessionNameWriteTarget::new(
-                        provider,
-                        session_ref.value.clone(),
-                        path,
-                    )
-                })
-            });
-        let session_name_path_reported =
-            session_name_provider.is_some() && params.agent_session_path.is_some();
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref,
             claude_transcript_path,
             session_name_write_target,
-            session_name_path_reported,
+            session_name_target_evaluated,
             source: params.source,
             agent_label,
             seq: params.seq,
@@ -1758,7 +1799,9 @@ impl App {
                 && context.session_name.is_none()
                 && context.work_title == requested_work_title;
             let valid_session_name_context = session_name_request
-                && context.session_name.is_some()
+                && context.session_name.as_deref().is_some_and(|name| {
+                    crate::work_title::normalize_session_name_for_write(name).is_some()
+                })
                 && context.work_title.is_none()
                 && context.branch.is_none()
                 && context.repo.is_none()
@@ -7040,15 +7083,26 @@ mod tests {
 
         // A rename aimed at a session this pane is not running is rejected.
         let stale = guarded_session_name_params(
-            pane_id,
+            pane_id.clone(),
             "claude",
             "herdr:claude",
             "session-other",
-            "Sneaky",
+            "Sneaky session",
             3,
         );
         let response = app.handle_pane_report_metadata("stale".into(), stale);
         assert_eq!(metadata_error_code(&response), "agent_session_mismatch");
+
+        let single_token = guarded_session_name_params(
+            pane_id,
+            "claude",
+            "herdr:claude",
+            "session-1",
+            "random-id",
+            4,
+        );
+        let response = app.handle_pane_report_metadata("single-token".into(), single_token);
+        assert_eq!(metadata_error_code(&response), "invalid_work_context");
     }
 
     #[test]
@@ -7905,6 +7959,8 @@ mod tests {
 
     #[test]
     fn pane_rename_writes_to_the_bound_codex_home_index() {
+        let _env_lock = crate::integration::integration_env_lock();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -7920,6 +7976,7 @@ mod tests {
 
         let root = session_name_temp_dir("codex-pane-rename");
         let index = root.join("session_index.jsonl");
+        std::env::set_var("CODEX_HOME", &root);
         let session_id = "codex-thread";
         std::fs::write(
             &index,
@@ -7934,7 +7991,7 @@ mod tests {
                 agent: "codex".into(),
                 seq: Some(1),
                 agent_session_id: Some(session_id.into()),
-                agent_session_path: Some(index.display().to_string()),
+                agent_session_path: None,
                 session_start_source: Some("startup".into()),
             },
         );
@@ -7943,7 +8000,7 @@ mod tests {
         let rename_response = app.handle_pane_rename(
             "rename".into(),
             PaneRenameParams {
-                pane_id,
+                pane_id: pane_id.clone(),
                 label: Some("Audit session naming".into()),
             },
         );
@@ -7954,7 +8011,43 @@ mod tests {
         assert_eq!(record["id"], session_id);
         assert_eq!(record["thread_name"], "Audit session naming");
         assert!(record["updated_at"].as_str().unwrap().ends_with('Z'));
+
+        let invalid_contents = "{\"id\":\"other-thread\",\"thread_name\":\"Other name\"}\n";
+        std::fs::write(&index, invalid_contents).unwrap();
+        let repeated_response = app.handle_pane_report_agent_session(
+            "repeat-bind".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(2),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: None,
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&repeated_response).unwrap();
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_some());
+        let failed_write_response = app.handle_pane_rename(
+            "failed-write".into(),
+            PaneRenameParams {
+                pane_id,
+                label: Some("Local name after invalid index".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&failed_write_response).unwrap();
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), invalid_contents);
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("Local name after invalid index")
+        );
         std::fs::remove_dir_all(root).unwrap();
+        match previous_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
     }
 
     #[test]

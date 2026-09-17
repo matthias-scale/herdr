@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -64,6 +64,23 @@ impl SessionNameWriteTarget {
             && source == self.provider.lifecycle_source()
             && agent == self.provider.agent()
             && value == self.session_id
+    }
+
+    pub(crate) fn matches_binding(
+        &self,
+        provider: WorkTitleProvider,
+        session_id: &str,
+        path: &Path,
+    ) -> bool {
+        self.matches_provider_session(provider, session_id) && self.path == path
+    }
+
+    pub(crate) fn matches_provider_session(
+        &self,
+        provider: WorkTitleProvider,
+        session_id: &str,
+    ) -> bool {
+        self.provider == provider && self.session_id == session_id
     }
 }
 
@@ -535,10 +552,19 @@ pub(crate) fn latest_codex_thread_name(index: &str, thread_id: &str) -> Option<S
 }
 
 fn normalize_session_name_for_read(name: &str) -> Option<String> {
-    let sanitized = sanitize_prompt(name);
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(char::is_control)
+        || trimmed.split_whitespace().count() < 2
+    {
+        return None;
+    }
+    if trimmed.chars().count() <= SESSION_NAME_MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+
     let mut collapsed = String::new();
-    let mut word_count = 0;
-    for word in sanitized.split_whitespace() {
+    for word in trimmed.split_whitespace() {
         if collapsed.chars().count() + 1 + word.chars().count() > SESSION_NAME_MAX_CHARS {
             break;
         }
@@ -546,9 +572,8 @@ fn normalize_session_name_for_read(name: &str) -> Option<String> {
             collapsed.push(' ');
         }
         collapsed.push_str(word);
-        word_count += 1;
     }
-    (word_count >= 2).then_some(collapsed)
+    (collapsed.split_whitespace().count() >= 2).then_some(collapsed)
 }
 
 pub(crate) fn normalize_session_name_for_write(name: &str) -> Option<String> {
@@ -668,12 +693,24 @@ pub(crate) fn append_session_name(target: &SessionNameWriteTarget, name: &str) -
                 .map_err(io::Error::other)?,
         }),
     };
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&target.path)?;
+    let needs_separator = if file.metadata()?.len() == 0 {
+        false
+    } else {
+        file.seek(io::SeekFrom::End(-1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        last[0] != b'\n'
+    };
     let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
     line.push(b'\n');
-    OpenOptions::new()
-        .append(true)
-        .open(&target.path)?
-        .write_all(&line)?;
+    if needs_separator {
+        line.insert(0, b'\n');
+    }
+    file.write_all(&line)?;
     Ok(true)
 }
 
@@ -1096,6 +1133,27 @@ mod tests {
     }
 
     #[test]
+    fn inbound_session_names_preserve_written_paths_emails_and_handles() {
+        let name = "Review /tmp/report for dev@example.com with @ops";
+        let claude = serde_json::json!({
+            "type": "custom-title",
+            "customTitle": name,
+            "sessionId": "s1",
+        })
+        .to_string();
+        let codex = serde_json::json!({
+            "id": "t1",
+            "thread_name": name,
+        })
+        .to_string();
+        assert_eq!(latest_session_name(&claude, "s1").as_deref(), Some(name));
+        assert_eq!(
+            latest_codex_thread_name(&codex, "t1").as_deref(),
+            Some(name)
+        );
+    }
+
+    #[test]
     fn session_name_request_is_guarded_and_carries_only_the_name() {
         let input =
             r#"{"hook_event_name":"Stop","session_id":"s1","transcript_path":"/tmp/s1.jsonl"}"#;
@@ -1260,7 +1318,7 @@ mod tests {
         let claude_dir = root.join("projects/-tmp-repro");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let transcript = claude_dir.join("claude-session.jsonl");
-        std::fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+        std::fs::write(&transcript, b"{\"type\":\"user\"}").unwrap();
         let claude = SessionNameWriteTarget::new(
             WorkTitleProvider::Claude,
             "claude-session".into(),
@@ -1274,11 +1332,20 @@ mod tests {
             .unwrap()
             .to_string();
         let claude_record: serde_json::Value = serde_json::from_str(&claude_line).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&transcript)
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
         assert_eq!(claude_record["type"], "custom-title");
         assert_eq!(claude_record["customTitle"], "Review billing retries");
         assert_eq!(claude_record["sessionId"], "claude-session");
 
-        assert!(append_session_name(&claude, "  Review /tmp logs  ").unwrap());
+        let exact_name = "Review /tmp/report for dev@example.com with @ops";
+        assert!(append_session_name(&claude, &format!("  {exact_name}  ")).unwrap());
+        let claude_contents = std::fs::read_to_string(&transcript).unwrap();
         let exact_line = std::fs::read_to_string(&transcript)
             .unwrap()
             .lines()
@@ -1286,12 +1353,16 @@ mod tests {
             .unwrap()
             .to_string();
         let exact_record: serde_json::Value = serde_json::from_str(&exact_line).unwrap();
-        assert_eq!(exact_record["customTitle"], "Review /tmp logs");
+        assert_eq!(exact_record["customTitle"], exact_name);
+        assert_eq!(
+            latest_session_name(&claude_contents, "claude-session").as_deref(),
+            Some(exact_name)
+        );
 
         let index = root.join("session_index.jsonl");
         std::fs::write(
             &index,
-            b"{\"id\":\"codex-thread\",\"thread_name\":\"Original thread\"}\n",
+            b"{\"id\":\"codex-thread\",\"thread_name\":\"Original thread\"}",
         )
         .unwrap();
         assert_eq!(
@@ -1311,10 +1382,18 @@ mod tests {
             .unwrap()
             .to_string();
         let codex_record: serde_json::Value = serde_json::from_str(&codex_line).unwrap();
+        assert_eq!(std::fs::read_to_string(&index).unwrap().lines().count(), 2);
         assert_eq!(codex_record["id"], "codex-thread");
         assert_eq!(codex_record["thread_name"], "Audit session naming");
         let timestamp = codex_record["updated_at"].as_str().unwrap();
         assert!(timestamp.contains('T') && timestamp.ends_with('Z'));
+
+        assert!(append_session_name(&codex, exact_name).unwrap());
+        let codex_contents = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            latest_codex_thread_name(&codex_contents, "codex-thread").as_deref(),
+            Some(exact_name)
+        );
 
         let before = std::fs::read(&index).unwrap();
         assert!(!append_session_name(&codex, "random-id").unwrap());
