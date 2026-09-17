@@ -15201,13 +15201,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  sample-prz✓ pi  2m");
+        assert_eq!(github_depth, "    ●  sampl… ◷  ✓ pi  2m");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "      ●  sample…z✓ pi  2m");
+        assert_eq!(repo_branch_depth, "      ●  sam… ◷  ✓ pi  2m");
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sample-li…z✓ pi  2m");
+        assert_eq!(nested_ticket, "   ●  sample… ◷  ✓ pi  2m");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
