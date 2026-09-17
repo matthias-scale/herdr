@@ -573,13 +573,14 @@ mod tests {
     }
 
     fn set_persisted_session(app: &mut App, terminal_id: &TerminalId, source: &str) {
+        let agent = source.rsplit_once(':').map_or(source, |(_, agent)| agent);
         app.state
             .terminals
             .get_mut(terminal_id)
             .expect("root terminal")
             .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
                 source: source.into(),
-                agent: "codex".into(),
+                agent: agent.into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("settled-session")
                     .expect("valid session id"),
             });
@@ -2007,27 +2008,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settled_pane_stays_settled_through_its_own_suspension() {
-        let (mut app, pane_id, terminal_id, _rx) =
-            app_with_runtime(&crate::config::Config::default(), Default::default());
-        set_persisted_session(&mut app, &terminal_id, "herdr:codex");
-        let before = Instant::now();
-        let _ = app.refresh_pane_settlement_at(before);
-
-        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_013));
-        assert!(app.flush_pane_settlement_events());
-        for step in 1..=5 {
-            let _ = app.refresh_pane_settlement_at(before + Duration::from_millis(100 * step));
-        }
-
-        assert!(app.state.pane_is_settled(0, pane_id));
-        assert!(app
-            .terminal_runtimes
-            .get(&terminal_id)
-            .is_some_and(TerminalRuntime::is_suspended));
-    }
-
-    #[tokio::test]
     async fn suspending_a_settled_agent_is_not_foreground_activity() {
         let (mut app, pane_id, terminal_id, _rx) =
             app_with_runtime(&crate::config::Config::default(), Default::default());
@@ -2044,16 +2024,22 @@ mod tests {
 
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_014));
         assert!(app.flush_pane_settlement_events());
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .is_some_and(TerminalRuntime::is_suspended));
         app.last_foreground_process_refresh_generation += 1;
         let generation = app.last_foreground_process_refresh_generation;
         let _ = app.handle_foreground_processes_refreshed(
             generation,
-            vec![crate::app::foreground_process::ForegroundProcessObservation {
-                pane_id,
-                shell_pid,
-                process_name: None,
-                process_active: false,
-            }],
+            vec![
+                crate::app::foreground_process::ForegroundProcessObservation {
+                    pane_id,
+                    shell_pid,
+                    process_name: None,
+                    process_active: false,
+                },
+            ],
         );
         let _ = app.flush_pane_settlement_events();
 
