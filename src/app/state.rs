@@ -3160,11 +3160,17 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 pub const SETTLE_ITEM: &str = "Settle";
-pub const SNOOZE_DURATION_ITEMS: [(&str, u64); 4] = [
-    ("15 minutes", 15 * 60),
-    ("1 hour", 60 * 60),
-    ("4 hours", 4 * 60 * 60),
-    ("1 day", 24 * 60 * 60),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarSnoozePreset {
+    Duration(u64),
+    TomorrowMorning,
+}
+
+pub(crate) const SNOOZE_DURATION_ITEMS: [(&str, SidebarSnoozePreset); 4] = [
+    ("15 minutes", SidebarSnoozePreset::Duration(15 * 60)),
+    ("1 hour", SidebarSnoozePreset::Duration(60 * 60)),
+    ("4 hours", SidebarSnoozePreset::Duration(4 * 60 * 60)),
+    ("Tomorrow morning", SidebarSnoozePreset::TomorrowMorning),
 ];
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.

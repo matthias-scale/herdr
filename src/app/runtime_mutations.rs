@@ -131,17 +131,9 @@ impl App {
     pub(crate) fn runtime_pane_snooze(
         &mut self,
         id: &'static str,
-        pane_id: String,
-        duration_s: u64,
+        params: PaneSnoozeParams,
     ) -> String {
-        self.dispatch_runtime_mutation(
-            id,
-            Method::PaneSnooze(PaneSnoozeParams {
-                pane_id,
-                duration_s: Some(duration_s),
-                snoozed_until: None,
-            }),
-        )
+        self.dispatch_runtime_mutation(id, Method::PaneSnooze(params))
     }
 
     pub(crate) fn runtime_pane_rename(

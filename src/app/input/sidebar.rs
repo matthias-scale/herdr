@@ -22,6 +22,22 @@ pub(crate) enum SidebarWorkGroupKeyAction {
     Dispatch(Box<crate::app::home::HomeDispatchPlan>),
 }
 
+fn sidebar_snooze_params(
+    pane_id: String,
+    preset: crate::app::state::SidebarSnoozePreset,
+    tomorrow_morning: Option<u64>,
+) -> Option<crate::api::schema::PaneSnoozeParams> {
+    let (duration_s, snoozed_until) = match preset {
+        crate::app::state::SidebarSnoozePreset::Duration(duration_s) => (Some(duration_s), None),
+        crate::app::state::SidebarSnoozePreset::TomorrowMorning => (None, Some(tomorrow_morning?)),
+    };
+    Some(crate::api::schema::PaneSnoozeParams {
+        pane_id,
+        duration_s,
+        snoozed_until,
+    })
+}
+
 impl AppState {
     pub(crate) fn settled_target_has_resume_plan(
         &self,
@@ -1231,10 +1247,10 @@ impl super::super::App {
     }
 
     pub(crate) fn apply_sidebar_snooze_menu_action(&mut self, index: usize) {
-        let Some((_, duration_s)) = crate::app::state::SNOOZE_DURATION_ITEMS.get(index) else {
+        let Some((_, preset)) = crate::app::state::SNOOZE_DURATION_ITEMS.get(index) else {
             return;
         };
-        let Some(menu) = self.state.sidebar_snooze_menu.take() else {
+        let Some(menu) = self.state.sidebar_snooze_menu.as_ref() else {
             return;
         };
         let Some(ws_idx) = self
@@ -1248,7 +1264,17 @@ impl super::super::App {
         let Some(public_pane_id) = self.public_pane_id(ws_idx, menu.target.pane_id) else {
             return;
         };
-        self.runtime_pane_snooze("tui.sidebar.snooze", public_pane_id, *duration_s);
+        let tomorrow_morning = matches!(
+            preset,
+            crate::app::state::SidebarSnoozePreset::TomorrowMorning
+        )
+        .then(crate::platform::tomorrow_morning_unix)
+        .flatten();
+        let Some(params) = sidebar_snooze_params(public_pane_id, *preset, tomorrow_morning) else {
+            return;
+        };
+        self.state.sidebar_snooze_menu = None;
+        self.runtime_pane_snooze("tui.sidebar.snooze", params);
     }
 
     pub(crate) fn handle_sidebar_snooze_menu_key(&mut self, key: KeyEvent) -> bool {
@@ -2073,16 +2099,50 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_keyboard_reaches_snooze_and_settle_controls() {
+    fn snooze_presets_map_to_bounded_api_requests() {
+        let expected = [
+            ("15 minutes", Some(15 * 60), None),
+            ("1 hour", Some(60 * 60), None),
+            ("4 hours", Some(4 * 60 * 60), None),
+            ("Tomorrow morning", None, Some(1_725_033_600)),
+        ];
+
+        for ((label, preset), (expected_label, duration_s, snoozed_until)) in
+            crate::app::state::SNOOZE_DURATION_ITEMS
+                .into_iter()
+                .zip(expected)
+        {
+            let params = super::sidebar_snooze_params(
+                "workspace:pane".to_string(),
+                preset,
+                Some(1_725_033_600),
+            )
+            .expect("bounded snooze request");
+            assert_eq!(label, expected_label);
+            assert_eq!(params.pane_id, "workspace:pane");
+            assert_eq!(params.duration_s, duration_s);
+            assert_eq!(params.snoozed_until, snoozed_until);
+        }
+    }
+
+    #[tokio::test]
+    async fn sidebar_keyboard_reaches_snooze_and_settle_controls_through_input_routing() {
         let mut snooze = sidebar_order_app(false);
         crate::ui::compute_view(&mut snooze.state, Rect::new(0, 0, 120, 40));
         snooze.state.sidebar_focused = true;
-        assert!(snooze.handle_sidebar_session_action_key(KeyEvent::new(
-            KeyCode::Char('z'),
-            KeyModifiers::empty(),
-        )));
+        let _ = snooze
+            .handle_key_inner(crate::input::TerminalKey::new(
+                KeyCode::Char('z'),
+                KeyModifiers::empty(),
+            ))
+            .await;
         assert!(snooze.state.sidebar_snooze_menu.is_some());
-        snooze.handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let _ = snooze
+            .handle_key_inner(crate::input::TerminalKey::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            ))
+            .await;
         let snoozed_pane = snooze.state.workspaces[0]
             .focused_pane_id()
             .expect("focused pane");
@@ -2090,10 +2150,12 @@ mod tests {
 
         let mut settle = sidebar_order_app(false);
         settle.state.sidebar_focused = true;
-        assert!(settle.handle_sidebar_session_action_key(KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::empty(),
-        )));
+        let _ = settle
+            .handle_key_inner(crate::input::TerminalKey::new(
+                KeyCode::Char('s'),
+                KeyModifiers::empty(),
+            ))
+            .await;
         let settled_pane = settle.state.workspaces[0]
             .focused_pane_id()
             .expect("focused pane");

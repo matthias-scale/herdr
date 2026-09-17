@@ -163,6 +163,26 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
     datetime_from_tm(&local)
 }
 
+pub(crate) fn tomorrow_morning_unix() -> Option<u64> {
+    let mut now: libc::time_t = 0;
+    if unsafe { libc::time(&mut now) } == -1 {
+        return None;
+    }
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&now, &mut local) }.is_null() {
+        return None;
+    }
+    local.tm_mday = local.tm_mday.checked_add(1)?;
+    local.tm_hour = 9;
+    local.tm_min = 0;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+    let deadline = unsafe { libc::mktime(&mut local) };
+    (deadline > now)
+        .then(|| u64::try_from(deadline).ok())
+        .flatten()
+}
+
 pub(crate) fn status_commands_supported() -> bool {
     true
 }

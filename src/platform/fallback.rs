@@ -137,6 +137,10 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
     None
 }
 
+pub(crate) fn tomorrow_morning_unix() -> Option<u64> {
+    None
+}
+
 pub(crate) fn status_commands_supported() -> bool {
     false
 }
