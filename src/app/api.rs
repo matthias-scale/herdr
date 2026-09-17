@@ -2121,6 +2121,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unreachable_host_retains_prior_rows_as_unknown() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let mut reachable = fleet_host("office", "machine-a");
+        reachable.entries = vec![crate::fleet::FleetRow::test_run_row(
+            "office",
+            "retained-task",
+            false,
+        )];
+        assert!(app.install_fleet_snapshot(fleet_snapshot(vec![reachable])));
+
+        let mut unreachable = fleet_host("office", "machine-a");
+        unreachable.state = crate::fleet::HostState::Unreachable;
+        unreachable.error = Some("offline".into());
+        unreachable.remote_identity = Some("must-not-survive".into());
+        assert!(app.install_fleet_snapshot(fleet_snapshot(vec![unreachable])));
+
+        let host = &app.state.fleet_snapshot.hosts[0];
+        assert_eq!(host.state, crate::fleet::HostState::Unreachable);
+        assert_eq!(host.remote_identity, None);
+        assert_eq!(host.entries.len(), 1);
+        let retained = &app.state.remote_agent_panel_entries[0];
+        assert_eq!(retained.agent_ref.to_string(), "office::retained-task");
+        assert_eq!(retained.state, crate::detect::AgentState::Unknown);
+        assert!(retained.stale);
+    }
+
     fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {
         crate::app::home_catalog::parse_codex_catalog(
             format!(

@@ -1000,7 +1000,6 @@ pub(crate) struct RemoteAgentPanelEntry {
     narrow_host_suffix_width: usize,
     search_key_lowercase: String,
     work_context: crate::work_context::PaneWorkContext,
-    workspace_id: String,
     settled: bool,
     snoozed: bool,
     show_host_identity: bool,
@@ -1015,7 +1014,6 @@ impl RemoteAgentPanelEntry {
             entry,
             narrow_host,
             crate::work_context::PaneWorkContext::default(),
-            String::new(),
             false,
             false,
         )
@@ -1026,7 +1024,6 @@ impl RemoteAgentPanelEntry {
         entry: AgentPanelEntry,
         narrow_host: String,
         work_context: crate::work_context::PaneWorkContext,
-        workspace_id: String,
         settled: bool,
         snoozed: bool,
     ) -> Self {
@@ -1058,7 +1055,6 @@ impl RemoteAgentPanelEntry {
             narrow_host_suffix,
             search_key_lowercase,
             work_context,
-            workspace_id,
             settled,
             snoozed,
             show_host_identity: false,
@@ -1556,12 +1552,11 @@ pub(crate) fn remote_agent_panel_entries(
                 state
             };
             let stale = stale || unavailable;
-            let (work_context, workspace_id, settled, snoozed) = row
+            let (work_context, settled, snoozed) = row
                 .agent_info()
                 .map(|info| {
                     (
                         info.work_context.clone(),
-                        info.workspace_id.clone(),
                         info.settled_at.is_some(),
                         info.snoozed_until.is_some(),
                     )
@@ -1630,7 +1625,6 @@ pub(crate) fn remote_agent_panel_entries(
                     },
                     narrow_host,
                     work_context,
-                    workspace_id,
                     settled,
                     snoozed,
                 ),
@@ -2530,55 +2524,6 @@ fn take_remote_sidebar_row_visits() -> usize {
 /// collide with a repository, branch, or provider object of the same name.
 pub(crate) fn remote_host_collapse_key(host: &str) -> String {
     format!("host:{host}")
-}
-
-/// Remote agents are grouped under one collapsible header per host. The host
-/// is then the group's identity, so the rows below it drop their own host
-/// token (see `depth`-gated suffix in the row renderer) and read as densely as
-/// the local list.
-fn append_remote_rows(app: &AppState, rows: &mut Vec<SidebarRow>, terms: &[&str]) {
-    // The projection already emits hosts in configured order, so a group is a
-    // contiguous run. Grouping on the run keeps that order instead of imposing
-    // an alphabetical one the operator never chose.
-    let mut groups: Vec<(&str, Vec<&std::sync::Arc<RemoteAgentPanelEntry>>)> = Vec::new();
-    for entry in app.remote_agent_panel_entries.iter().filter(|entry| {
-        remote_sidebar_entry_matches_query(entry, terms)
-            && (!app.blocked_filter || entry_has_red_dot(entry))
-    }) {
-        let host = entry.agent_ref.host.as_str();
-        match groups.last_mut() {
-            Some((current, entries)) if *current == host => entries.push(entry),
-            _ => groups.push((host, vec![entry])),
-        }
-    }
-    for (host, entries) in groups {
-        let collapse_key = remote_host_collapse_key(host);
-        let collapsed = section_is_collapsed(app, &collapse_key);
-        let sort = effective_sidebar_group_sort(app, &collapse_key, SidebarSortMode::Default);
-        let mut entries = entries;
-        if let Some(cmp) = sidebar_entry_cmp(sort) {
-            entries.sort_by(|left, right| cmp(&left.entry, &right.entry));
-        }
-        rows.push(SidebarRow::NestedHeader {
-            key: collapse_key.clone(),
-            action_key: None,
-            sort_key: Some(collapse_key),
-            sort_mode: sort,
-            title: host.to_string(),
-            count: entries.len(),
-            collapsed,
-            dim: false,
-            status: None,
-            spawn: false,
-        });
-        if collapsed {
-            continue;
-        }
-        rows.extend(entries.into_iter().map(|entry| SidebarRow::RemoteAgent {
-            entry: std::sync::Arc::clone(entry),
-            depth: 1,
-        }));
-    }
 }
 
 fn pane_context_has_sidebar_metadata(context: &crate::work_context::PaneWorkContext) -> bool {
@@ -9162,20 +9107,138 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn remote_agents_share_the_local_group_projection_without_host_headers() {
+    fn unified_fleet_desktop_and_mobile_share_rows_without_host_headers() {
         let app = app_with_two_remote_hosts();
-        let rows = sidebar_rows(&app);
+        for (surface, rows) in [
+            ("desktop", sidebar_rows(&app)),
+            ("mobile", mobile_sidebar_rows(&app)),
+        ] {
+            assert!(
+                rows.iter().all(|row| !matches!(
+                    row,
+                    SidebarRow::NestedHeader { key, .. } if key.starts_with("host:")
+                )),
+                "{surface}"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
+                    .count(),
+                3,
+                "{surface}"
+            );
+        }
+    }
 
-        assert!(rows.iter().all(|row| !matches!(
-            row,
-            SidebarRow::NestedHeader { key, .. } if key.starts_with("host:")
-        )));
+    #[test]
+    fn unified_fleet_attached_proxy_source_agent_appears_once() {
+        let mut app = app_with_agents(&["proxy"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let source =
+            crate::api::schema::AgentRef::new("remote", "pane/1").expect("valid remote source");
+        app.remote_focus_proxy_agents
+            .insert(pane_id, source.clone());
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "remote",
+                    remote_agent_info(
+                        "pane/1",
+                        "source",
+                        crate::api::schema::AgentStatus::Working,
+                        false,
+                        false,
+                    ),
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+
+        let rows = sidebar_rows(&app);
         assert_eq!(
             rows.iter()
-                .filter(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
+                .filter(|row| matches!(row, SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref == source))
                 .count(),
-            3
+            1
         );
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.pane_id == pane_id
+        )));
+    }
+
+    #[test]
+    fn unified_fleet_local_and_remote_snooze_and_settle_share_sections() {
+        let mut app = app_with_agents(&["active", "snoozed", "settled"]);
+        let snoozed_pane = app.workspaces[1].tabs[0].root_pane;
+        let settled_pane = app.workspaces[2].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(1, snoozed_pane, 1_725_000_900));
+        assert!(app.settle_pane_at(2, settled_pane, 1_725_000_000));
+
+        let mut remote_snoozed = remote_agent_info(
+            "remote-snoozed",
+            "remote snoozed",
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+        );
+        remote_snoozed.snoozed_until = Some(1_725_000_900);
+        let mut remote_settled = remote_agent_info(
+            "remote-settled",
+            "remote settled",
+            crate::api::schema::AgentStatus::Done,
+            false,
+            false,
+        );
+        remote_settled.settled_at = Some(1_725_000_000);
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![
+                    crate::fleet::FleetRow::test_agent_info_row("remote", remote_snoozed),
+                    crate::fleet::FleetRow::test_agent_info_row("remote", remote_settled),
+                ],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+
+        let rows = sidebar_rows(&app);
+        let settled_at = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("settled section");
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.pane_id == snoozed_pane
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "remote-snoozed"
+        )));
+        assert!(rows[settled_at + 1..].iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.pane_id == settled_pane
+        )));
+        assert!(rows[settled_at + 1..].iter().any(|row| matches!(
+            row,
+            SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "remote-settled"
+        )));
     }
 
     fn expand_remote_host(app: &mut AppState, host: &str) {
@@ -10833,30 +10896,66 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn remote_rows_render_the_host_token_at_narrow_and_normal_widths() {
-        let entry = compact_test_entry("remote task", Some(Agent::Codex));
-        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
-            .expect("valid remote agent reference");
-        let remote = RemoteAgentPanelEntry::new(agent_ref, entry);
-        let app = AppState::test_new();
-
-        for width in [18, 40] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
-            terminal
-                .draw(|frame| {
-                    render_remote_compact_agent_row(
-                        &app,
-                        frame,
-                        &remote,
-                        Rect::new(0, 0, width, 1),
-                        0,
-                        None,
+    fn unified_fleet_ambiguous_row_keeps_dot_title_and_host_at_eighteen_columns() {
+        let mut app = app_with_agents(&["local"]);
+        let snapshot = crate::fleet::Snapshot {
+            hosts: ["ub1", "ub2"]
+                .into_iter()
+                .map(|host| {
+                    fleet_host_snapshot(
+                        host,
+                        false,
+                        vec![crate::fleet::FleetRow::test_agent_info_row(
+                            host,
+                            remote_agent_info(
+                                "same-agent",
+                                "same task",
+                                crate::api::schema::AgentStatus::Working,
+                                false,
+                                false,
+                            ),
+                        )],
                     )
                 })
-                .unwrap();
-            let rendered = row_text(terminal.backend().buffer(), 0, width);
-            assert!(rendered.contains("· ub2"), "width {width}: {rendered:?}");
-        }
+                .collect(),
+            ..crate::fleet::Snapshot::default()
+        };
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        let rows = sidebar_rows(&app);
+        let remote = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.host == "ub1" => {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .expect("ambiguous remote row");
+
+        let width = 18;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_remote_compact_agent_row(
+                    &app,
+                    frame,
+                    remote,
+                    Rect::new(0, 0, width, 1),
+                    1,
+                    None,
+                )
+            })
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), 0, width);
+        assert!(rendered.contains('●'), "missing state dot: {rendered:?}");
+        assert!(
+            rendered.contains("same"),
+            "missing readable title: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("· ub1"),
+            "missing host identity: {rendered:?}"
+        );
     }
 
     #[test]
