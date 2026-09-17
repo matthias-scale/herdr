@@ -1451,6 +1451,20 @@ mod tests {
         state.auto_settle_finished = false;
         state.auto_settle_done = true;
         state.settle_done_after = Duration::ZERO;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_closing_task_report(
+                None,
+                None,
+                Some(crate::api::schema::ClosingParseStatus::Ok),
+                Some(false),
+                now,
+            );
         state.handle_app_event(crate::events::AppEvent::HookStateReported {
             pane_id,
             source: "herdr:claude-closing-block".into(),
@@ -1503,9 +1517,6 @@ mod tests {
             0,
             "zero workers alone cannot prove task completion"
         );
-        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
         assert!(state
             .terminals
             .get_mut(&terminal_id)

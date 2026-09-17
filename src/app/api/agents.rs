@@ -869,6 +869,13 @@ mod tests {
             false,
             screen_observed_at,
         );
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            hook_reported_at,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -1190,6 +1197,17 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .apply_closing_task_report(
+                    None,
+                    None,
+                    Some(crate::api::schema::ClosingParseStatus::Ok),
+                    Some(false),
+                    std::time::Instant::now(),
+                );
             let screen = include_bytes!(
                 "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
             );
@@ -1286,6 +1304,17 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .apply_closing_task_report(
+                    None,
+                    None,
+                    Some(crate::api::schema::ClosingParseStatus::Ok),
+                    Some(false),
+                    std::time::Instant::now(),
+                );
             let screen = include_bytes!(
                 "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
             );

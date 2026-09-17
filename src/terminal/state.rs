@@ -874,6 +874,19 @@ impl TerminalState {
         changed
     }
 
+    fn clear_closing_task_report(&mut self, now: Instant) -> bool {
+        self.metadata_tokens.patch(
+            HashMap::from([
+                ("closing_completion".into(), None),
+                ("closing_wait".into(), None),
+                ("closing_parse".into(), None),
+                ("closing_workers_unknown".into(), None),
+            ]),
+            None,
+            now,
+        )
+    }
+
     pub(crate) fn apply_closing_contract_tokens(
         &mut self,
         tokens: &HashMap<String, Option<String>>,
@@ -1695,16 +1708,7 @@ impl TerminalState {
             self.closing_decisions.clear();
             self.closing_report_subagents = Some(0);
             self.closing_idle = None;
-            self.metadata_tokens.patch(
-                HashMap::from([
-                    ("closing_completion".into(), None),
-                    ("closing_wait".into(), None),
-                    ("closing_parse".into(), None),
-                    ("closing_workers_unknown".into(), None),
-                ]),
-                None,
-                now,
-            );
+            self.clear_closing_task_report(now);
         }
         self.revision = self.revision.wrapping_add(1);
         true
@@ -3239,6 +3243,10 @@ impl TerminalState {
             return None;
         }
 
+        let retiring_closing_report = self.hook_authority.as_ref().is_some_and(|authority| {
+            crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        });
+
         let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
@@ -3246,6 +3254,10 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let authority = self.hook_authority.as_mut()?;
         authority.retired_at = Some(observed_at);
+        let task_report_cleared = retiring_closing_report && self.clear_closing_task_report(now);
+        if task_report_cleared {
+            self.revision = self.revision.wrapping_add(1);
+        }
 
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -3259,7 +3271,7 @@ impl TerminalState {
             session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
-            sidebar_projection_changed: false,
+            sidebar_projection_changed: task_report_cleared,
         })
     }
 
@@ -10876,6 +10888,13 @@ mod tests {
         let reported_at = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            reported_at,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
