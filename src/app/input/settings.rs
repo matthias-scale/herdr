@@ -517,9 +517,15 @@ impl AppState {
             SettingsSection::General => {
                 let list_y = area.y + 2;
                 let offset = row.checked_sub(list_y)?;
+                let list_height = area.height.saturating_sub(2);
+                let scroll =
+                    crate::ui::general_row_scroll(self.settings.list.selected, list_height);
                 crate::ui::general_row_offsets()
                     .into_iter()
-                    .position(|(start, height)| offset >= start && offset < start + height)
+                    .position(|(start, height)| {
+                        let offset = offset.saturating_add(scroll);
+                        offset >= start && offset < start + height
+                    })
             }
             SettingsSection::Theme => {
                 let max_visible = area.height as usize;
