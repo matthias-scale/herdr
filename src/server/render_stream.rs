@@ -621,6 +621,18 @@ mod render_scale_benchmark {
         app_with(workspaces)
     }
 
+    fn app_with_working_sessions(workspace_count: usize, opacity: u8) -> AppState {
+        let mut app = app_with_workspaces(workspace_count);
+        app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.detected_agent = Some(crate::detect::Agent::Codex);
+            terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Working);
+        }
+        app.reconcile_sidebar_presentation();
+        app.working_row_opacity_percent = opacity;
+        app
+    }
+
     fn app_with_active_panes(pane_count: usize) -> AppState {
         let history = history();
         let mut workspace = Workspace::test_new("bench");
@@ -755,6 +767,10 @@ mod render_scale_benchmark {
         [1, 15, 50].map(|count| (count, profile(build(count))))
     }
 
+    fn profile_working_cardinalities(opacity: u8) -> [(usize, RenderStats); 3] {
+        [1, 15, 50].map(|count| (count, profile(app_with_working_sessions(count, opacity))))
+    }
+
     fn profile_remote_cardinalities() -> [(usize, RenderStats); 3] {
         [1, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
     }
@@ -825,6 +841,14 @@ mod render_scale_benchmark {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "manual full-render scaling profile"]
     async fn render_scale_profile() {
+        print_profiles(
+            "blue-dot Working sessions at 100% opacity (one pane each)",
+            profile_working_cardinalities(100),
+        );
+        print_profiles(
+            "blue-dot Working sessions at 25% opacity (one pane each)",
+            profile_working_cardinalities(25),
+        );
         print_profiles(
             "background-workspace resize/layout (one pane each)",
             profile_cardinalities(app_with_workspaces),
