@@ -1485,7 +1485,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
     def test_short_reply_payload_cannot_clear_merge_base_dependencies(self):
         block = closing_block.parse("Progressing.")
-        with self._isolated():
+        with self._isolated(), mock.patch.object(herdr_status, "_rpc") as rpc:
             outcome = herdr_status.report(
                 agent="codex",
                 blocking=block.blocking,
@@ -1507,13 +1507,19 @@ class ClosingBlockV2Tests(unittest.TestCase):
         for key in ("agents", "agent_names", "gates", "items", "decisions"):
             self.assertNotIn(key, payload)
 
+        report_params = rpc.call_args_list[1].args[3]
+        for key in ("agents", "gates", "items", "decisions"):
+            self.assertNotIn(key, report_params)
+        metadata_tokens = rpc.call_args_list[2].args[3]["tokens"]
+        self.assertNotIn("closing_agents", metadata_tokens)
+
         # The merge-base server only replaced dependencies when all three CAP
         # arrays were present. Replaying this payload must leave both facts intact.
         merge_base_state = {"gates": ["pending gate"], "agents": 2}
-        if all(key in payload for key in ("gates", "items", "decisions")):
+        if all(key in report_params for key in ("gates", "items", "decisions")):
             merge_base_state = {
-                "gates": payload["gates"],
-                "agents": payload.get("agents"),
+                "gates": report_params["gates"],
+                "agents": report_params.get("agents"),
             }
         self.assertEqual(merge_base_state, {"gates": ["pending gate"], "agents": 2})
 
