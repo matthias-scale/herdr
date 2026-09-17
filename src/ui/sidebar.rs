@@ -1650,7 +1650,7 @@ fn remote_agent_panel_entries_at(
                         prio: false,
                         starred: false,
                         state: lifecycle.state,
-                        attention_tier: Some(lifecycle.attention_tier),
+                        attention_tier: lifecycle.attention_tier,
                         open_blockers: lifecycle.open_blockers,
                         completion_tier: None,
                         usage_limited: lifecycle.usage_limited,
