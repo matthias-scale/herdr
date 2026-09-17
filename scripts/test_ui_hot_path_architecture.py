@@ -135,6 +135,21 @@ def production_code(source: str) -> str:
     return code
 
 
+def function_body(source: str, signature: str) -> str:
+    code = production_code(source)
+    start = code.index(signature)
+    opening = code.index("{", start)
+    depth = 0
+    for index in range(opening, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[opening + 1 : index]
+    raise AssertionError(f"unclosed function: {signature}")
+
+
 def find_violations(paths, rules) -> list[str]:
     violations: list[str] = []
     for path in paths:
@@ -168,6 +183,22 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             "App/server code must use narrow terminal-state accessors:\n"
             + "\n".join(violations),
         )
+
+    def test_pane_projection_scans_closing_items_once_without_allocating(self) -> None:
+        pane_projection = function_body(
+            (PROJECT_ROOT / "src" / "pane" / "state.rs").read_text(encoding="utf-8"),
+            "fn agent_projection",
+        )
+        item_classification = function_body(
+            (PROJECT_ROOT / "src" / "api" / "schema" / "panes.rs").read_text(
+                encoding="utf-8"
+            ),
+            "fn requires_human_input",
+        )
+
+        self.assertNotIn("has_pending_human_input", pane_projection)
+        self.assertEqual(pane_projection.count(".closing_items"), 1)
+        self.assertNotIn("to_ascii_lowercase", item_classification)
 
     def test_scanner_ignores_non_production_references(self) -> None:
         source = '''

@@ -102,23 +102,23 @@ impl PaneState {
             };
         }
         let (state, seen) = terminal.sidebar_projection(self.seen);
-        let open_blockers = terminal.has_pending_human_input();
         let blocking_item_count = terminal
             .closing_items
             .iter()
             .filter(|item| item.requires_human_input())
             .count();
+        let has_closing_gates = !terminal.closing_gates.is_empty();
         PaneAgentProjection {
             state,
             seen,
             stale: terminal.supervisor_stale,
             attention_tier: attention_tier(
                 state,
-                !terminal.closing_gates.is_empty(),
+                has_closing_gates,
                 blocking_item_count > 0,
                 terminal.usage_limited,
             ),
-            open_blockers,
+            open_blockers: has_closing_gates || blocking_item_count > 0,
             gate_count: terminal.closing_gates.len() + blocking_item_count,
             usage_limited: terminal.usage_limited,
             waiting_on_agents: terminal.waiting_on_agents(),

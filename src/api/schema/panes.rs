@@ -603,10 +603,10 @@ pub struct ClosingBlockItem {
 
 impl ClosingBlockItem {
     pub(crate) fn requires_human_input(&self) -> bool {
-        matches!(
-            self.label.trim().to_ascii_lowercase().as_str(),
-            "gate" | "answer" | "verify"
-        )
+        let label = self.label.trim();
+        ["gate", "answer", "verify"]
+            .iter()
+            .any(|action| label.eq_ignore_ascii_case(action))
     }
 }
 
