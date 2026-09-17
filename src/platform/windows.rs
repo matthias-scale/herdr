@@ -537,6 +537,10 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
 }
 
 pub(crate) fn tomorrow_morning_unix() -> Option<u64> {
+    unsafe extern "C" {
+        fn _mktime64(local: *mut libc::tm) -> i64;
+    }
+
     let mut now: libc::time_t = 0;
     if unsafe { libc::time(&mut now) } == -1 {
         return None;
@@ -550,7 +554,9 @@ pub(crate) fn tomorrow_morning_unix() -> Option<u64> {
     local.tm_min = 0;
     local.tm_sec = 0;
     local.tm_isdst = -1;
-    let deadline = unsafe { libc::mktime(&mut local) };
+    // SAFETY: `local` is initialized by `localtime_s`; `_mktime64` accepts a
+    // mutable `tm` so it can normalize the next-day date and DST fields.
+    let deadline = unsafe { _mktime64(&mut local) };
     (deadline > now)
         .then(|| u64::try_from(deadline).ok())
         .flatten()
