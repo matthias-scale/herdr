@@ -86,13 +86,22 @@ pub(crate) fn pane_has_resume_plan(terminal: &crate::terminal::TerminalState) ->
 }
 
 fn derived_pane_label(state: &AppState, ws_idx: usize, pane_id: PaneId) -> Option<String> {
-    state
-        .workspaces
-        .get(ws_idx)?
-        .pane_details(&state.terminals)
-        .into_iter()
-        .find(|detail| detail.pane_id == pane_id)?
-        .pane_label
+    let workspace = state.workspaces.get(ws_idx)?;
+    let tab_idx = workspace
+        .tabs
+        .iter()
+        .position(|tab| tab.panes.contains_key(&pane_id))?;
+    let projection = workspace.tab_display_projection(&state.terminals, tab_idx)?;
+    match &projection {
+        crate::workspace::TabDisplayProjection::Manual(label) => Some(label.clone()),
+        crate::workspace::TabDisplayProjection::Derived { ticket, title, .. }
+            if ticket.is_some() || title.is_some() =>
+        {
+            crate::workspace::session_title(Some(&projection), None)
+        }
+        crate::workspace::TabDisplayProjection::Derived { .. }
+        | crate::workspace::TabDisplayProjection::Fallback(_) => None,
+    }
 }
 
 impl AppState {
@@ -2133,6 +2142,41 @@ mod tests {
         assert_eq!(
             app.state.terminals[&terminal_id].manual_label.as_deref(),
             Some("Current derived title")
+        );
+    }
+
+    #[tokio::test]
+    async fn settlement_label_preserves_session_name_instead_of_agent_identity() {
+        let (mut app, pane_id, terminal_id, _rx) = app_with_runtime(
+            &crate::config::Config::default(),
+            crate::work_context::PaneWorkContext {
+                session_name: Some("Herdr merges pending overview".into()),
+                ..Default::default()
+            },
+        );
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("root terminal");
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("settled-session")
+                .expect("valid session id"),
+        });
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_016));
+        assert!(app.flush_pane_settlement_events());
+
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("Herdr merges pending overview")
+        );
+        assert_ne!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("claude")
         );
     }
 

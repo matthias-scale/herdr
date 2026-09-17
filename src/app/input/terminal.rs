@@ -96,6 +96,11 @@ impl App {
         let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let has_bytes = !input.bytes.is_empty();
+        if has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
+                self.resume_settled_pane_before_input(pane_id);
+            }
+        }
         let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
             if has_bytes {
                 #[cfg(unix)]
@@ -512,6 +517,11 @@ impl App {
         let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(crate::app::LOCAL_INPUT_SOURCE, key)?;
         let has_bytes = !input.bytes.is_empty();
+        if has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
+                self.resume_settled_pane_before_input(pane_id);
+            }
+        }
         let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
             runtime.send_bytes(input.bytes).await.is_ok()
         } else {
@@ -2105,7 +2115,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicking_settled_pane_content_removes_it_from_settled_sidebar_section() {
+    async fn text_reply_routed_to_settled_pane_unsettles_it() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("settled-text-reply");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            pane_infos[0].inner_rect.width,
+            pane_infos[0].inner_rect.height,
+        );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+
+        app.handle_text_commit_headless("reply");
+
+        assert_eq!(rx.try_recv().expect("forwarded reply").as_ref(), b"reply");
+        assert!(!app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[tokio::test]
+    async fn clicking_settled_pane_content_keeps_it_in_settled_sidebar_section() {
         let mut app = app_for_mouse_test();
         let mut workspace = Workspace::test_new("settled-mouse-input");
         let pane_id = workspace.tabs[0].root_pane;
@@ -2140,8 +2175,8 @@ mod tests {
             inner.y,
         ));
 
-        assert!(!app.state.pane_is_settled(0, pane_id));
-        assert!(!crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert!(crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
             matches!(
                 row,
                 crate::ui::SidebarRow::SectionHeader { title, .. }

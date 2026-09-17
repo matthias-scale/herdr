@@ -4451,6 +4451,11 @@ impl App {
                     .get(ws_idx)
                     .and_then(|workspace| workspace.terminal_id(pane_id).cloned())
             });
+            if !text.is_empty() {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4517,6 +4522,11 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            if !text.is_empty() {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4581,6 +4591,11 @@ impl App {
                 .and_then(|workspace| workspace.focused_pane_id());
             let draft = text.clone();
             let has_text = !text.is_empty();
+            if has_text {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -5115,9 +5130,8 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
-                    MouseAction::FocusLiveSettledPane(target) => {
-                        self.focus_live_settled_pane(target)
-                    }
+                    MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
+                    MouseAction::SettlePane(target) => self.settle_sidebar_pane(target),
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
                             self.begin_tui_workspace_create("tui.mouse.workspace.create");
