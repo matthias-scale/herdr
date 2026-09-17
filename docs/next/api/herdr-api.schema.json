@@ -3546,6 +3546,7 @@
                 }
               ],
               "description": "Explicit task completion from the authoritative final report."
+            },
             "agents": {
               "format": "uint32",
               "minimum": 0,
