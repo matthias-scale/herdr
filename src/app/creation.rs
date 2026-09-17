@@ -316,6 +316,22 @@ impl App {
     /// Without one it opens the whole remote session, which is what the Hosts
     /// surface asks for.
     pub(crate) fn open_fleet_host_focused(&mut self, name: &str, focus_agent: Option<&str>) {
+        if let Some(agent_ref) =
+            focus_agent.and_then(|agent| crate::api::schema::AgentRef::new(name, agent).ok())
+        {
+            let proxy_pane = self
+                .state
+                .remote_focus_proxy_agents
+                .iter()
+                .find_map(|(pane_id, candidate)| (candidate == &agent_ref).then_some(*pane_id));
+            if let Some(pane_id) = proxy_pane {
+                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                    self.state.mode = Mode::Terminal;
+                    self.state.focus_pane_in_workspace(ws_idx, pane_id);
+                    return;
+                }
+            }
+        }
         let Some(configured_host) = self.fleet_poller_config.host(name) else {
             self.show_fleet_launch_error(
                 "host is no longer in the fleet configuration".to_string(),

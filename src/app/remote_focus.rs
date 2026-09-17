@@ -719,6 +719,9 @@ impl crate::app::App {
                     terminal_id,
                     public_pane_id,
                 );
+                self.state
+                    .remote_focus_proxy_agents
+                    .insert(pane_id, agent_ref.clone());
                 channels
             }
             Err(error) => {
@@ -876,7 +879,7 @@ impl crate::app::App {
     /// identity line becomes the pane label, and the input gate opens when
     /// the first complete frame has also arrived.
     fn activate_remote_proxy(&mut self, operation_id: &str, context: &RemoteControlContext) {
-        let Some((pane_id, terminal_id)) =
+        let Some((_pane_id, terminal_id)) =
             self.remote_focus_operations.proxy_location(operation_id)
         else {
             return;
@@ -886,15 +889,6 @@ impl crate::app::App {
             .agent_ref(operation_id)
             .map(|agent_ref| agent_ref.host.as_str())
             .unwrap_or(context.host.as_str());
-        if let Some(agent_ref) = self
-            .remote_focus_operations
-            .agent_ref(operation_id)
-            .cloned()
-        {
-            self.state
-                .remote_focus_proxy_agents
-                .insert(pane_id, agent_ref);
-        }
         let identity = remote_proxy_identity_line(configured_host, context);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.manual_label = Some(identity);
@@ -1154,6 +1148,72 @@ mod tests {
                 .is_err(),
             "refused keystrokes never reach the transport"
         );
+    }
+
+    #[test]
+    fn connecting_proxy_deduplicates_source_and_remote_row_refocuses_it() {
+        let (mut app, recording) = proxy_app();
+        let source = agent_ref();
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: source.host.clone(),
+                target: source.host.clone(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![crate::fleet::FleetRow::test_run_row(
+                    &source.host,
+                    &source.agent,
+                    false,
+                )],
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(&snapshot);
+
+        let started = app
+            .start_remote_focus_operation(source.clone())
+            .expect("operation starts");
+        let (proxy_pane, _) = app
+            .remote_focus_operations
+            .proxy_location(&started.operation_id)
+            .expect("connecting proxy location");
+        assert_eq!(
+            app.state.remote_focus_proxy_agents.get(&proxy_pane),
+            Some(&source),
+            "dedup identity starts with the proxy, before ControlReady"
+        );
+        let rows = crate::ui::sidebar_rows(&app.state);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, crate::ui::SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref == source))
+                .count(),
+            1
+        );
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            crate::ui::SidebarRow::Tab { entry, .. }
+                | crate::ui::SidebarRow::Agent { entry, .. }
+                if entry.pane_id == proxy_pane
+        )));
+
+        let original = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.focus_pane_in_workspace(0, original);
+        app.open_fleet_host_focused(&source.host, Some(&source.agent));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        let workspace = &app.state.workspaces[0];
+        assert_eq!(
+            workspace.tabs[workspace.active_tab_index()]
+                .layout
+                .focused(),
+            proxy_pane
+        );
+        assert_eq!(recording.lock().expect("lock").started.len(), 1);
     }
 
     #[test]
