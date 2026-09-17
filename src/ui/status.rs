@@ -924,11 +924,42 @@ pub(super) fn render_copy_feedback(
     frame.render_widget(Paragraph::new(text), inner);
 }
 
-pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {
+pub(super) fn config_diagnostic_marker_rect(area: Rect) -> Rect {
+    let width = area.width.min(3);
+    Rect::new(
+        area.right().saturating_sub(width),
+        area.y,
+        width,
+        u16::from(area.height > 0),
+    )
+}
+
+pub(super) fn render_config_diagnostic(
+    frame: &mut Frame,
+    area: Rect,
+    message: &str,
+    expanded: bool,
+    p: &Palette,
+) {
     let style = Style::default()
         .fg(panel_contrast_fg(p))
         .bg(p.yellow)
         .add_modifier(Modifier::BOLD);
+
+    if !expanded {
+        let marker_area = config_diagnostic_marker_rect(area);
+        if marker_area.is_empty() {
+            return;
+        }
+        let marker = match marker_area.width {
+            1 => "!",
+            2 => "! ",
+            _ => " ! ",
+        };
+        frame.render_widget(Clear, marker_area);
+        frame.render_widget(Paragraph::new(Span::styled(marker, style)), marker_area);
+        return;
+    }
 
     for (row, line) in message
         .lines()
