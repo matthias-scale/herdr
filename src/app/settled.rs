@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_on_agents_is_not_settled_until_a_zero_agent_close() {
+    fn waiting_on_agents_requires_zero_agent_close_and_completion_to_settle() {
         let now = Instant::now();
         let (mut state, pane_id) = state_with_context(Default::default());
         state.active = None;
@@ -1500,6 +1500,25 @@ mod tests {
         let settled_at = now + Duration::from_secs(1);
         assert_eq!(
             state.refresh_settled_panes_at(None, settled_at, 1_725_000_046),
+            0,
+            "zero workers alone cannot prove task completion"
+        );
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        assert!(state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_closing_task_report(
+                Some(crate::api::schema::ClosingCompletion::Complete),
+                None,
+                Some(crate::api::schema::ClosingParseStatus::Ok),
+                Some(false),
+                settled_at,
+            ));
+        assert_eq!(
+            state.refresh_settled_panes_at(None, settled_at, 1_725_000_047),
             1
         );
         assert!(state.pane_is_settled(0, pane_id));
