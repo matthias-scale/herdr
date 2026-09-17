@@ -550,10 +550,17 @@ fn compact_row_style(style: Style, bg: Option<Color>) -> Style {
 /// Terminal cells have no alpha channel, so fade the foreground toward the
 /// background actually painted under this row. Named and indexed colours use
 /// their xterm RGB values; an inherited terminal background can only use DIM.
+fn blue_working_state(
+    state: AgentState,
+    attention_tier: AttentionTier,
+    p: &Palette,
+    dot_color: Color,
+) -> bool {
+    state == AgentState::Working && attention_tier == AttentionTier::None && dot_color == p.blue
+}
+
 fn blue_working_row(entry: &AgentPanelEntry, p: &Palette, dot_color: Color) -> bool {
-    entry.state == AgentState::Working
-        && entry_attention_tier(entry) == AttentionTier::None
-        && dot_color == p.blue
+    blue_working_state(entry.state, entry_attention_tier(entry), p, dot_color)
 }
 
 fn working_row_style(app: &AppState, fade: bool, style: Style, bg: Option<Color>) -> Style {
@@ -562,26 +569,29 @@ fn working_row_style(app: &AppState, fade: bool, style: Style, bg: Option<Color>
         return compact_row_style(style, bg);
     }
     let row_bg = bg.unwrap_or_else(|| app.palette.sidebar_background());
-    let style = match (
-        style.fg.and_then(crate::app::state::color_rgb),
-        crate::app::state::color_rgb(row_bg),
-    ) {
-        (Some(foreground), Some(background)) => {
-            let blend = |foreground: u8, background: u8| {
-                ((u16::from(foreground) * u16::from(opacity)
-                    + u16::from(background) * u16::from(100 - opacity)
-                    + 50)
-                    / 100) as u8
-            };
-            style.fg(Color::Rgb(
-                blend(foreground.r, background.r),
-                blend(foreground.g, background.g),
-                blend(foreground.b, background.b),
-            ))
-        }
-        (Some(_), _) => style.add_modifier(Modifier::DIM),
-        _ => style,
+    // Reset inherits colors that the TUI cannot query. Use the conventional
+    // terminal defaults so every configured level still produces a distinct
+    // cell instead of collapsing 75/50/25% into the same DIM modifier.
+    let foreground = style.fg.and_then(crate::app::state::color_rgb).unwrap_or(
+        crate::terminal_theme::RgbColor {
+            r: 192,
+            g: 192,
+            b: 192,
+        },
+    );
+    let background = crate::app::state::color_rgb(row_bg)
+        .unwrap_or(crate::terminal_theme::RgbColor { r: 0, g: 0, b: 0 });
+    let blend = |foreground: u8, background: u8| {
+        ((u16::from(foreground) * u16::from(opacity)
+            + u16::from(background) * u16::from(100 - opacity)
+            + 50)
+            / 100) as u8
     };
+    let style = style.fg(Color::Rgb(
+        blend(foreground.r, background.r),
+        blend(foreground.g, background.g),
+        blend(foreground.b, background.b),
+    ));
     compact_row_style(style, bg)
 }
 
@@ -6472,7 +6482,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     })
                 });
                 let icon = compact_dot_for_state(agg_state, agg_seen, has_agent, false, false);
-                let icon_style = Style::default().fg(if has_agent {
+                let icon_color = if has_agent {
                     match attention_tier {
                         AttentionTier::Blocked => p.red,
                         AttentionTier::Attention => p.peach,
@@ -6480,7 +6490,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     }
                 } else {
                     p.overlay0
-                });
+                };
                 let is_selected = *ws_idx == app.selected && is_navigating;
                 let is_active = Some(*ws_idx) == app.active;
                 let selection_bg = workspace_selection_background(p, is_active);
@@ -6491,6 +6501,19 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 } else {
                     Style::default()
                 };
+                let icon_bg = if is_selected {
+                    Some(selection_bg)
+                } else if is_active && is_navigating {
+                    Some(p.active_row_bg)
+                } else {
+                    None
+                };
+                let icon_style = working_row_style(
+                    app,
+                    blue_working_state(agg_state, attention_tier, p, icon_color),
+                    Style::default().fg(icon_color),
+                    icon_bg,
+                );
                 let num_style = if is_selected {
                     Style::default()
                         .fg(p.text)
@@ -10250,6 +10273,98 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn terminal_palette_keeps_every_working_opacity_level_distinct() {
+        let mut app = AppState::test_new();
+        app.palette = crate::app::state::Palette::terminal();
+        let mut working = compact_test_entry("working task", Some(Agent::Claude));
+        working.state = AgentState::Working;
+        let agent_ref =
+            crate::api::schema::AgentRef::new("ub2", "pane/1").expect("valid remote reference");
+        let remote = RemoteAgentPanelEntry::new(agent_ref, working.clone());
+        let mut rendered_levels = Vec::new();
+
+        for opacity in [100, 75, 50, 25] {
+            app.working_row_opacity_percent = opacity;
+            let mut level = Vec::new();
+            for is_remote in [false, true] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        if is_remote {
+                            render_remote_compact_agent_row(
+                                &app,
+                                frame,
+                                &remote,
+                                Rect::new(0, 0, 40, 1),
+                                0,
+                                None,
+                            );
+                        } else {
+                            render_compact_agent_row(
+                                &app,
+                                frame,
+                                &working,
+                                Rect::new(0, 0, 40, 1),
+                                0,
+                                false,
+                                None,
+                            );
+                        }
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let dot_x = find_symbol_x(buffer, 0, 40, "●");
+                let title_x = find_symbol_x(buffer, 0, 40, "w");
+                level.push((
+                    buffer[(dot_x, 0)].style().fg,
+                    buffer[(title_x, 0)].style().fg,
+                ));
+            }
+            assert_eq!(level[0], level[1], "local and remote differ at {opacity}%");
+            rendered_levels.push(level[0]);
+        }
+
+        for (index, level) in rendered_levels.iter().enumerate() {
+            assert!(
+                !rendered_levels[..index].contains(level),
+                "opacity levels collapse at index {index}: {rendered_levels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_palette_fades_an_active_working_title_that_inherits_text_color() {
+        let mut app = AppState::test_new();
+        app.palette = crate::app::state::Palette::terminal();
+        app.active = Some(0);
+        app.working_row_opacity_percent = 50;
+        let mut working = compact_test_entry("working task", Some(Agent::Claude));
+        working.state = AgentState::Working;
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_compact_agent_row(
+                    &app,
+                    frame,
+                    &working,
+                    Rect::new(0, 0, 40, 1),
+                    0,
+                    true,
+                    None,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let title_x = find_symbol_x(buffer, 0, 40, "w");
+        assert_eq!(
+            buffer[(title_x, 0)].style().fg,
+            Some(Color::Rgb(96, 96, 96))
+        );
     }
 
     #[test]
@@ -15502,7 +15617,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn collapsed_local_and_remote_working_markers_match_each_opacity_level() {
+    fn collapsed_workspace_local_and_remote_working_markers_match_each_opacity_level() {
         let mut app = AppState::test_new();
         app.workspaces = vec![Workspace::test_new("working")];
         app.ensure_test_terminals();
@@ -15527,6 +15642,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 4, 20);
         let (list, _, _) = collapsed_sidebar_sections(area);
         let rows = sidebar_rows(&app);
+        let workspace_row_index = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::Workspace { .. }))
+            .expect("working workspace summary row");
         let local_row_index = rows
             .iter()
             .position(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
@@ -15545,6 +15664,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let buffer = display.backend().buffer();
             let expected =
                 blended_test_color(app.palette.blue, app.palette.sidebar_background(), opacity);
+            let workspace_expected = blended_test_color(
+                app.palette.blue,
+                workspace_selection_background(&app.palette, true),
+                opacity,
+            );
+            let workspace_y = list.y + workspace_row_index as u16;
+            let workspace_x = find_symbol_x(buffer, workspace_y, area.width, "●");
+            assert_eq!(
+                buffer[(workspace_x, workspace_y)].style().fg,
+                Some(workspace_expected)
+            );
             for row_index in [local_row_index, remote_row_index] {
                 let y = list.y + row_index as u16;
                 let x = find_symbol_x(buffer, y, area.width, "●");
