@@ -154,7 +154,7 @@ impl Tab {
                     closing_contract_met: terminal.closing_contract_met,
                     usage_limited: projection.usage_limited,
                     holds_shell: terminal.holds_shell,
-                    active_subagents: terminal.effective_active_subagents(),
+                    active_subagents: terminal.verified_active_subagents(),
                     waiting_on_agents: projection.waiting_on_agents,
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen,

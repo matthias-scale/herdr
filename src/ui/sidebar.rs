@@ -11237,7 +11237,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn waiting_on_agents_has_a_distinct_glyph_and_blocked_still_outranks_it() {
+    fn waiting_on_agents_stays_active_until_the_lifecycle_blocks() {
         let palette = Palette::one_dark();
         let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
         entry.waiting_on_agents = true;
@@ -11249,6 +11249,10 @@ pub(crate) mod tests {
 
         entry.open_blockers = true;
         assert_ne!(compact_row_dot(&entry), "◌");
+        assert_eq!(compact_row_color(&entry, &palette), palette.yellow);
+        assert_eq!(agent_dot_tooltip(&entry), "Waiting on agents");
+
+        entry.state = AgentState::Blocked;
         assert_eq!(compact_row_color(&entry, &palette), palette.red);
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
     }

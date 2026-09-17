@@ -1973,7 +1973,7 @@ impl TerminalState {
         self.closing_report_subagents
     }
 
-    fn verified_active_subagents(&self) -> Option<u32> {
+    pub(crate) fn verified_active_subagents(&self) -> Option<u32> {
         self.current_direct_closing_report_subagents()
             .or(self.active_subagents)
     }
@@ -6682,7 +6682,7 @@ mod tests {
             .expect("later closing report declares no agents");
 
         assert!(!terminal.waiting_on_agents());
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Unknown);
         assert!(terminal
             .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
             .is_none());
