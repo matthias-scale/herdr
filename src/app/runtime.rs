@@ -1732,6 +1732,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uncaptured_mouse_input_refreshes_activity_on_both_ingress_paths() {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let (runtime, mut pane_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                4,
+            );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.mouse_capture = false;
+        let mouse = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        for ingress in ["monolithic", "headless"] {
+            let stale_at = Instant::now() - Duration::from_secs(60);
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .expect("test pane")
+                .activity
+                .set_last_at(stale_at);
+            let event = crate::raw_input::RawInputEvent::Mouse(mouse);
+            if ingress == "monolithic" {
+                assert!(app.handle_raw_input_event(event).await);
+            } else {
+                app.route_client_events(vec![event], false);
+            }
+
+            assert!(
+                app.state.workspaces[0].tabs[0].panes[&pane_id]
+                    .activity
+                    .last_at()
+                    > stale_at,
+                "{ingress} ingress must refresh activity"
+            );
+            assert!(pane_input.try_recv().is_ok(), "{ingress} mouse forwarding");
+        }
+    }
+
+    #[tokio::test]
     async fn runtime_scheduler_ticks_stalled_agent_auto_nudge() {
         let now = Instant::now();
         let mut config = crate::config::Config::default();
