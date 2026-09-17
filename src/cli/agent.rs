@@ -159,6 +159,16 @@ fn codex_session_index_path() -> Option<String> {
         .map(str::to_string)
 }
 
+fn turn_title_session_path(
+    provider: crate::work_title::WorkTitleProvider,
+    codex_index_path: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match provider {
+        crate::work_title::WorkTitleProvider::Claude => None,
+        crate::work_title::WorkTitleProvider::Codex => codex_index_path(),
+    }
+}
+
 fn hook_session_matches_process(
     provider: crate::work_title::WorkTitleProvider,
     session_id: &str,
@@ -229,6 +239,7 @@ fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
     let Some(source) = metadata.applies_to_source.clone() else {
         return Ok(0);
     };
+    let agent_session_path = turn_title_session_path(provider, codex_session_index_path);
     let session_request = Request {
         id: format!("cli:agent:turn-title:session:{seq}"),
         method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
@@ -237,7 +248,7 @@ fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
             agent,
             seq: Some(seq),
             agent_session_id: Some(session_id),
-            agent_session_path: None,
+            agent_session_path,
             session_start_source: None,
         }),
     };
@@ -1238,7 +1249,7 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
 #[cfg(test)]
 mod interactive_launch_gate_tests {
     use super::{
-        agent_start_gated, codex_session_index_path, hook_session_matches_process,
+        agent_start_gated, hook_session_matches_process, turn_title_session_path,
         InteractiveLaunchContext,
     };
 
@@ -1310,22 +1321,16 @@ mod interactive_launch_gate_tests {
     }
 
     #[test]
-    fn codex_session_name_uses_the_pane_profile_index_path() {
-        let _lock = crate::integration::integration_env_lock();
-        let previous = std::env::var_os("CODEX_HOME");
-        let codex_home = std::env::temp_dir().join(format!(
-            "herdr-codex-session-name-home-{}",
-            std::process::id()
-        ));
-        std::env::set_var("CODEX_HOME", &codex_home);
+    fn codex_work_title_reports_the_pane_profile_index_path() {
+        let pane_codex_home = std::path::PathBuf::from("profiles/reviewer/codex");
+        let expected = pane_codex_home.join("session_index.jsonl");
         assert_eq!(
-            codex_session_index_path().as_deref(),
-            codex_home.join("session_index.jsonl").to_str()
+            turn_title_session_path(crate::work_title::WorkTitleProvider::Codex, || {
+                expected.to_str().map(str::to_string)
+            })
+            .as_deref(),
+            expected.to_str()
         );
-        match previous {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
     }
 
     #[test]

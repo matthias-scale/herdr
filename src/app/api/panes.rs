@@ -1650,12 +1650,7 @@ impl App {
                         crate::work_title::WorkTitleProvider::Codex => params
                             .agent_session_path
                             .as_deref()
-                            .map(std::path::PathBuf::from)
-                            .or_else(|| {
-                                crate::integration::codex_dir()
-                                    .ok()
-                                    .map(|home| home.join("session_index.jsonl"))
-                            }),
+                            .map(std::path::PathBuf::from),
                     };
                     candidate_path.and_then(|path| {
                         if existing_write_target.as_ref().is_some_and(|target| {
@@ -7958,9 +7953,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_rename_writes_to_the_bound_codex_home_index() {
-        let _env_lock = crate::integration::integration_env_lock();
-        let previous_codex_home = std::env::var_os("CODEX_HOME");
+    fn profile_codex_path_rebinds_a_pathless_session_and_drives_rename() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -7974,17 +7967,24 @@ mod tests {
             .unwrap()
             .set_detected_state(Some(Agent::Codex), AgentState::Idle);
 
-        let root = session_name_temp_dir("codex-pane-rename");
-        let index = root.join("session_index.jsonl");
-        std::env::set_var("CODEX_HOME", &root);
+        let root = session_name_temp_dir("codex-profile-pane-rename");
+        let pane_codex_home = root.join("pane-profile");
+        let server_codex_home = root.join("server-profile");
+        std::fs::create_dir_all(&pane_codex_home).unwrap();
+        std::fs::create_dir_all(&server_codex_home).unwrap();
+        let index = pane_codex_home.join("session_index.jsonl");
+        let server_index = server_codex_home.join("session_index.jsonl");
         let session_id = "codex-thread";
         std::fs::write(
             &index,
             format!(r#"{{"id":"{session_id}","thread_name":"Original thread"}}"#) + "\n",
         )
         .unwrap();
-        let session_response = app.handle_pane_report_agent_session(
-            "bind".into(),
+        let server_index_contents =
+            format!(r#"{{"id":"{session_id}","thread_name":"Wrong profile"}}"#) + "\n";
+        std::fs::write(&server_index, &server_index_contents).unwrap();
+        let pathless_response = app.handle_pane_report_agent_session(
+            "pathless-bind".into(),
             PaneReportAgentSessionParams {
                 pane_id: pane_id.clone(),
                 source: "herdr:codex".into(),
@@ -7995,7 +7995,24 @@ mod tests {
                 session_start_source: Some("startup".into()),
             },
         );
-        let _: SuccessResponse = serde_json::from_str(&session_response).unwrap();
+        let _: SuccessResponse = serde_json::from_str(&pathless_response).unwrap();
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_none());
+
+        let profile_path_response = app.handle_pane_report_agent_session(
+            "profile-path".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(2),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: Some(index.display().to_string()),
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&profile_path_response).unwrap();
 
         let rename_response = app.handle_pane_rename(
             "rename".into(),
@@ -8011,6 +8028,11 @@ mod tests {
         assert_eq!(record["id"], session_id);
         assert_eq!(record["thread_name"], "Audit session naming");
         assert!(record["updated_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(
+            std::fs::read_to_string(&server_index).unwrap(),
+            server_index_contents,
+            "the server must not resolve a Codex index from its own profile"
+        );
 
         let invalid_contents = "{\"id\":\"other-thread\",\"thread_name\":\"Other name\"}\n";
         std::fs::write(&index, invalid_contents).unwrap();
@@ -8020,7 +8042,7 @@ mod tests {
                 pane_id: pane_id.clone(),
                 source: "herdr:codex".into(),
                 agent: "codex".into(),
-                seq: Some(2),
+                seq: Some(3),
                 agent_session_id: Some(session_id.into()),
                 agent_session_path: None,
                 session_start_source: None,
@@ -8044,10 +8066,6 @@ mod tests {
             Some("Local name after invalid index")
         );
         std::fs::remove_dir_all(root).unwrap();
-        match previous_codex_home {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
     }
 
     #[test]
