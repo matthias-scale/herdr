@@ -9154,6 +9154,14 @@
             "name": {
               "type": "string"
             },
+            "snoozed_until": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "source": {
               "type": "string"
             },
