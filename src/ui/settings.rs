@@ -1077,11 +1077,12 @@ mod tests {
     }
 
     #[test]
-    fn general_row_offsets_give_the_hinted_row_two_lines() {
+    fn general_row_offsets_give_hinted_rows_two_lines() {
         let offsets = general_row_offsets();
         assert_eq!(offsets.len(), GeneralRow::ALL.len());
         assert_eq!(offsets[0], (0, 2));
-        assert_eq!(offsets[1], (2, 1));
+        assert_eq!(offsets[1], (2, 2));
+        assert_eq!(offsets[2], (4, 1));
     }
 
     #[test]
