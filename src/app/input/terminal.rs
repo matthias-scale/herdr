@@ -66,6 +66,9 @@ impl App {
         if self.state.handle_sidebar_subgroup_picker_key(key_event) {
             return None;
         }
+        if self.handle_sidebar_snooze_menu_key(key_event) {
+            return None;
+        }
 
         // This is the key already on its way to a pane, so the sidebar may only
         // intercept it while the sidebar owns the keyboard.
@@ -90,6 +93,9 @@ impl App {
                     self.dispatch_sidebar_work_group_plan(*plan);
                     return None;
                 }
+            }
+            if self.handle_sidebar_session_action_key(key_event) {
+                return None;
             }
         }
 
@@ -664,6 +670,60 @@ mod tests {
             app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
         assert!(target.is_none());
         assert!(app.state.sidebar_new_thread.is_none());
+    }
+
+    #[tokio::test]
+    async fn attached_client_routes_sidebar_session_keys_without_reaching_the_pane() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("sidebar-session-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_focused = true;
+        app.state.sidebar_width = 40;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        for code in [KeyCode::Char('z'), KeyCode::Down, KeyCode::Enter] {
+            app.route_client_events_from(
+                42,
+                vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                    code,
+                    KeyModifiers::empty(),
+                ))],
+                false,
+            );
+            assert!(
+                pane_input.try_recv().is_err(),
+                "sidebar-owned key reached the pane"
+            );
+        }
+        assert!(app.state.pane_is_snoozed(0, pane_id));
+
+        assert!(app.state.unsnooze_pane_at(
+            0,
+            pane_id,
+            crate::api::schema::PaneUnsnoozeReason::Explicit,
+            std::time::Instant::now(),
+        ));
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('s'),
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert!(
+            pane_input.try_recv().is_err(),
+            "settle shortcut reached the pane"
+        );
     }
 
     #[tokio::test]
