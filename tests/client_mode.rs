@@ -521,7 +521,7 @@ fn direct_attach_initial_mouse_capture_follows_config() {
 }
 
 #[test]
-fn client_sees_headless_startup_config_diagnostic() {
+fn client_sees_headless_startup_config_diagnostic_marker() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -582,17 +582,24 @@ fn client_sees_headless_startup_config_diagnostic() {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut found_diagnostic = false;
+    let mut found_diagnostic_marker = false;
     let mut last_frame_text = String::new();
     while Instant::now() < deadline {
         match read_server_message(&mut stream) {
             Ok((1, payload)) => {
                 let frame = decode_frame_payload(&payload).expect("decode frame");
                 last_frame_text = frame_text(&frame);
-                if last_frame_text.contains("config.toml")
-                    && last_frame_text.contains("herdr config check")
+                let width = usize::from(frame.width);
+                let top_right = (width >= 3 && frame.cells.len() >= width).then(|| {
+                    frame.cells[width - 3..width]
+                        .iter()
+                        .map(|cell| cell.symbol.as_str())
+                        .collect::<String>()
+                });
+                if top_right.as_deref() == Some(" ! ")
+                    && !last_frame_text.contains("herdr config check")
                 {
-                    found_diagnostic = true;
+                    found_diagnostic_marker = true;
                     break;
                 }
             }
@@ -602,8 +609,8 @@ fn client_sees_headless_startup_config_diagnostic() {
     }
 
     assert!(
-        found_diagnostic,
-        "attached client should see startup config parse diagnostic; last frame:\n{last_frame_text}"
+        found_diagnostic_marker,
+        "attached client should see the compact startup diagnostic marker; last frame:\n{last_frame_text}"
     );
 
     cleanup_spawned_herdr(spawned, base);
