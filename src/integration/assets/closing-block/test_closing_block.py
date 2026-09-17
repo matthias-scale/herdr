@@ -2409,6 +2409,7 @@ class QuestionGateHookTests(unittest.TestCase):
             gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
             completion="incomplete",
             parse_status="ok",
+            session_id="sess-1",
             pane_id=self.pane_id,
             sock_path="/tmp/herdr-question-gate-test.sock",
         )
@@ -2426,6 +2427,39 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(reports[1]["completion"], "incomplete")
         self.assertEqual(reports[1]["parse_status"], "ok")
 
+    def test_new_session_question_ignores_old_session_status(self):
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[{"n": 7, "label": "Gate", "text": "Old session gate"}],
+            completion="incomplete",
+            parse_status="ok",
+            session_id="sess-old",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        herdr_status.report(
+            agent="claude",
+            blocking=0,
+            agents=0,
+            completion="missing",
+            parse_status="missing",
+            session_id="sess-new",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(dict(self._PRE, session_id="sess-new"))
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(
+            [gate["text"] for gate in reports[0]["gates"]],
+            ["Which color do you prefer? — Red / Green"],
+        )
+
     def test_post_without_a_marker_cannot_clear_an_unrelated_pending_gate(self):
         import json
 
@@ -2436,6 +2470,7 @@ class QuestionGateHookTests(unittest.TestCase):
             gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
             completion="incomplete",
             parse_status="ok",
+            session_id="sess-1",
             pane_id=self.pane_id,
             sock_path="/tmp/herdr-question-gate-test.sock",
         )

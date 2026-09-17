@@ -1445,6 +1445,7 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let workers_unknown = params.workers_unknown;
         let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION))
             .then(|| {
                 params.gates.zip(params.items).zip(params.decisions).map(
@@ -1452,7 +1453,9 @@ impl App {
                         gates,
                         items,
                         decisions,
-                        agents: params.agents,
+                        agents: (workers_unknown != Some(true))
+                            .then_some(params.agents)
+                            .flatten(),
                     },
                 )
             })
@@ -1468,7 +1471,6 @@ impl App {
             (!wait.is_empty()).then_some(wait)
         });
         let parse_status = params.parse_status;
-        let workers_unknown = params.workers_unknown;
         let mut closing_block = closing_block;
         let malformed_closing_block = matches!(
             parse_status,
@@ -1874,6 +1876,13 @@ impl App {
                     ] {
                         tokens.remove(key);
                     }
+                }
+                if tokens
+                    .get("closing_workers_unknown")
+                    .and_then(Option::as_deref)
+                    == Some("1")
+                {
+                    tokens.remove("closing_agents");
                 }
                 if parse.as_deref() == Some("missing") {
                     tokens.remove("closing_blocking");
@@ -6205,6 +6214,50 @@ mod tests {
     }
 
     #[test]
+    fn installed_v2_idle_payload_keeps_the_legacy_done_projection() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        // Captured from the installed v2 adapter. Only request-routing fields
+        // are added; lifecycle fields are intentionally absent.
+        let legacy_payload = serde_json::json!({
+            "pane_id": pane_id,
+            "source": "herdr:claude-closing-block",
+            "agent": "claude",
+            "agent_names": [],
+            "agents": 0,
+            "blocking": 0,
+            "decisions": [],
+            "gates": [],
+            "items": [],
+            "reported_at": "2026-09-17T13:10:04.914583Z",
+            "seq": 1789650604914579484_u64,
+            "state": "idle",
+            "v": 2
+        });
+        let report: PaneReportAgentParams =
+            serde_json::from_value(legacy_payload).expect("installed v2 payload parses");
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("legacy-idle".into(), report))
+                .unwrap();
+
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+    }
+
+    #[test]
     fn missing_report_preserves_an_unknown_worker_claim_through_metadata() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
@@ -6263,6 +6316,65 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_adapter_workers_cannot_mask_a_live_native_subagent() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:claude",
+            "claude",
+            "session-current",
+        );
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_active_subagents(Some(1));
+
+        let requests = closing_block_text_adapter_requests(
+            &pane_id,
+            "session-current",
+            "**Critical action points (0 blocking)**\n\n\
+             1 agent running: reviewer — checking the patch.\n",
+        );
+        let adapter_params = requests
+            .iter()
+            .find(|request| request["method"] == "pane.report_agent")
+            .expect("adapter agent report")["params"]
+            .clone();
+        assert!(
+            adapter_params.get("agents").is_none(),
+            "unknown workers must not be serialized as a verified zero"
+        );
+        apply_closing_block_adapter_requests(&mut app, "unknown-workers", requests);
+
+        let mut unverified_zero = adapter_params;
+        unverified_zero["agents"] = serde_json::json!(0);
+        unverified_zero["seq"] = serde_json::json!(unverified_zero["seq"]
+            .as_u64()
+            .expect("adapter sequence")
+            .saturating_add(1));
+        let unverified_zero: PaneReportAgentParams =
+            serde_json::from_value(unverified_zero).expect("unverified count report parses");
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent("unverified-zero".into(), unverified_zero),
+        )
+        .unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        let pane = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .expect("reported pane");
+        assert_eq!(
+            pane.agent_projection(terminal).state,
+            AgentState::Working,
+            "an unverified adapter count must not override the native live count"
+        );
+        assert_eq!(terminal.verified_active_subagents(), Some(1));
+        assert!(!crate::app::pane_lifecycle::pane_is_done(pane, terminal));
     }
 
     #[cfg(unix)]

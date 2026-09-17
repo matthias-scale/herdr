@@ -190,7 +190,11 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
             ):
                 return None
             mirror_payload = dict(payload)
-            if payload.get("parse_status") == "missing" and isinstance(prior, dict):
+            if (
+                payload.get("parse_status") == "missing"
+                and isinstance(prior, dict)
+                and prior.get("session_id") == payload.get("session_id")
+            ):
                 for key in (
                     "blocking",
                     "agents",
@@ -306,6 +310,7 @@ def report(
     external_wait = external_wait.strip() if isinstance(external_wait, str) else None
     external_wait = external_wait or None
     workers_unknown = workers_unknown is True
+    reported_agents = None if workers_unknown else agents
     state = resolve_state(
         blocking, agents, state, len(action_points), external_wait
     )
@@ -316,7 +321,6 @@ def report(
         "reported_at": reported_at,
         "state": state,
         "blocking": blocking,
-        "agents": agents,
         "gates": gate_objects,
         "items": item_objects,
         "decisions": decision_objects,
@@ -326,6 +330,8 @@ def report(
         "parse_status": parse_status,
         "workers_unknown": workers_unknown,
     }
+    if reported_agents is not None:
+        payload["agents"] = reported_agents
     if title:
         payload["title"] = title
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
@@ -334,7 +340,10 @@ def report(
 
     outcome = {"payload": payload, "mirror": None, "socket": False}
     if pane_id:
-        outcome["mirror"] = write_mirror(pane_id, payload)
+        mirror_payload = dict(payload)
+        if session_id:
+            mirror_payload["session_id"] = session_id
+        outcome["mirror"] = write_mirror(pane_id, mirror_payload)
     if not (pane_id and sock_path):
         return outcome
 
@@ -352,7 +361,6 @@ def report(
 
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
                     "state": state, "seq": seq, "v": VERSION,
-                    "agents": agents,
                     "reported_at": reported_at,
                     "gates": gate_objects, "items": item_objects,
                     "decisions": decision_objects,
@@ -360,6 +368,8 @@ def report(
                     "external_wait": external_wait,
                     "parse_status": parse_status,
                     "workers_unknown": workers_unknown}
+    if reported_agents is not None:
+        agent_params["agents"] = reported_agents
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
         agent_params["wait"] = wait
         agent_params["eta_s"] = eta_s
@@ -370,7 +380,6 @@ def report(
     gate_texts = [_item_text(gate) for gate in gate_objects]
     tokens = {
         "closing_blocking": str(blocking),
-        "closing_agents": str(agents),
         "closing_idle": "1" if state == "idle" else "0",
         "closing_agent_names": "; ".join(agent_names)[:200],
         "closing_gates": "; ".join(gate_texts)[:200],
@@ -380,6 +389,8 @@ def report(
         "closing_workers_unknown": "1" if workers_unknown else "0",
         "session_title": (title or "")[:120],
     }
+    if reported_agents is not None:
+        tokens["closing_agents"] = str(reported_agents)
     if contract and isinstance(contract_met, bool):
         tokens["closing_contract"] = contract[:200]
         tokens["closing_contract_met"] = "1" if contract_met else "0"

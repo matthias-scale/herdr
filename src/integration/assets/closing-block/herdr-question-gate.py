@@ -55,14 +55,19 @@ def read_marker(pane_id: str) -> dict | None:
     return marker if isinstance(marker, dict) else None
 
 
-def read_prior_status(pane_id: str) -> dict:
+def read_prior_status(pane_id: str, session_id: object) -> dict:
     """Read the last complete structured set before adding a tool question."""
     try:
         with open(mirror_path(pane_id), encoding="utf-8") as fh:
             prior = json.load(fh)
     except (OSError, ValueError):
         return {}
-    if not isinstance(prior, dict) or prior.get("v") != 2:
+    if (
+        not isinstance(prior, dict)
+        or prior.get("v") != 2
+        or not isinstance(session_id, str)
+        or prior.get("session_id") != session_id
+    ):
         return {}
     return {
         "blocking": prior.get("blocking") if isinstance(prior.get("blocking"), int) else 0,
@@ -148,7 +153,7 @@ def gates_for(payload: dict) -> list[dict]:
 
 
 def open_gate(payload: dict, pane_id: str) -> dict:
-    prior = read_prior_status(pane_id)
+    prior = read_prior_status(pane_id, payload.get("session_id"))
     gates = [*(prior.get("gates") or []), *gates_for(payload)]
     outcome = report(
         agent="claude",

@@ -773,13 +773,13 @@ impl TerminalState {
     }
 
     fn closing_task_reported(&self) -> bool {
-        self.hook_authority.as_ref().is_some_and(|authority| {
-            authority.retired_at.is_none()
-                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
-        }) || self.closing_idle.is_some()
-            || self.closing_contract.is_some()
-            || self.metadata_tokens.get("closing_completion").is_some()
+        self.metadata_tokens.get("closing_completion").is_some()
             || self.metadata_tokens.get("closing_parse").is_some()
+            || self
+                .metadata_tokens
+                .get("closing_workers_unknown")
+                .is_some()
+            || self.metadata_tokens.get("closing_wait").is_some()
     }
 
     fn closing_task_complete(&self) -> bool {
@@ -1695,6 +1695,16 @@ impl TerminalState {
             self.closing_decisions.clear();
             self.closing_report_subagents = Some(0);
             self.closing_idle = None;
+            self.metadata_tokens.patch(
+                HashMap::from([
+                    ("closing_completion".into(), None),
+                    ("closing_wait".into(), None),
+                    ("closing_parse".into(), None),
+                    ("closing_workers_unknown".into(), None),
+                ]),
+                None,
+                now,
+            );
         }
         self.revision = self.revision.wrapping_add(1);
         true
@@ -4482,6 +4492,13 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
         terminal.set_hook_authority_at(
             "herdr:codex-closing-block".into(),
             "codex".into(),
@@ -6267,6 +6284,68 @@ mod tests {
             terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
             turn_started.checked_add(AGENT_BUSY_STALE_SILENCE)
         );
+    }
+
+    #[test]
+    fn resumed_turn_cannot_inherit_completion_from_the_previous_turn() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, false));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(2),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(3),
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Idle, true),
+            "the resumed turn needs fresh closing evidence before it can be done"
+        );
+        assert!(terminal.metadata_tokens.get("closing_completion").is_none());
     }
 
     #[test]
