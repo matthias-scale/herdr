@@ -2504,15 +2504,21 @@ fn compact_sidebar_rows_inner(
             entry.space_label_redundant = true;
         }
     }
-    // Lifecycle sections count and render sessions, not split panes. Aggregate
-    // first so one tab has one canonical representative in exactly one section.
-    let entries = ordered_tab_entries(app, &entries);
-    let (settled_entries, remaining_entries): (Vec<_>, Vec<_>) = entries
-        .into_iter()
-        .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
-    let (snoozed_entries, active_entries): (Vec<_>, Vec<_>) = remaining_entries
-        .into_iter()
-        .partition(|entry| app.pane_is_snoozed(entry.ws_idx, entry.pane_id));
+    // A split tab can contribute one row to more than one lifecycle section.
+    // Resolve each pane once through its known tab, then aggregate each class.
+    let mut active_panes = Vec::new();
+    let mut snoozed_panes = Vec::new();
+    let mut settled_panes = Vec::new();
+    for entry in entries {
+        match sidebar_entry_lifecycle(app, &entry) {
+            SidebarEntryLifecycle::Active => active_panes.push(entry),
+            SidebarEntryLifecycle::Snoozed => snoozed_panes.push(entry),
+            SidebarEntryLifecycle::Settled => settled_panes.push(entry),
+        }
+    }
+    let active_entries = ordered_tab_entries(app, &active_panes);
+    let snoozed_entries = ordered_tab_entries(app, &snoozed_panes);
+    let settled_entries = ordered_tab_entries(app, &settled_panes);
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
@@ -3249,23 +3255,37 @@ struct SidebarTabGroup {
     unlinked: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarEntryLifecycle {
+    Active,
+    Snoozed,
+    Settled,
+}
+
+fn sidebar_entry_lifecycle(app: &AppState, entry: &AgentPanelEntry) -> SidebarEntryLifecycle {
+    let Some(pane) = app
+        .workspaces
+        .get(entry.ws_idx)
+        .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
+        .and_then(|tab| tab.panes.get(&entry.pane_id))
+    else {
+        return SidebarEntryLifecycle::Active;
+    };
+    if pane.settled_at.is_some() {
+        SidebarEntryLifecycle::Settled
+    } else if pane.snoozed_until().is_some() {
+        SidebarEntryLifecycle::Snoozed
+    } else {
+        SidebarEntryLifecycle::Active
+    }
+}
+
 fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
-    let lifecycle_rank = |entry: &AgentPanelEntry| {
-        if !app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
-            && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
-        {
-            usize::from(!app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id))
-        } else if app.pane_is_snoozed(entry.ws_idx, entry.pane_id) {
-            2
-        } else {
-            3
-        }
-    };
     let mut representatives = std::collections::HashMap::new();
     for entry in entries {
         let key = (entry.ws_idx, entry.tab_idx);
-        let rank = lifecycle_rank(entry);
+        let rank = usize::from(!app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id));
         representatives
             .entry(key)
             .and_modify(|(pane_id, current_rank)| {
@@ -11072,6 +11092,109 @@ pub(crate) mod tests {
         )));
         assert!(!app.pane_is_snoozed(0, expires));
         assert!(!app.pane_is_snoozed(1, attention));
+    }
+
+    #[test]
+    fn split_tab_keeps_active_and_snoozed_panes_in_separate_rows() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("split snooze");
+        let active_pane = workspace.tabs[0].root_pane;
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+
+        let snoozed_terminal = app.workspaces[0].tabs[0].panes[&snoozed_pane]
+            .attached_terminal_id
+            .clone();
+        let working_at = std::time::Instant::now();
+        app.terminals
+            .get_mut(&snoozed_terminal)
+            .expect("snoozed pane terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                working_at,
+            );
+        app.reconcile_sidebar_presentation();
+        assert!(app.snooze_pane_at(0, snoozed_pane, 1_725_000_060));
+
+        let rows = sidebar_rows(&app);
+        let snoozed_section = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )
+            })
+            .expect("Snoozed section");
+        let active_entry = rows[..snoozed_section]
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("active sibling row");
+        assert_eq!(active_entry.pane_id, active_pane);
+        assert_eq!(active_entry.state, AgentState::Unknown);
+        let snoozed_entry = rows[snoozed_section + 1..]
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("snoozed pane row");
+        assert_eq!(snoozed_entry.pane_id, snoozed_pane);
+        assert_eq!(snoozed_entry.state, AgentState::Working);
+
+        assert!(app.unsnooze_pane_at(
+            0,
+            snoozed_pane,
+            crate::api::schema::PaneUnsnoozeReason::Explicit,
+            std::time::Instant::now(),
+        ));
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+                .count(),
+            1
+        );
+
+        assert!(app.snooze_pane_at(0, snoozed_pane, 1_725_000_120));
+        assert!(app.refresh_snoozes_at(std::time::Instant::now(), 1_725_000_120));
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
