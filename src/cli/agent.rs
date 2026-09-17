@@ -1322,7 +1322,9 @@ mod interactive_launch_gate_tests {
 
     #[test]
     fn codex_work_title_reports_the_pane_profile_index_path() {
-        let pane_codex_home = std::path::PathBuf::from("profiles/reviewer/codex");
+        let pane_codex_home = std::env::temp_dir().join("pane-profile-codex-home");
+        let server_process_codex_home = crate::integration::codex_dir().unwrap();
+        assert_ne!(pane_codex_home, server_process_codex_home);
         let expected = pane_codex_home.join("session_index.jsonl");
         assert_eq!(
             turn_title_session_path(crate::work_title::WorkTitleProvider::Codex, || {
