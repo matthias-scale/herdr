@@ -1243,6 +1243,12 @@
           "description": "Default expanded sidebar width in columns. Auto-scales based on workspace names."
         },
         {
+          "key": "ui.working_row_opacity_percent",
+          "type": "integer",
+          "default": "100",
+          "description": "Foreground opacity for blue-dot working rows, from 25 to 100. Settings cycles through 100, 75, 50, and 25."
+        },
+        {
           "key": "ui.sidebar_animation",
           "type": "boolean",
           "default": "true",

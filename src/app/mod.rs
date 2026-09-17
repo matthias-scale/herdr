@@ -1215,6 +1215,7 @@ impl App {
             agent_panel_scroll: 0,
             agent_panel_sort,
             status_indicators: config.ui.status_indicators,
+            working_row_opacity_percent: config.ui.working_row_opacity_percent,
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
@@ -2613,6 +2614,7 @@ impl App {
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.status_indicators = config.ui.status_indicators;
+                self.state.working_row_opacity_percent = config.ui.working_row_opacity_percent;
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 if sidebar_projection_changed {
@@ -6355,6 +6357,34 @@ mod tests {
         );
         assert_eq!(app.state.commit_message_model, "claude-opus-5");
         assert_eq!(app.state.branch_prefix, "live/");
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn working_row_opacity_general_edit_persists_and_reloads_live() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("working-row-opacity");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(app.state.working_row_opacity_percent, 100);
+        app.save_config_edit(crate::app::settings_general::ConfigEdit::Integer {
+            section: "ui",
+            key: "working_row_opacity_percent",
+            value: 75,
+        });
+        assert_eq!(app.state.working_row_opacity_percent, 75);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("working_row_opacity_percent = 75"));
+
+        std::fs::write(&path, "[ui]\nworking_row_opacity_percent = 50\n").unwrap();
+        app.apply_config_from_disk(false);
+        assert_eq!(app.state.working_row_opacity_percent, 50);
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

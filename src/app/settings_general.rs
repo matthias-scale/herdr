@@ -9,6 +9,7 @@ use crate::app::state::AppState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GeneralRow {
     ProjectGrouping,
+    WorkingRowOpacity,
     AutoSettleFinished,
     AutoSettleInactive,
     SettleAfterDays,
@@ -45,6 +46,7 @@ const NOTEPAD_HEIGHT_LADDER: [u64; 4] = [6, 8, 12, 16];
 const WORK_MINUTE_LADDER: [u64; 5] = [20, 25, 30, 45, 50];
 const SHORT_BREAK_MINUTE_LADDER: [u64; 3] = [3, 5, 10];
 const LONG_BREAK_MINUTE_LADDER: [u64; 3] = [15, 20, 30];
+const WORKING_OPACITY_LADDER: [u8; 4] = [100, 75, 50, 25];
 
 /// The next entry above `current`, wrapping to the first one at the top.
 fn next_in_ladder(ladder: &[u64], current: u64) -> u64 {
@@ -58,6 +60,7 @@ fn next_in_ladder(ladder: &[u64], current: u64) -> u64 {
 impl GeneralRow {
     pub(crate) const ALL: &'static [Self] = &[
         Self::ProjectGrouping,
+        Self::WorkingRowOpacity,
         Self::AutoSettleFinished,
         Self::AutoSettleInactive,
         Self::SettleAfterDays,
@@ -81,6 +84,7 @@ impl GeneralRow {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::ProjectGrouping => "Project grouping",
+            Self::WorkingRowOpacity => "Working row opacity",
             Self::AutoSettleFinished => "Auto-settle finished threads",
             Self::AutoSettleInactive => "Auto-settle inactive threads",
             Self::SettleAfterDays => "Days of inactivity before auto-settle",
@@ -106,6 +110,7 @@ impl GeneralRow {
     pub(crate) fn hint(self) -> Option<&'static str> {
         match self {
             Self::ProjectGrouping => Some("combine matching repos across hosts"),
+            Self::WorkingRowOpacity => Some("fade blue-dot sessions on every device"),
             Self::AutoSettleDone => Some("file idle agents with no pending work under Settled"),
             Self::NudgeResumedAgents => {
                 Some("after a restart, tell an idle resumed agent to carry on")
@@ -123,6 +128,7 @@ impl GeneralRow {
     pub(crate) fn config_key(self) -> (&'static str, &'static str) {
         match self {
             Self::ProjectGrouping => ("ui", "combine_repos_across_hosts"),
+            Self::WorkingRowOpacity => ("ui", "working_row_opacity_percent"),
             Self::AutoSettleFinished => ("session", "auto_settle_finished"),
             Self::AutoSettleInactive => ("session", "auto_settle_inactive"),
             Self::SettleAfterDays => ("session", "settle_after_days"),
@@ -150,6 +156,7 @@ impl GeneralRow {
         let minutes = |value: std::time::Duration| value.as_secs().div_ceil(60).to_string();
         match self {
             Self::ProjectGrouping => on_off(state.combine_repos_across_hosts),
+            Self::WorkingRowOpacity => format!("{}%", state.working_row_opacity_percent),
             Self::AutoSettleFinished => on_off(state.auto_settle_finished),
             Self::AutoSettleInactive => on_off(state.auto_settle_inactive),
             Self::SettleAfterDays => state
@@ -235,6 +242,20 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
     };
     match row {
         GeneralRow::ProjectGrouping => toggle(state.combine_repos_across_hosts),
+        GeneralRow::WorkingRowOpacity => {
+            let current = state.working_row_opacity_percent;
+            let index = WORKING_OPACITY_LADDER
+                .iter()
+                .position(|value| *value == current)
+                .unwrap_or(0);
+            Some(ConfigEdit::Integer {
+                section,
+                key,
+                value: u64::from(
+                    WORKING_OPACITY_LADDER[(index + 1) % WORKING_OPACITY_LADDER.len()],
+                ),
+            })
+        }
         GeneralRow::AutoSettleFinished => toggle(state.auto_settle_finished),
         GeneralRow::AutoSettleInactive => toggle(state.auto_settle_inactive),
         GeneralRow::AutoSettleDone => toggle(state.auto_settle_done),
@@ -321,7 +342,7 @@ mod tests {
         let total = keys.len();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(total, 19);
+        assert_eq!(total, 20);
         assert_eq!(keys.len(), total);
     }
 
@@ -336,11 +357,28 @@ mod tests {
         );
         assert_eq!(GeneralRow::AddProjectStartDir.value(&state), "last used");
         assert_eq!(GeneralRow::DefaultPanelSurfaces.value(&state), "none");
+        assert_eq!(GeneralRow::WorkingRowOpacity.value(&state), "100%");
 
         state.combine_repos_across_hosts = true;
         state.add_project_start_dir = "~/Repos".into();
         assert_eq!(GeneralRow::ProjectGrouping.value(&state), "on");
         assert_eq!(GeneralRow::AddProjectStartDir.value(&state), "~/Repos");
+    }
+
+    #[test]
+    fn working_row_opacity_cycles_in_decreasing_steps_and_wraps() {
+        let mut state = AppState::test_new();
+        for (current, next) in [(100, 75), (75, 50), (50, 25), (25, 100)] {
+            state.working_row_opacity_percent = current;
+            assert_eq!(
+                cycle_general_row(&state, GeneralRow::WorkingRowOpacity),
+                Some(ConfigEdit::Integer {
+                    section: "ui",
+                    key: "working_row_opacity_percent",
+                    value: next,
+                })
+            );
+        }
     }
 
     #[test]

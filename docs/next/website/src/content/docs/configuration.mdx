@@ -432,6 +432,16 @@ roll up pane state as `working`, `blocked`, or `done`; plan exhaustion uses
 `usage` until the live screen resumes. Agentless rows omit lifecycle status.
 Opening a completed tab clears `done` without moving it.
 
+**Settings → General → Working row opacity** cycles blue-dot working rows
+through 100%, 75%, 50%, and 25%. The same level applies to local and fleet
+rows, including the dots in the collapsed sidebar. Red and peach attention rows
+and green idle rows keep their normal colours. To set the value directly:
+
+```toml
+[ui]
+working_row_opacity_percent = 75
+```
+
 ### Status row
 
 Desktop layouts show a right-aligned, full-width status row above the tab bar. Its visible fields are subscription usage per provider account, an offline dot, an agent dot, device name, CPU, memory, and disk; the left side carries the quick-access buttons. Each value is a filled column, `▁` through `█`, coloured green below 80%, yellow from 80%, red from 90%.
