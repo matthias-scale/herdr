@@ -4151,16 +4151,6 @@ mod tests {
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
         )];
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 10));
-        let collapse_key = crate::ui::sidebar::remote_host_collapse_key("ub2");
-        let expansion_key = format!(
-            "{}:{collapse_key}",
-            app.state.sidebar_group_mode.collapse_namespace()
-        );
-        assert!(!app
-            .state
-            .expanded_remote_host_groups
-            .contains(&expansion_key));
-
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 
         assert_eq!(active_window(&app.state), original_window);
@@ -4175,10 +4165,6 @@ mod tests {
                 .map(ToString::to_string),
             Some("ub2::pane/with/slash".into())
         );
-        assert!(app
-            .state
-            .expanded_remote_host_groups
-            .contains(&expansion_key));
         assert!(
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
                 .iter()

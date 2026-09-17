@@ -3816,8 +3816,6 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
-        app.state
-            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub2"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -3854,49 +3852,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_remote_host_header_expands_it_on_the_first_click() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.active = Some(0);
-        app.state.ensure_test_terminals();
-        let entry = crate::ui::sidebar_thread_entries(&app.state)
-            .into_iter()
-            .next()
-            .expect("local agent panel entry");
-        let agent_ref = crate::api::schema::AgentRef::new("ub2", "pane/1")
-            .expect("valid remote agent reference");
-        app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
-            crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
-        )];
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
-        assert!(
-            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
-                .is_empty()
-        );
-        let collapse_key = crate::ui::sidebar::remote_host_collapse_key("ub2");
-        let header_row = (app.state.view.sidebar_rect.y..app.state.view.sidebar_rect.bottom())
-            .find(|row| {
-                crate::ui::sidebar_nested_header_at(&app.state, *row).as_deref()
-                    == Some(collapse_key.as_str())
-            })
-            .expect("remote host header row");
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            app.state.view.sidebar_rect.x + 2,
-            header_row,
-        ));
-
-        assert_eq!(
-            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
-                .len(),
-            1,
-            "one header click reveals the host's rows"
-        );
-    }
-
-    #[test]
-    fn mobile_switcher_toggles_remote_host_and_opens_remote_agent() {
+    fn mobile_switcher_opens_a_unified_remote_agent_row() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
@@ -3914,23 +3870,6 @@ mod tests {
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         let target_col = viewport.x + 2;
-        let header_row = (viewport.y..viewport.bottom())
-            .find(|row| {
-                matches!(
-                    crate::ui::mobile_switcher_target_at(&app.state, target_col, *row),
-                    Some(crate::ui::MobileSwitcherTarget::NestedHeader(ref key))
-                        if key == "host:ub2"
-                )
-            })
-            .expect("remote host header");
-
-        let header_result = app.state.handle_mobile_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            target_col,
-            header_row,
-        ));
-        assert!(matches!(header_result, MobileMouseResult::Consumed));
-
         let remote_row = (viewport.y..viewport.bottom())
             .find(|row| {
                 matches!(
@@ -3939,7 +3878,7 @@ mod tests {
                         if target == &agent_ref
                 )
             })
-            .expect("expanded remote agent row");
+            .expect("remote agent row");
         let result = app.state.handle_mobile_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             target_col,
@@ -3973,8 +3912,6 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
-        app.state
-            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4040,8 +3977,6 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
-        app.state
-            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4094,8 +4029,6 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
-        app.state
-            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4161,8 +4094,6 @@ mod tests {
                 ))
             })
             .collect();
-        app.state
-            .toggle_sidebar_group(&crate::ui::sidebar::remote_host_collapse_key("ub1"));
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let rows =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect);

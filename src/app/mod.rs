@@ -829,7 +829,6 @@ impl App {
                 crate::ui::RECENTLY_DONE_SECTION_TITLE
             ))
             .collect(),
-            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode,
             sidebar_focused: false,
             sidebar_group_menu_open: false,
