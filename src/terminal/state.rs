@@ -875,16 +875,32 @@ impl TerminalState {
     }
 
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
-        self.metadata_tokens.patch(
+        let structured_changed = self.closing_report_subagents.is_some()
+            || self.closing_idle.is_some()
+            || self.closing_contract.is_some()
+            || self.closing_contract_met.is_some()
+            || self.closing_contract_met_at.is_some();
+        self.closing_report_subagents = None;
+        self.closing_idle = None;
+        self.closing_contract = None;
+        self.closing_contract_met = None;
+        self.closing_contract_met_at = None;
+        let tokens_changed = self.metadata_tokens.patch(
             HashMap::from([
                 ("closing_completion".into(), None),
                 ("closing_wait".into(), None),
                 ("closing_parse".into(), None),
                 ("closing_workers_unknown".into(), None),
+                ("closing_agents".into(), None),
+                ("closing_agent_names".into(), None),
+                ("closing_idle".into(), None),
+                ("closing_contract".into(), None),
+                ("closing_contract_met".into(), None),
             ]),
             None,
             now,
-        )
+        );
+        structured_changed || tokens_changed
     }
 
     pub(crate) fn apply_closing_contract_tokens(
@@ -1706,8 +1722,6 @@ impl TerminalState {
             self.closing_gates.clear();
             self.closing_items.clear();
             self.closing_decisions.clear();
-            self.closing_report_subagents = Some(0);
-            self.closing_idle = None;
             self.clear_closing_task_report(now);
         }
         self.revision = self.revision.wrapping_add(1);
@@ -6358,6 +6372,78 @@ mod tests {
             "the resumed turn needs fresh closing evidence before it can be done"
         );
         assert!(terminal.metadata_tokens.get("closing_completion").is_none());
+    }
+
+    #[test]
+    fn resumed_turn_retires_legacy_completion_and_worker_evidence() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let legacy_tokens = HashMap::from([
+            ("closing_idle".into(), Some("1".into())),
+            ("closing_contract".into(), Some("finish the repair".into())),
+            ("closing_contract_met".into(), Some("1".into())),
+            ("closing_agents".into(), Some("2".into())),
+        ]);
+        assert!(terminal.apply_closing_contract_tokens(&legacy_tokens, now,));
+        assert!(terminal.metadata_tokens.patch(legacy_tokens, None, now));
+        terminal
+            .apply_closing_report_subagents_at(Some(2), now)
+            .expect("legacy direct worker evidence should be present");
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(2),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(3),
+        );
+
+        assert!(terminal.closing_contract_met.is_none());
+        assert!(terminal.closing_report_subagents.is_none());
+        for key in [
+            "closing_idle",
+            "closing_contract",
+            "closing_contract_met",
+            "closing_agents",
+        ] {
+            assert!(terminal.metadata_tokens.get(key).is_none(), "stale {key}");
+        }
+        assert!(!terminal.closing_task_complete());
+        assert!(!terminal.declares_running_subagents());
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
     }
 
     #[test]
