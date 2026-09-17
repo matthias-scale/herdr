@@ -7786,7 +7786,7 @@ mod tests {
         app.state.selected = 0;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let runtime_count = app.terminal_runtimes.len();
-        app.state.context_menu = Some(ContextMenuState {
+        let mut menu = ContextMenuState {
             kind: ContextMenuKind::Pane {
                 ws_idx: 0,
                 tab_idx: 0,
@@ -7804,8 +7804,14 @@ mod tests {
             },
             x: 2,
             y: 2,
-            list: MenuListState::new(1),
-        });
+            list: MenuListState::new(0),
+        };
+        menu.list.highlighted = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Split right")
+            .expect("split-right menu item");
+        app.state.context_menu = Some(menu);
         app.state.mode = Mode::ContextMenu;
 
         handle_context_menu_key(
