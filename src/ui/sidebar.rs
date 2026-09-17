@@ -227,8 +227,10 @@ const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
 const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
-const SIDEBAR_SELECTED_CONTROL_WIDTH: usize = 1;
-const SIDEBAR_SELECTED_CONTROLS_WIDTH: usize = SIDEBAR_SELECTED_CONTROL_WIDTH * 2;
+const SIDEBAR_SNOOZE_CONTROL_WIDTH: usize = 3;
+const SIDEBAR_SETTLE_CONTROL_WIDTH: usize = 2;
+const SIDEBAR_SELECTED_CONTROLS_WIDTH: usize =
+    SIDEBAR_SNOOZE_CONTROL_WIDTH + SIDEBAR_SETTLE_CONTROL_WIDTH;
 const SIDEBAR_SELECTED_MIN_TITLE_WIDTH: usize = 4;
 const SIDEBAR_MIN_CONTROLS_ROW_WIDTH: u16 = 19;
 
@@ -795,6 +797,8 @@ fn render_compact_agent_row_with_prefix(
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let controls_width = selected_row_controls_width(app, entry, tab, title_width, rect.width);
+    let snoozed = row_control_pane(app, entry, tab)
+        .is_some_and(|(pane_id, _)| app.pane_is_snoozed(entry.ws_idx, pane_id));
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
@@ -848,11 +852,15 @@ fn render_compact_agent_row_with_prefix(
     spans.extend([
         Span::styled(title_pad, compact_row_style(title_style, bg)),
         Span::styled(
-            if controls_width > 0 { "z" } else { "" },
-            compact_row_style(Style::default().fg(p.mauve).add_modifier(Modifier::DIM), bg),
+            if controls_width > 0 { " ◷ " } else { "" },
+            compact_row_style(Style::default().fg(p.mauve), bg),
         ),
         Span::styled(
-            if controls_width > 0 { "✓" } else { "" },
+            if controls_width == SIDEBAR_SELECTED_CONTROLS_WIDTH && !snoozed {
+                " ✓"
+            } else {
+                ""
+            },
             compact_row_style(Style::default().fg(p.overlay0), bg),
         ),
         Span::styled(provider, compact_row_style(provider_style, bg)),
@@ -879,6 +887,24 @@ fn selected_local_row_pane(
         .then_some(entry.pane_id)
 }
 
+fn row_control_pane(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    tab: bool,
+) -> Option<(crate::layout::PaneId, bool)> {
+    if app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
+        && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
+    {
+        return Some((entry.pane_id, false));
+    }
+    let pane_id = selected_local_row_pane(app, entry, tab)?;
+    if app.pane_is_settled(entry.ws_idx, pane_id) {
+        None
+    } else {
+        Some((pane_id, !app.pane_is_snoozed(entry.ws_idx, pane_id)))
+    }
+}
+
 fn selected_row_controls_width(
     app: &AppState,
     entry: &AgentPanelEntry,
@@ -886,14 +912,16 @@ fn selected_row_controls_width(
     title_width: usize,
     row_width: u16,
 ) -> usize {
-    selected_local_row_pane(app, entry, tab)
-        .filter(|pane_id| !app.pane_is_settled(entry.ws_idx, *pane_id))
-        .filter(|pane_id| !app.pane_is_snoozed(entry.ws_idx, *pane_id))
+    row_control_pane(app, entry, tab)
         .filter(|_| row_width >= SIDEBAR_MIN_CONTROLS_ROW_WIDTH)
-        .filter(|_| {
-            title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + SIDEBAR_SELECTED_CONTROLS_WIDTH
+        .filter(|(_, show_settle)| {
+            let controls_width = SIDEBAR_SNOOZE_CONTROL_WIDTH
+                + usize::from(*show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH;
+            title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + controls_width
         })
-        .map_or(0, |_| SIDEBAR_SELECTED_CONTROLS_WIDTH)
+        .map_or(0, |(_, show_settle)| {
+            SIDEBAR_SNOOZE_CONTROL_WIDTH + usize::from(show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH
+        })
 }
 
 pub(crate) fn selected_row_control_at(
@@ -925,17 +953,19 @@ pub(crate) fn selected_row_control_at(
     if column < start || column >= start.saturating_add(controls_width as u16) {
         return None;
     }
-    let pane_id = selected_local_row_pane(app, entry, tab)?;
-    if column < start.saturating_add(SIDEBAR_SELECTED_CONTROL_WIDTH as u16) {
+    let (pane_id, show_settle) = row_control_pane(app, entry, tab)?;
+    if column < start.saturating_add(SIDEBAR_SNOOZE_CONTROL_WIDTH as u16) {
         Some(crate::app::state::SidebarHoverAction::Snooze {
             ws_idx: entry.ws_idx,
             pane_id,
         })
-    } else {
+    } else if show_settle {
         Some(crate::app::state::SidebarHoverAction::Settle {
             ws_idx: entry.ws_idx,
             pane_id,
         })
+    } else {
+        None
     }
 }
 
@@ -5727,6 +5757,36 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     .to_string()
 }
 
+fn snooze_deadline_tooltip(
+    now: time::PrimitiveDateTime,
+    deadline: time::PrimitiveDateTime,
+) -> String {
+    let clock = format!("{:02}:{:02}", deadline.hour(), deadline.minute());
+    if deadline.date() == now.date() {
+        format!("Unsnoozes at {clock}")
+    } else {
+        format!("Unsnoozes {} at {clock}", deadline.date())
+    }
+}
+
+fn snooze_control_tooltip(app: &AppState, ws_idx: usize, pane_id: crate::layout::PaneId) -> String {
+    let deadline = app
+        .workspaces
+        .get(ws_idx)
+        .and_then(|workspace| workspace.pane_state(pane_id))
+        .and_then(crate::pane::PaneState::snoozed_until);
+    let Some(deadline) = deadline else {
+        return "Set time".to_string();
+    };
+    match (
+        crate::platform::local_datetime(),
+        crate::platform::local_datetime_at(deadline),
+    ) {
+        (Some(now), Some(deadline)) => snooze_deadline_tooltip(now, deadline),
+        _ => format!("Unsnoozes at UNIX {deadline}"),
+    }
+}
+
 /// Hover explanations for the parts of a sidebar row that are a glyph or a
 /// truncation rather than words: status glyphs, agent dots, and work titles the
 /// row was too narrow to spell out.
@@ -5801,38 +5861,36 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let controls_width =
                     selected_row_controls_width(app, entry, tab, title_width, body.width);
                 if controls_width > 0 {
-                    let Some(pane_id) = selected_local_row_pane(app, entry, tab) else {
+                    let Some((pane_id, show_settle)) = row_control_pane(app, entry, tab) else {
                         continue;
                     };
                     let start = prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
-                    for (offset, label, action) in [
-                        (
-                            0,
-                            "Snooze",
-                            crate::app::state::SidebarHoverAction::Snooze {
+                    if let Some(rect) =
+                        clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
+                    {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: snooze_control_tooltip(app, entry.ws_idx, pane_id),
+                            action: Some(crate::app::state::SidebarHoverAction::Snooze {
                                 ws_idx: entry.ws_idx,
                                 pane_id,
-                            },
-                        ),
-                        (
-                            SIDEBAR_SELECTED_CONTROL_WIDTH,
-                            "Settle",
-                            crate::app::state::SidebarHoverAction::Settle {
-                                ws_idx: entry.ws_idx,
-                                pane_id,
-                            },
-                        ),
-                    ] {
+                            }),
+                        });
+                    }
+                    if show_settle {
                         if let Some(rect) = clamp_row_cells(
                             body,
                             row_y,
-                            start + offset,
-                            SIDEBAR_SELECTED_CONTROL_WIDTH,
+                            start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                            SIDEBAR_SETTLE_CONTROL_WIDTH,
                         ) {
                             targets.push(crate::app::state::SidebarHoverTarget {
                                 rect,
-                                label: label.into(),
-                                action: Some(action),
+                                label: "Settle".into(),
+                                action: Some(crate::app::state::SidebarHoverAction::Settle {
+                                    ws_idx: entry.ws_idx,
+                                    pane_id,
+                                }),
                             });
                         }
                     }
@@ -8593,7 +8651,10 @@ pub(super) fn render_sidebar_object_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                format!("{} {label}", if selected { "▸" } else { " " }),
+                super::dropdown::pad_menu_row(
+                    &format!(" {} {label} ", if selected { "▸" } else { " " }),
+                    layout.list_rect.width,
+                ),
                 style,
             ))
         })
@@ -8867,11 +8928,11 @@ pub(crate) fn sidebar_snooze_menu_layout(
     super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
             anchor,
-            item_count: crate::app::state::SNOOZE_DURATION_ITEMS.len(),
+            item_count: crate::app::state::sidebar_snooze_menu_items(menu.snoozed).len(),
             selected: menu.selected,
             has_filter: false,
-            max_rows: crate::app::state::SNOOZE_DURATION_ITEMS.len(),
-            min_width: 18,
+            max_rows: crate::app::state::sidebar_snooze_menu_items(menu.snoozed).len(),
+            min_width: 34,
         },
         area,
     )
@@ -8885,7 +8946,7 @@ pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
-    let lines = crate::app::state::SNOOZE_DURATION_ITEMS
+    let lines = crate::app::state::sidebar_snooze_menu_items(menu.snoozed)
         .iter()
         .enumerate()
         .skip(layout.first_visible)
@@ -20881,6 +20942,42 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn snooze_control_tooltip_names_the_action_and_wake_time() {
+        let app = app_with_agents(&["alpha"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        assert_eq!(snooze_control_tooltip(&app, 0, pane_id), "Set time");
+
+        let today =
+            time::Date::from_calendar_date(2026, time::Month::September, 17).expect("valid date");
+        let tomorrow =
+            time::Date::from_calendar_date(2026, time::Month::September, 18).expect("valid date");
+        let now = time::PrimitiveDateTime::new(
+            today,
+            time::Time::from_hms(13, 5, 0).expect("valid time"),
+        );
+        assert_eq!(
+            snooze_deadline_tooltip(
+                now,
+                time::PrimitiveDateTime::new(
+                    today,
+                    time::Time::from_hms(14, 30, 0).expect("valid time"),
+                )
+            ),
+            "Unsnoozes at 14:30"
+        );
+        assert_eq!(
+            snooze_deadline_tooltip(
+                now,
+                time::PrimitiveDateTime::new(
+                    tomorrow,
+                    time::Time::from_hms(9, 0, 0).expect("valid time"),
+                )
+            ),
+            "Unsnoozes 2026-09-18 at 09:00"
+        );
+    }
+
+    #[test]
     fn hover_targets_anchor_on_the_agent_dot_a_row_actually_drew() {
         let app = app_with_agents(&["alpha"]);
         let area = Rect::new(0, 0, 32, 20);
@@ -20938,7 +21035,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     target.action,
                     Some(crate::app::state::SidebarHoverAction::Settle { .. })
                 )));
-                assert!(rendered.contains('z'), "{rendered:?}");
+                assert!(rendered.contains('◷'), "{rendered:?}");
                 assert!(rendered.contains('✓'), "{rendered:?}");
                 let settle = targets
                     .iter()

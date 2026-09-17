@@ -1226,7 +1226,6 @@ impl super::super::App {
         row: u16,
     ) {
         if self.state.pane_is_settled(ws_idx, pane_id)
-            || self.state.pane_is_snoozed(ws_idx, pane_id)
             || self
                 .state
                 .workspaces
@@ -1243,38 +1242,79 @@ impl super::super::App {
             },
             anchor: (column, row),
             selected: 0,
+            snoozed: self.state.pane_is_snoozed(ws_idx, pane_id),
         });
     }
 
-    pub(crate) fn apply_sidebar_snooze_menu_action(&mut self, index: usize) {
-        let Some((_, preset)) = crate::app::state::SNOOZE_DURATION_ITEMS.get(index) else {
+    pub(crate) fn open_snooze_time_input(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
             return;
         };
+        let Some(pane) = workspace.pane_state(pane_id) else {
+            return;
+        };
+        let prefill = pane
+            .snoozed_until()
+            .and_then(crate::platform::local_datetime_at)
+            .map(|deadline| format!("{:02}:{:02}", deadline.hour(), deadline.minute()))
+            .unwrap_or_default();
+        self.state.name_input = prefill;
+        self.state.name_input_replace_on_type = false;
+        self.state.snooze_time_input = Some(crate::app::state::SnoozeTimeInputState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: workspace.id.clone(),
+                pane_id,
+            },
+            error: None,
+        });
+        self.state.sidebar_snooze_menu = None;
+        self.state.mode = crate::app::Mode::SetSnoozeTime;
+    }
+
+    pub(crate) fn apply_sidebar_snooze_menu_action(&mut self, index: usize) {
         let Some(menu) = self.state.sidebar_snooze_menu.as_ref() else {
             return;
         };
+        let Some((_, action)) =
+            crate::app::state::sidebar_snooze_menu_items(menu.snoozed).get(index)
+        else {
+            return;
+        };
+        let target = menu.target.clone();
         let Some(ws_idx) = self
             .state
             .workspaces
             .iter()
-            .position(|workspace| workspace.id == menu.target.workspace_id)
+            .position(|workspace| workspace.id == target.workspace_id)
         else {
             return;
         };
-        let Some(public_pane_id) = self.public_pane_id(ws_idx, menu.target.pane_id) else {
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, target.pane_id) else {
             return;
         };
-        let tomorrow_morning = matches!(
-            preset,
-            crate::app::state::SidebarSnoozePreset::TomorrowMorning
-        )
-        .then(crate::platform::tomorrow_morning_unix)
-        .flatten();
-        let Some(params) = sidebar_snooze_params(public_pane_id, *preset, tomorrow_morning) else {
-            return;
-        };
-        self.state.sidebar_snooze_menu = None;
-        self.runtime_pane_snooze("tui.sidebar.snooze", params);
+        match action {
+            crate::app::state::SidebarSnoozeMenuAction::Preset(preset) => {
+                let tomorrow_morning = matches!(
+                    preset,
+                    crate::app::state::SidebarSnoozePreset::TomorrowMorning
+                )
+                .then(crate::platform::tomorrow_morning_unix)
+                .flatten();
+                let Some(params) = sidebar_snooze_params(public_pane_id, *preset, tomorrow_morning)
+                else {
+                    return;
+                };
+                self.state.sidebar_snooze_menu = None;
+                self.runtime_pane_snooze("tui.sidebar.snooze", params);
+            }
+            crate::app::state::SidebarSnoozeMenuAction::SetTime => {
+                self.open_snooze_time_input(ws_idx, target.pane_id);
+            }
+            crate::app::state::SidebarSnoozeMenuAction::Unsnooze => {
+                self.state.sidebar_snooze_menu = None;
+                self.runtime_pane_unsnooze("tui.sidebar.unsnooze", public_pane_id);
+            }
+        }
     }
 
     pub(crate) fn handle_sidebar_snooze_menu_key(&mut self, key: KeyEvent) -> bool {
@@ -1287,10 +1327,8 @@ impl super::super::App {
                 menu.selected = menu.selected.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                menu.selected = menu
-                    .selected
-                    .saturating_add(1)
-                    .min(crate::app::state::SNOOZE_DURATION_ITEMS.len() - 1);
+                let item_count = crate::app::state::sidebar_snooze_menu_items(menu.snoozed).len();
+                menu.selected = menu.selected.saturating_add(1).min(item_count - 1);
             }
             KeyCode::Enter => {
                 let index = menu.selected;
@@ -2059,13 +2097,14 @@ mod tests {
     #[test]
     fn clicking_sidebar_snooze_opens_durations_and_dispatches_the_api() {
         let mut app = sidebar_order_app(false);
+        app.state.sidebar_width = 40;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let target = app
             .state
             .view
             .sidebar_hover_targets
             .iter()
-            .find(|target| target.label == "Snooze")
+            .find(|target| target.label == "Set time")
             .cloned()
             .expect("snooze control target");
         let crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } =
@@ -2099,19 +2138,63 @@ mod tests {
     }
 
     #[test]
+    fn snoozed_section_timer_dropdown_unsnoozes_the_exact_pane() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_width = 40;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, pane_id, deadline));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let target = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                target.label.starts_with("Unsnoozes")
+                    && matches!(
+                        target.action.as_ref(),
+                        Some(crate::app::state::SidebarHoverAction::Snooze {
+                            pane_id: target_pane,
+                            ..
+                        }) if *target_pane == pane_id
+                    )
+            })
+            .cloned()
+            .expect("timer control in Snoozed section");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.rect.x,
+            target.rect.y,
+        ));
+        assert!(app
+            .state
+            .sidebar_snooze_menu
+            .as_ref()
+            .is_some_and(|menu| menu.snoozed));
+        app.handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(!app.state.pane_is_snoozed(0, pane_id));
+    }
+
+    #[test]
     fn snooze_presets_map_to_bounded_api_requests() {
         let expected = [
-            ("15 minutes", Some(15 * 60), None),
-            ("1 hour", Some(60 * 60), None),
-            ("4 hours", Some(4 * 60 * 60), None),
-            ("Tomorrow morning", None, Some(1_725_033_600)),
+            ("Snooze for 15 minutes", Some(15 * 60), None),
+            ("Snooze for 1 hour", Some(60 * 60), None),
+            ("Snooze for 4 hours", Some(4 * 60 * 60), None),
+            ("Snooze until tomorrow at 09:00", None, Some(1_725_033_600)),
         ];
 
-        for ((label, preset), (expected_label, duration_s, snoozed_until)) in
-            crate::app::state::SNOOZE_DURATION_ITEMS
+        for ((label, action), (expected_label, duration_s, snoozed_until)) in
+            crate::app::state::SNOOZE_MENU_ITEMS
                 .into_iter()
+                .take(4)
                 .zip(expected)
         {
+            let crate::app::state::SidebarSnoozeMenuAction::Preset(preset) = action else {
+                panic!("duration row must dispatch a preset");
+            };
             let params = super::sidebar_snooze_params(
                 "workspace:pane".to_string(),
                 preset,

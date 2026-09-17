@@ -1196,7 +1196,10 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace
+                        | Mode::RenameTab
+                        | Mode::RenamePane
+                        | Mode::SetSnoozeTime
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -2212,12 +2215,18 @@ impl AppState {
                         .sidebar_local_pane_at(mouse.row)
                         .map(|(_, _, pane_id)| pane_id)
                         .filter(|pane_id| !self.pane_is_settled(ws_idx, *pane_id));
+                    let snooze_target =
+                        settle_pane_id.map(|pane_id| crate::app::state::ContextMenuSnoozeTarget {
+                            pane_id,
+                            snoozed: self.pane_is_snoozed(ws_idx, pane_id),
+                        });
                     self.selected = ws_idx;
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab {
                             ws_idx,
                             tab_idx,
                             settle_pane_id,
+                            snooze_target,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             has_subgroup: self
                                 .workspaces
@@ -2288,6 +2297,7 @@ impl AppState {
                             ws_idx,
                             tab_idx,
                             settle_pane_id: None,
+                            snooze_target: None,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             has_subgroup: self
                                 .workspaces
@@ -2377,6 +2387,7 @@ impl AppState {
                             ws_idx,
                             tab_idx,
                             pane_id: info.id,
+                            snoozed: self.pane_is_snoozed(ws_idx, info.id),
                             source_pane_id,
                             has_manual_label,
                             right_click_passthrough,
@@ -4041,7 +4052,7 @@ mod tests {
             .expect("snooze duration menu");
         let pane_id = menu.target.pane_id;
         assert_eq!(menu.selected, 0);
-        assert_eq!(crate::app::state::SNOOZE_DURATION_ITEMS.len(), 4);
+        assert_eq!(crate::app::state::SNOOZE_MENU_ITEMS.len(), 5);
 
         let layout = crate::ui::sidebar_snooze_menu_layout(&app.state, Rect::new(0, 0, 60, 20))
             .expect("mobile snooze menu layout");
@@ -5133,6 +5144,10 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: Some(target.pane_id),
+                snooze_target: Some(crate::app::state::ContextMenuSnoozeTarget {
+                    pane_id: target.pane_id,
+                    snoozed: false,
+                }),
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -7776,6 +7791,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
+                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
@@ -8343,6 +8359,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: None,
+                snooze_target: None,
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);

@@ -84,6 +84,7 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
         Mode::RenameTab if app.creating_new_tab => "new tab",
         Mode::RenameTab => "rename tab",
         Mode::RenamePane => "rename pane",
+        Mode::SetSnoozeTime => "set snooze time",
         _ => return,
     };
 
@@ -104,6 +105,27 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
     .areas::<5>(inner);
 
     render_modal_header(frame, rows[0], title, &app.palette);
+
+    if app.mode == Mode::SetSnoozeTime {
+        let message = app
+            .snooze_time_input
+            .as_ref()
+            .and_then(|input| input.error.as_deref())
+            .unwrap_or("Today, using 24-hour time (HH:MM)");
+        let color = if app
+            .snooze_time_input
+            .as_ref()
+            .is_some_and(|input| input.error.is_some())
+        {
+            app.palette.red
+        } else {
+            app.palette.overlay0
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(color)),
+            rows[1],
+        );
+    }
 
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
     render_name_input_field(app, frame, input_rect);
@@ -1065,13 +1087,44 @@ mod tests {
         let input = rename_input_rect(RENAME_AREA);
         let expected = Position::new(input.x + 3, input.y);
 
-        for mode in [Mode::RenameWorkspace, Mode::RenameTab, Mode::RenamePane] {
+        for mode in [
+            Mode::RenameWorkspace,
+            Mode::RenameTab,
+            Mode::RenamePane,
+            Mode::SetSnoozeTime,
+        ] {
             assert_eq!(
                 rename_overlay_caret_in(mode, "ab").0,
                 expected,
                 "{mode:?} should anchor the caret like the other rename modes"
             );
         }
+    }
+
+    #[test]
+    fn snooze_time_error_is_visible_in_the_input_modal() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::SetSnoozeTime;
+        app.snooze_time_input = Some(crate::app::state::SnoozeTimeInputState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: "workspace".into(),
+                pane_id: crate::layout::PaneId::alloc(),
+            },
+            error: Some("Time must be later than now".into()),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(RENAME_AREA.width, RENAME_AREA.height))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render_rename_overlay(&app, frame, RENAME_AREA))
+            .expect("snooze time overlay");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Time must be later than now"));
     }
 
     #[test]

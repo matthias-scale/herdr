@@ -446,6 +446,35 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.mode = Mode::RenamePane;
 }
 
+#[cfg(test)]
+fn open_snooze_time_input_state(
+    state: &mut AppState,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+) {
+    let Some(workspace) = state.workspaces.get(ws_idx) else {
+        return;
+    };
+    let Some(pane) = workspace.pane_state(pane_id) else {
+        return;
+    };
+    state.name_input = pane
+        .snoozed_until()
+        .and_then(crate::platform::local_datetime_at)
+        .map(|deadline| format!("{:02}:{:02}", deadline.hour(), deadline.minute()))
+        .unwrap_or_default();
+    state.name_input_replace_on_type = false;
+    state.snooze_time_input = Some(crate::app::state::SnoozeTimeInputState {
+        target: crate::app::state::PaneFocusTarget {
+            workspace_id: workspace.id.clone(),
+            pane_id,
+        },
+        error: None,
+    });
+    state.sidebar_snooze_menu = None;
+    state.mode = Mode::SetSnoozeTime;
+}
+
 fn workspace_create_label(input: &str, suggested_name: &str) -> Option<String> {
     let name = input.trim();
     (!name.is_empty() && name != suggested_name).then(|| name.to_string())
@@ -927,6 +956,49 @@ pub(super) fn apply_context_menu_action(
         (
             ContextMenuKind::Tab {
                 ws_idx,
+                snooze_target: Some(target),
+                ..
+            },
+            Some(crate::app::state::SNOOZE_ITEM),
+        ) => {
+            state.sidebar_snooze_menu = Some(crate::app::state::SidebarSnoozeMenuState {
+                target: crate::app::state::PaneFocusTarget {
+                    workspace_id: state.workspaces[ws_idx].id.clone(),
+                    pane_id: target.pane_id,
+                },
+                anchor: (menu_x, menu_y),
+                selected: 0,
+                snoozed: false,
+            });
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx,
+                snooze_target: Some(target),
+                ..
+            },
+            Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
+        ) => open_snooze_time_input_state(state, ws_idx, target.pane_id),
+        (
+            ContextMenuKind::Tab {
+                ws_idx,
+                snooze_target: Some(target),
+                ..
+            },
+            Some(crate::app::state::UNSNOOZE_ITEM),
+        ) => {
+            state.unsnooze_pane_at(
+                ws_idx,
+                target.pane_id,
+                crate::api::schema::PaneUnsnoozeReason::Explicit,
+                std::time::Instant::now(),
+            );
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx,
                 settle_pane_id: Some(pane_id),
                 ..
             },
@@ -958,6 +1030,43 @@ pub(super) fn apply_context_menu_action(
         }
         (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
             open_rename_pane(state, pane_id);
+        }
+        (
+            ContextMenuKind::Pane {
+                ws_idx, pane_id, ..
+            },
+            Some(crate::app::state::SNOOZE_ITEM),
+        ) => {
+            state.sidebar_snooze_menu = Some(crate::app::state::SidebarSnoozeMenuState {
+                target: crate::app::state::PaneFocusTarget {
+                    workspace_id: state.workspaces[ws_idx].id.clone(),
+                    pane_id,
+                },
+                anchor: (menu_x, menu_y),
+                selected: 0,
+                snoozed: false,
+            });
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Pane {
+                ws_idx, pane_id, ..
+            },
+            Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
+        ) => open_snooze_time_input_state(state, ws_idx, pane_id),
+        (
+            ContextMenuKind::Pane {
+                ws_idx, pane_id, ..
+            },
+            Some(crate::app::state::UNSNOOZE_ITEM),
+        ) => {
+            state.unsnooze_pane_at(
+                ws_idx,
+                pane_id,
+                crate::api::schema::PaneUnsnoozeReason::Explicit,
+                std::time::Instant::now(),
+            );
+            leave_modal(state);
         }
         (
             ContextMenuKind::Pane {
@@ -1153,10 +1262,17 @@ impl App {
             return;
         }
 
+        if let Some(input) = self.state.snooze_time_input.as_mut() {
+            input.error = None;
+        }
         handle_rename_edit_key(&mut self.state, key);
     }
 
     fn save_rename_modal_via_api(&mut self) {
+        if self.state.mode == Mode::SetSnoozeTime {
+            self.save_snooze_time_modal_via_api();
+            return;
+        }
         let new_name = if self.state.name_input.trim().is_empty() {
             self.state.name_input.clone()
         } else {
@@ -1255,6 +1371,65 @@ impl App {
             _ => {}
         }
 
+        cancel_rename_modal(&mut self.state);
+    }
+
+    fn save_snooze_time_modal_via_api(&mut self) {
+        let Some(input) = self.state.snooze_time_input.clone() else {
+            cancel_rename_modal(&mut self.state);
+            return;
+        };
+        let (hour, minute) = match parse_snooze_clock_time(&self.state.name_input) {
+            Ok(time) => time,
+            Err(message) => {
+                if let Some(input) = self.state.snooze_time_input.as_mut() {
+                    input.error = Some(message.to_string());
+                }
+                return;
+            }
+        };
+        let Some(deadline) = crate::platform::local_time_today_unix(hour, minute) else {
+            if let Some(input) = self.state.snooze_time_input.as_mut() {
+                input.error = Some("Could not convert that local time".to_string());
+            }
+            return;
+        };
+        let now = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+        if let Err(message) = validate_snooze_deadline(now, deadline) {
+            if let Some(input) = self.state.snooze_time_input.as_mut() {
+                input.error = Some(message.to_string());
+            }
+            return;
+        }
+        self.dispatch_snooze_time_deadline(input, deadline);
+    }
+
+    fn dispatch_snooze_time_deadline(
+        &mut self,
+        input: crate::app::state::SnoozeTimeInputState,
+        deadline: u64,
+    ) {
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == input.target.workspace_id)
+        else {
+            cancel_rename_modal(&mut self.state);
+            return;
+        };
+        let Some(pane_id) = self.public_pane_id(ws_idx, input.target.pane_id) else {
+            cancel_rename_modal(&mut self.state);
+            return;
+        };
+        self.runtime_pane_snooze(
+            "tui.snooze.set-time",
+            crate::api::schema::PaneSnoozeParams {
+                pane_id,
+                duration_s: None,
+                snoozed_until: Some(deadline),
+            },
+        );
         cancel_rename_modal(&mut self.state);
     }
 
@@ -1491,6 +1666,38 @@ impl App {
             (
                 ContextMenuKind::Tab {
                     ws_idx,
+                    snooze_target: Some(target),
+                    ..
+                },
+                Some(crate::app::state::SNOOZE_ITEM),
+            ) => {
+                leave_modal(&mut self.state);
+                self.open_sidebar_snooze_menu(ws_idx, target.pane_id, menu_x, menu_y);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx,
+                    snooze_target: Some(target),
+                    ..
+                },
+                Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
+            ) => self.open_snooze_time_input(ws_idx, target.pane_id),
+            (
+                ContextMenuKind::Tab {
+                    ws_idx,
+                    snooze_target: Some(target),
+                    ..
+                },
+                Some(crate::app::state::UNSNOOZE_ITEM),
+            ) => {
+                if let Some(pane_id) = self.public_pane_id(ws_idx, target.pane_id) {
+                    self.runtime_pane_unsnooze("tui.context-menu.unsnooze", pane_id);
+                }
+                leave_modal(&mut self.state);
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx,
                     settle_pane_id: Some(pane_id),
                     ..
                 },
@@ -1515,6 +1722,32 @@ impl App {
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some(crate::app::state::SNOOZE_ITEM),
+            ) => {
+                leave_modal(&mut self.state);
+                self.open_sidebar_snooze_menu(ws_idx, pane_id, menu_x, menu_y);
+            }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
+            ) => self.open_snooze_time_input(ws_idx, pane_id),
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
+                Some(crate::app::state::UNSNOOZE_ITEM),
+            ) => {
+                if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.runtime_pane_unsnooze("tui.context-menu.unsnooze", pane_id);
+                }
+                leave_modal(&mut self.state);
             }
             (
                 ContextMenuKind::Pane {
@@ -1732,10 +1965,42 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.snooze_time_input = None;
     state.rename_tab_prefill = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     leave_modal(state);
+}
+
+fn parse_snooze_clock_time(input: &str) -> Result<(u8, u8), &'static str> {
+    let Some((hour, minute)) = input.trim().split_once(':') else {
+        return Err("Use a 24-hour time such as 14:30");
+    };
+    if hour.is_empty()
+        || minute.len() != 2
+        || !hour.bytes().all(|byte| byte.is_ascii_digit())
+        || !minute.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("Use a 24-hour time such as 14:30");
+    }
+    let hour = hour
+        .parse::<u8>()
+        .map_err(|_| "Use a 24-hour time such as 14:30")?;
+    let minute = minute
+        .parse::<u8>()
+        .map_err(|_| "Use a 24-hour time such as 14:30")?;
+    if hour > 23 || minute > 59 {
+        return Err("Use a time between 00:00 and 23:59");
+    }
+    Ok((hour, minute))
+}
+
+fn validate_snooze_deadline(now: u64, deadline: u64) -> Result<u64, &'static str> {
+    if deadline <= now {
+        Err("Time must be later than now")
+    } else {
+        Ok(deadline)
+    }
 }
 
 impl AppState {
@@ -2700,6 +2965,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
+                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
@@ -2754,6 +3020,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
+                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
@@ -2841,6 +3108,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: None,
+                snooze_target: None,
             },
             x: 0,
             y: 0,
@@ -2868,6 +3136,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: None,
+                snooze_target: None,
             },
             x: 0,
             y: 0,
@@ -2891,6 +3160,7 @@ mod tests {
                 starred: false,
                 has_subgroup: true,
                 settle_pane_id: None,
+                snooze_target: None,
             },
             x: 0,
             y: 0,
@@ -2921,6 +3191,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: Some(pane_id),
+                snooze_target: None,
             },
             x: 0,
             y: 0,
@@ -2948,6 +3219,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: None,
+                snooze_target: None,
             },
             x: 7,
             y: 4,
@@ -2981,6 +3253,7 @@ mod tests {
                 starred: false,
                 has_subgroup: true,
                 settle_pane_id: None,
+                snooze_target: None,
             },
             x: 0,
             y: 0,
@@ -3011,6 +3284,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
+                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,
@@ -3039,5 +3313,128 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
+    }
+
+    #[test]
+    fn snooze_clock_input_accepts_clock_time_and_rejects_past_deadlines() {
+        assert_eq!(parse_snooze_clock_time("14:30"), Ok((14, 30)));
+        assert_eq!(parse_snooze_clock_time("7:05"), Ok((7, 5)));
+        assert_eq!(
+            parse_snooze_clock_time("24:00"),
+            Err("Use a time between 00:00 and 23:59")
+        );
+        assert_eq!(
+            validate_snooze_deadline(1_000, 999),
+            Err("Time must be later than now")
+        );
+    }
+
+    #[test]
+    fn context_menus_name_snooze_actions_for_both_states() {
+        let pane_id = crate::layout::PaneId::alloc();
+        for snoozed in [false, true] {
+            let tab = ContextMenuState {
+                kind: ContextMenuKind::Tab {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    settle_pane_id: Some(pane_id),
+                    snooze_target: Some(crate::app::state::ContextMenuSnoozeTarget {
+                        pane_id,
+                        snoozed,
+                    }),
+                    starred: false,
+                    has_subgroup: false,
+                },
+                x: 0,
+                y: 0,
+                list: MenuListState::new(0),
+            };
+            let items = tab.items();
+            if snoozed {
+                assert!(items.contains(&crate::app::state::UNSNOOZE_ITEM));
+                assert!(items.contains(&crate::app::state::CHANGE_TIME_ITEM));
+                assert!(!items.contains(&crate::app::state::SNOOZE_ITEM));
+            } else {
+                assert!(items.contains(&crate::app::state::SNOOZE_ITEM));
+                assert!(items.contains(&crate::app::state::SET_TIME_ITEM));
+                assert!(!items.contains(&crate::app::state::UNSNOOZE_ITEM));
+            }
+
+            let pane = ContextMenuState {
+                kind: ContextMenuKind::Pane {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id,
+                    snoozed,
+                    source_pane_id: None,
+                    has_manual_label: false,
+                    right_click_passthrough: false,
+                    linkable_work_link: None,
+                    link: None,
+                    path: None,
+                    open_with: Vec::new(),
+                    send_text: None,
+                    has_agent_targets: false,
+                },
+                x: 0,
+                y: 0,
+                list: MenuListState::new(0),
+            };
+            assert_eq!(
+                pane.items().contains(&crate::app::state::UNSNOOZE_ITEM),
+                snoozed
+            );
+        }
+    }
+
+    #[test]
+    fn set_time_and_unsnooze_context_actions_dispatch_through_the_runtime_api() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 300;
+        let input = crate::app::state::SnoozeTimeInputState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                pane_id,
+            },
+            error: None,
+        };
+        app.state.snooze_time_input = Some(input.clone());
+        app.state.mode = Mode::SetSnoozeTime;
+        app.dispatch_snooze_time_deadline(input, deadline);
+        assert_eq!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .and_then(crate::pane::PaneState::snoozed_until),
+            Some(deadline)
+        );
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                snoozed: true,
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+                linkable_work_link: None,
+                link: None,
+                path: None,
+                open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let unsnooze = menu
+            .items()
+            .iter()
+            .position(|item| *item == crate::app::state::UNSNOOZE_ITEM)
+            .expect("unsnooze item");
+        app.apply_context_menu_action_via_api(menu, unsnooze);
+        assert!(!app.state.pane_is_snoozed(0, pane_id));
     }
 }

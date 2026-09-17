@@ -2039,7 +2039,7 @@ mod tests {
                 assert!(targets
                     .iter()
                     .any(|target| matches!(target, MobileSwitcherTarget::Settle { .. })));
-                assert!(rendered.contains('z'), "{rendered:?}");
+                assert!(rendered.contains('◷'), "{rendered:?}");
                 assert!(rendered.contains('✓'), "{rendered:?}");
             }
         }

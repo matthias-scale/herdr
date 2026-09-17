@@ -136,6 +136,10 @@ impl App {
         self.dispatch_runtime_mutation(id, Method::PaneSnooze(params))
     }
 
+    pub(crate) fn runtime_pane_unsnooze(&mut self, id: &'static str, pane_id: String) -> String {
+        self.dispatch_runtime_mutation(id, Method::PaneUnsnooze(PaneTarget { pane_id }))
+    }
+
     pub(crate) fn runtime_pane_rename(
         &mut self,
         id: &'static str,

@@ -1557,6 +1557,13 @@ pub(crate) struct SidebarSnoozeMenuState {
     pub(crate) target: PaneFocusTarget,
     pub(crate) anchor: (u16, u16),
     pub(crate) selected: usize,
+    pub(crate) snoozed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SnoozeTimeInputState {
+    pub(crate) target: PaneFocusTarget,
+    pub(crate) error: Option<String>,
 }
 
 impl SidebarPresentationState {
@@ -2480,6 +2487,7 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    SetSnoozeTime,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -3044,6 +3052,8 @@ pub enum ContextMenuKind {
         /// Exact local pane represented by the sidebar row. Top tab chrome
         /// leaves this empty because it represents the whole tab.
         settle_pane_id: Option<PaneId>,
+        /// Exact local pane and its snooze state at menu-open time.
+        snooze_target: Option<ContextMenuSnoozeTarget>,
         /// Snapshot of the tab's star at open time, so the entry can read
         /// "Star" or "Unstar" without the menu reaching back into state.
         starred: bool,
@@ -3055,6 +3065,7 @@ pub enum ContextMenuKind {
         ws_idx: usize,
         tab_idx: usize,
         pane_id: PaneId,
+        snoozed: bool,
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
         right_click_passthrough: bool,
@@ -3076,6 +3087,12 @@ pub enum ContextMenuKind {
         /// offers a picker that would have something to pick.
         has_agent_targets: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextMenuSnoozeTarget {
+    pub pane_id: PaneId,
+    pub snoozed: bool,
 }
 
 /// Label of the pane menu entry that opens the clicked link in a browser.
@@ -3162,18 +3179,57 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 pub const SETTLE_ITEM: &str = "Settle";
+pub const SNOOZE_ITEM: &str = "Snooze ▸";
+pub const SET_TIME_ITEM: &str = "Set time…";
+pub const CHANGE_TIME_ITEM: &str = "Change time…";
+pub const UNSNOOZE_ITEM: &str = "Unsnooze (unset time)";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarSnoozePreset {
     Duration(u64),
     TomorrowMorning,
 }
 
-pub(crate) const SNOOZE_DURATION_ITEMS: [(&str, SidebarSnoozePreset); 4] = [
-    ("15 minutes", SidebarSnoozePreset::Duration(15 * 60)),
-    ("1 hour", SidebarSnoozePreset::Duration(60 * 60)),
-    ("4 hours", SidebarSnoozePreset::Duration(4 * 60 * 60)),
-    ("Tomorrow morning", SidebarSnoozePreset::TomorrowMorning),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarSnoozeMenuAction {
+    Preset(SidebarSnoozePreset),
+    SetTime,
+    Unsnooze,
+}
+
+pub(crate) const SNOOZE_MENU_ITEMS: [(&str, SidebarSnoozeMenuAction); 5] = [
+    (
+        "Snooze for 15 minutes",
+        SidebarSnoozeMenuAction::Preset(SidebarSnoozePreset::Duration(15 * 60)),
+    ),
+    (
+        "Snooze for 1 hour",
+        SidebarSnoozeMenuAction::Preset(SidebarSnoozePreset::Duration(60 * 60)),
+    ),
+    (
+        "Snooze for 4 hours",
+        SidebarSnoozeMenuAction::Preset(SidebarSnoozePreset::Duration(4 * 60 * 60)),
+    ),
+    (
+        "Snooze until tomorrow at 09:00",
+        SidebarSnoozeMenuAction::Preset(SidebarSnoozePreset::TomorrowMorning),
+    ),
+    ("Set time…", SidebarSnoozeMenuAction::SetTime),
 ];
+
+pub(crate) const SNOOZED_MENU_ITEMS: [(&str, SidebarSnoozeMenuAction); 2] = [
+    (UNSNOOZE_ITEM, SidebarSnoozeMenuAction::Unsnooze),
+    (CHANGE_TIME_ITEM, SidebarSnoozeMenuAction::SetTime),
+];
+
+pub(crate) fn sidebar_snooze_menu_items(
+    snoozed: bool,
+) -> &'static [(&'static str, SidebarSnoozeMenuAction)] {
+    if snoozed {
+        &SNOOZED_MENU_ITEMS
+    } else {
+        &SNOOZE_MENU_ITEMS
+    }
+}
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
@@ -3333,6 +3389,7 @@ impl ContextMenuState {
                 starred,
                 has_subgroup,
                 settle_pane_id,
+                snooze_target,
                 ..
             } => {
                 let mut items = vec![
@@ -3344,6 +3401,13 @@ impl ContextMenuState {
                 if *has_subgroup {
                     items.push(REMOVE_FROM_SUBGROUP_ITEM);
                 }
+                if let Some(target) = snooze_target {
+                    if target.snoozed {
+                        items.extend([UNSNOOZE_ITEM, CHANGE_TIME_ITEM]);
+                    } else {
+                        items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
+                    }
+                }
                 if settle_pane_id.is_some() {
                     items.push(SETTLE_ITEM);
                 }
@@ -3351,6 +3415,7 @@ impl ContextMenuState {
                 items
             }
             ContextMenuKind::Pane {
+                snoozed,
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
@@ -3363,6 +3428,11 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
+                if *snoozed {
+                    items.extend([UNSNOOZE_ITEM, CHANGE_TIME_ITEM]);
+                } else {
+                    items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
+                }
                 if let Some(action) = linkable_work_link {
                     items.push(action.menu_item());
                 }
@@ -3714,6 +3784,7 @@ pub struct AppState {
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
     pub rename_pane_target: Option<PaneId>,
+    pub(crate) snooze_time_input: Option<SnoozeTimeInputState>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -6236,6 +6307,7 @@ impl AppState {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
+            snooze_time_input: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -7256,6 +7328,7 @@ mod tests {
             target: target.clone(),
             anchor: (9, 3),
             selected: 2,
+            snoozed: false,
         });
         app.swap_sidebar_presentation(&mut first_client);
 
@@ -7683,6 +7756,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id: crate::layout::PaneId::alloc(),
+                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,

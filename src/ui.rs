@@ -1293,7 +1293,7 @@ fn render_with_runtime_registry_inner(
         Mode::GitMenu => render_git_menu(app, frame),
         Mode::AddAction => render_add_action_overlay(app, frame),
         Mode::Settings => render_settings_overlay(app, frame, frame.area()),
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::SetSnoozeTime => {
             render_rename_overlay(app, frame, frame.area())
         }
         Mode::NewLinkedWorktree => render_new_linked_worktree_overlay(app, frame, frame.area()),
