@@ -42,7 +42,10 @@ pub(super) enum MouseAction {
         index: usize,
     },
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
-    SettlePane(crate::app::state::PaneFocusTarget),
+    SettlePane {
+        ws_idx: usize,
+        pane_id: PaneId,
+    },
     SidebarNewMenu {
         action: crate::app::state::SidebarNewMenuAction,
     },
@@ -870,14 +873,14 @@ impl AppState {
             && self.mode == Mode::Terminal
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
-            if let Some(crate::app::state::SidebarHoverAction::Settle(target)) = self
+            if let Some(crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id }) = self
                 .view
                 .sidebar_hover_targets
                 .iter()
                 .find(|target| rect_contains(target.rect, mouse.column, mouse.row))
                 .and_then(|target| target.action.clone())
             {
-                return Some(MouseAction::SettlePane(target));
+                return Some(MouseAction::SettlePane { ws_idx, pane_id });
             }
         }
 
@@ -1713,6 +1716,10 @@ impl AppState {
                     // the surface flags are dropped here rather than only on a
                     // focus change.
                     self.release_surface_focus_to_pane();
+
+                    if !self.pane_is_settled_anywhere(info.id) {
+                        self.note_pane_activity_at(info.id, std::time::Instant::now());
+                    }
 
                     if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                         self.selection = None;

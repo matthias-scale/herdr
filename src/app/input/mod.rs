@@ -5120,7 +5120,9 @@ impl App {
             self.start_home_ref_refresh_if_requested();
             self.start_home_github_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                if !self.state.pane_is_settled_anywhere(pane_id) {
+                    self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                }
             }
             if let Some(action) = action {
                 match action {
@@ -5131,7 +5133,9 @@ impl App {
                         self.apply_sidebar_settled_menu_action(index)
                     }
                     MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
-                    MouseAction::SettlePane(target) => self.settle_sidebar_pane(target),
+                    MouseAction::SettlePane { ws_idx, pane_id } => {
+                        self.settle_sidebar_pane(ws_idx, pane_id)
+                    }
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
                             self.begin_tui_workspace_create("tui.mouse.workspace.create");

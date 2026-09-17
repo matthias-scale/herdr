@@ -2145,14 +2145,15 @@ mod tests {
         let mut workspace = Workspace::test_new("settled-mouse-input");
         let pane_id = workspace.tabs[0].root_pane;
         let pane_infos = workspace.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
-        workspace.insert_test_runtime(
-            pane_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+        let (runtime, mut mouse_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
                 pane_infos[0].inner_rect.width,
                 pane_infos[0].inner_rect.height,
-                b"settled shell",
-            ),
-        );
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2175,6 +2176,13 @@ mod tests {
             inner.y,
         ));
 
+        assert_eq!(
+            mouse_input
+                .try_recv()
+                .expect("forwarded mouse input")
+                .as_ref(),
+            b"\x1b[<0;1;1M"
+        );
         assert!(app.state.pane_is_settled(0, pane_id));
         assert!(crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
             matches!(
@@ -2183,6 +2191,40 @@ mod tests {
                     if title == "Settled"
             )
         }));
+    }
+
+    #[test]
+    fn clicking_active_pane_content_refreshes_its_inactivity_clock() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("active-mouse-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let stale_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        workspace.tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(stale_at);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos.clone();
+
+        let inner = pane_infos[0].inner_rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            inner.x,
+            inner.y,
+        ));
+
+        assert!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .last_at()
+                > stale_at
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

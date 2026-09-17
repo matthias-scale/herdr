@@ -143,6 +143,14 @@ impl AppState {
             .is_some_and(|pane| pane.settled_at.is_some())
     }
 
+    pub(crate) fn pane_is_settled_anywhere(&self, pane_id: PaneId) -> bool {
+        self.workspaces.iter().any(|workspace| {
+            workspace
+                .pane_state(pane_id)
+                .is_some_and(|pane| pane.settled_at.is_some())
+        })
+    }
+
     pub(crate) fn settle_pane_at(
         &mut self,
         ws_idx: usize,

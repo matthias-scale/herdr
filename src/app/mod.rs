@@ -3298,10 +3298,12 @@ impl App {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                         if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                            self.retire_blocked_hook_authority_for_pane(
-                                pane_id,
-                                std::time::Instant::now(),
-                            );
+                            if !self.state.pane_is_settled_anywhere(pane_id) {
+                                self.retire_blocked_hook_authority_for_pane(
+                                    pane_id,
+                                    std::time::Instant::now(),
+                                );
+                            }
                         }
                     }
                 }

@@ -1602,21 +1602,16 @@ impl super::super::App {
         self.flush_pane_settlement_events();
     }
 
-    pub(crate) fn settle_sidebar_pane(&mut self, target: crate::app::state::PaneFocusTarget) {
-        let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == target.workspace_id)
-        else {
+    pub(crate) fn settle_sidebar_pane(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
             return;
         };
-        if self.state.pane_is_settled(ws_idx, target.pane_id) {
+        if workspace.pane_state(pane_id).is_none() || self.state.pane_is_settled(ws_idx, pane_id) {
             return;
         }
         self.state.settle_pane_at(
             ws_idx,
-            target.pane_id,
+            pane_id,
             crate::app::settled::unix_seconds(std::time::SystemTime::now()),
         );
         self.flush_pane_settlement_events();
@@ -1889,14 +1884,8 @@ mod tests {
             .find(|target| target.label == "Settle")
             .cloned()
             .expect("settle icon target");
-        let crate::app::state::SidebarHoverAction::Settle(pane_target) =
+        let crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } =
             target.action.expect("settle action");
-        let ws_idx = app
-            .state
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == pane_target.workspace_id)
-            .expect("target workspace");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1904,7 +1893,7 @@ mod tests {
             target.rect.y,
         ));
 
-        assert!(app.state.pane_is_settled(ws_idx, pane_target.pane_id));
+        assert!(app.state.pane_is_settled(ws_idx, pane_id));
     }
 
     #[test]

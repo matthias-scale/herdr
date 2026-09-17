@@ -5685,12 +5685,10 @@ pub(crate) fn compute_sidebar_hover_targets(
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
                             label: "Settle".into(),
-                            action: Some(crate::app::state::SidebarHoverAction::Settle(
-                                crate::app::state::PaneFocusTarget {
-                                    workspace_id: app.workspaces[entry.ws_idx].id.clone(),
-                                    pane_id: entry.pane_id,
-                                },
-                            )),
+                            action: Some(crate::app::state::SidebarHoverAction::Settle {
+                                ws_idx: entry.ws_idx,
+                                pane_id: entry.pane_id,
+                            }),
                         });
                     }
                 }
@@ -20647,7 +20645,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert_eq!(target.rect.width, 2, "width={width}");
             assert!(matches!(
                 target.action,
-                Some(crate::app::state::SidebarHoverAction::Settle(_))
+                Some(crate::app::state::SidebarHoverAction::Settle { .. })
             ));
             let rendered = row_text(terminal.backend().buffer(), target.rect.y, area.width - 1);
             assert!(rendered.contains('✓'), "width={width}: {rendered:?}");

@@ -1036,7 +1036,7 @@ pub struct SidebarHoverTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHoverAction {
-    Settle(PaneFocusTarget),
+    Settle { ws_idx: usize, pane_id: PaneId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
