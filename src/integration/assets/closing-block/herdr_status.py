@@ -310,7 +310,11 @@ def report(
     external_wait = external_wait.strip() if isinstance(external_wait, str) else None
     external_wait = external_wait or None
     workers_unknown = workers_unknown is True
-    reported_agents = None if workers_unknown else agents
+    dependencies_authoritative = (
+        parse_status != "missing"
+        or bool(gate_objects or item_objects or decision_objects)
+    )
+    reported_agents = agents if dependencies_authoritative and not workers_unknown else None
     state = resolve_state(
         blocking, agents, state, len(action_points), external_wait
     )
@@ -321,15 +325,16 @@ def report(
         "reported_at": reported_at,
         "state": state,
         "blocking": blocking,
-        "gates": gate_objects,
-        "items": item_objects,
-        "decisions": decision_objects,
-        "agent_names": agent_names,
         "completion": completion,
         "external_wait": external_wait,
         "parse_status": parse_status,
         "workers_unknown": workers_unknown,
     }
+    if dependencies_authoritative:
+        payload["gates"] = gate_objects
+        payload["items"] = item_objects
+        payload["decisions"] = decision_objects
+        payload["agent_names"] = agent_names
     if reported_agents is not None:
         payload["agents"] = reported_agents
     if title:
@@ -362,12 +367,14 @@ def report(
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
                     "state": state, "seq": seq, "v": VERSION,
                     "reported_at": reported_at,
-                    "gates": gate_objects, "items": item_objects,
-                    "decisions": decision_objects,
                     "completion": completion,
                     "external_wait": external_wait,
                     "parse_status": parse_status,
                     "workers_unknown": workers_unknown}
+    if dependencies_authoritative:
+        agent_params["gates"] = gate_objects
+        agent_params["items"] = item_objects
+        agent_params["decisions"] = decision_objects
     if reported_agents is not None:
         agent_params["agents"] = reported_agents
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:

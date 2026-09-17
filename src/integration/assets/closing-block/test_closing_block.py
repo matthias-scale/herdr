@@ -1483,6 +1483,40 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(tokens["closing_parse"], "missing")
         self.assertEqual(tokens["closing_workers_unknown"], "0")
 
+    def test_short_reply_payload_cannot_clear_merge_base_dependencies(self):
+        block = closing_block.parse("Progressing.")
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="codex",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                decisions=block.wire_decisions(),
+                agent_names=block.agents,
+                completion=block.completion,
+                parse_status=block.parse_status,
+                workers_unknown=block.workers_unknown,
+                pane_id="w9:p18-missing",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        payload = outcome["payload"]
+        self.assertEqual(payload["completion"], "missing")
+        self.assertEqual(payload["parse_status"], "missing")
+        for key in ("agents", "agent_names", "gates", "items", "decisions"):
+            self.assertNotIn(key, payload)
+
+        # The merge-base server only replaced dependencies when all three CAP
+        # arrays were present. Replaying this payload must leave both facts intact.
+        merge_base_state = {"gates": ["pending gate"], "agents": 2}
+        if all(key in payload for key in ("gates", "items", "decisions")):
+            merge_base_state = {
+                "gates": payload["gates"],
+                "agents": payload.get("agents"),
+            }
+        self.assertEqual(merge_base_state, {"gates": ["pending gate"], "agents": 2})
+
     def test_report_does_not_honor_legacy_nonblocking_item_flags(self):
         with self._isolated():
             outcome = herdr_status.report(
@@ -2560,7 +2594,9 @@ class QuestionGateHookTests(unittest.TestCase):
         reports = self._reports()
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0]["state"], "working")
-        self.assertEqual(reports[0]["gates"], [])
+        self.assertNotIn("gates", reports[0])
+        self.assertNotIn("items", reports[0])
+        self.assertNotIn("decisions", reports[0])
 
     def test_a_gate_is_only_cleared_by_the_session_that_opened_it(self):
         self._run(self._PRE)
