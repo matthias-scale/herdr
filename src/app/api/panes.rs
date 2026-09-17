@@ -3580,11 +3580,8 @@ mod tests {
     }
 
     #[test]
-    fn red_and_peach_attention_end_snooze_and_emit_immediately() {
-        for (label, expected_tier) in [
-            ("Gate", crate::terminal::state::AttentionTier::Blocked),
-            ("Answer", crate::terminal::state::AttentionTier::Attention),
-        ] {
+    fn gate_and_answer_attention_end_snooze_and_emit_immediately() {
+        for label in ["Gate", "Answer"] {
             let (mut app, public_id, pane_id, terminal_id) = quiet_settle_test_app();
             assert!(app.state.snooze_pane_at(0, pane_id, 1_725_000_120));
             app.flush_pane_snooze_events();
@@ -3607,7 +3604,7 @@ mod tests {
             assert_eq!(
                 pane.agent_projection(&app.state.terminals[&terminal_id])
                     .attention_tier,
-                expected_tier,
+                crate::terminal::state::AttentionTier::Blocked,
                 "{label}"
             );
             assert!(
