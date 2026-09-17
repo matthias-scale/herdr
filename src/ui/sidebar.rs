@@ -7697,7 +7697,7 @@ fn render_workspace_list(
         render_symphony_job(app, frame, &job, symphony_now);
     }
     for area in runs::areas(app, sidebar_area) {
-        runs::render(app, frame, &area);
+        runs::render(app, frame, &area, symphony_now);
     }
     for card in tab_cards {
         render_tab_card(app, frame, &card, narrow_prefix, &row_entries);

@@ -118,7 +118,7 @@ pub(super) fn target_at(app: &AppState, row: u16) -> Option<(String, String)> {
         })
 }
 
-pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area) {
+pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::time::SystemTime) {
     if area.rect.width == 0 || area.rect.height == 0 {
         return;
     }
@@ -169,10 +169,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area) {
     let fixed = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = width.saturating_sub(fixed);
     let age = if widths.age == SIDEBAR_AGE_FIELD_WIDTH {
-        crate::ui::symphony::age_label_since(
-            Some(summary.started_at.as_str()),
-            std::time::SystemTime::now(),
-        )
+        crate::ui::symphony::age_label_since(Some(summary.started_at.as_str()), now)
     } else {
         String::new()
     };
@@ -282,6 +279,8 @@ mod tests {
                             summary: Some(Arc::clone(&summary)),
                             rect: Rect::new(0, 0, width, 1),
                         },
+                        std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_secs(1_779_000_060),
                     );
                 })
                 .expect("draw run row");

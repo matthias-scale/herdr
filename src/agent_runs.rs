@@ -80,10 +80,7 @@ impl Summary {
     }
 
     pub(crate) fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            DisplayState::Done | DisplayState::Failed | DisplayState::Empty
-        )
+        matches!(self.state, DisplayState::Done | DisplayState::Failed)
     }
 }
 
@@ -110,12 +107,13 @@ pub(crate) fn project(snapshot: &crate::fleet::Snapshot) -> Projection {
         let mut stale = Vec::new();
         let mut terminal = Vec::new();
         for summary in host.entries.iter().filter_map(|row| row.run_summary()) {
-            if summary.is_active() {
-                active.push(Arc::clone(summary));
-            } else if summary.is_terminal() {
-                terminal.push(Arc::clone(summary));
-            } else {
-                stale.push(Arc::clone(summary));
+            match summary.state {
+                DisplayState::Active | DisplayState::Blocked => active.push(Arc::clone(summary)),
+                DisplayState::Stale => stale.push(Arc::clone(summary)),
+                DisplayState::Done | DisplayState::Failed => {
+                    terminal.push(Arc::clone(summary));
+                }
+                DisplayState::Empty => continue,
             }
         }
         active.sort_by_key(|summary| std::cmp::Reverse(summary.started_at_unix_s));
@@ -357,6 +355,7 @@ mod tests {
             summary("ub2", "ra-done-2", DisplayState::Done, 8),
             summary("ub2", "ra-done-3", DisplayState::Done, 7),
             summary("ub2", "ra-done-4", DisplayState::Done, 6),
+            summary("ub2", "ra-empty", DisplayState::Empty, 11),
         ]
         .into_iter()
         .map(crate::fleet::FleetRow::test_run_summary_row)
@@ -385,6 +384,10 @@ mod tests {
         assert_eq!(projection.hosts[0].runs.len(), 4);
         assert_eq!(projection.hosts[0].runs[0].run_id, "ra-active");
         assert_eq!(projection.hosts[0].runs[3].run_id, "ra-done-3");
+        assert!(projection.hosts[0]
+            .runs
+            .iter()
+            .all(|summary| summary.state != DisplayState::Empty));
     }
 
     #[test]
