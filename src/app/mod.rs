@@ -855,6 +855,7 @@ impl App {
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
+            pending_pane_snooze_changes: Vec::new(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),

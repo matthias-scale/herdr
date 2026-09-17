@@ -193,6 +193,10 @@ pub enum Method {
     PaneSettle(PaneTarget),
     #[serde(rename = "pane.unsettle")]
     PaneUnsettle(PaneTarget),
+    #[serde(rename = "pane.snooze")]
+    PaneSnooze(PaneSnoozeParams),
+    #[serde(rename = "pane.unsnooze")]
+    PaneUnsnooze(PaneTarget),
     #[serde(rename = "pane.focus")]
     PaneFocus(PaneTarget),
     #[serde(rename = "pane.input.set")]

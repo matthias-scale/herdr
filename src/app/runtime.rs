@@ -1216,6 +1216,10 @@ impl App {
                 .flatten(),
             self.state.next_done_reap_deadline(now),
             self.state.next_done_settle_deadline(now),
+            self.state.next_snooze_deadline_at(
+                now,
+                super::settled::unix_seconds(std::time::SystemTime::now()),
+            ),
             self.copy_feedback_deadline,
             // Presentation only: an unattached headless server draws no
             // sidebar, so client-specific animation deadlines are handled by
