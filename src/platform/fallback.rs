@@ -134,7 +134,27 @@ pub(crate) fn hostname() -> Option<String> {
 }
 
 pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
-    None
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    local_datetime_at(now)
+}
+
+pub(crate) fn local_datetime_at(unix_seconds: u64) -> Option<time::PrimitiveDateTime> {
+    let timestamp = i64::try_from(unix_seconds).ok()?;
+    let datetime = time::OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+    Some(time::PrimitiveDateTime::new(
+        datetime.date(),
+        datetime.time(),
+    ))
+}
+
+pub(crate) fn local_time_today_unix(hour: u8, minute: u8) -> Option<u64> {
+    let now = time::OffsetDateTime::now_utc();
+    let time = time::Time::from_hms(hour, minute, 0).ok()?;
+    let deadline = time::PrimitiveDateTime::new(now.date(), time).assume_utc();
+    u64::try_from(deadline.unix_timestamp()).ok()
 }
 
 pub(crate) fn tomorrow_morning_unix() -> Option<u64> {

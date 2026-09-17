@@ -55,10 +55,11 @@ fn effective_user_name_for_uid(uid: libc::uid_t) -> Option<String> {
 
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, set_default_plugin_pane_pwd, status_commands_supported,
-    tomorrow_morning_unix, StatusCommandGuard,
+    create_remote_ssh_config_file, hostname, local_datetime, local_datetime_at,
+    local_time_today_unix, remote_bridge_endpoint_path, remote_private_temp_base,
+    remote_reattach_argument, remote_reattach_program, remote_ssh_config_paths,
+    set_default_plugin_pane_pwd, status_commands_supported, tomorrow_morning_unix,
+    StatusCommandGuard,
 };
 
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
