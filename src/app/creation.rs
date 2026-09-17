@@ -776,6 +776,7 @@ impl App {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             focused,
             settled_at: pane.settled_at,
+            snoozed_until: pane.snoozed_until(),
             work_context: terminal.effective_work_context().clone(),
             cwd: ws.tabs[tab_idx]
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)

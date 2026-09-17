@@ -60,6 +60,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneZoom(_)
             | Method::PaneFocusDirection(_)
             | Method::PaneResize(_)
+            | Method::PaneSnooze(_)
+            | Method::PaneUnsnooze(_)
             | Method::PaneFocus(_)
             | Method::PaneInputSet(_)
             | Method::PaneRename(_)
@@ -97,4 +99,31 @@ pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;
 
 pub fn socket_path() -> PathBuf {
     crate::session::active_api_socket_path()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::schema::{PaneSnoozeParams, PaneTarget};
+
+    #[test]
+    fn snooze_transitions_are_classified_as_ui_changes() {
+        let snooze = Request {
+            id: "snooze".into(),
+            method: Method::PaneSnooze(PaneSnoozeParams {
+                pane_id: "w1:p1".into(),
+                duration_s: Some(60),
+                snoozed_until: None,
+            }),
+        };
+        let unsnooze = Request {
+            id: "unsnooze".into(),
+            method: Method::PaneUnsnooze(PaneTarget {
+                pane_id: "w1:p1".into(),
+            }),
+        };
+
+        assert!(request_changes_ui(&snooze));
+        assert!(request_changes_ui(&unsnooze));
+    }
 }

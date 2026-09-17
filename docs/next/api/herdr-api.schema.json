@@ -671,6 +671,56 @@
                 "pane_id": {
                   "type": "string"
                 },
+                "snoozed_until": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_snoozed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "snoozed_until"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "$ref": "#/schemas/event/$defs/PaneUnsnoozeReason"
+                },
+                "type": {
+                  "const": "pane_unsnoozed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
                 "type": {
                   "const": "pane_focused",
                   "type": "string"
@@ -944,6 +994,8 @@
             "pane_updated",
             "pane_settled",
             "pane_unsettled",
+            "pane_snoozed",
+            "pane_unsnoozed",
             "pane_focused",
             "pane_moved",
             "pane_output_changed",
@@ -1196,6 +1248,14 @@
                 "null"
               ]
             },
+            "snoozed_until": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "state_labels": {
               "additionalProperties": {
                 "type": "string"
@@ -1412,6 +1472,14 @@
             "viewport_rows"
           ],
           "type": "object"
+        },
+        "PaneUnsnoozeReason": {
+          "enum": [
+            "explicit",
+            "expired",
+            "attention"
+          ],
+          "type": "string"
         },
         "PaneWorkContext": {
           "properties": {
@@ -3945,6 +4013,53 @@
           ],
           "type": "object"
         },
+        "PaneSnoozeParams": {
+          "description": "Exactly one of `duration_s` and `snoozed_until` must be present.",
+          "oneOf": [
+            {
+              "not": {
+                "required": [
+                  "snoozed_until"
+                ]
+              },
+              "required": [
+                "duration_s"
+              ]
+            },
+            {
+              "not": {
+                "required": [
+                  "duration_s"
+                ]
+              },
+              "required": [
+                "snoozed_until"
+              ]
+            }
+          ],
+          "properties": {
+            "duration_s": {
+              "description": "Relative duration in seconds. The server limits it to seven days.",
+              "format": "uint64",
+              "maximum": 604800,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "snoozed_until": {
+              "description": "Absolute future deadline, in UNIX seconds. The server limits it to seven days.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneSplitParams": {
           "properties": {
             "cwd": {
@@ -5005,6 +5120,30 @@
               "properties": {
                 "type": {
                   "const": "pane.unsettled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.snoozed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.unsnoozed",
                   "type": "string"
                 }
               },
@@ -6843,6 +6982,38 @@
         {
           "properties": {
             "method": {
+              "const": "pane.snooze",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSnoozeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.unsnooze",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.focus",
               "type": "string"
             },
@@ -7853,6 +8024,14 @@
                 "null"
               ]
             },
+            "snoozed_until": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "state_change_seq": {
               "default": 0,
               "format": "uint64",
@@ -8663,6 +8842,56 @@
                 "pane_id": {
                   "type": "string"
                 },
+                "snoozed_until": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_snoozed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "snoozed_until"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "$ref": "#/schemas/success_response/$defs/PaneUnsnoozeReason"
+                },
+                "type": {
+                  "const": "pane_unsnoozed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
                 "type": {
                   "const": "pane_focused",
                   "type": "string"
@@ -8951,6 +9180,8 @@
             "pane_updated",
             "pane_settled",
             "pane_unsettled",
+            "pane_snoozed",
+            "pane_unsnoozed",
             "pane_focused",
             "pane_moved",
             "pane_output_changed",
@@ -9753,6 +9984,14 @@
                 "null"
               ]
             },
+            "snoozed_until": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "state_labels": {
               "additionalProperties": {
                 "type": "string"
@@ -10352,6 +10591,14 @@
             "layout"
           ],
           "type": "object"
+        },
+        "PaneUnsnoozeReason": {
+          "enum": [
+            "explicit",
+            "expired",
+            "attention"
+          ],
+          "type": "string"
         },
         "PaneWorkContext": {
           "properties": {

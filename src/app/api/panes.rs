@@ -11,9 +11,9 @@ use crate::api::schema::{
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextIfOutcome, PaneSendTextIfParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneSendTextParams, PaneSnoozeParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -218,6 +218,13 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return pane_not_found(id, &target.pane_id);
         };
+        if settle
+            && self.state.workspaces[ws_idx]
+                .pane_state(pane_id)
+                .is_some_and(|pane| pane.snoozed_until().is_some())
+        {
+            return encode_error(id, "pane_snoozed", "unsnooze this pane before settling it");
+        }
         if settle {
             self.state.settle_pane_at(
                 ws_idx,
@@ -229,6 +236,100 @@ impl App {
                 .note_pane_activity_at(pane_id, std::time::Instant::now());
         }
         self.flush_pane_settlement_events();
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    pub(super) fn handle_pane_snooze(&mut self, id: String, params: PaneSnoozeParams) -> String {
+        let now = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+        self.handle_pane_snooze_at(id, params, now)
+    }
+
+    fn handle_pane_snooze_at(&mut self, id: String, params: PaneSnoozeParams, now: u64) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let deadline = match (params.duration_s, params.snoozed_until) {
+            (Some(duration), None)
+                if (1..=crate::app::settled::MAX_SNOOZE_SECONDS).contains(&duration) =>
+            {
+                let Some(deadline) = now.checked_add(duration) else {
+                    return encode_error(
+                        id,
+                        "invalid_snooze_duration",
+                        "duration must be between one second and seven days",
+                    );
+                };
+                deadline
+            }
+            (Some(_), None) => {
+                return encode_error(
+                    id,
+                    "invalid_snooze_duration",
+                    "duration must be between one second and seven days",
+                )
+            }
+            (None, Some(deadline))
+                if deadline > now
+                    && deadline.saturating_sub(now) <= crate::app::settled::MAX_SNOOZE_SECONDS =>
+            {
+                deadline
+            }
+            (None, Some(_)) => {
+                return encode_error(
+                    id,
+                    "invalid_snooze_deadline",
+                    "deadline must be in the future and within seven days",
+                )
+            }
+            (None, None) | (Some(_), Some(_)) => {
+                return encode_error(
+                    id,
+                    "invalid_snooze_request",
+                    "provide exactly one of duration_s and snoozed_until",
+                )
+            }
+        };
+        if self.state.pane_is_settled(ws_idx, pane_id) {
+            return encode_error(id, "pane_settled", "unsettle this pane before snoozing it");
+        }
+        let gated = self.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .and_then(|pane| {
+                self.state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .map(|terminal| pane.agent_projection(terminal).needs_human_attention())
+            })
+            .unwrap_or(false);
+        if gated {
+            return encode_error(
+                id,
+                "pane_needs_attention",
+                "resolve the active human-attention gate before snoozing",
+            );
+        }
+        self.state.snooze_pane_at(ws_idx, pane_id, deadline);
+        self.flush_pane_snooze_events();
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    pub(super) fn handle_pane_unsnooze(&mut self, id: String, target: PaneTarget) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        self.state.unsnooze_pane_at(
+            ws_idx,
+            pane_id,
+            crate::api::schema::PaneUnsnoozeReason::Explicit,
+            std::time::Instant::now(),
+        );
+        self.flush_pane_snooze_events();
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &target.pane_id);
         };
@@ -2748,10 +2849,14 @@ mod tests {
     }
 
     fn test_gate() -> crate::api::schema::ClosingBlockItem {
+        test_attention_item("Gate")
+    }
+
+    fn test_attention_item(label: &str) -> crate::api::schema::ClosingBlockItem {
         crate::api::schema::ClosingBlockItem {
             blocking: true,
             n: 1,
-            label: "Gate".into(),
+            label: label.into(),
             text: "Choose the release path".into(),
             pr: None,
             ticket: None,
@@ -3174,6 +3279,351 @@ mod tests {
                 )
             }));
         assert_eq!(pane_updated_events(&app), 2);
+    }
+
+    #[test]
+    fn snooze_api_accepts_duration_or_deadline_and_rejects_invalid_time_inputs() {
+        let (mut app, public_id, pane_id, _) = quiet_settle_test_app();
+        let now = 1_725_000_000;
+        for params in [
+            serde_json::json!({"pane_id": public_id}),
+            serde_json::json!({"pane_id": public_id, "duration_s": null}),
+            serde_json::json!({
+                "pane_id": public_id,
+                "duration_s": 60,
+                "snoozed_until": null
+            }),
+            serde_json::json!({
+                "pane_id": public_id,
+                "duration_s": 60,
+                "snoozed_until": now + 60
+            }),
+        ] {
+            let request = serde_json::json!({
+                "id": "invalid-wire-snooze",
+                "method": "pane.snooze",
+                "params": params,
+            });
+            assert!(
+                serde_json::from_value::<crate::api::schema::Request>(request).is_err(),
+                "invalid wire request was accepted"
+            );
+        }
+        let invalid = [
+            (None, None, "invalid_snooze_request"),
+            (Some(60), Some(now + 60), "invalid_snooze_request"),
+            (Some(0), None, "invalid_snooze_duration"),
+            (
+                Some(crate::app::settled::MAX_SNOOZE_SECONDS + 1),
+                None,
+                "invalid_snooze_duration",
+            ),
+            (None, Some(now), "invalid_snooze_deadline"),
+            (
+                None,
+                Some(now + crate::app::settled::MAX_SNOOZE_SECONDS + 1),
+                "invalid_snooze_deadline",
+            ),
+        ];
+        for (duration_s, snoozed_until, expected_code) in invalid {
+            let response = app.handle_pane_snooze_at(
+                "bad".into(),
+                PaneSnoozeParams {
+                    pane_id: public_id.clone(),
+                    duration_s,
+                    snoozed_until,
+                },
+                now,
+            );
+            let error: crate::api::schema::ErrorResponse =
+                serde_json::from_str(&response).expect("invalid snooze error");
+            assert_eq!(error.error.code, expected_code);
+            assert!(app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .snoozed_until()
+                .is_none());
+        }
+
+        let deadline = now + 3600;
+        let response = app.handle_pane_snooze_at(
+            "duration".into(),
+            PaneSnoozeParams {
+                pane_id: public_id.clone(),
+                duration_s: Some(3600),
+                snoozed_until: None,
+            },
+            now,
+        );
+        let success: SuccessResponse =
+            serde_json::from_str(&response).expect("duration snooze response");
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("pane info");
+        };
+        assert_eq!(pane.snoozed_until, Some(deadline));
+        app.handle_pane_unsnooze(
+            "reset".into(),
+            PaneTarget {
+                pane_id: public_id.clone(),
+            },
+        );
+
+        let response = app.handle_pane_snooze_at(
+            "deadline".into(),
+            PaneSnoozeParams {
+                pane_id: public_id,
+                duration_s: None,
+                snoozed_until: Some(deadline),
+            },
+            now,
+        );
+        let success: SuccessResponse =
+            serde_json::from_str(&response).expect("deadline snooze response");
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("pane info");
+        };
+        assert_eq!(pane.snoozed_until, Some(deadline));
+    }
+
+    #[test]
+    fn snooze_and_settle_refuse_both_conflict_directions_without_replacing_state() {
+        let (mut app, public_id, pane_id, _) = quiet_settle_test_app();
+        let now = 1_725_000_000;
+        assert!(app.state.settle_pane_at(0, pane_id, now));
+        let response = app.handle_pane_snooze_at(
+            "snooze-settled".into(),
+            PaneSnoozeParams {
+                pane_id: public_id.clone(),
+                duration_s: Some(60),
+                snoozed_until: None,
+            },
+            now,
+        );
+        let error: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response).expect("settled error");
+        assert_eq!(error.error.code, "pane_settled");
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .snoozed_until(),
+            None
+        );
+        assert!(!app.state.snooze_pane_at(0, pane_id, now + 60));
+
+        assert!(app
+            .state
+            .note_pane_activity_at(pane_id, std::time::Instant::now()));
+        let response = app.handle_pane_snooze_at(
+            "snooze".into(),
+            PaneSnoozeParams {
+                pane_id: public_id.clone(),
+                duration_s: Some(60),
+                snoozed_until: None,
+            },
+            now,
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).expect("snooze response");
+        let response = app.handle_pane_settlement(
+            "settle".into(),
+            PaneTarget {
+                pane_id: public_id.clone(),
+            },
+            true,
+        );
+        let error: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response).expect("settle error");
+        assert_eq!(error.error.code, "pane_snoozed");
+        assert_eq!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .snoozed_until(),
+            Some(now + 60)
+        );
+        assert!(!app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn pane_and_agent_reads_expose_snooze_and_explicit_unsnooze_emits_event() {
+        let (mut app, public_id, _, _) = quiet_settle_test_app();
+        let now = 1_725_000_000;
+        let deadline = now + 3600;
+        let response = app.handle_pane_snooze_at(
+            "snooze".into(),
+            PaneSnoozeParams {
+                pane_id: public_id.clone(),
+                duration_s: None,
+                snoozed_until: Some(deadline),
+            },
+            now,
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).expect("snooze response");
+
+        let pane_response = app.handle_api_request(crate::api::schema::Request {
+            id: "pane".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget {
+                pane_id: public_id.clone(),
+            }),
+        });
+        let pane_response: SuccessResponse =
+            serde_json::from_str(&pane_response).expect("pane.get response");
+        let ResponseResult::PaneInfo { pane } = pane_response.result else {
+            panic!("pane info");
+        };
+        assert_eq!(pane.snoozed_until, Some(deadline));
+
+        let agent_response = app.handle_api_request(crate::api::schema::Request {
+            id: "agents".into(),
+            method: crate::api::schema::Method::AgentList(Default::default()),
+        });
+        let agent_response: SuccessResponse =
+            serde_json::from_str(&agent_response).expect("agent.list response");
+        let ResponseResult::AgentList { agents } = agent_response.result else {
+            panic!("agent list");
+        };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].snoozed_until, Some(deadline));
+
+        let event_seq = app
+            .event_hub
+            .events_after(0)
+            .last()
+            .map_or(0, |(seq, _)| *seq);
+        let response =
+            app.handle_pane_unsnooze("unsnooze".into(), PaneTarget { pane_id: public_id });
+        let success: SuccessResponse = serde_json::from_str(&response).expect("unsnooze response");
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("pane info");
+        };
+        assert_eq!(pane.snoozed_until, None);
+        assert!(app
+            .event_hub
+            .events_after(event_seq)
+            .iter()
+            .any(|(_, event)| matches!(
+                event.data,
+                EventData::PaneUnsnoozed {
+                    reason: crate::api::schema::PaneUnsnoozeReason::Explicit,
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn snooze_expiry_wakes_the_scheduler_marks_unread_emits_and_requests_redraw() {
+        let (mut app, _, pane_id, _) = quiet_settle_test_app();
+        let now = 1_725_000_000;
+        app.state.workspaces[0]
+            .pane_state_mut(pane_id)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0]
+            .pane_state_mut(pane_id)
+            .unwrap()
+            .done_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        assert!(crate::app::pane_lifecycle::pane_is_done(
+            app.state.workspaces[0].pane_state(pane_id).unwrap(),
+            app.state.terminals.get(&terminal_id).unwrap()
+        ));
+        assert!(app.state.snooze_pane_at(0, pane_id, now + 60));
+        assert!(app.flush_pane_snooze_events());
+        let before_expiry_seq = app
+            .event_hub
+            .events_after(0)
+            .last()
+            .map_or(0, |(seq, _)| *seq);
+        assert!(!crate::app::pane_lifecycle::pane_is_done(
+            app.state.workspaces[0].pane_state(pane_id).unwrap(),
+            app.state.terminals.get(&terminal_id).unwrap()
+        ));
+        let clock = std::time::Instant::now();
+        assert_eq!(
+            app.state.next_snooze_deadline_at(clock, now),
+            Some(clock + std::time::Duration::from_secs(60))
+        );
+        assert!(!app.refresh_pane_settlement_at_with_wall_clock(clock, now + 59));
+        assert_eq!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .snoozed_until(),
+            Some(now + 60)
+        );
+        app.state.workspaces[0]
+            .pane_state_mut(pane_id)
+            .unwrap()
+            .seen = true;
+        let expiry = clock + std::time::Duration::from_secs(1);
+        assert!(app.refresh_pane_settlement_at_with_wall_clock(expiry, now + 60));
+        let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();
+        assert!(pane.snoozed_until().is_none());
+        assert!(!pane.seen);
+        assert_eq!(pane.done_since, Some(expiry));
+        assert!(app
+            .event_hub
+            .events_after(before_expiry_seq)
+            .iter()
+            .any(|(_, event)| matches!(
+                event.data,
+                EventData::PaneUnsnoozed {
+                    reason: crate::api::schema::PaneUnsnoozeReason::Expired,
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn red_and_peach_attention_end_snooze_and_emit_immediately() {
+        for (label, expected_tier) in [
+            ("Gate", crate::terminal::state::AttentionTier::Blocked),
+            ("Answer", crate::terminal::state::AttentionTier::Attention),
+        ] {
+            let (mut app, public_id, pane_id, terminal_id) = quiet_settle_test_app();
+            assert!(app.state.snooze_pane_at(0, pane_id, 1_725_000_120));
+            app.flush_pane_snooze_events();
+            let before_seq = app
+                .event_hub
+                .events_after(0)
+                .last()
+                .map_or(0, |(seq, _)| *seq);
+            let mut report = closing_block_report(&public_id, 1, Vec::new());
+            if label == "Gate" {
+                report.gates = Some(vec![test_attention_item(label)]);
+            } else {
+                report.items = Some(vec![test_attention_item(label)]);
+            }
+
+            let response = app.handle_pane_report_agent(label.into(), report);
+            let _: SuccessResponse = serde_json::from_str(&response).expect("attention report");
+            let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();
+            assert_eq!(pane.snoozed_until(), None, "{label}");
+            assert_eq!(
+                pane.agent_projection(&app.state.terminals[&terminal_id])
+                    .attention_tier,
+                expected_tier,
+                "{label}"
+            );
+            assert!(
+                app.event_hub
+                    .events_after(before_seq)
+                    .iter()
+                    .any(|(_, event)| matches!(
+                        event.data,
+                        EventData::PaneUnsnoozed {
+                            reason: crate::api::schema::PaneUnsnoozeReason::Attention,
+                            ..
+                        }
+                    )),
+                "{label}"
+            );
+        }
     }
 
     #[test]

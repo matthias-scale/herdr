@@ -310,6 +310,7 @@ impl App {
                 self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
                 self.emit_pane_state_update(update);
             }
+            self.flush_pane_snooze_events();
             return updates;
         }
         let _ = self.handle_internal_event(ev);
@@ -739,6 +740,7 @@ impl App {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
         }
+        self.flush_pane_snooze_events();
         self.sync_agent_metadata_deadline();
         if let Some((
             overlay,
@@ -1718,6 +1720,8 @@ impl App {
             Method::PaneUnsettle(target) => {
                 return self.handle_pane_settlement(request.id, target, false)
             }
+            Method::PaneSnooze(params) => return self.handle_pane_snooze(request.id, params),
+            Method::PaneUnsnooze(target) => return self.handle_pane_unsnooze(request.id, target),
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),

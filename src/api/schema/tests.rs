@@ -469,6 +469,67 @@ fn remote_focus_schema_requires_exclusive_targets_and_state_details() {
 }
 
 #[test]
+fn pane_snooze_schema_and_requests_support_exclusive_duration_or_deadline() {
+    for params in [
+        serde_json::json!({"pane_id": "w1:p3", "duration_s": 900}),
+        serde_json::json!({"pane_id": "w1:p3", "snoozed_until": 1_725_000_900_u64}),
+    ] {
+        let request = serde_json::json!({
+            "id": "snooze",
+            "method": "pane.snooze",
+            "params": params,
+        });
+        let parsed: Request = serde_json::from_value(request.clone()).expect("snooze request");
+        assert_eq!(serde_json::to_value(parsed).expect("snooze JSON"), request);
+    }
+
+    for params in [
+        serde_json::json!({"pane_id": "w1:p3"}),
+        serde_json::json!({"pane_id": "w1:p3", "duration_s": null}),
+        serde_json::json!({
+            "pane_id": "w1:p3",
+            "duration_s": 60,
+            "snoozed_until": null
+        }),
+        serde_json::json!({
+            "pane_id": "w1:p3",
+            "duration_s": 60,
+            "snoozed_until": 1_725_000_060_u64
+        }),
+    ] {
+        let request = serde_json::json!({
+            "id": "snooze-invalid",
+            "method": "pane.snooze",
+            "params": params,
+        });
+        assert!(
+            serde_json::from_value::<Request>(request).is_err(),
+            "invalid snooze shape was accepted"
+        );
+    }
+
+    let params = protocol_schema_document()
+        .pointer("/schemas/request/$defs/PaneSnoozeParams")
+        .expect("pane snooze params schema")
+        .clone();
+    assert_eq!(
+        params["oneOf"],
+        serde_json::json!([
+            {
+                "required": ["duration_s"],
+                "not": {"required": ["snoozed_until"]}
+            },
+            {
+                "required": ["snoozed_until"],
+                "not": {"required": ["duration_s"]}
+            }
+        ])
+    );
+    assert_eq!(params["properties"]["duration_s"]["type"], "integer");
+    assert_eq!(params["properties"]["snoozed_until"]["type"], "integer");
+}
+
+#[test]
 fn notification_show_request_parses() {
     let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
     let request: Request = serde_json::from_str(json).unwrap();
@@ -763,6 +824,22 @@ fn event_envelope_round_trips() {
             },
         },
         EventEnvelope {
+            event: EventKind::PaneSnoozed,
+            data: EventData::PaneSnoozed {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+                snoozed_until: 1_725_000_060,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::PaneUnsnoozed,
+            data: EventData::PaneUnsnoozed {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+                reason: PaneUnsnoozeReason::Expired,
+            },
+        },
+        EventEnvelope {
             event: EventKind::WorkspaceMoved,
             data: EventData::WorkspaceMoved {
                 workspace_id: "w_1".into(),
@@ -825,18 +902,27 @@ fn event_envelope_round_trips() {
 }
 
 #[test]
-fn settlement_subscriptions_use_dot_event_names() {
+fn settlement_and_snooze_subscriptions_use_dot_event_names() {
     let request = Request {
         id: "sub_settlement".into(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: vec![Subscription::PaneSettled {}, Subscription::PaneUnsettled {}],
+            subscriptions: vec![
+                Subscription::PaneSettled {},
+                Subscription::PaneUnsettled {},
+                Subscription::PaneSnoozed {},
+                Subscription::PaneUnsnoozed {},
+            ],
         }),
     };
     let json = serde_json::to_string(&request).expect("settlement subscription JSON");
     assert!(json.contains("\"type\":\"pane.settled\""));
     assert!(json.contains("\"type\":\"pane.unsettled\""));
+    assert!(json.contains("\"type\":\"pane.snoozed\""));
+    assert!(json.contains("\"type\":\"pane.unsnoozed\""));
     assert_eq!(EventKind::PaneSettled.dot_name(), "pane.settled");
     assert_eq!(EventKind::PaneUnsettled.dot_name(), "pane.unsettled");
+    assert_eq!(EventKind::PaneSnoozed.dot_name(), "pane.snoozed");
+    assert_eq!(EventKind::PaneUnsnoozed.dot_name(), "pane.unsnoozed");
 }
 
 #[test]
@@ -1058,6 +1144,7 @@ fn worktree_request_and_response_round_trip() {
                 tab_id: "w_1:1".into(),
                 focused: true,
                 settled_at: None,
+                snoozed_until: None,
                 work_context: Default::default(),
                 cwd: Some("/worktrees/herdr/worktree-api".into()),
                 foreground_cwd: None,
@@ -1534,6 +1621,7 @@ fn create_response_round_trips_with_root_pane() {
                 tab_id: "w_1:2".into(),
                 focused: false,
                 settled_at: None,
+                snoozed_until: None,
                 work_context: Default::default(),
                 cwd: Some("/tmp/review".into()),
                 foreground_cwd: None,

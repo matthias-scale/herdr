@@ -304,6 +304,8 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     pub workspace_id: String,
     pub tab_id: String,
