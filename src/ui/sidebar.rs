@@ -2372,11 +2372,11 @@ fn compact_sidebar_rows_inner(
     };
     entries.retain(|entry| {
         !app.remote_focus_proxy_agents.contains_key(&entry.pane_id)
-            && !app
+            && app
                 .workspaces
                 .get(entry.ws_idx)
                 .and_then(|workspace| workspace.pane_state(entry.pane_id))
-                .is_some_and(|pane| pane.snoozed_until().is_some())
+                .is_none_or(|pane| pane.snoozed_until().is_none())
     });
     if sidebar_rows_are_filtered(app) {
         let scope = sidebar_project_scope(app);
