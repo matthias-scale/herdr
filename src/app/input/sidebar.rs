@@ -1047,6 +1047,27 @@ impl AppState {
             })
     }
 
+    pub(super) fn collapsed_remote_agent_target_at(
+        &self,
+        row: u16,
+    ) -> Option<crate::api::schema::AgentRef> {
+        if !self.sidebar_collapsed {
+            return None;
+        }
+        let (content, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        if content == Rect::default() || row < content.y || row >= content.bottom() {
+            return None;
+        }
+        let row_idx =
+            usize::from(row - content.y) + crate::ui::collapsed_sidebar_row_scroll(self, content);
+        crate::ui::sidebar_rows(self)
+            .get(row_idx)
+            .and_then(|entry| match entry {
+                crate::ui::SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.clone()),
+                _ => None,
+            })
+    }
+
     pub(super) fn workspace_drop_target_at_row(
         &self,
         row: u16,
