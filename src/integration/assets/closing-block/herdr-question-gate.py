@@ -69,9 +69,8 @@ def read_prior_status(pane_id: str, session_id: object) -> dict:
         or prior.get("session_id") != session_id
     ):
         return {}
-    return {
+    status = {
         "blocking": prior.get("blocking") if isinstance(prior.get("blocking"), int) else 0,
-        "agents": prior.get("agents") if isinstance(prior.get("agents"), int) else 0,
         "gates": prior.get("gates") if isinstance(prior.get("gates"), list) else [],
         "items": prior.get("items") if isinstance(prior.get("items"), list) else [],
         "decisions": (
@@ -89,6 +88,16 @@ def read_prior_status(pane_id: str, session_id: object) -> dict:
         ),
         "workers_unknown": prior.get("workers_unknown") is True,
     }
+    if isinstance(prior.get("agents"), int):
+        status["agents"] = prior["agents"]
+    return status
+
+
+def worker_evidence(prior: dict) -> tuple[int, bool]:
+    agents = prior.get("agents")
+    if isinstance(agents, int) and prior.get("workers_unknown") is not True:
+        return agents, False
+    return 0, True
 
 
 def read_status_seq(pane_id: str) -> int | None:
@@ -154,11 +163,12 @@ def gates_for(payload: dict) -> list[dict]:
 
 def open_gate(payload: dict, pane_id: str) -> dict:
     prior = read_prior_status(pane_id, payload.get("session_id"))
+    agents, workers_unknown = worker_evidence(prior)
     gates = [*(prior.get("gates") or []), *gates_for(payload)]
     outcome = report(
         agent="claude",
         blocking=max(int(prior.get("blocking") or 0), len(gates)),
-        agents=int(prior.get("agents") or 0),
+        agents=agents,
         gates=gates,
         items=prior.get("items"),
         decisions=prior.get("decisions"),
@@ -166,7 +176,7 @@ def open_gate(payload: dict, pane_id: str) -> dict:
         completion="incomplete",
         external_wait=prior.get("external_wait"),
         parse_status="ok",
-        workers_unknown=prior.get("workers_unknown") is True,
+        workers_unknown=workers_unknown,
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
     )
@@ -229,10 +239,11 @@ def close_gate(payload: dict, pane_id: str, *, match_tool: bool) -> dict | None:
             prior = marker["prior"]
             prior_available = True
         clear_marker(pane_id)
+    agents, workers_unknown = worker_evidence(prior)
     return report(
         agent="claude",
         blocking=int(prior.get("blocking") or 0),
-        agents=int(prior.get("agents") or 0),
+        agents=agents,
         gates=prior.get("gates"),
         items=prior.get("items"),
         decisions=prior.get("decisions"),
@@ -241,7 +252,7 @@ def close_gate(payload: dict, pane_id: str, *, match_tool: bool) -> dict | None:
         completion="incomplete",
         external_wait=prior.get("external_wait"),
         parse_status="ok" if prior_available else "missing",
-        workers_unknown=prior.get("workers_unknown") is True,
+        workers_unknown=workers_unknown,
         session_id=session_id,
         session_path=payload.get("transcript_path"),
     )

@@ -2513,6 +2513,8 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(reports[1]["state"], "working")
         self.assertEqual(reports[1]["completion"], "incomplete")
         self.assertEqual(reports[1]["parse_status"], "ok")
+        self.assertTrue(all(report["agents"] == 0 for report in reports))
+        self.assertTrue(all(report["workers_unknown"] is False for report in reports))
 
     def test_new_session_question_ignores_old_session_status(self):
         herdr_status.report(
@@ -2546,6 +2548,8 @@ class QuestionGateHookTests(unittest.TestCase):
             [gate["text"] for gate in reports[0]["gates"]],
             ["Which color do you prefer? — Red / Green"],
         )
+        self.assertNotIn("agents", reports[0])
+        self.assertTrue(reports[0]["workers_unknown"])
 
     def test_post_without_a_marker_cannot_clear_an_unrelated_pending_gate(self):
         import json
@@ -2650,6 +2654,8 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertNotIn("gates", reports[0])
         self.assertNotIn("items", reports[0])
         self.assertNotIn("decisions", reports[0])
+        self.assertNotIn("agents", reports[0])
+        self.assertTrue(reports[0]["workers_unknown"])
 
     def test_a_gate_is_only_cleared_by_the_session_that_opened_it(self):
         self._run(self._PRE)
