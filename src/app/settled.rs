@@ -1962,9 +1962,11 @@ mod tests {
             pane_id.raw().to_string()
         );
         assert_eq!(
-            state.remote_agent_panel_entries[0].entry.pane_id,
-            PaneId::from_raw(0),
-            "remote projection carries no local pane target"
+            state.remote_agent_panel_entries[0].entry.identity,
+            crate::ui::sidebar::AgentPanelIdentity::Remote(
+                state.remote_agent_panel_entries[0].agent_ref.clone()
+            ),
+            "remote projection carries typed remote identity, not a local pane target"
         );
 
         state.workspaces[0].tabs[0]
