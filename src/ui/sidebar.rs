@@ -15505,16 +15505,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 render_sidebar(&rendered_app, &TerminalRuntimeRegistry::new(), frame, area)
             })
             .expect("narrow grouped view should render");
-        let rendered_rows = (0..area.height)
-            .map(|y| row_text(terminal.backend().buffer(), y, area.width - 1))
-            .filter(|row| row.contains("sample-"))
+        let rendered_rows = compute_tab_card_areas(&rendered_app, area)
+            .into_iter()
+            .map(|card| row_text(terminal.backend().buffer(), card.rect.y, area.width - 1))
             .collect::<Vec<_>>();
         assert_eq!(rendered_rows.len(), 4, "{rendered_rows:#?}");
-        for expected_title in ["sample-li", "sample-pr", "sample-mi", "sample-se"] {
-            let row = rendered_rows
-                .iter()
-                .find(|row| row.contains(expected_title))
-                .unwrap_or_else(|| panic!("missing {expected_title}: {rendered_rows:#?}"));
+        for row in &rendered_rows {
+            assert!(!row.contains("SCA-3165 ·"), "{row:?}");
+            assert!(!row.contains("#159 ·"), "{row:?}");
+            assert!(row.contains("samp"), "{row:?}");
             assert_eq!(row.find('●'), Some(3), "{row:?}");
         }
     }
