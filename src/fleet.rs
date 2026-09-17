@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::api::client::{ApiClient, ConnectionTarget};
 use crate::api::schema::{AgentInfo, AgentStatus, EmptyParams, Method, Request, ResponseResult};
 use crate::config::{FleetConfig, FleetHostConfig};
 
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
+const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
@@ -20,7 +21,7 @@ const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
-    Vec<Result<RunState, String>>,
+    Vec<Result<crate::agent_runs::Observation, String>>,
     HostRuntime,
 );
 
@@ -187,6 +188,13 @@ pub(crate) fn select_hosts(
             ));
         }
     }
+    if let Some(host) = fleet.symphony_host.as_deref() {
+        if !names.contains(host) {
+            return Err(format!(
+                "remote.fleet.symphony_host names unknown host: {host}"
+            ));
+        }
+    }
 
     if let Some(selected) = selected {
         let unknown = selected.difference(&names).cloned().collect::<Vec<_>>();
@@ -332,11 +340,25 @@ fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot
 }
 
 fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
-    if fleet.hosts.is_empty() {
-        return snapshot_from_evidence(&[], fleet, Vec::new(), SystemTime::now());
+    let mut polling_fleet = fleet.clone();
+    let implicit_local = !polling_fleet.hosts.iter().any(|host| host.local);
+    if implicit_local {
+        polling_fleet.hosts.insert(
+            0,
+            FleetHostConfig {
+                name: polling_fleet.resolved_self_name(),
+                local: true,
+                ..FleetHostConfig::default()
+            },
+        );
     }
-    match select_hosts(fleet, None) {
-        Ok(hosts) => collect_snapshot(&hosts, fleet),
+    match select_hosts(&polling_fleet, None) {
+        Ok(hosts) => collect_snapshot_with_implicit_local(
+            &SystemHostReader,
+            &hosts,
+            &polling_fleet,
+            implicit_local.then(|| polling_fleet.resolved_self_name()),
+        ),
         Err(error) => {
             let refreshed_at = SystemTime::now();
             Snapshot {
@@ -347,8 +369,12 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                     .ok()
                     .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
                 config_generation: 0,
-                configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
-                hosts: fleet
+                configured_hosts: polling_fleet
+                    .hosts
+                    .iter()
+                    .map(|host| host.name.clone())
+                    .collect(),
+                hosts: polling_fleet
                     .hosts
                     .iter()
                     .map(|host| HostSnapshot {
@@ -537,14 +563,49 @@ impl FleetPollerConfig {
     }
 
     pub(crate) fn host(&self, name: &str) -> Option<FleetHostConfig> {
-        self.state
+        let state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(host) = state
             .fleet
             .hosts
             .iter()
             .find(|host| host.name == name)
             .cloned()
+        {
+            return Some(host);
+        }
+        (!state.fleet.hosts.iter().any(|host| host.local)
+            && state.fleet.resolved_self_name() == name)
+            .then(|| FleetHostConfig {
+                name: name.to_string(),
+                local: true,
+                ..FleetHostConfig::default()
+            })
+    }
+
+    pub(crate) fn symphony_target(&self) -> Result<(Option<FleetHostConfig>, Duration), String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let timeout =
+            Duration::from_millis(state.fleet.timeout_ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS));
+        let Some(name) = state.fleet.symphony_host.as_deref() else {
+            return Ok((None, timeout));
+        };
+        let host = state
+            .fleet
+            .hosts
+            .iter()
+            .find(|host| host.name == name)
+            .cloned()
+            .ok_or_else(|| format!("Symphony host {name} is not configured"))?;
+        if !host.local && (host.target.trim().is_empty() || host.target.starts_with('-')) {
+            return Err(format!("Symphony host {name} has no valid SSH target"));
+        }
+        Ok(((!host.local).then_some(host), timeout))
     }
 
     fn snapshot(&self) -> FleetPollerState {
@@ -597,7 +658,7 @@ pub(crate) fn start_poller(
 struct HostEvidence {
     host: FleetHostConfig,
     agents: Result<Vec<AgentInfo>, String>,
-    runs: Vec<Result<RunState, String>>,
+    runs: Vec<Result<crate::agent_runs::Observation, String>>,
     runtime: HostRuntime,
 }
 
@@ -614,6 +675,15 @@ fn collect_snapshot_with(
     hosts: &[FleetHostConfig],
     fleet: &FleetConfig,
 ) -> Snapshot {
+    collect_snapshot_with_implicit_local(reader, hosts, fleet, None)
+}
+
+fn collect_snapshot_with_implicit_local(
+    reader: &impl HostReader,
+    hosts: &[FleetHostConfig],
+    fleet: &FleetConfig,
+    implicit_local_name: Option<String>,
+) -> Snapshot {
     let timeout = Duration::from_millis(fleet.timeout_ms);
     let evidence = std::thread::scope(|scope| {
         let handles = hosts
@@ -621,9 +691,16 @@ fn collect_snapshot_with(
             .cloned()
             .map(|host| {
                 let name = host.name.clone();
+                let runs_only = host.local && implicit_local_name.as_deref() == Some(&host.name);
                 (
                     name,
-                    scope.spawn(move || fetch_host_with(reader, host, timeout)),
+                    scope.spawn(move || {
+                        if runs_only {
+                            fetch_local_run_host(host)
+                        } else {
+                            fetch_host_with(reader, host, timeout)
+                        }
+                    }),
                 )
             })
             .collect::<Vec<_>>();
@@ -645,6 +722,15 @@ fn collect_snapshot_with(
     });
 
     snapshot_from_evidence(hosts, fleet, evidence, SystemTime::now())
+}
+
+fn fetch_local_run_host(host: FleetHostConfig) -> HostEvidence {
+    HostEvidence {
+        host,
+        agents: Ok(Vec::new()),
+        runs: local_run_states(),
+        runtime: HostRuntime::default(),
+    }
 }
 
 fn snapshot_from_evidence(
@@ -847,14 +933,14 @@ fn fetch_local_runtime(client: &ApiClient, timeout: Duration) -> HostRuntime {
         .unwrap_or_default()
 }
 
-fn local_run_states() -> Vec<Result<RunState, String>> {
+fn local_run_states() -> Vec<Result<crate::agent_runs::Observation, String>> {
     let Some(home) = std::env::var_os("HOME") else {
         return vec![Err("HOME is unavailable; cannot read ~/.agents/runs".into())];
     };
     read_run_state_dir(&PathBuf::from(home).join(".agents/runs"))
 }
 
-fn read_run_state_dir(root: &Path) -> Vec<Result<RunState, String>> {
+fn read_run_state_dir(root: &Path) -> Vec<Result<crate::agent_runs::Observation, String>> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -864,14 +950,28 @@ fn read_run_state_dir(root: &Path) -> Vec<Result<RunState, String>> {
         .filter_map(Result::ok)
         .map(|entry| entry.path().join("state.json"))
         .filter(|path| path.is_file())
+        .filter_map(|path| {
+            let modified = path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
+            Some((modified, path))
+        })
         .collect::<Vec<_>>();
-    paths.sort();
+    paths.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     paths
         .into_iter()
-        .map(|path| {
+        .take(crate::agent_runs::MAX_RUNS_PER_HOST)
+        .map(|(_, path)| {
             std::fs::read(&path)
                 .map_err(|error| format!("cannot read {}: {error}", path.display()))
-                .and_then(|bytes| parse_run_state(&bytes, &path.display().to_string()))
+                .and_then(|bytes| {
+                    crate::agent_runs::parse_state(&bytes, &path.display().to_string())
+                })
+                .map(|state| crate::agent_runs::Observation {
+                    pid_alive: crate::platform::process_exists(state.pid),
+                    state,
+                })
         })
         .collect()
 }
@@ -899,15 +999,20 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
         .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
         .unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || exit $?\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  find \"$HOME/.agents/runs\" -mindepth 2 -maxdepth 2 -type f -name state.json -exec cat {{}} \\; -exec printf '\\n' \\;\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n"
+        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' \"$file\" | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    cat \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        crate::agent_runs::MAX_RUNS_PER_HOST,
     )
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn run_ssh_with_timeout(target: &str, script: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+pub(crate) fn run_ssh_with_timeout(
+    target: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let connect_timeout = timeout.as_secs().max(1).to_string();
     let mut child = Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o"])
@@ -1015,22 +1120,37 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
                 ),
             )
         });
-    let runs = serde_json::Deserializer::from_slice(state_bytes)
-        .into_iter::<serde_json::Value>()
-        .enumerate()
-        .map(|(index, value)| {
-            value
-                .map_err(|error| format!("invalid remote run state #{}: {error}", index + 1))
-                .and_then(|value| {
-                    serde_json::to_vec(&value)
-                        .map_err(|error| error.to_string())
-                        .and_then(|bytes| {
-                            parse_run_state(&bytes, &format!("remote run state #{}", index + 1))
-                        })
-                })
-        })
-        .collect();
+    let runs = parse_remote_run_records(state_bytes);
     (response, runs, runtime)
+}
+
+fn parse_remote_run_records(bytes: &[u8]) -> Vec<Result<crate::agent_runs::Observation, String>> {
+    let mut records = Vec::new();
+    let mut remaining = bytes;
+    while let Some(marker_at) = remaining
+        .windows(REMOTE_RUN_RECORD_MARKER.len())
+        .position(|window| window == REMOTE_RUN_RECORD_MARKER)
+    {
+        remaining = &remaining[marker_at + REMOTE_RUN_RECORD_MARKER.len()..];
+        let Some(header_end) = remaining.windows(2).position(|window| window == b"\x1e\n") else {
+            records.push(Err("invalid remote run marker".to_string()));
+            break;
+        };
+        let pid_alive = &remaining[..header_end] == b"1";
+        remaining = &remaining[header_end + 2..];
+        let next_marker = remaining
+            .windows(REMOTE_RUN_RECORD_MARKER.len())
+            .position(|window| window == REMOTE_RUN_RECORD_MARKER)
+            .unwrap_or(remaining.len());
+        let state_bytes = remaining[..next_marker].trim_ascii();
+        let source = format!("remote run state #{}", records.len() + 1);
+        records.push(
+            crate::agent_runs::parse_state(state_bytes, &source)
+                .map(|state| crate::agent_runs::Observation { state, pid_alive }),
+        );
+        remaining = &remaining[next_marker..];
+    }
+    records
 }
 
 fn parse_host_runtime(bytes: &[u8]) -> HostRuntime {
@@ -1047,133 +1167,6 @@ fn parse_host_runtime(bytes: &[u8]) -> HostRuntime {
             .and_then(serde_json::Value::as_u64)
             .and_then(|protocol| u32::try_from(protocol).ok()),
     }
-}
-
-fn parse_run_state(bytes: &[u8], source: &str) -> Result<RunState, String> {
-    let value: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("invalid run state {source}: {error}"))?;
-    let schema = value.get("schema").and_then(serde_json::Value::as_u64);
-    if schema != Some(1) {
-        return Err(format!(
-            "rejected run state {source}: schema {} is unsupported; expected 1",
-            schema.map_or_else(|| "missing".into(), |value| value.to_string())
-        ));
-    }
-    let run: RunState = serde_json::from_value(value)
-        .map_err(|error| format!("invalid run state {source}: {error}"))?;
-    if run.run_id.len() > 64
-        || run.run_id.is_empty()
-        || !run
-            .run_id
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-        || !run.run_id.starts_with("ra-")
-    {
-        return Err(format!("invalid run state {source}: invalid run_id"));
-    }
-    for (field, timestamp) in [
-        ("started_at", Some(run.started_at.as_str())),
-        ("last_heartbeat", Some(run.last_heartbeat.as_str())),
-        ("blocked_since", run.blocked_since.as_deref()),
-    ] {
-        if timestamp.is_some_and(|timestamp| parse_utc_timestamp(timestamp).is_none()) {
-            return Err(format!(
-                "invalid run state {source}: {field} must be RFC3339 UTC with Z"
-            ));
-        }
-    }
-    Ok(run)
-}
-
-// Schema v1 fields are intentionally all deserialized even when the current table does not
-// display them. This makes malformed producer output fail at the consumer boundary.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-struct RunState {
-    schema: u32,
-    run_id: String,
-    host: String,
-    agent: String,
-    model: String,
-    effort: String,
-    label: String,
-    task: String,
-    cwd: String,
-    repo: String,
-    branch: String,
-    pid: u32,
-    started_at: String,
-    last_heartbeat: String,
-    phase: String,
-    state: RunStateKind,
-    blocked_reason: Option<BlockedReason>,
-    blocked_since: Option<String>,
-    exit_code: Option<i32>,
-    exit_reason: Option<ExitReason>,
-    log_path: String,
-    tokens_in: Option<u64>,
-    tokens_out: Option<u64>,
-    cost_usd: Option<f64>,
-    tool_calls: Option<u64>,
-    parent: RunParent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum RunStateKind {
-    Active,
-    Blocked,
-    Waiting,
-    Done,
-    Failed,
-    Unknown,
-}
-
-impl RunStateKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Blocked => "blocked",
-            Self::Waiting => "waiting",
-            Self::Done => "done",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum BlockedReason {
-    Approval,
-    Stalled,
-    Loop,
-}
-
-impl BlockedReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Approval => "approval",
-            Self::Stalled => "stalled",
-            Self::Loop => "loop",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ExitReason {
-    Completed,
-    Failed,
-    Killed,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RunParent {
-    host: String,
-    run_id: Option<String>,
-    session: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1287,6 +1280,8 @@ pub(crate) struct FleetRow {
     native_session: Option<String>,
     #[serde(skip)]
     agent_info: Option<AgentInfo>,
+    #[serde(skip)]
+    run_summary: Option<std::sync::Arc<crate::agent_runs::Summary>>,
 }
 
 pub(crate) fn counts_as_live_agent(entry: &FleetRow) -> bool {
@@ -1328,6 +1323,17 @@ impl FleetRow {
         row.agent = Some("codex".to_string());
         row.state = if blocked { "blocked" } else { "active" }.to_string();
         row.blocked = blocked;
+        row
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_run_summary_row(summary: crate::agent_runs::Summary) -> Self {
+        let mut row = Self::test_run_row(
+            &summary.host,
+            &summary.run_id,
+            summary.state == crate::agent_runs::DisplayState::Blocked,
+        );
+        row.run_summary = Some(std::sync::Arc::new(summary));
         row
     }
 
@@ -1441,53 +1447,60 @@ impl FleetRow {
             error: None,
             native_session,
             agent_info: Some(agent_info),
+            run_summary: None,
         })
     }
 
-    fn from_run(host: &str, run: RunState, now_s: u64, heartbeat_stale_s: u64) -> Option<Self> {
-        let heartbeat_at = parse_utc_timestamp(&run.last_heartbeat);
-        let age_s = heartbeat_at.and_then(|heartbeat| now_s.checked_sub(heartbeat));
-        let fresh = age_s.is_some_and(|age| age <= heartbeat_stale_s);
-        let blocked = run.state == RunStateKind::Blocked;
-        let liveness = match run.state {
-            RunStateKind::Active | RunStateKind::Blocked | RunStateKind::Waiting if fresh => {
-                Liveness::Live
-            }
-            RunStateKind::Done | RunStateKind::Failed => Liveness::Terminal,
-            RunStateKind::Active
-            | RunStateKind::Blocked
-            | RunStateKind::Waiting
-            | RunStateKind::Unknown => Liveness::Unknown,
+    fn from_run(
+        host: &str,
+        observation: crate::agent_runs::Observation,
+        now_s: u64,
+        heartbeat_stale_s: u64,
+    ) -> Option<Self> {
+        let agent = observation.state.agent.clone();
+        let model = observation.state.model.clone();
+        let effort = observation.state.effort.clone();
+        let branch = observation.state.branch.clone();
+        let task = observation.state.task.clone();
+        let reported_at = observation.state.last_heartbeat.clone();
+        let summary = std::sync::Arc::new(crate::agent_runs::summarize(
+            host,
+            observation,
+            now_s,
+            heartbeat_stale_s,
+        ));
+        let blocked = summary.state == crate::agent_runs::DisplayState::Blocked;
+        let liveness = if summary.is_active() {
+            Liveness::Live
+        } else if summary.is_terminal() {
+            Liveness::Terminal
+        } else {
+            Liveness::Unknown
         };
-        let raw_state = run.state.as_str().to_string();
+        let raw_state = match summary.state {
+            crate::agent_runs::DisplayState::Active => "active",
+            crate::agent_runs::DisplayState::Blocked => "blocked",
+            crate::agent_runs::DisplayState::Stale => "unknown",
+            crate::agent_runs::DisplayState::Done => "done",
+            crate::agent_runs::DisplayState::Failed => "failed",
+            crate::agent_runs::DisplayState::Empty => "empty",
+        }
+        .to_string();
         let state = effective_state(&raw_state, liveness, blocked);
-        let blocked_reason = run.blocked_reason.map(|reason| reason.as_str().to_string());
-        let gate_summary = blocked_reason
-            .as_ref()
-            .map(|reason| format!("windowless run blocked: {reason}"));
-        let parent_handle = run
-            .parent
-            .run_id
-            .as_ref()
-            .and_then(|run_id| crate::api::schema::AgentRef::new(&run.parent.host, run_id).ok())
-            .map(|agent_ref| agent_ref.to_string());
-        let agent_ref = crate::api::schema::AgentRef::new(host, run.run_id.clone()).ok()?;
+        let age_s = summary.heartbeat_age_s;
+        let agent_ref = crate::api::schema::AgentRef::new(host, summary.run_id.clone()).ok()?;
         let handle = agent_ref.to_string();
         Some(Self {
             host: host.into(),
             agent_ref,
             source: EvidenceSource::RunState,
             handle,
-            agent: Some(run.agent),
-            name: Some(run.run_id),
+            agent: Some(agent),
+            name: Some(summary.run_id.clone()),
             title: None,
-            model: Some(run.model),
-            effort: Some(run.effort),
-            work: Some(if run.branch.is_empty() {
-                run.task
-            } else {
-                run.branch
-            }),
+            model: Some(model),
+            effort: Some(effort),
+            work: Some(if branch.is_empty() { task } else { branch }),
             state,
             raw_state,
             liveness,
@@ -1495,20 +1508,17 @@ impl FleetRow {
             closure_liveness: liveness,
             closure_blocked: blocked,
             age_s,
-            reported_at: Some(run.last_heartbeat),
+            reported_at: Some(reported_at),
             gates: Vec::new(),
-            gate_summary,
-            blocked_reason,
+            gate_summary: blocked.then(|| "windowless run blocked".to_string()),
+            blocked_reason: None,
             state_change_seq: None,
-            parent_handle: parent_handle.or_else(|| {
-                run.parent
-                    .session
-                    .map(|session| format!("session:{}/{}", run.parent.host, session))
-            }),
+            parent_handle: None,
             descendants: DescendantScore::default(),
             error: None,
             native_session: None,
             agent_info: None,
+            run_summary: Some(summary),
         })
     }
 
@@ -1565,11 +1575,16 @@ impl FleetRow {
             error: Some(error),
             native_session: None,
             agent_info: None,
+            run_summary: None,
         }
     }
 
     pub(crate) fn agent_info(&self) -> Option<&AgentInfo> {
         self.agent_info.as_ref()
+    }
+
+    pub(crate) fn run_summary(&self) -> Option<&std::sync::Arc<crate::agent_runs::Summary>> {
+        self.run_summary.as_ref()
     }
 }
 
@@ -1966,7 +1981,7 @@ fn unix_seconds(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn parse_utc_timestamp(value: &str) -> Option<u64> {
+pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
     let value = value.strip_suffix('Z')?;
     let (date, time) = value.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);
@@ -2303,7 +2318,48 @@ mod tests {
         let polled = poll(&config);
         assert!(!unpolled.polled);
         assert!(polled.polled);
-        assert!(polled.hosts.is_empty());
+        assert_eq!(polled.hosts.len(), 1);
+        assert_eq!(polled.hosts[0].name, config.resolved_self_name());
+    }
+
+    #[test]
+    fn implicit_local_host_can_open_run_logs() {
+        let config = FleetConfig {
+            self_name: Some("laptop".to_string()),
+            hosts: vec![host("ub2", false)],
+            ..FleetConfig::default()
+        };
+        let poller = FleetPollerConfig::new(config);
+
+        let local = poller.host("laptop").expect("implicit local host");
+        assert!(local.local);
+        assert_eq!(local.name, "laptop");
+        assert_eq!(poller.host("ub2").expect("configured host").target, "ub2");
+    }
+
+    #[test]
+    fn symphony_defaults_local_and_can_target_remote_temporal() {
+        let local = FleetPollerConfig::new(FleetConfig::default());
+        assert!(local.symphony_target().expect("local target").0.is_none());
+
+        let remote = FleetPollerConfig::new(FleetConfig {
+            symphony_host: Some("ub2".to_string()),
+            hosts: vec![host("ub2", false)],
+            ..FleetConfig::default()
+        });
+        let (target, _) = remote.symphony_target().expect("remote target");
+        assert_eq!(target.expect("configured remote").target, "ub2");
+
+        let invalid = FleetPollerConfig::new(FleetConfig {
+            symphony_host: Some("unsafe".to_string()),
+            hosts: vec![FleetHostConfig {
+                name: "unsafe".to_string(),
+                target: "-oProxyCommand=bad".to_string(),
+                ..FleetHostConfig::default()
+            }],
+            ..FleetConfig::default()
+        });
+        assert!(invalid.symphony_target().is_err());
     }
 
     #[test]
@@ -2406,6 +2462,29 @@ mod tests {
         let snapshot = collect_snapshot_with(&reader, &hosts, &FleetConfig::default());
         assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
         assert_eq!(reader.local_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(reader.remote_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn implicit_local_run_host_does_not_call_back_into_the_server() {
+        let hosts = vec![host("laptop", true)];
+        let reader = fake_reader(
+            Ok(Vec::new()),
+            HostRuntime {
+                version: Some(crate::build_info::version().to_string()),
+                protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            },
+        );
+
+        let snapshot = collect_snapshot_with_implicit_local(
+            &reader,
+            &hosts,
+            &FleetConfig::default(),
+            Some("laptop".to_string()),
+        );
+
+        assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
+        assert_eq!(reader.local_calls.load(Ordering::Relaxed), 0);
         assert_eq!(reader.remote_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -2548,14 +2627,19 @@ mod tests {
 
     #[test]
     fn run_schema_mismatch_is_rejected_loudly() {
-        let error = parse_run_state(br#"{"schema":2}"#, "fixture").unwrap_err();
+        let error = crate::agent_runs::parse_state(br#"{"schema":2}"#, "fixture").unwrap_err();
         assert!(error.contains("schema 2 is unsupported; expected 1"));
     }
 
     #[test]
     fn rejected_run_state_is_listed_but_not_counted_as_live() {
         let configured_host = host("ub2", false);
-        let rejected = parse_run_state(br#"{"schema":2}"#, "fixture");
+        let rejected = crate::agent_runs::parse_state(br#"{"schema":2}"#, "fixture").map(|state| {
+            crate::agent_runs::Observation {
+                state,
+                pid_alive: false,
+            }
+        });
         let snapshot = snapshot_from_evidence(
             std::slice::from_ref(&configured_host),
             &FleetConfig::default(),
@@ -2616,14 +2700,31 @@ mod tests {
         let output = [
             serde_json::to_vec(&agent_response).unwrap(),
             REMOTE_RUNS_MARKER.to_vec(),
+            b"\x1eHERDR_FLEET_RUN_V1:1\x1e\n".to_vec(),
             serde_json::to_vec(&run).unwrap(),
         ]
         .concat();
         let (agents, runs, runtime) = parse_remote_output(&output);
         assert!(agents.unwrap().is_empty());
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].as_ref().unwrap().run_id, "ra-260826-test-a1b2c3d");
+        assert_eq!(
+            runs[0].as_ref().unwrap().state.run_id,
+            "ra-260826-test-a1b2c3d"
+        );
+        assert!(runs[0].as_ref().unwrap().pid_alive);
         assert_eq!(runtime, HostRuntime::default());
+    }
+
+    #[test]
+    fn remote_run_read_is_bounded_and_survives_an_unavailable_herdr_socket() {
+        let script = remote_read_script(None, None);
+
+        assert!(script.contains("herdr agent list || true"));
+        assert!(script.contains(&format!(
+            "sed -n '1,{}p'",
+            crate::agent_runs::MAX_RUNS_PER_HOST
+        )));
+        assert!(script.contains("kill -0 \"$pid\""));
     }
 
     #[test]

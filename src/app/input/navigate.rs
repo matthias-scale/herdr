@@ -719,6 +719,9 @@ impl App {
                 self.state.toggle_symphony();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenRuns => {
+                focus_runs_section(&mut self.state);
+            }
             NavigateAction::OpenWorkView => {
                 self.toggle_work_view();
                 leave_navigate_mode(&mut self.state);
@@ -2340,6 +2343,7 @@ pub(crate) enum NavigateAction {
     GitCreatePr,
     ToggleInfoPanel,
     OpenSymphony,
+    OpenRuns,
     OpenWorkView,
     OpenUsageView,
     OpenTicketView,
@@ -2347,6 +2351,22 @@ pub(crate) enum NavigateAction {
     Detach,
     OpenNavigator,
     OpenCommandPalette,
+}
+
+fn focus_runs_section(state: &mut AppState) {
+    state.sidebar_collapsed = false;
+    let key = format!(
+        "{}:{}",
+        state.sidebar_group_mode.collapse_namespace(),
+        crate::ui::sidebar::RUNS_SECTION_TITLE
+    );
+    state.collapsed_sidebar_groups.remove(&key);
+    if let Some(index) = crate::ui::sidebar_rows(state).iter().position(|row| {
+        matches!(row, crate::ui::SidebarRow::SectionHeader { title, .. } if *title == crate::ui::sidebar::RUNS_SECTION_TITLE)
+    }) {
+        state.workspace_scroll = index;
+    }
+    state.mode = crate::app::Mode::Navigate;
 }
 
 fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
@@ -2595,6 +2615,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.toggle_pomodoro, NavigateAction::TogglePomodoro),
             (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
             (&kb.symphony, NavigateAction::OpenSymphony),
+            (&kb.runs, NavigateAction::OpenRuns),
             (&kb.work, NavigateAction::OpenWorkView),
             (&kb.usage, NavigateAction::OpenUsageView),
             (&kb.tickets, NavigateAction::OpenTicketView),
@@ -3170,6 +3191,9 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::OpenSymphony => {
             state.toggle_symphony();
             leave_navigate_mode(state);
+        }
+        NavigateAction::OpenRuns => {
+            focus_runs_section(state);
         }
         NavigateAction::OpenWorkView => {
             state.work_view = Some(crate::app::state::WorkViewState::new(false, None));

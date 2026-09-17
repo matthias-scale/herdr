@@ -260,6 +260,7 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("inbox", "inbox", |kb| &kb.inbox),
             built_in("missive", "missive", |kb| &kb.missive),
             built_in("symphony", "symphony", |kb| &kb.symphony),
+            built_in("runs", "fleet runs", |kb| &kb.runs),
             built_in("next_review_agent", "next review agent", |kb| {
                 &kb.next_review_agent
             }),
