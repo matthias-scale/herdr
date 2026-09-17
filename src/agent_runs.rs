@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 pub(crate) const MAX_RUNS_PER_HOST: usize = 40;
 pub(crate) const RECENT_FINISHED_PER_HOST: usize = 3;
+pub(crate) const MAX_RUN_STATE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -17,9 +18,33 @@ pub(crate) enum State {
     Unknown,
 }
 
+impl State {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Empty => "empty",
+            Self::Waiting => "waiting",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RunParent {
+    #[serde(default)]
+    pub(crate) host: String,
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
+    pub(crate) session: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
-// Parse the complete producer contract even when the current projection does
-// not display every field. Missing producer fields must fail at this boundary.
+// Parse the producer contract even when the current projection does not display
+// every field. Legacy metadata is optional because current ra-wrap states omit it.
 #[allow(dead_code)]
 pub(crate) struct RunState {
     pub(crate) schema: u32,
@@ -30,6 +55,8 @@ pub(crate) struct RunState {
     pub(crate) effort: String,
     pub(crate) label: String,
     pub(crate) task: String,
+    #[serde(default)]
+    pub(crate) cwd: String,
     pub(crate) repo: String,
     pub(crate) branch: String,
     pub(crate) pid: u32,
@@ -40,9 +67,25 @@ pub(crate) struct RunState {
     pub(crate) phase: String,
     pub(crate) state: State,
     #[serde(default)]
+    pub(crate) blocked_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) blocked_since: Option<String>,
+    #[serde(default)]
     pub(crate) exit_code: Option<i32>,
     #[serde(default)]
     pub(crate) exit_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) log_path: String,
+    #[serde(default)]
+    pub(crate) tokens_in: Option<u64>,
+    #[serde(default)]
+    pub(crate) tokens_out: Option<u64>,
+    #[serde(default)]
+    pub(crate) cost_usd: Option<f64>,
+    #[serde(default)]
+    pub(crate) tool_calls: Option<u64>,
+    #[serde(default)]
+    pub(crate) parent: RunParent,
 }
 
 #[derive(Debug, Clone)]
@@ -72,16 +115,6 @@ pub(crate) struct Summary {
     pub(crate) started_at_unix_s: u64,
     pub(crate) heartbeat_age_s: Option<u64>,
     pub(crate) state: DisplayState,
-}
-
-impl Summary {
-    pub(crate) fn is_active(&self) -> bool {
-        matches!(self.state, DisplayState::Active | DisplayState::Blocked)
-    }
-
-    pub(crate) fn is_terminal(&self) -> bool {
-        matches!(self.state, DisplayState::Done | DisplayState::Failed)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +197,7 @@ pub(crate) fn parse_state(bytes: &[u8], source: &str) -> Result<RunState, String
         ("started_at", Some(state.started_at.as_str())),
         ("last_heartbeat", Some(state.last_heartbeat.as_str())),
         ("progress_at", state.progress_at.as_deref()),
+        ("blocked_since", state.blocked_since.as_deref()),
     ] {
         if timestamp.is_some_and(|value| crate::fleet::parse_utc_timestamp(value).is_none()) {
             return Err(format!(
@@ -279,6 +313,9 @@ mod tests {
         assert_eq!(state.run_id, "ra-260917-sidebar-a1b2c3d");
         assert_eq!(state.progress_at.as_deref(), Some("2026-09-17T08:04:00Z"));
         assert_eq!(state.phase, "implementation");
+        assert_eq!(state.blocked_reason, None);
+        assert!(state.parent.host.is_empty());
+        assert_eq!(state.parent.run_id, None);
     }
 
     #[test]

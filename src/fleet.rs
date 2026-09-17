@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,8 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
+const MAX_RUN_DIRECTORY_ENTRIES: usize = 256;
+const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
     Vec<Result<crate::agent_runs::Observation, String>>,
@@ -946,10 +948,20 @@ fn read_run_state_dir(root: &Path) -> Vec<Result<crate::agent_runs::Observation,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => return vec![Err(format!("cannot read {}: {error}", root.display()))],
     };
+    recent_run_state_paths(entries.map(|entry| entry.map(|entry| entry.path())))
+        .into_iter()
+        .map(|path| read_run_state_file(&path))
+        .collect()
+}
+
+fn recent_run_state_paths(
+    entries: impl IntoIterator<Item = std::io::Result<PathBuf>>,
+) -> Vec<PathBuf> {
     let mut paths = entries
+        .into_iter()
+        .take(MAX_RUN_DIRECTORY_ENTRIES)
         .filter_map(Result::ok)
-        .map(|entry| entry.path().join("state.json"))
-        .filter(|path| path.is_file())
+        .map(|path| path.join("state.json"))
         .filter_map(|path| {
             let modified = path
                 .metadata()
@@ -962,18 +974,33 @@ fn read_run_state_dir(root: &Path) -> Vec<Result<crate::agent_runs::Observation,
     paths
         .into_iter()
         .take(crate::agent_runs::MAX_RUNS_PER_HOST)
-        .map(|(_, path)| {
-            std::fs::read(&path)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()))
-                .and_then(|bytes| {
-                    crate::agent_runs::parse_state(&bytes, &path.display().to_string())
-                })
-                .map(|state| crate::agent_runs::Observation {
-                    pid_alive: crate::platform::process_exists(state.pid),
-                    state,
-                })
-        })
+        .map(|(_, path)| path)
         .collect()
+}
+
+fn read_run_state_file(path: &Path) -> Result<crate::agent_runs::Observation, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let bytes =
+        match crate::platform::read_limited_reader(file, crate::agent_runs::MAX_RUN_STATE_BYTES)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?
+        {
+            crate::platform::LimitedRead::Empty => Vec::new(),
+            crate::platform::LimitedRead::Complete(bytes) => bytes,
+            crate::platform::LimitedRead::Oversized => {
+                return Err(format!(
+                    "run state {} exceeds {} bytes",
+                    path.display(),
+                    crate::agent_runs::MAX_RUN_STATE_BYTES
+                ));
+            }
+        };
+    crate::agent_runs::parse_state(&bytes, &path.display().to_string()).map(|state| {
+        crate::agent_runs::Observation {
+            pid_alive: crate::platform::process_exists(state.pid),
+            state,
+        }
+    })
 }
 
 fn fetch_remote_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
@@ -999,8 +1026,10 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
         .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
         .unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' \"$file\" | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    cat \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
         crate::agent_runs::MAX_RUNS_PER_HOST,
+        crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
+        crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
     )
 }
 
@@ -1013,78 +1042,48 @@ pub(crate) fn run_ssh_with_timeout(
     script: &str,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    run_ssh_program_with_timeout("ssh", target, script, timeout)
+}
+
+fn run_ssh_program_with_timeout(
+    program: impl AsRef<OsStr>,
+    target: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let connect_timeout = timeout.as_secs().max(1).to_string();
-    let mut child = Command::new("ssh")
+    let mut command = crate::noninteractive_process::command(program);
+    command
         .args(["-o", "BatchMode=yes", "-o"])
         .arg(format!("ConnectTimeout={connect_timeout}"))
         .args(["-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=1"])
         .arg(target)
-        .args(["sh", "-s"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start ssh: {error}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|error| format!("failed to send remote read script: {error}"))?;
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "ssh stdout unavailable".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "ssh stderr unavailable".to_string())?;
-    let stdout_reader = std::thread::spawn(move || read_all(stdout));
-    let stderr_reader = std::thread::spawn(move || read_all(stderr));
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(format!(
-                    "STATUS UNKNOWN: host read timed out after {}ms",
-                    timeout.as_millis()
-                ));
-            }
-            Err(error) => return Err(format!("failed to wait for ssh: {error}")),
+        .args(["sh", "-s"]);
+    let output = crate::noninteractive_process::output_with_stdin_and_deadline_limited(
+        command,
+        script.as_bytes().to_vec(),
+        Instant::now() + timeout,
+        MAX_REMOTE_OUTPUT_BYTES,
+    )
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::TimedOut => format!(
+            "STATUS UNKNOWN: host read timed out after {}ms",
+            timeout.as_millis()
+        ),
+        std::io::ErrorKind::FileTooLarge => {
+            format!("STATUS UNKNOWN: host read exceeded {MAX_REMOTE_OUTPUT_BYTES} bytes")
         }
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| "ssh stdout reader panicked".to_string())??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| "ssh stderr reader panicked".to_string())??;
-    if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+        _ => format!("failed to run ssh: {error}"),
+    })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {
-            format!("STATUS UNKNOWN: ssh exited with {status}")
+            format!("STATUS UNKNOWN: ssh exited with {}", output.status)
         } else {
             format!("STATUS UNKNOWN: {detail}")
         });
     }
-    Ok(stdout)
-}
-
-fn read_all(mut reader: impl Read) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    Ok(bytes)
+    Ok(output.stdout)
 }
 
 fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
@@ -1145,8 +1144,15 @@ fn parse_remote_run_records(bytes: &[u8]) -> Vec<Result<crate::agent_runs::Obser
         let state_bytes = remaining[..next_marker].trim_ascii();
         let source = format!("remote run state #{}", records.len() + 1);
         records.push(
-            crate::agent_runs::parse_state(state_bytes, &source)
-                .map(|state| crate::agent_runs::Observation { state, pid_alive }),
+            if state_bytes.len() > crate::agent_runs::MAX_RUN_STATE_BYTES {
+                Err(format!(
+                    "run state {source} exceeds {} bytes",
+                    crate::agent_runs::MAX_RUN_STATE_BYTES
+                ))
+            } else {
+                crate::agent_runs::parse_state(state_bytes, &source)
+                    .map(|state| crate::agent_runs::Observation { state, pid_alive })
+            },
         );
         remaining = &remaining[next_marker..];
     }
@@ -1457,37 +1463,50 @@ impl FleetRow {
         now_s: u64,
         heartbeat_stale_s: u64,
     ) -> Option<Self> {
-        let agent = observation.state.agent.clone();
-        let model = observation.state.model.clone();
-        let effort = observation.state.effort.clone();
-        let branch = observation.state.branch.clone();
-        let task = observation.state.task.clone();
-        let reported_at = observation.state.last_heartbeat.clone();
+        let run = observation.state.clone();
+        let heartbeat_at = parse_utc_timestamp(&run.last_heartbeat);
+        let age_s = heartbeat_at.and_then(|heartbeat| now_s.checked_sub(heartbeat));
+        let fresh = age_s.is_some_and(|age| age <= heartbeat_stale_s);
+        let blocked = run.state == crate::agent_runs::State::Blocked;
+        let liveness = match run.state {
+            crate::agent_runs::State::Active
+            | crate::agent_runs::State::Blocked
+            | crate::agent_runs::State::Waiting
+                if fresh =>
+            {
+                Liveness::Live
+            }
+            crate::agent_runs::State::Done | crate::agent_runs::State::Failed => Liveness::Terminal,
+            crate::agent_runs::State::Active
+            | crate::agent_runs::State::Blocked
+            | crate::agent_runs::State::Waiting
+            | crate::agent_runs::State::Unknown
+            | crate::agent_runs::State::Empty => Liveness::Unknown,
+        };
+        let raw_state = run.state.as_str().to_string();
+        let state = effective_state(&raw_state, liveness, blocked);
+        let blocked_reason = run.blocked_reason.clone();
+        let gate_summary = blocked_reason
+            .as_ref()
+            .map(|reason| format!("windowless run blocked: {reason}"));
+        let parent_handle = run
+            .parent
+            .run_id
+            .as_ref()
+            .and_then(|run_id| crate::api::schema::AgentRef::new(&run.parent.host, run_id).ok())
+            .map(|agent_ref| agent_ref.to_string())
+            .or_else(|| {
+                run.parent
+                    .session
+                    .as_ref()
+                    .map(|session| format!("session:{}/{}", run.parent.host, session))
+            });
         let summary = std::sync::Arc::new(crate::agent_runs::summarize(
             host,
             observation,
             now_s,
             heartbeat_stale_s,
         ));
-        let blocked = summary.state == crate::agent_runs::DisplayState::Blocked;
-        let liveness = if summary.is_active() {
-            Liveness::Live
-        } else if summary.is_terminal() {
-            Liveness::Terminal
-        } else {
-            Liveness::Unknown
-        };
-        let raw_state = match summary.state {
-            crate::agent_runs::DisplayState::Active => "active",
-            crate::agent_runs::DisplayState::Blocked => "blocked",
-            crate::agent_runs::DisplayState::Stale => "unknown",
-            crate::agent_runs::DisplayState::Done => "done",
-            crate::agent_runs::DisplayState::Failed => "failed",
-            crate::agent_runs::DisplayState::Empty => "empty",
-        }
-        .to_string();
-        let state = effective_state(&raw_state, liveness, blocked);
-        let age_s = summary.heartbeat_age_s;
         let agent_ref = crate::api::schema::AgentRef::new(host, summary.run_id.clone()).ok()?;
         let handle = agent_ref.to_string();
         Some(Self {
@@ -1495,12 +1514,16 @@ impl FleetRow {
             agent_ref,
             source: EvidenceSource::RunState,
             handle,
-            agent: Some(agent),
+            agent: Some(run.agent),
             name: Some(summary.run_id.clone()),
             title: None,
-            model: Some(model),
-            effort: Some(effort),
-            work: Some(if branch.is_empty() { task } else { branch }),
+            model: Some(run.model),
+            effort: Some(run.effort),
+            work: Some(if run.branch.is_empty() {
+                run.task
+            } else {
+                run.branch
+            }),
             state,
             raw_state,
             liveness,
@@ -1508,12 +1531,12 @@ impl FleetRow {
             closure_liveness: liveness,
             closure_blocked: blocked,
             age_s,
-            reported_at: Some(reported_at),
+            reported_at: Some(run.last_heartbeat),
             gates: Vec::new(),
-            gate_summary: blocked.then(|| "windowless run blocked".to_string()),
-            blocked_reason: None,
+            gate_summary,
+            blocked_reason,
             state_change_seq: None,
-            parent_handle: None,
+            parent_handle,
             descendants: DescendantScore::default(),
             error: None,
             native_session: None,
@@ -2048,6 +2071,31 @@ fn print_fleet_help() {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn run_fixture_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-fleet-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fleet fixture directory");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).expect("write executable fixture");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("set executable fixture mode");
+    }
 
     struct FakeReader {
         local_calls: AtomicUsize,
@@ -2632,6 +2680,238 @@ mod tests {
     }
 
     #[test]
+    fn local_run_scan_caps_entries_before_metadata_and_keeps_newest_results() {
+        let inspected = std::sync::Arc::new(AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&inspected);
+        let entries = (0..MAX_RUN_DIRECTORY_ENTRIES + 20).map(move |index| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(PathBuf::from(format!("/missing/run-{index}")))
+        });
+        assert!(recent_run_state_paths(entries).is_empty());
+        assert_eq!(inspected.load(Ordering::Relaxed), MAX_RUN_DIRECTORY_ENTRIES);
+
+        let root = run_fixture_dir("newest-runs");
+        let mut entries = Vec::new();
+        for index in 0..crate::agent_runs::MAX_RUNS_PER_HOST + 5 {
+            let run = root.join(format!("run-{index:02}"));
+            std::fs::create_dir(&run).expect("create run directory");
+            std::fs::write(run.join("state.json"), b"{}").expect("write run state");
+            entries.push(Ok(run));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let newest = recent_run_state_paths(entries);
+        assert_eq!(newest.len(), crate::agent_runs::MAX_RUNS_PER_HOST);
+        assert!(newest.contains(&root.join("run-44").join("state.json")));
+        assert!(!newest.contains(&root.join("run-00").join("state.json")));
+        std::fs::remove_dir_all(root).expect("remove newest-runs fixture");
+    }
+
+    #[test]
+    fn local_and_remote_run_states_reject_bytes_past_the_cap() {
+        let root = run_fixture_dir("oversized-state");
+        let run = root.join("run");
+        std::fs::create_dir(&run).expect("create run fixture");
+        std::fs::write(
+            run.join("state.json"),
+            vec![b'x'; crate::agent_runs::MAX_RUN_STATE_BYTES + 1],
+        )
+        .expect("write oversized state");
+        let result = read_run_state_dir(&root);
+        assert_eq!(result.len(), 1);
+        assert!(result[0]
+            .as_ref()
+            .expect_err("oversized local state must fail")
+            .contains("exceeds 65536 bytes"));
+
+        let mut remote = REMOTE_RUN_RECORD_MARKER.to_vec();
+        remote.extend_from_slice(b"0\x1e\n");
+        remote.extend(std::iter::repeat_n(
+            b'x',
+            crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
+        ));
+        let records = parse_remote_run_records(&remote);
+        assert_eq!(records.len(), 1);
+        assert!(records[0]
+            .as_ref()
+            .expect_err("oversized remote state must fail")
+            .contains("exceeds 65536 bytes"));
+        std::fs::remove_dir_all(root).expect("remove oversized-state fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_timeout_does_not_wait_for_descendant_pipe_holders() {
+        let root = run_fixture_dir("ssh-descendant");
+        let fake_ssh = root.join("ssh");
+        write_executable(&fake_ssh, "#!/bin/sh\nsleep 30 &\nwait\n");
+
+        let started = Instant::now();
+        let error = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            "exit 0",
+            Duration::from_millis(500),
+        )
+        .expect_err("SSH wrapper with retained pipes must time out");
+
+        assert!(error.contains("timed out after 500ms"));
+        assert!(
+            started.elapsed() < Duration::from_millis(1_250),
+            "timeout must not block joining descendant-held pipes"
+        );
+        std::fs::remove_dir_all(root).expect("remove ssh-descendant fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_capture_caps_combined_stdout_and_stderr() {
+        let root = run_fixture_dir("ssh-output-cap");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nhead -c {} /dev/zero\nhead -c {} /dev/zero >&2\n",
+                MAX_REMOTE_OUTPUT_BYTES / 2 + 1,
+                MAX_REMOTE_OUTPUT_BYTES / 2 + 1,
+            ),
+        );
+
+        let error =
+            run_ssh_program_with_timeout(&fake_ssh, "fixture", "exit 0", Duration::from_secs(5))
+                .expect_err("SSH output past the cap must fail");
+        assert!(error.contains("exceeded 4194304 bytes"));
+        std::fs::remove_dir_all(root).expect("remove ssh-output-cap fixture");
+    }
+
+    fn legacy_run(
+        run_id: &str,
+        state: &str,
+        heartbeat: &str,
+        blocked_reason: Option<&str>,
+        parent_run_id: Option<&str>,
+    ) -> crate::agent_runs::Observation {
+        let value = serde_json::json!({
+            "schema": 1,
+            "run_id": run_id,
+            "host": "probe",
+            "agent": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "label": "compatibility probe",
+            "task": "preserve fleet status",
+            "cwd": "/tmp/probe",
+            "repo": "matthias-scale/herdr",
+            "branch": "feat/probe",
+            "pid": 4242,
+            "started_at": "2026-09-17T08:00:00Z",
+            "last_heartbeat": heartbeat,
+            "phase": "verify",
+            "state": state,
+            "blocked_reason": blocked_reason,
+            "blocked_since": blocked_reason.map(|_| "2026-09-17T08:01:00Z"),
+            "exit_code": null,
+            "exit_reason": null,
+            "log_path": "/home/probe/.agents/runs/probe/out.log",
+            "tokens_in": null,
+            "tokens_out": null,
+            "cost_usd": null,
+            "tool_calls": null,
+            "parent": {"host": "probe", "run_id": parent_run_id, "session": null}
+        });
+        crate::agent_runs::Observation {
+            state: crate::agent_runs::parse_state(
+                &serde_json::to_vec(&value).expect("legacy fixture JSON"),
+                "legacy fixture",
+            )
+            .expect("legacy run state"),
+            pid_alive: false,
+        }
+    }
+
+    fn run_snapshot(runs: Vec<crate::agent_runs::Observation>) -> Snapshot {
+        let configured_host = host("probe", false);
+        let fleet = FleetConfig {
+            heartbeat_stale_ms: 60_000,
+            ..FleetConfig::default()
+        };
+        snapshot_from_evidence(
+            std::slice::from_ref(&configured_host),
+            &fleet,
+            vec![HostEvidence {
+                host: configured_host.clone(),
+                agents: Ok(Vec::new()),
+                runs: runs.into_iter().map(Ok).collect(),
+                runtime: HostRuntime::default(),
+            }],
+            UNIX_EPOCH + Duration::from_secs(1_758_099_600), // 2025-09-17T09:00:00Z
+        )
+    }
+
+    #[test]
+    fn run_rows_preserve_stale_blocked_and_fresh_waiting_contract() {
+        let snapshot = run_snapshot(vec![
+            legacy_run(
+                "ra-stale-blocked",
+                "blocked",
+                "2025-09-17T08:00:00Z",
+                Some("approval"),
+                Some("ra-parent"),
+            ),
+            legacy_run(
+                "ra-fresh-waiting",
+                "waiting",
+                "2025-09-17T08:59:30Z",
+                None,
+                None,
+            ),
+        ]);
+        let rows = serde_json::to_value(&snapshot.hosts[0].entries).expect("serialize rows");
+        let rows = rows.as_array().expect("row array");
+        let blocked = rows
+            .iter()
+            .find(|row| row["name"] == "ra-stale-blocked")
+            .expect("blocked row");
+        assert_eq!(blocked["state"], "blocked_liveness_unknown");
+        assert_eq!(blocked["raw_state"], "blocked");
+        assert_eq!(blocked["liveness"], "unknown");
+        assert_eq!(blocked["blocked"], true);
+        assert_eq!(blocked["blocked_reason"], "approval");
+        assert_eq!(blocked["parent_handle"], "probe::ra-parent");
+
+        let waiting = rows
+            .iter()
+            .find(|row| row["name"] == "ra-fresh-waiting")
+            .expect("waiting row");
+        assert_eq!(waiting["state"], "waiting");
+        assert_eq!(waiting["raw_state"], "waiting");
+        assert_eq!(waiting["liveness"], "live");
+        assert_eq!(waiting["blocked"], false);
+    }
+
+    #[test]
+    fn run_parent_closure_includes_live_child() {
+        let snapshot = run_snapshot(vec![
+            legacy_run("ra-parent", "done", "2025-09-17T08:00:00Z", None, None),
+            legacy_run(
+                "ra-child",
+                "active",
+                "2025-09-17T08:59:30Z",
+                None,
+                Some("ra-parent"),
+            ),
+        ]);
+        let rows = serde_json::to_value(&snapshot.hosts[0].entries).expect("serialize rows");
+        let parent = rows
+            .as_array()
+            .expect("row array")
+            .iter()
+            .find(|row| row["name"] == "ra-parent")
+            .expect("parent row");
+        assert_eq!(parent["closure_liveness"], "live");
+        assert_eq!(parent["descendants"]["live"], 1);
+    }
+
+    #[test]
     fn rejected_run_state_is_listed_but_not_counted_as_live() {
         let configured_host = host("ub2", false);
         let rejected = crate::agent_runs::parse_state(br#"{"schema":2}"#, "fixture").map(|state| {
@@ -2723,6 +3003,10 @@ mod tests {
         assert!(script.contains(&format!(
             "sed -n '1,{}p'",
             crate::agent_runs::MAX_RUNS_PER_HOST
+        )));
+        assert!(script.contains(&format!(
+            "head -c {} \"$file\"",
+            crate::agent_runs::MAX_RUN_STATE_BYTES + 1
         )));
         assert!(script.contains("kill -0 \"$pid\""));
     }
