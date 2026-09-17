@@ -6774,6 +6774,20 @@ mod tests {
     fn closing_reports_emit_one_waiting_projection_transition() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_closing_task_report(
+                None,
+                None,
+                Some(crate::api::schema::ClosingParseStatus::Ok),
+                Some(false),
+                std::time::Instant::now(),
+            );
 
         let started = state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
