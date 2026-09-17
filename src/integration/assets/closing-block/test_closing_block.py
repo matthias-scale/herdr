@@ -2007,6 +2007,12 @@ class StopHookTranscriptTests(unittest.TestCase):
 
 class CodexNotifyHookTests(unittest.TestCase):
     @staticmethod
+    def _state_dir():
+        import tempfile
+
+        return tempfile.mkdtemp(prefix="herdr-codex-notify-test-")
+
+    @staticmethod
     def _hook_module():
         import importlib.util
         import os
@@ -2066,11 +2072,13 @@ class CodexNotifyHookTests(unittest.TestCase):
             hook,
             "report",
             return_value={"payload": {}, "mirror": "/tmp/mirror", "socket": False},
-        ) as report, mock.patch.object(
-            hook, "claim_unreported_turn", return_value=True
-        ), mock.patch.dict(
+        ) as report, mock.patch.dict(
             hook.os.environ,
-            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            {
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "XDG_STATE_HOME": self._state_dir(),
+            },
             clear=False,
         ), mock.patch.object(
             hook.sys, "argv", ["herdr-codex-notify.py", payload]
@@ -2103,8 +2111,6 @@ class CodexNotifyHookTests(unittest.TestCase):
         with mock.patch.object(hook, "reserve_sequence", side_effect=reserve), mock.patch.object(
             hook, "load_payload", side_effect=load
         ), mock.patch.object(
-            hook, "claim_unreported_turn", return_value=True
-        ), mock.patch.object(
             hook, "title_from", return_value="Task title"
         ), mock.patch.object(
             hook,
@@ -2112,7 +2118,11 @@ class CodexNotifyHookTests(unittest.TestCase):
             return_value={"payload": {}, "mirror": "/tmp/mirror", "socket": False},
         ) as report, mock.patch.dict(
             hook.os.environ,
-            {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+            {
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "XDG_STATE_HOME": self._state_dir(),
+            },
             clear=False,
         ):
             self.assertEqual(hook.main(), 0)
@@ -2128,7 +2138,7 @@ class CodexNotifyHookTests(unittest.TestCase):
             "turn-id": "turn-1",
         }
         with mock.patch.object(hook, "load_payload", return_value=payload), mock.patch.object(
-            hook, "claim_unreported_turn"
+            hook, "report_unreported_turn"
         ) as claim, mock.patch.dict(
             hook.os.environ,
             {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
@@ -2137,6 +2147,45 @@ class CodexNotifyHookTests(unittest.TestCase):
             self.assertEqual(hook.main(), 0)
 
         claim.assert_not_called()
+
+    def test_failed_delivery_is_retried_for_the_same_notification(self):
+        import json
+        import tempfile
+
+        hook = self._hook_module()
+        payload = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-retry",
+            "turn-id": "turn-retry",
+            "last-assistant-message": "Done here.",
+        }
+        with mock.patch.object(
+            hook,
+            "report",
+            side_effect=[
+                {"payload": {}, "mirror": None, "socket": False},
+                {"payload": {}, "mirror": "/tmp/mirror", "socket": True},
+            ],
+        ) as report, mock.patch.object(
+            hook, "title_from", return_value="Task title"
+        ), mock.patch.dict(
+            hook.os.environ,
+            {
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "XDG_STATE_HOME": tempfile.mkdtemp(prefix="herdr-codex-retry-test-"),
+            },
+            clear=False,
+        ):
+            for _ in range(2):
+                with mock.patch.object(
+                    hook.sys,
+                    "argv",
+                    ["herdr-codex-notify.py", json.dumps(payload)],
+                ):
+                    self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(report.call_count, 2)
 
     def test_duplicate_old_turn_cannot_restore_a_resolved_gate(self):
         import json
@@ -2164,7 +2213,7 @@ class CodexNotifyHookTests(unittest.TestCase):
 
         def report(**kwargs):
             reports.append(kwargs)
-            return {"payload": {}, "mirror": "/tmp/mirror", "socket": False}
+            return {"payload": {}, "mirror": "/tmp/mirror", "socket": True}
 
         with mock.patch.object(hook, "report", side_effect=report), mock.patch.object(
             hook, "title_from", return_value="Task title"
@@ -2189,7 +2238,7 @@ class CodexNotifyHookTests(unittest.TestCase):
         self.assertEqual(reports[0]["blocking"], 1)
         self.assertEqual(reports[1]["blocking"], 0)
 
-    def test_competing_processes_claim_one_turn_only_once(self):
+    def test_competing_processes_deliver_one_turn_only_once(self):
         import multiprocessing
         import tempfile
 
@@ -2199,16 +2248,20 @@ class CodexNotifyHookTests(unittest.TestCase):
         ready = context.Event()
         results = context.Queue()
 
-        def claim():
+        def deliver():
             ready.wait(2)
             with mock.patch.dict(
                 hook.os.environ, {"XDG_STATE_HOME": state_dir}, clear=False
             ):
-                results.put(
-                    hook.claim_unreported_turn("w1:p1", "thread-1", "turn-1")
+                outcome = hook.report_unreported_turn(
+                    "w1:p1",
+                    "thread-1",
+                    "turn-1",
+                    lambda: {"socket": True},
                 )
+                results.put(outcome is not None)
 
-        processes = [context.Process(target=claim) for _ in range(6)]
+        processes = [context.Process(target=deliver) for _ in range(6)]
         for process in processes:
             process.start()
         ready.set()

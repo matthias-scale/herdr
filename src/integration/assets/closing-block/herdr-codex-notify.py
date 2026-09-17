@@ -63,28 +63,34 @@ def _read_reported_turns(path: str) -> list[list[str]]:
     ][-REPORTED_TURN_LIMIT:]
 
 
-def claim_unreported_turn(pane_id: str, session_id: str, turn_id: str) -> bool:
-    """Atomically claim a documented Codex notification pair once per pane."""
+def report_unreported_turn(pane_id: str, session_id: str, turn_id: str, deliver):
+    """Deliver once, persisting the replay key only after socket success."""
     if not session_id or not turn_id:
-        return True
+        return deliver()
     path = reported_turns_path(pane_id)
     try:
-        with open(f"{path}.lock", "a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            values = _read_reported_turns(path)
-            key = _reported_turn_key(session_id, turn_id)
-            if key in values:
-                return False
-            values = [*values, key][-REPORTED_TURN_LIMIT:]
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(values, fh)
-            os.replace(tmp, path)
-            return True
+        lock = open(f"{path}.lock", "a", encoding="utf-8")
     except OSError:
         # The adapter was historically stateless; an unwritable optional
         # replay ledger must not suppress all turn-end reports.
-        return True
+        return deliver()
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        values = _read_reported_turns(path)
+        key = _reported_turn_key(session_id, turn_id)
+        if key in values:
+            return None
+        outcome = deliver()
+        if outcome.get("socket") is True:
+            values = [*values, key][-REPORTED_TURN_LIMIT:]
+            try:
+                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(values, fh)
+                os.replace(tmp, path)
+            except OSError:
+                pass
+        return outcome
 
 
 def load_payload(argv: list[str]) -> dict:
@@ -162,26 +168,28 @@ def main() -> int:
     # Missing task evidence is reported explicitly so an abbreviated reply does
     # not clear unresolved decisions from an earlier authoritative report.
     block = parse(text)
-    if not claim_unreported_turn(pane_id, session_id, turn_id):
-        return 0
-
-    outcome = report(
-        agent="codex",
-        blocking=block.blocking,
-        agents=block.agents_running,
-        gates=block.wire_gates(),
-        items=block.wire_items(),
-        decisions=block.wire_decisions(),
-        agent_names=block.agents,
-        completion=block.completion,
-        external_wait=block.external_wait,
-        parse_status=block.parse_status,
-        workers_unknown=block.workers_unknown,
-        session_id=session_id or None,
-        title=title_from(payload, pane_id),
-        seq=seq,
+    outcome = report_unreported_turn(
+        pane_id,
+        session_id,
+        turn_id,
+        lambda: report(
+            agent="codex",
+            blocking=block.blocking,
+            agents=block.agents_running,
+            gates=block.wire_gates(),
+            items=block.wire_items(),
+            decisions=block.wire_decisions(),
+            agent_names=block.agents,
+            completion=block.completion,
+            external_wait=block.external_wait,
+            parse_status=block.parse_status,
+            workers_unknown=block.workers_unknown,
+            session_id=session_id or None,
+            title=title_from(payload, pane_id),
+            seq=seq,
+        ),
     )
-    if os.environ.get("HERDR_CLOSING_BLOCK_DEBUG"):
+    if outcome is not None and os.environ.get("HERDR_CLOSING_BLOCK_DEBUG"):
         print(json.dumps(outcome["payload"]), file=sys.stderr)
     return 0
 
