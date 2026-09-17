@@ -10657,8 +10657,8 @@ pub(crate) mod tests {
                         .draw(|frame| {
                             let rect = Rect::new(0, 0, width, 1);
                             if is_remote {
-                                render_remote_compact_agent_row(
-                                    &app, frame, &remote, rect, 0, None,
+                                render_remote_compact_agent_row_with_identity(
+                                    &app, frame, &remote, rect, 0, None, true,
                                 );
                             } else {
                                 render_compact_agent_row(
