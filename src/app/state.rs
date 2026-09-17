@@ -3970,6 +3970,8 @@ pub struct AppState {
     pub agent_panel_sort: AgentPanelSort,
     /// Transient session-wide compatibility projection for indexed Agent focus.
     pub status_indicators: crate::config::StatusIndicatorStyle,
+    /// TUI-only foreground opacity of blue-dot Working rows.
+    pub working_row_opacity_percent: u8,
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
@@ -6435,6 +6437,7 @@ impl AppState {
             agent_panel_scroll: 0,
             agent_panel_sort: AgentPanelSort::Spaces,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
+            working_row_opacity_percent: 100,
             agent_view_override: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),

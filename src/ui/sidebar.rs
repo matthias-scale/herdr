@@ -547,6 +547,44 @@ fn compact_row_style(style: Style, bg: Option<Color>) -> Style {
     bg.map_or(style, |bg| style.bg(bg))
 }
 
+/// Terminal cells have no alpha channel, so fade the foreground toward the
+/// background actually painted under this row. Named and indexed colours use
+/// their xterm RGB values; an inherited terminal background can only use DIM.
+fn blue_working_row(entry: &AgentPanelEntry, p: &Palette, dot_color: Color) -> bool {
+    entry.state == AgentState::Working
+        && entry_attention_tier(entry) == AttentionTier::None
+        && dot_color == p.blue
+}
+
+fn working_row_style(app: &AppState, fade: bool, style: Style, bg: Option<Color>) -> Style {
+    let opacity = app.working_row_opacity_percent;
+    if opacity == 100 || !fade {
+        return compact_row_style(style, bg);
+    }
+    let row_bg = bg.unwrap_or_else(|| app.palette.sidebar_background());
+    let style = match (
+        style.fg.and_then(crate::app::state::color_rgb),
+        crate::app::state::color_rgb(row_bg),
+    ) {
+        (Some(foreground), Some(background)) => {
+            let blend = |foreground: u8, background: u8| {
+                ((u16::from(foreground) * u16::from(opacity)
+                    + u16::from(background) * u16::from(100 - opacity)
+                    + 50)
+                    / 100) as u8
+            };
+            style.fg(Color::Rgb(
+                blend(foreground.r, background.r),
+                blend(foreground.g, background.g),
+                blend(foreground.b, background.b),
+            ))
+        }
+        (Some(_), _) => style.add_modifier(Modifier::DIM),
+        _ => style,
+    };
+    compact_row_style(style, bg)
+}
+
 fn superscript(index: usize) -> String {
     index
         .to_string()
@@ -692,7 +730,9 @@ fn render_remote_compact_agent_row_with_prefix(
     } else {
         Style::default().fg(p.subtext0)
     };
-    let dot_style = Style::default().fg(compact_row_color(remote, p));
+    let dot_color = compact_row_color(remote, p);
+    let fade = blue_working_row(remote, p, dot_color);
+    let dot_style = Style::default().fg(dot_color);
     let provider_style = Style::default()
         .fg(provider_color(remote, p))
         .add_modifier(Modifier::DIM);
@@ -706,13 +746,16 @@ fn render_remote_compact_agent_row_with_prefix(
     frame.render_widget(
         Paragraph::new(Span::styled(
             remote.render_dot,
-            compact_row_style(dot_style, bg),
+            working_row_style(app, fade, dot_style, bg),
         )),
         Rect::new(x, rect.y, SIDEBAR_DOT_FIELD_WIDTH as u16, rect.height),
     );
     x = x.saturating_add(SIDEBAR_DOT_FIELD_WIDTH as u16);
     frame.render_widget(
-        Paragraph::new(Span::styled(title, compact_row_style(title_style, bg))),
+        Paragraph::new(Span::styled(
+            title,
+            working_row_style(app, fade, title_style, bg),
+        )),
         Rect::new(x, rect.y, title_width as u16, rect.height),
     );
     x = x.saturating_add(title_width as u16);
@@ -720,7 +763,7 @@ fn render_remote_compact_agent_row_with_prefix(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 remote.render_provider.as_str(),
-                compact_row_style(provider_style, bg),
+                working_row_style(app, fade, provider_style, bg),
             ))
             .alignment(Alignment::Right),
             Rect::new(x, rect.y, provider_width as u16, rect.height),
@@ -731,7 +774,7 @@ fn render_remote_compact_agent_row_with_prefix(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 remote.render_age.as_str(),
-                compact_row_style(age_style, bg),
+                working_row_style(app, fade, age_style, bg),
             ))
             .alignment(Alignment::Right),
             Rect::new(x, rect.y, age_width as u16, rect.height),
@@ -742,7 +785,9 @@ fn render_remote_compact_agent_row_with_prefix(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 suffix,
-                compact_row_style(
+                working_row_style(
+                    app,
+                    fade,
                     Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                     bg,
                 ),
@@ -822,7 +867,9 @@ fn render_compact_agent_row_with_prefix(
     } else {
         Style::default().fg(p.subtext0)
     };
-    let dot_style = Style::default().fg(compact_row_color(entry, p));
+    let dot_color = compact_row_color(entry, p);
+    let fade = blue_working_row(entry, p, dot_color);
+    let dot_style = Style::default().fg(dot_color);
     let provider_style = Style::default()
         .fg(provider_color(entry, p))
         .add_modifier(Modifier::DIM);
@@ -833,23 +880,28 @@ fn render_compact_agent_row_with_prefix(
     });
     let mut spans = vec![
         Span::styled(prefix, compact_row_style(Style::default(), bg)),
-        Span::styled(dot, compact_row_style(dot_style, bg)),
-        Span::styled(title_text, compact_row_style(title_style, bg)),
+        Span::styled(dot, working_row_style(app, fade, dot_style, bg)),
+        Span::styled(title_text, working_row_style(app, fade, title_style, bg)),
     ];
     if let Some(star) = star_suffix {
         spans.push(Span::styled(
             star,
-            compact_row_style(Style::default().fg(p.yellow), bg),
+            working_row_style(app, fade, Style::default().fg(p.yellow), bg),
         ));
     }
     spans.extend([
-        Span::styled(title_pad, compact_row_style(title_style, bg)),
+        Span::styled(title_pad, working_row_style(app, fade, title_style, bg)),
         Span::styled(
             if settle_width > 0 { " ✓" } else { "" },
-            compact_row_style(Style::default().fg(p.green).add_modifier(Modifier::DIM), bg),
+            working_row_style(
+                app,
+                fade,
+                Style::default().fg(p.green).add_modifier(Modifier::DIM),
+                bg,
+            ),
         ),
-        Span::styled(provider, compact_row_style(provider_style, bg)),
-        Span::styled(age, compact_row_style(age_style, bg)),
+        Span::styled(provider, working_row_style(app, fade, provider_style, bg)),
+        Span::styled(age, working_row_style(app, fade, age_style, bg)),
     ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
@@ -6482,8 +6534,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             }
             SidebarRow::Agent { entry, depth } => {
                 let icon = compact_row_dot(entry);
-                let icon_style = Style::default().fg(compact_row_color(entry, p));
+                let dot_color = compact_row_color(entry, p);
                 let is_active = app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id);
+                let icon_style = working_row_style(
+                    app,
+                    blue_working_row(entry, p, dot_color),
+                    Style::default().fg(dot_color),
+                    is_active.then_some(p.active_row_bg),
+                );
                 let row_style = if is_active {
                     Style::default().bg(p.active_row_bg)
                 } else {
@@ -6544,8 +6602,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             }
             SidebarRow::Tab { entry, .. } => {
                 let icon = compact_row_dot(entry);
-                let icon_style = Style::default().fg(compact_row_color(entry, p));
+                let dot_color = compact_row_color(entry, p);
                 let is_active = app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id);
+                let icon_style = working_row_style(
+                    app,
+                    blue_working_row(entry, p, dot_color),
+                    Style::default().fg(dot_color),
+                    is_active.then_some(p.active_row_bg),
+                );
                 let row_style = if is_active {
                     Style::default().bg(p.active_row_bg)
                 } else {
@@ -10115,6 +10179,130 @@ pub(crate) mod tests {
             active_sidebar_title_color(&crate::app::state::Palette::github_dark_high_contrast()),
             Color::Rgb(245, 247, 249)
         );
+    }
+
+    fn blended_test_color(foreground: Color, background: Color, opacity: u8) -> Color {
+        let foreground = crate::app::state::color_rgb(foreground).expect("known foreground");
+        let background = crate::app::state::color_rgb(background).expect("known background");
+        let blend = |foreground: u8, background: u8| {
+            ((u16::from(foreground) * u16::from(opacity)
+                + u16::from(background) * u16::from(100 - opacity)
+                + 50)
+                / 100) as u8
+        };
+        Color::Rgb(
+            blend(foreground.r, background.r),
+            blend(foreground.g, background.g),
+            blend(foreground.b, background.b),
+        )
+    }
+
+    #[test]
+    fn working_row_opacity_matches_each_level_for_local_and_remote_at_18_and_60_columns() {
+        let mut app = AppState::test_new();
+        let mut working = compact_test_entry("working task", Some(Agent::Claude));
+        working.state = AgentState::Working;
+        let agent_ref =
+            crate::api::schema::AgentRef::new("ub2", "pane/1").expect("valid remote reference");
+        let remote = RemoteAgentPanelEntry::new(agent_ref, working.clone());
+        let background = app.palette.sidebar_background();
+
+        for opacity in [100, 75, 50, 25] {
+            app.working_row_opacity_percent = opacity;
+            let expected_dot = blended_test_color(app.palette.blue, background, opacity);
+            let expected_title = blended_test_color(app.palette.subtext0, background, opacity);
+            let expected_provider = blended_test_color(app.palette.peach, background, opacity);
+            let expected_remote_suffix =
+                blended_test_color(app.palette.overlay0, background, opacity);
+            for width in [18, 60] {
+                for is_remote in [false, true] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            let rect = Rect::new(0, 0, width, 1);
+                            if is_remote {
+                                render_remote_compact_agent_row(
+                                    &app, frame, &remote, rect, 0, None,
+                                );
+                            } else {
+                                render_compact_agent_row(
+                                    &app, frame, &working, rect, 0, true, None,
+                                );
+                            }
+                        })
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let rendered = row_text(buffer, 0, width);
+                    let dot_x = find_symbol_x(buffer, 0, width, "●");
+                    let title_x = find_symbol_x(buffer, 0, width, "w");
+                    assert!(dot_x < title_x, "{rendered:?}");
+                    assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
+                    assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
+                    if width == 60 {
+                        let (symbol, expected) = if is_remote {
+                            ("u", expected_remote_suffix)
+                        } else {
+                            ("c", expected_provider)
+                        };
+                        let secondary_x = find_symbol_x(buffer, 0, width, symbol);
+                        assert_eq!(buffer[(secondary_x, 0)].style().fg, Some(expected));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn working_row_opacity_keeps_attention_and_idle_dot_colors() {
+        let mut app = AppState::test_new();
+        app.working_row_opacity_percent = 25;
+        let mut working = compact_test_entry("working task", Some(Agent::Claude));
+        working.state = AgentState::Working;
+        let mut attention = working.clone();
+        attention.attention_tier = Some(AttentionTier::Attention);
+        let mut blocked = working.clone();
+        blocked.attention_tier = Some(AttentionTier::Blocked);
+        let mut idle = working;
+        idle.state = AgentState::Idle;
+        for (entry, color) in [
+            (attention, app.palette.peach),
+            (blocked, app.palette.red),
+            (idle, app.palette.green),
+        ] {
+            let agent_ref =
+                crate::api::schema::AgentRef::new("ub2", "pane/1").expect("valid remote reference");
+            let remote = RemoteAgentPanelEntry::new(agent_ref, entry.clone());
+            for is_remote in [false, true] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        if is_remote {
+                            render_remote_compact_agent_row(
+                                &app,
+                                frame,
+                                &remote,
+                                Rect::new(0, 0, 40, 1),
+                                0,
+                                None,
+                            );
+                        } else {
+                            render_compact_agent_row(
+                                &app,
+                                frame,
+                                &entry,
+                                Rect::new(0, 0, 40, 1),
+                                0,
+                                false,
+                                None,
+                            );
+                        }
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let x = find_symbol_x(buffer, 0, 40, compact_row_dot(&entry));
+                assert_eq!(buffer[(x, 0)].style().fg, Some(color));
+            }
+        }
     }
 
     #[test]
@@ -15311,6 +15499,58 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_ne!(buffer[(detail_area.x, detail_area.y)].symbol(), "");
         assert_ne!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "");
+    }
+
+    #[test]
+    fn collapsed_local_and_remote_working_markers_match_each_opacity_level() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("working")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
+        app.reconcile_sidebar_presentation();
+        let mut remote_entry = compact_test_entry("remote working", Some(Agent::Codex));
+        remote_entry.state = AgentState::Working;
+        let remote_ref = crate::api::schema::AgentRef::new("ub2", "remote-working")
+            .expect("valid remote reference");
+        app.remote_agent_panel_entries = vec![std::sync::Arc::new(RemoteAgentPanelEntry::new(
+            remote_ref,
+            remote_entry,
+        ))];
+        expand_remote_host(&mut app, "ub2");
+
+        let area = Rect::new(0, 0, 4, 20);
+        let (list, _, _) = collapsed_sidebar_sections(area);
+        let rows = sidebar_rows(&app);
+        let local_row_index = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+            .expect("working session row");
+        let remote_row_index = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
+            .expect("remote working session row");
+
+        for opacity in [100, 75, 50, 25] {
+            app.working_row_opacity_percent = opacity;
+            let mut display = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            display
+                .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+                .unwrap();
+            let buffer = display.backend().buffer();
+            let expected =
+                blended_test_color(app.palette.blue, app.palette.sidebar_background(), opacity);
+            for row_index in [local_row_index, remote_row_index] {
+                let y = list.y + row_index as u16;
+                let x = find_symbol_x(buffer, y, area.width, "●");
+                assert_eq!(buffer[(x, y)].style().fg, Some(expected));
+            }
+        }
     }
 
     #[test]
