@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, DockHostRowHitArea};
-use crate::fleet::{counts_as_live_agent, EvidenceSource, HostSnapshot, HostState};
+use crate::fleet::{EvidenceSource, HostSnapshot, HostState};
 
 const HEADER_ROWS: u16 = 1;
 
@@ -104,11 +104,18 @@ fn render_hosts_at(app: &AppState, frame: &mut Frame, area: Rect, now: SystemTim
     );
 
     for (host, row) in visible_host_rows(app, area) {
-        render_host(app, frame, area, host, row);
+        render_host(app, frame, area, host, row, now);
     }
 }
 
-fn render_host(app: &AppState, frame: &mut Frame, area: Rect, host: &HostSnapshot, row: u16) {
+fn render_host(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    host: &HostSnapshot,
+    row: u16,
+    now: SystemTime,
+) {
     if row >= area.bottom() {
         return;
     }
@@ -126,10 +133,13 @@ fn render_host(app: &AppState, frame: &mut Frame, area: Rect, host: &HostSnapsho
         HostState::Unreachable => ("×", "unreachable", app.palette.red),
         HostState::VersionSkew => ("○", "version skew", app.palette.peach),
     };
+    let now_unix_s = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
     let agent_count = host
         .entries
         .iter()
-        .filter(|entry| counts_as_live_agent(entry))
+        .filter(|entry| entry.counts_as_live_agent(host.state, now_unix_s))
         .count();
     let version = host.version.as_deref().unwrap_or("unknown");
     let local = if host.local { "  local" } else { "" };
@@ -169,10 +179,11 @@ fn render_host(app: &AppState, frame: &mut Frame, area: Rect, host: &HostSnapsho
         }
         let name = entry.name.as_deref().unwrap_or(entry.handle.as_str());
         let agent = entry.agent.as_deref().unwrap_or("agent");
+        let lifecycle = entry.effective_remote_lifecycle(host.state, now_unix_s);
         frame.render_widget(
             Paragraph::new(format!(
                 "   {} · {name}  {agent}  {}",
-                entry.host, entry.state
+                entry.host, lifecycle.state_label
             ))
             .style(Style::default().fg(app.palette.subtext0)),
             Rect::new(area.x, next, area.width, 1),

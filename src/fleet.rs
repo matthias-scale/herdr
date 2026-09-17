@@ -1318,11 +1318,104 @@ pub(crate) struct FleetRow {
     agent_info: Option<AgentInfo>,
 }
 
+#[cfg(test)]
 pub(crate) fn counts_as_live_agent(entry: &FleetRow) -> bool {
     entry.source != EvidenceSource::Host && entry.state != "status_unknown"
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EffectiveRemoteLifecycle<'a> {
+    pub(crate) state_label: &'a str,
+    pub(crate) state: crate::detect::AgentState,
+    pub(crate) seen: bool,
+    pub(crate) stale: bool,
+    pub(crate) attention_tier: crate::terminal::state::AttentionTier,
+    pub(crate) open_blockers: bool,
+    pub(crate) usage_limited: bool,
+    pub(crate) waiting_on_agents: bool,
+    pub(crate) settled: bool,
+    pub(crate) snoozed_until: Option<u64>,
+}
+
 impl FleetRow {
+    pub(crate) fn counts_as_live_agent(&self, host_state: HostState, now_unix_s: u64) -> bool {
+        self.source != EvidenceSource::Host
+            && self
+                .effective_remote_lifecycle(host_state, now_unix_s)
+                .state_label
+                != "status_unknown"
+    }
+
+    /// Combine the owning host's reachability with the last observed agent
+    /// lifecycle. Retained inventory stays useful during an outage, but stale
+    /// gates never remain actionable and a snooze only lasts until its original
+    /// server-owned deadline.
+    pub(crate) fn effective_remote_lifecycle(
+        &self,
+        host_state: HostState,
+        now_unix_s: u64,
+    ) -> EffectiveRemoteLifecycle<'_> {
+        let projection = self.agent_info.as_ref().map(AgentInfo::agent_projection);
+        let settled = projection.is_some_and(|projection| projection.settled);
+        let snoozed_until = self
+            .agent_info
+            .as_ref()
+            .and_then(|info| info.snoozed_until)
+            .filter(|deadline| *deadline > now_unix_s);
+
+        if host_state == HostState::Unreachable {
+            return EffectiveRemoteLifecycle {
+                state_label: "status_unknown",
+                state: crate::detect::AgentState::Unknown,
+                seen: true,
+                stale: true,
+                attention_tier: crate::terminal::state::AttentionTier::None,
+                open_blockers: false,
+                usage_limited: false,
+                waiting_on_agents: false,
+                settled,
+                snoozed_until,
+            };
+        }
+
+        if let Some(projection) = projection {
+            return EffectiveRemoteLifecycle {
+                state_label: &self.state,
+                state: projection.state,
+                seen: projection.seen,
+                stale: projection.stale,
+                attention_tier: projection.attention_tier,
+                open_blockers: projection.open_blockers,
+                usage_limited: projection.usage_limited,
+                waiting_on_agents: projection.waiting_on_agents,
+                settled,
+                snoozed_until,
+            };
+        }
+
+        let state = if self.blocked {
+            crate::detect::AgentState::Blocked
+        } else {
+            match self.state.as_str() {
+                "active" | "working" => crate::detect::AgentState::Working,
+                "waiting" | "done" | "failed" => crate::detect::AgentState::Idle,
+                _ => crate::detect::AgentState::Unknown,
+            }
+        };
+        EffectiveRemoteLifecycle {
+            state_label: &self.state,
+            state,
+            seen: !matches!(self.state.as_str(), "done" | "failed"),
+            stale: state == crate::detect::AgentState::Unknown,
+            attention_tier: crate::terminal::state::AttentionTier::None,
+            open_blockers: false,
+            usage_limited: false,
+            waiting_on_agents: false,
+            settled: false,
+            snoozed_until: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_agent_row(host: &str, name: &str) -> Self {
         Self::test_agent_row_with_id(host, name, name)

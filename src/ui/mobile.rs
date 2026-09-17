@@ -12,7 +12,7 @@ use super::sidebar::agent_panel_entries;
 use super::sidebar::AgentPanelEntry;
 use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout, render_compact_agent_row,
-    render_remote_compact_agent_row, sidebar_row_belongs_to_workspace,
+    render_remote_compact_agent_row_with_identity, sidebar_row_belongs_to_workspace,
     sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
     SidebarRow, RECENTLY_DONE_SECTION_TITLE,
 };
@@ -764,20 +764,25 @@ fn render_mobile_switcher_content(
                     );
                 }
             }
-            SidebarRow::RemoteAgent { entry, depth } => {
+            SidebarRow::RemoteAgent {
+                entry,
+                depth,
+                show_host_identity,
+            } => {
                 let selected = app
                     .sidebar_selected_remote_agent
                     .as_ref()
                     .is_some_and(|agent_ref| agent_ref == &entry.agent_ref);
                 let bg = mobile_item_bg(selected, false, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
-                    render_remote_compact_agent_row(
+                    render_remote_compact_agent_row_with_identity(
                         app,
                         frame,
                         entry,
                         Rect::new(content.x, y, content.width, 1),
                         *depth,
                         Some(bg),
+                        *show_host_identity,
                     );
                 }
             }
@@ -1525,9 +1530,13 @@ mod tests {
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
             usage_limited: false,
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: PaneId::from_raw(1),
+            identity: crate::ui::sidebar::AgentPanelIdentity::Local(
+                crate::ui::sidebar::AgentPanelLocalTarget {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: PaneId::from_raw(1),
+                },
+            ),
             primary_label: "herdr".into(),
             space_label: String::new(),
             space_label_redundant: false,
@@ -1565,6 +1574,7 @@ mod tests {
             tab_first_pane: false,
             remote_host: None,
             remote_entry: None,
+            remote_show_host_identity: false,
         }
     }
 

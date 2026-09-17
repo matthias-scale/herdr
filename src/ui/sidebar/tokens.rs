@@ -1,6 +1,7 @@
 use super::{
     canonical_sidebar_agent_identity, compact_agent_identity, gate_override_label,
-    title_repeats_agent_identity, AgentPanelEntry, DEFAULT_THREAD_TITLE,
+    title_repeats_agent_identity, AgentPanelEntry, AgentPanelIdentity, AgentPanelLocalTarget,
+    DEFAULT_THREAD_TITLE,
 };
 use crate::config::{
     AgentSidebarToken, AgentsSidebarConfig, SidebarTokenStyle, SpaceSidebarToken,
@@ -222,9 +223,11 @@ mod tests {
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
             usage_limited: false,
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: crate::layout::PaneId::from_raw(1),
+            identity: AgentPanelIdentity::Local(AgentPanelLocalTarget {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::from_raw(1),
+            }),
             primary_label: "repo".into(),
             space_label: String::new(),
             space_label_redundant: false,
@@ -262,6 +265,7 @@ mod tests {
             tab_first_pane: false,
             remote_host: None,
             remote_entry: None,
+            remote_show_host_identity: false,
         }
     }
 
