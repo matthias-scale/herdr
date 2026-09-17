@@ -19,7 +19,9 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
-const MAX_RUN_DIRECTORY_ENTRIES: usize = 256;
+// ub2 currently carries about 1,000 retained runs. Inspect enough entries to
+// select its newest records while keeping malformed or unbounded stores capped.
+const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
