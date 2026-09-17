@@ -6819,7 +6819,7 @@ mod tests {
         assert_eq!(finished.len(), 1);
         assert!(finished[0].previous_waiting_on_agents);
         assert!(!finished[0].waiting_on_agents);
-        assert_eq!(finished[0].state, AgentState::Idle);
+        assert_eq!(finished[0].state, AgentState::Unknown);
     }
 
     #[test]
