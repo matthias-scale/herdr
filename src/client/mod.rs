@@ -2181,6 +2181,54 @@ async fn run_client_loop(
                         crate::logging::client_first_frame();
                     }
                 }
+                ServerMessage::FramePatch(patch) => {
+                    let Some(baseline) = state.blit_encoder.last_frame() else {
+                        warn!("received retained frame patch without a client baseline");
+                        continue;
+                    };
+                    let patch = if state.draw_host_cursor {
+                        let Some(patch) =
+                            render_ansi::frame_patch_with_drawn_cursor(baseline, patch)
+                        else {
+                            warn!("received invalid retained frame patch");
+                            continue;
+                        };
+                        patch
+                    } else {
+                        patch
+                    };
+                    let mut stdout = io::stdout();
+                    if state.repaint_pending {
+                        let mut frame = baseline.clone();
+                        if render_ansi::apply_frame_patch(&mut frame, &patch).is_none() {
+                            warn!("received retained frame patch for a different baseline");
+                            continue;
+                        }
+                        let encoded = if state.draw_host_cursor {
+                            state
+                                .blit_encoder
+                                .encode_with_suppressed_visible_cursor(&frame, true)
+                        } else {
+                            state.blit_encoder.encode(&frame, true)
+                        };
+                        let _ = stdout.write_all(&encoded.bytes);
+                        let _ = stdout.flush();
+                        state.blit_encoder.commit(frame, encoded);
+                        state.repaint_pending = false;
+                    } else {
+                        let Some(encoded) = state
+                            .blit_encoder
+                            .encode_patch(&patch, state.draw_host_cursor)
+                        else {
+                            warn!("received retained frame patch for a different baseline");
+                            continue;
+                        };
+                        let _ = stdout.write_all(&encoded.bytes);
+                        let _ = stdout.flush();
+                        let committed = state.blit_encoder.commit_patch(patch, encoded).is_some();
+                        debug_assert!(committed, "encoded client patch must remain valid");
+                    }
+                }
                 ServerMessage::Terminal(frame) => {
                     if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
                         record_received_kitty_graphics(&frame.bytes);

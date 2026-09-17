@@ -31,7 +31,9 @@ use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::protocol::{underline_style_from_modifier, CellData, FrameData};
+use crate::protocol::{
+    underline_style_from_modifier, CellData, FrameData, FramePatch, FramePatchRow,
+};
 
 const REVERSED_MODIFIER: u16 = 1 << 6;
 const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
@@ -75,6 +77,33 @@ impl BlitEncoder {
         repaint: bool,
     ) -> EncodedBlit {
         self.encode_inner(frame, repaint, true)
+    }
+
+    pub(crate) fn encode_patch(
+        &self,
+        patch: &FramePatch,
+        suppress_visible_cursor: bool,
+    ) -> Option<EncodedBlit> {
+        let frame = self.last_frame.as_ref()?;
+        validate_frame_patch(frame, patch)?;
+        let mut bytes = Vec::new();
+        let mut next_last_visible_cursor = self.last_visible_cursor;
+        let mut next_last_cursor_shape = self.last_cursor_shape;
+        blit_patch_to_with_cursor_memory(
+            &mut bytes,
+            frame,
+            patch,
+            &mut next_last_visible_cursor,
+            &mut next_last_cursor_shape,
+            repeat_ime_anchor_after_sync(),
+            suppress_visible_cursor,
+        );
+        Some(EncodedBlit {
+            bytes,
+            full: false,
+            next_last_visible_cursor,
+            next_last_cursor_shape,
+        })
     }
 
     fn encode_inner(
@@ -131,6 +160,14 @@ impl BlitEncoder {
         self.last_frame = Some(frame);
     }
 
+    pub(crate) fn commit_patch(&mut self, patch: FramePatch, encoded: EncodedBlit) -> Option<()> {
+        let frame = self.last_frame.as_mut()?;
+        apply_frame_patch(frame, &patch)?;
+        self.last_visible_cursor = encoded.next_last_visible_cursor;
+        self.last_cursor_shape = encoded.next_last_cursor_shape;
+        Some(())
+    }
+
     pub(crate) fn is_current(&self, frame: &FrameData) -> bool {
         self.last_frame.as_ref() == Some(frame)
     }
@@ -138,6 +175,111 @@ impl BlitEncoder {
     pub(crate) fn last_frame(&self) -> Option<&FrameData> {
         self.last_frame.as_ref()
     }
+}
+
+pub(crate) fn validate_frame_patch(frame: &FrameData, patch: &FramePatch) -> Option<()> {
+    if frame.width != patch.width
+        || frame.height != patch.height
+        || frame.cells.len() != usize::from(frame.width) * usize::from(frame.height)
+    {
+        return None;
+    }
+    for row in &patch.rows {
+        let len = u16::try_from(row.cells.len()).ok()?;
+        if row.y >= frame.height
+            || row.x.checked_add(len)? > frame.width
+            || row.cells.iter().any(|cell| cell.hyperlink.is_some())
+        {
+            return None;
+        }
+        let start = usize::from(row.y) * usize::from(frame.width) + usize::from(row.x);
+        if start.checked_add(row.cells.len())? > frame.cells.len() {
+            return None;
+        }
+    }
+    Some(())
+}
+
+pub(crate) fn apply_frame_patch(frame: &mut FrameData, patch: &FramePatch) -> Option<()> {
+    validate_frame_patch(frame, patch)?;
+    for row in &patch.rows {
+        let start = usize::from(row.y) * usize::from(frame.width) + usize::from(row.x);
+        let end = start + row.cells.len();
+        frame.cells[start..end].clone_from_slice(&row.cells);
+    }
+    frame.cursor.clone_from(&patch.cursor);
+    frame.graphics.clear();
+    Some(())
+}
+
+pub(crate) fn frame_patch_with_drawn_cursor(
+    baseline: &FrameData,
+    mut patch: FramePatch,
+) -> Option<FramePatch> {
+    validate_frame_patch(baseline, &patch)?;
+    let old_cursor = baseline
+        .cursor
+        .as_ref()
+        .filter(|cursor| cursor.visible)
+        .map(|cursor| clamp_cursor_position(baseline, cursor.x, cursor.y));
+    let new_cursor = patch
+        .cursor
+        .as_ref()
+        .filter(|cursor| cursor.visible)
+        .map(|cursor| clamp_cursor_position(baseline, cursor.x, cursor.y));
+
+    if let Some(position) = old_cursor {
+        let cell = raw_patch_cell(baseline, &patch, position, old_cursor)?;
+        upsert_patch_cell(&mut patch, position, cell)?;
+    }
+    if let Some(position) = new_cursor {
+        let mut cell = raw_patch_cell(baseline, &patch, position, old_cursor)?;
+        cell.modifier ^= REVERSED_MODIFIER;
+        upsert_patch_cell(&mut patch, position, cell)?;
+    }
+    Some(patch)
+}
+
+fn raw_patch_cell(
+    baseline: &FrameData,
+    patch: &FramePatch,
+    (x, y): (u16, u16),
+    old_cursor: Option<(u16, u16)>,
+) -> Option<CellData> {
+    for row in patch.rows.iter().rev() {
+        if row.y != y || x < row.x {
+            continue;
+        }
+        let offset = usize::from(x - row.x);
+        if let Some(cell) = row.cells.get(offset) {
+            return Some(cell.clone());
+        }
+    }
+    let index = usize::from(y) * usize::from(baseline.width) + usize::from(x);
+    let mut cell = baseline.cells.get(index)?.clone();
+    if old_cursor == Some((x, y)) {
+        cell.modifier ^= REVERSED_MODIFIER;
+    }
+    Some(cell)
+}
+
+fn upsert_patch_cell(patch: &mut FramePatch, (x, y): (u16, u16), cell: CellData) -> Option<()> {
+    for row in patch.rows.iter_mut().rev() {
+        if row.y != y || x < row.x {
+            continue;
+        }
+        let offset = usize::from(x - row.x);
+        if let Some(target) = row.cells.get_mut(offset) {
+            *target = cell;
+            return Some(());
+        }
+    }
+    patch.rows.push(FramePatchRow {
+        x,
+        y,
+        cells: vec![cell],
+    });
+    Some(())
 }
 
 pub(crate) fn frame_with_drawn_cursor(mut frame: FrameData) -> FrameData {
@@ -510,6 +652,37 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
     let _ = writer.flush();
 }
 
+fn blit_patch_to_with_cursor_memory(
+    mut writer: impl Write,
+    frame: &FrameData,
+    patch: &FramePatch,
+    last_visible_cursor: &mut Option<(u16, u16)>,
+    last_cursor_shape: &mut u8,
+    repeat_ime_anchor: bool,
+    suppress_visible_cursor: bool,
+) {
+    let _ = writer.write_all(b"\x1b[?2026h");
+    let _ = writer.write_all(b"\x1b[?25l");
+    let _ = writer.write_all(b"\x1b]8;;\x1b\\");
+    write_patch_rows(&mut writer, frame, patch);
+
+    let mut host_cursor = resolve_host_cursor_state_for(
+        patch.width,
+        patch.height,
+        patch.cursor.as_ref(),
+        last_visible_cursor,
+    );
+    if suppress_visible_cursor && host_cursor.visible {
+        host_cursor.visible = false;
+    }
+    write_host_cursor_state(&mut writer, host_cursor, last_cursor_shape);
+    let _ = writer.write_all(b"\x1b[?2026l");
+    if repeat_ime_anchor {
+        write_ime_anchor_cursor_state(&mut writer, host_cursor);
+    }
+    let _ = writer.flush();
+}
+
 #[cfg(windows)]
 fn repeat_ime_anchor_after_sync() -> bool {
     false
@@ -553,9 +726,23 @@ fn resolve_host_cursor_state(
     frame: &FrameData,
     last_visible_cursor: &mut Option<(u16, u16)>,
 ) -> HostCursorState {
-    if let Some(cursor) = &frame.cursor {
+    resolve_host_cursor_state_for(
+        frame.width,
+        frame.height,
+        frame.cursor.as_ref(),
+        last_visible_cursor,
+    )
+}
+
+fn resolve_host_cursor_state_for(
+    width: u16,
+    height: u16,
+    cursor: Option<&crate::protocol::CursorState>,
+    last_visible_cursor: &mut Option<(u16, u16)>,
+) -> HostCursorState {
+    if let Some(cursor) = cursor {
         if cursor.visible {
-            let position = clamp_cursor_position(frame, cursor.x, cursor.y);
+            let position = clamp_cursor_position_for(width, height, cursor.x, cursor.y);
             *last_visible_cursor = Some(position);
             return HostCursorState {
                 position,
@@ -564,7 +751,7 @@ fn resolve_host_cursor_state(
             };
         }
 
-        let position = clamp_cursor_position(frame, cursor.x, cursor.y);
+        let position = clamp_cursor_position_for(width, height, cursor.x, cursor.y);
         return HostCursorState {
             position,
             visible: false,
@@ -573,8 +760,8 @@ fn resolve_host_cursor_state(
     }
 
     let position = (*last_visible_cursor)
-        .map(|(x, y)| clamp_cursor_position(frame, x, y))
-        .unwrap_or_else(|| default_hidden_cursor_position(frame));
+        .map(|(x, y)| clamp_cursor_position_for(width, height, x, y))
+        .unwrap_or_else(|| default_hidden_cursor_position_for(width, height));
     HostCursorState {
         position,
         visible: false,
@@ -590,17 +777,18 @@ fn normalize_cursor_shape(shape: u8) -> u8 {
     }
 }
 
-fn default_hidden_cursor_position(frame: &FrameData) -> (u16, u16) {
-    (
-        frame.width.saturating_sub(1),
-        frame.height.saturating_sub(1),
-    )
+fn default_hidden_cursor_position_for(width: u16, height: u16) -> (u16, u16) {
+    (width.saturating_sub(1), height.saturating_sub(1))
 }
 
 fn clamp_cursor_position(frame: &FrameData, x: u16, y: u16) -> (u16, u16) {
+    clamp_cursor_position_for(frame.width, frame.height, x, y)
+}
+
+fn clamp_cursor_position_for(width: u16, height: u16, x: u16, y: u16) -> (u16, u16) {
     (
-        x.min(frame.width.saturating_sub(1)),
-        y.min(frame.height.saturating_sub(1)),
+        x.min(width.saturating_sub(1)),
+        y.min(height.saturating_sub(1)),
     )
 }
 
@@ -672,6 +860,46 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
 
     // Reset style at the end.
     let _ = writer.write_all(b"\x1b[0m");
+}
+
+fn write_patch_rows(writer: &mut impl Write, frame: &FrameData, patch: &FramePatch) {
+    let mut last_sgr = String::new();
+    let mut active_hyperlink = None;
+    for row in &patch.rows {
+        let mut to_skip = 0usize;
+        let mut next_inline_col = None;
+        for (offset, cell) in row.cells.iter().enumerate() {
+            if to_skip > 0 {
+                to_skip -= 1;
+                continue;
+            }
+            if cell.skip {
+                next_inline_col = None;
+                continue;
+            }
+            let Ok(offset) = u16::try_from(offset) else {
+                break;
+            };
+            let col = row.x + offset;
+            let cursor_position = (next_inline_col != Some(col)).then_some((col, row.y));
+            write_cell(
+                writer,
+                cursor_position,
+                cell,
+                &mut last_sgr,
+                &mut active_hyperlink,
+                frame,
+            );
+            let width = cell_width(cell);
+            next_inline_col =
+                (cell.symbol.is_ascii() && width == 1).then_some(col.saturating_add(1));
+            to_skip = width.saturating_sub(1);
+        }
+    }
+    close_hyperlink(writer, &mut active_hyperlink);
+    if !last_sgr.is_empty() {
+        let _ = writer.write_all(b"\x1b[0m");
+    }
 }
 
 fn cell_hyperlink_uri<'a>(frame: &'a FrameData, cell: &CellData) -> Option<&'a str> {
@@ -869,6 +1097,112 @@ mod tests {
         let mut cell = make_cell(symbol, 0, 0, 0);
         cell.hyperlink = Some(index);
         cell
+    }
+
+    #[test]
+    fn frame_patch_commits_in_place_without_replacing_untouched_storage() {
+        let mut frame = make_frame(
+            4,
+            1,
+            vec![
+                make_cell("a", 0, 0, 0),
+                make_cell("b", 0, 0, 0),
+                make_cell("c", 0, 0, 0),
+                make_cell("untouched", 0, 0, 0),
+            ],
+        );
+        let cells_ptr = frame.cells.as_ptr();
+        let untouched_symbol_ptr = frame.cells[3].symbol.as_ptr();
+        let patch = FramePatch {
+            width: 4,
+            height: 1,
+            rows: vec![FramePatchRow {
+                x: 1,
+                y: 0,
+                cells: vec![make_cell("B", 0, 0, 0)],
+            }],
+            cursor: None,
+        };
+
+        apply_frame_patch(&mut frame, &patch).expect("valid patch");
+
+        assert_eq!(frame.cells[1].symbol, "B");
+        assert_eq!(frame.cells.as_ptr(), cells_ptr);
+        assert_eq!(frame.cells[3].symbol.as_ptr(), untouched_symbol_ptr);
+    }
+
+    #[test]
+    fn blit_encoder_patches_only_supplied_rows_and_commits_them() {
+        let frame = make_frame(
+            4,
+            1,
+            vec![
+                make_cell("a", 0, 0, 0),
+                make_cell("b", 0, 0, 0),
+                make_cell("c", 0, 0, 0),
+                make_cell("d", 0, 0, 0),
+            ],
+        );
+        let mut encoder = BlitEncoder::new();
+        let initial = encoder.encode(&frame, false);
+        encoder.commit(frame, initial);
+        let patch = FramePatch {
+            width: 4,
+            height: 1,
+            rows: vec![FramePatchRow {
+                x: 1,
+                y: 0,
+                cells: vec![make_cell("Z", 0, 0, 0)],
+            }],
+            cursor: None,
+        };
+
+        let encoded = encoder.encode_patch(&patch, false).expect("valid patch");
+        assert!(encoded.bytes.contains(&b'Z'));
+        encoder
+            .commit_patch(patch, encoded)
+            .expect("valid prepared patch");
+
+        assert_eq!(encoder.last_frame().unwrap().cells[1].symbol, "Z");
+    }
+
+    #[test]
+    fn drawn_cursor_patch_restores_old_cell_and_draws_new_cell() {
+        let raw = FrameData {
+            cursor: Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: true,
+                shape: 0,
+            }),
+            ..make_frame(
+                3,
+                1,
+                vec![
+                    make_cell("a", 0, 0, 0),
+                    make_cell("b", 0, 0, 0),
+                    make_cell("c", 0, 0, 0),
+                ],
+            )
+        };
+        let mut displayed = frame_with_drawn_cursor(raw);
+        let patch = FramePatch {
+            width: 3,
+            height: 1,
+            rows: Vec::new(),
+            cursor: Some(CursorState {
+                x: 2,
+                y: 0,
+                visible: true,
+                shape: 0,
+            }),
+        };
+
+        let patch = frame_patch_with_drawn_cursor(&displayed, patch).expect("valid cursor patch");
+        apply_frame_patch(&mut displayed, &patch).expect("valid display patch");
+
+        assert_eq!(displayed.cells[0].modifier & REVERSED_MODIFIER, 0);
+        assert_ne!(displayed.cells[2].modifier & REVERSED_MODIFIER, 0);
     }
 
     #[test]

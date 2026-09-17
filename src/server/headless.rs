@@ -43,7 +43,8 @@ use crate::ipc::{
     SocketFileIdentity,
 };
 use crate::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
+    self, AttachScrollDirection, AttachScrollSource, FrameData, FramePatch, FramePatchRow,
+    ServerMessage, MAX_FRAME_SIZE,
 };
 #[cfg(unix)]
 use crate::server::client_accept::{
@@ -336,28 +337,35 @@ fn rect_fits_frame(rect: Rect, frame: &FrameData) -> bool {
         && rect.y.saturating_add(rect.height) <= frame.height
 }
 
-fn apply_terminal_dirty_patch(
-    frame: &mut FrameData,
+fn retained_dirty_rows(
+    frame: &FrameData,
     area: Rect,
     patch: crate::pane::TerminalDirtyPatch,
-) -> bool {
+) -> Option<Vec<FramePatchRow>> {
     if !rect_fits_frame(area, frame) {
-        return false;
+        return None;
     }
     let width = usize::from(frame.width);
+    let mut rows = Vec::with_capacity(patch.rows.len());
     for (local_y, row_cells) in patch.rows {
         if local_y >= area.height || row_cells.len() != usize::from(area.width) {
-            return false;
+            return None;
         }
         let frame_y = area.y + local_y;
         let start = usize::from(frame_y) * width + usize::from(area.x);
         let end = start + usize::from(area.width);
         if end > frame.cells.len() {
-            return false;
+            return None;
         }
-        frame.cells[start..end].clone_from_slice(&row_cells);
+        if frame.cells[start..end] != row_cells {
+            rows.push(FramePatchRow {
+                x: area.x,
+                y: frame_y,
+                cells: row_cells,
+            });
+        }
     }
-    true
+    Some(rows)
 }
 
 fn dirty_patch_intersects_hyperlinks(
@@ -5864,14 +5872,12 @@ impl HeadlessServer {
         {
             retained_fallback!("visible_kitty_graphics");
         }
-        let Some(mut frame) = client.render_state.last_frame().cloned() else {
+        let Some(frame) = client.render_state.last_frame() else {
             retained_fallback!("no_last_frame");
         };
         if frame.width != cols || frame.height != rows {
             retained_fallback!("frame_size_mismatch");
         }
-        frame.graphics.clear();
-
         let Some(ws_idx) = self.app.state.active else {
             retained_fallback!("no_active_workspace");
         };
@@ -5881,9 +5887,9 @@ impl HeadlessServer {
             retained_fallback!("no_pane_info");
         }
 
-        let mut touched = false;
+        let mut patch_rows = Vec::new();
         for info in &pane_infos {
-            if !rect_fits_frame(info.inner_rect, &frame) {
+            if !rect_fits_frame(info.inner_rect, frame) {
                 retained_fallback!("pane_rect_outside_frame");
             }
             let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
@@ -5903,36 +5909,44 @@ impl HeadlessServer {
                 crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => {
                     crate::render_prof::event("retained.pane_patch");
                     crate::render_prof::counter("retained.patch_rows", patch.rows.len() as u64);
-                    if dirty_patch_intersects_hyperlinks(&frame, info.inner_rect, &patch) {
+                    if dirty_patch_intersects_hyperlinks(frame, info.inner_rect, &patch) {
                         retained_fallback!("hyperlink_intersection");
                     }
-                    if !apply_terminal_dirty_patch(&mut frame, info.inner_rect, patch) {
-                        retained_fallback!("patch_apply_failed");
-                    }
-                    touched = true;
+                    let Some(rows) = retained_dirty_rows(frame, info.inner_rect, patch) else {
+                        retained_fallback!("patch_plan_failed");
+                    };
+                    patch_rows.extend(rows);
                 }
             }
         }
 
-        let previous_cursor = frame.cursor.clone();
-        if retained_pane_cursor {
-            frame.cursor = crate::ui::tab_surface_cursor(
+        let cursor = if retained_pane_cursor {
+            crate::ui::tab_surface_cursor(
                 &self.app.state,
                 &self.app.terminal_runtimes,
                 crate::ui::TabSurfaceView {
                     pane_infos: &pane_infos,
                     split_borders: &[],
                 },
-            );
-        }
-        let cursor_changed = frame.cursor != previous_cursor;
+            )
+        } else {
+            frame.cursor.clone()
+        };
+        let cursor_changed = cursor != frame.cursor;
 
-        if !touched && !cursor_changed {
+        if patch_rows.is_empty() && !cursor_changed {
             retained_success!("clean_no_cursor_change");
         }
 
+        let patch = FramePatch {
+            width: frame.width,
+            height: frame.height,
+            rows: patch_rows,
+            cursor,
+        };
+
         let mut broken_clients = Vec::new();
-        let sent = self.send_retained_frame_to_client(client_id, frame, &mut broken_clients);
+        let sent = self.send_retained_patch_to_client(client_id, patch, &mut broken_clients);
         for broken_client in broken_clients {
             self.remove_client_and_resize_if_needed(broken_client);
         }
@@ -5954,10 +5968,10 @@ impl HeadlessServer {
             && !self.app.full_redraw_pending
     }
 
-    fn send_retained_frame_to_client(
+    fn send_retained_patch_to_client(
         &mut self,
         client_id: u64,
-        frame: FrameData,
+        patch: FramePatch,
         broken_clients: &mut Vec<u64>,
     ) -> bool {
         let Some(client) = self.clients.get_mut(&client_id) else {
@@ -5969,7 +5983,7 @@ impl HeadlessServer {
             return false;
         };
         let prepare_started = crate::render_prof::timer();
-        let Some(prepared) = client.render_state.prepare_frame(frame) else {
+        let Some(prepared) = client.render_state.prepare_frame_patch(patch) else {
             client.clear_deferred_render();
             crate::render_prof::event("retained_send.skip_identical");
             crate::render_prof::duration_since("retained_send.prepare_frame", prepare_started);
@@ -7859,6 +7873,13 @@ esac
         {
             ServerMessage::Frame(frame) => frame,
             other => panic!("expected frame, got {other:?}"),
+        }
+    }
+
+    fn read_server_frame_patch(bytes: Vec<u8>) -> FramePatch {
+        match read_server_message(bytes) {
+            ServerMessage::FramePatch(patch) => patch,
+            other => panic!("expected frame patch, got {other:?}"),
         }
     }
 
@@ -16589,6 +16610,12 @@ next_tab = ""
                 .expect("initial frame"),
         );
         assert!(first.cells.iter().any(|cell| cell.symbol == "a"));
+        let baseline = server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("server baseline");
+        let cells_ptr = baseline.cells.as_ptr();
+        let untouched_symbol_ptr = baseline.cells.last().unwrap().symbol.as_ptr();
 
         let runtime = server
             .app
@@ -16598,13 +16625,99 @@ next_tab = ""
         runtime.test_process_pty_bytes(b"\rZ");
 
         assert!(server.render_retained_pty_update_and_stream());
-        let patched = read_server_frame(
+        let patch = read_server_frame_patch(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained frame"),
+                .expect("retained frame patch"),
         );
+        assert!(!patch.rows.is_empty());
+        let patched = server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("committed retained frame");
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
         assert_eq!((patched.width, patched.height), (80, 24));
+        assert_eq!(patched.cells.as_ptr(), cells_ptr);
+        assert_eq!(
+            patched.cells.last().unwrap().symbol.as_ptr(),
+            untouched_symbol_ptr,
+            "retained updates must preserve untouched frame storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_patch_queue_full_leaves_the_client_baseline_unchanged() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial frame");
+        let before = server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("initial baseline")
+            .clone();
+        let queued = HeadlessServer::frame_server_message(&ServerMessage::ReloadSoundConfig)
+            .expect("serialize dummy message");
+        server.clients[&1]
+            .writer
+            .as_ref()
+            .unwrap()
+            .test_fill_render(queued);
+
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert_eq!(
+            server.clients[&1].render_state.last_frame(),
+            Some(&before),
+            "queue-full must not advance the retained baseline"
+        );
+        assert_eq!(server.clients[&1].deferred_render(), DeferredRender::Full);
+        assert!(matches!(
+            read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::ReloadSoundConfig
+        ));
+    }
+
+    #[tokio::test]
+    async fn retained_patch_encodes_directly_for_terminal_ansi_clients() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.clients.get_mut(&1).unwrap().render_state =
+            crate::server::render_stream::ClientRenderState::new(RenderEncoding::TerminalAnsi);
+        server.render_and_stream();
+        assert!(matches!(
+            read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::Terminal(crate::protocol::TerminalFrame { full: true, .. })
+        ));
+
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\rZ");
+
+        assert!(server.render_retained_pty_update_and_stream());
+        match read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()) {
+            ServerMessage::Terminal(frame) => {
+                assert!(!frame.full);
+                assert!(frame.bytes.contains(&b'Z'));
+            }
+            other => panic!("expected retained ANSI frame, got {other:?}"),
+        }
+        assert!(server.clients[&1]
+            .render_state
+            .last_frame()
+            .unwrap()
+            .cells
+            .iter()
+            .any(|cell| cell.symbol == "Z"));
     }
 
     #[tokio::test]
@@ -16663,12 +16776,17 @@ next_tab = ""
             &usage_frame
         );
         assert!(usage_rx.recv_timeout(Duration::from_millis(50)).is_err());
-        let patched_tab = read_server_frame(
+        let patch = read_server_frame_patch(
             tab_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained tab frame"),
+                .expect("retained tab frame patch"),
         );
-        assert_ne!(patched_tab, tab_frame);
+        assert!(!patch.rows.is_empty());
+        let patched_tab = server.clients[&2]
+            .render_state
+            .last_frame()
+            .expect("committed tab frame");
+        assert_ne!(patched_tab, &tab_frame);
         assert!(patched_tab.cells.iter().any(|cell| cell.symbol == "Z"));
     }
 
@@ -17066,17 +17184,22 @@ next_tab = ""
         assert!(retained_server.render_retained_pty_update_and_stream());
         full_server.render_and_stream();
 
-        let retained_frame = read_server_frame(
+        let patch = read_server_frame_patch(
             retained_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained frame"),
+                .expect("retained frame patch"),
         );
+        assert!(!patch.rows.is_empty());
+        let retained_frame = retained_server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("committed retained frame");
         let full_frame = read_server_frame(
             full_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("full frame"),
         );
-        assert_frame_data_eq(&retained_frame, &full_frame);
+        assert_frame_data_eq(retained_frame, &full_frame);
     }
 
     #[tokio::test]
@@ -17115,17 +17238,22 @@ next_tab = ""
         assert!(retained_server.render_retained_pty_update_and_stream());
         full_server.render_and_stream();
 
-        let retained_frame = read_server_frame(
+        let patch = read_server_frame_patch(
             retained_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained cursor frame"),
+                .expect("retained cursor frame patch"),
         );
+        assert!(patch.rows.is_empty());
+        let retained_frame = retained_server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("committed retained frame");
         let full_frame = read_server_frame(
             full_rx
                 .recv_timeout(Duration::from_millis(100))
                 .expect("full cursor frame"),
         );
-        assert_frame_data_eq(&retained_frame, &full_frame);
+        assert_frame_data_eq(retained_frame, &full_frame);
     }
 
     #[tokio::test]
@@ -17149,11 +17277,16 @@ next_tab = ""
 
         server.app.state.mode = crate::app::Mode::Terminal;
         assert!(server.render_retained_pty_update_and_stream());
-        let patched = read_server_frame(
+        let patch = read_server_frame_patch(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained frame after safe mode"),
+                .expect("retained frame patch after safe mode"),
         );
+        assert!(!patch.rows.is_empty());
+        let patched = server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("committed retained frame");
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
     }
 
@@ -17236,11 +17369,16 @@ next_tab = ""
         runtime.test_process_pty_bytes(b"\rhttps://example.com/new");
 
         assert!(server.render_retained_pty_update_and_stream());
-        let patched = read_server_frame(
+        let patch = read_server_frame_patch(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained frame after plain URL"),
+                .expect("retained frame patch after plain URL"),
         );
+        assert!(!patch.rows.is_empty());
+        let patched = server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("committed retained frame");
         assert!(
             patched.hyperlinks.is_empty(),
             "retained render should not synthesize plain URL hyperlink metadata"
@@ -17269,11 +17407,16 @@ next_tab = ""
         runtime.test_process_pty_bytes(b"\rZ");
 
         assert!(server.render_retained_pty_update_and_stream());
-        let retained = read_server_frame(
+        let patch = read_server_frame_patch(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("retained frame with kitty enabled"),
+                .expect("retained frame patch with kitty enabled"),
         );
+        assert!(!patch.rows.is_empty());
+        let retained = server.clients[&1]
+            .render_state
+            .last_frame()
+            .expect("committed retained frame");
         assert!(retained.cells.iter().any(|cell| cell.symbol == "Z"));
     }
 

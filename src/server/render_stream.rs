@@ -8,7 +8,9 @@ use tokio::sync::Notify;
 use crate::app::state::AppState;
 use crate::app::Mode;
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
-use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
+use crate::protocol::{
+    CursorState, FrameData, FramePatch, RenderEncoding, ServerMessage, TerminalFrame,
+};
 use crate::render_signal::RenderSignal;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -114,6 +116,55 @@ impl ClientRenderState {
         }
     }
 
+    pub(crate) fn prepare_frame_patch(&mut self, patch: FramePatch) -> Option<PreparedRender> {
+        if let Self::TerminalAnsi {
+            blit_encoder,
+            repaint_pending: true,
+            ..
+        } = self
+        {
+            let mut frame = blit_encoder.last_frame()?.clone();
+            crate::protocol::render_ansi::apply_frame_patch(&mut frame, &patch)?;
+            return self.prepare_frame(frame);
+        }
+
+        match self {
+            Self::Semantic { last_frame } => {
+                let baseline = last_frame.as_ref()?;
+                crate::protocol::render_ansi::validate_frame_patch(baseline, &patch)?;
+                if patch.rows.is_empty() && patch.cursor == baseline.cursor {
+                    crate::render_prof::event("prepare_frame_patch.semantic.skip_current");
+                    return None;
+                }
+                crate::render_prof::event("prepare_frame_patch.semantic.changed");
+                Some(PreparedRender::SemanticPatch {
+                    message: ServerMessage::FramePatch(patch),
+                })
+            }
+            Self::TerminalAnsi {
+                blit_encoder, seq, ..
+            } => {
+                let encoded = blit_encoder.encode_patch(&patch, false)?;
+                crate::render_prof::event("prepare_frame_patch.ansi.changed");
+                crate::render_prof::counter(
+                    "prepare_frame_patch.ansi.bytes",
+                    encoded.bytes.len() as u64,
+                );
+                Some(PreparedRender::TerminalAnsiPatch {
+                    message: ServerMessage::Terminal(TerminalFrame {
+                        seq: *seq + 1,
+                        width: patch.width,
+                        height: patch.height,
+                        full: false,
+                        bytes: encoded.bytes.clone(),
+                    }),
+                    patch,
+                    encoded,
+                })
+            }
+        }
+    }
+
     pub(crate) fn last_frame(&self) -> Option<&FrameData> {
         match self {
             Self::Semantic { last_frame } => last_frame.as_ref(),
@@ -142,6 +193,31 @@ impl ClientRenderState {
                 },
             ) => {
                 blit_encoder.commit(frame, encoded);
+                *seq += 1;
+                *repaint_pending = false;
+            }
+            (
+                Self::Semantic {
+                    last_frame: Some(frame),
+                },
+                PreparedRender::SemanticPatch {
+                    message: ServerMessage::FramePatch(patch),
+                },
+            ) => {
+                let applied =
+                    crate::protocol::render_ansi::apply_frame_patch(frame, &patch).is_some();
+                debug_assert!(applied, "prepared semantic patch must remain valid");
+            }
+            (
+                Self::TerminalAnsi {
+                    blit_encoder,
+                    seq,
+                    repaint_pending,
+                },
+                PreparedRender::TerminalAnsiPatch { patch, encoded, .. },
+            ) => {
+                let applied = blit_encoder.commit_patch(patch, encoded).is_some();
+                debug_assert!(applied, "prepared ANSI patch must remain valid");
                 *seq += 1;
                 *repaint_pending = false;
             }
@@ -220,17 +296,28 @@ pub(crate) enum PreparedRender {
     Semantic {
         message: ServerMessage,
     },
+    SemanticPatch {
+        message: ServerMessage,
+    },
     TerminalAnsi {
         message: ServerMessage,
         frame: FrameData,
         encoded: Option<EncodedBlit>,
+    },
+    TerminalAnsiPatch {
+        message: ServerMessage,
+        patch: FramePatch,
+        encoded: EncodedBlit,
     },
 }
 
 impl PreparedRender {
     pub(crate) fn message(&self) -> &ServerMessage {
         match self {
-            Self::Semantic { message } | Self::TerminalAnsi { message, .. } => message,
+            Self::Semantic { message }
+            | Self::SemanticPatch { message }
+            | Self::TerminalAnsi { message, .. }
+            | Self::TerminalAnsiPatch { message, .. } => message,
         }
     }
 
@@ -240,6 +327,7 @@ impl PreparedRender {
                 message: ServerMessage::Frame(frame),
             } => Some(frame),
             Self::TerminalAnsi { frame, .. } => Some(frame),
+            Self::SemanticPatch { .. } | Self::TerminalAnsiPatch { .. } => None,
             _ => None,
         }
     }

@@ -37,7 +37,7 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// Render payload encoding negotiated during client handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderEncoding {
-    /// Send full semantic FrameData values. This is the local/default mode.
+    /// Send semantic frame values and retained row patches. This is the local/default mode.
     SemanticFrame,
     /// Send already-diffed terminal ANSI byte streams.
     TerminalAnsi,
@@ -635,6 +635,30 @@ pub struct FrameData {
     pub graphics: Vec<u8>,
 }
 
+/// One changed horizontal span in a retained semantic frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FramePatchRow {
+    /// Column offset of the first cell.
+    pub x: u16,
+    /// Row offset of the changed cells.
+    pub y: u16,
+    /// Replacement cells in left-to-right order.
+    pub cells: Vec<CellData>,
+}
+
+/// Incremental update to the last semantic frame sent to a client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FramePatch {
+    /// Width of the frame baseline this patch applies to.
+    pub width: u16,
+    /// Height of the frame baseline this patch applies to.
+    pub height: u16,
+    /// Changed cell spans.
+    pub rows: Vec<FramePatchRow>,
+    /// Cursor state after applying the patch.
+    pub cursor: Option<CursorState>,
+}
+
 impl FrameData {
     /// Creates a `FrameData` from a ratatui `Buffer` and optional cursor.
     ///
@@ -866,6 +890,9 @@ pub enum ServerMessage {
     /// Reload client-local notification settings and apply the server's
     /// effective sound permission after attach, config reload, or bell toggle.
     NotificationConfig { sound_enabled: bool },
+
+    /// Changed rows and cursor state relative to the last semantic frame.
+    FramePatch(FramePatch),
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,6 +1725,36 @@ mod tests {
             height: 40,
             full: false,
             bytes: b"\x1b[1;1Hhello".to_vec(),
+        });
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_frame_patch_roundtrip() {
+        let msg = ServerMessage::FramePatch(FramePatch {
+            width: 120,
+            height: 40,
+            rows: vec![FramePatchRow {
+                x: 7,
+                y: 9,
+                cells: vec![CellData {
+                    symbol: "changed".into(),
+                    fg: color_to_u32(Color::Cyan),
+                    bg: color_to_u32(Color::Reset),
+                    modifier: Modifier::BOLD.bits(),
+                    skip: false,
+                    hyperlink: None,
+                }],
+            }],
+            cursor: Some(CursorState {
+                x: 8,
+                y: 9,
+                visible: true,
+                shape: 2,
+            }),
         });
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
