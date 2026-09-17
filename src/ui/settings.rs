@@ -97,6 +97,15 @@ pub(crate) fn general_row_offsets() -> Vec<(u16, u16)> {
     offsets
 }
 
+/// First visible line in the General list, keeping the selected row fully in
+/// view when its labels and hints exceed the fixed popup height.
+pub(crate) fn general_row_scroll(selected: usize, height: u16) -> u16 {
+    let Some((start, row_height)) = general_row_offsets().get(selected).copied() else {
+        return 0;
+    };
+    start.saturating_add(row_height).saturating_sub(height)
+}
+
 fn render_settings_general(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let [title, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
@@ -142,7 +151,8 @@ fn render_settings_general(app: &AppState, frame: &mut Frame, area: Rect) {
             )));
         }
     }
-    frame.render_widget(Paragraph::new(lines), list);
+    let scroll = general_row_scroll(app.settings.list.selected, list.height);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), list);
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,6 +1093,21 @@ mod tests {
         assert_eq!(offsets[0], (0, 2));
         assert_eq!(offsets[1], (2, 2));
         assert_eq!(offsets[2], (4, 1));
+    }
+
+    #[test]
+    fn minimum_height_general_settings_scrolls_default_panel_surfaces_into_view() {
+        let mut app = AppState::test_new();
+        app.settings.section = SettingsSection::General;
+        app.settings.list.selected = GeneralRow::ALL
+            .iter()
+            .position(|row| *row == GeneralRow::DefaultPanelSurfaces)
+            .expect("default panel surfaces row");
+
+        let rendered =
+            rendered_integrations_overlay(&app, SETTINGS_POPUP_WIDTH, SETTINGS_POPUP_BASE_HEIGHT);
+
+        assert!(rendered.contains("Default panel surfaces"), "{rendered}");
     }
 
     #[test]
