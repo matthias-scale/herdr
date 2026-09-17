@@ -3536,6 +3536,14 @@
                 "null"
               ]
             },
+            "agents": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "completion": {
               "anyOf": [
                 {
@@ -3546,14 +3554,6 @@
                 }
               ],
               "description": "Explicit task completion from the authoritative final report."
-            },
-            "agents": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
             },
             "decisions": {
               "items": {
