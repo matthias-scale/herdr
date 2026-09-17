@@ -6758,6 +6758,13 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         assert!(terminal.waiting_on_agents());
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now + Duration::from_secs(1),
+        );
 
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
