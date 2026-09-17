@@ -395,10 +395,15 @@ impl crate::app::App {
                     if scope == ForegroundProcessRefreshScope::IdleAgents && !idle_agent_context {
                         continue;
                     }
-                    let shell_pid = self
-                        .state
-                        .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-                        .and_then(|runtime| runtime.child_pid());
+                    let runtime = self.state.runtime_for_pane_in_workspace(
+                        &self.terminal_runtimes,
+                        ws_idx,
+                        pane_id,
+                    );
+                    if runtime.is_some_and(|runtime| runtime.is_suspended()) {
+                        continue;
+                    }
+                    let shell_pid = runtime.and_then(|runtime| runtime.child_pid());
                     targets.push(ForegroundProcessTarget {
                         pane_id,
                         shell_pid,
@@ -454,11 +459,17 @@ impl crate::app::App {
             else {
                 continue;
             };
-            let current_shell_pid = self
-                .state
-                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, observation.pane_id)
-                .and_then(|runtime| runtime.child_pid());
-            if current_shell_pid != observation.shell_pid {
+            let runtime = self.state.runtime_for_pane_in_workspace(
+                &self.terminal_runtimes,
+                ws_idx,
+                observation.pane_id,
+            );
+            // A settled pane's runtime is suspended on purpose. Its agent
+            // disappearing is that suspension, not activity, and must not
+            // unsettle and resume the pane.
+            if runtime.is_some_and(|runtime| runtime.is_suspended())
+                || runtime.and_then(|runtime| runtime.child_pid()) != observation.shell_pid
+            {
                 continue;
             }
             let process_changed = self

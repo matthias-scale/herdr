@@ -853,7 +853,7 @@ fn render_compact_agent_row_with_prefix(
         ),
         Span::styled(
             if controls_width > 0 { "✓" } else { "" },
-            compact_row_style(Style::default().fg(p.green).add_modifier(Modifier::DIM), bg),
+            compact_row_style(Style::default().fg(p.overlay0), bg),
         ),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
@@ -20940,6 +20940,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 )));
                 assert!(rendered.contains('z'), "{rendered:?}");
                 assert!(rendered.contains('✓'), "{rendered:?}");
+                let settle = targets
+                    .iter()
+                    .find(|target| target.label == "Settle")
+                    .expect("settle hover target");
+                let icon = terminal
+                    .backend()
+                    .buffer()
+                    .cell((settle.rect.x, settle.rect.y))
+                    .expect("settle icon cell");
+                assert_eq!(icon.fg, app.palette.overlay0, "width={width}");
+                assert_ne!(icon.fg, app.palette.green, "width={width}");
             }
         }
     }
