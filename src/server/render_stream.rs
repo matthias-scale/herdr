@@ -756,7 +756,7 @@ mod render_scale_benchmark {
     }
 
     fn profile_remote_cardinalities() -> [(usize, RenderStats); 3] {
-        [0, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
+        [1, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
     }
 
     fn profile_proxy_cardinalities() -> [(usize, RenderStats); 3] {
