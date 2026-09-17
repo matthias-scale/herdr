@@ -68,7 +68,10 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Ok(0);
     }
-    let pane_id = std::env::var("HERDR_PANE_ID").ok();
+    let pane_id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let seq = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -78,9 +81,22 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return Ok(0);
     }
+    let (Some(pane_id), Some(session_id)) = (
+        pane_id,
+        crate::work_title::session_id_from_hook_input(provider, &input),
+    ) else {
+        return Ok(0);
+    };
+    if !hook_session_matches_process(provider, &session_id) {
+        tracing::debug!(
+            ?provider,
+            "ignored session name hook for a different Codex session"
+        );
+        return Ok(0);
+    }
     // Claude names a session inside the transcript the hook payload points at.
-    // Codex names a thread in a single machine-wide index instead, so there is
-    // no per-session path to bind and none is reported.
+    // Codex names every thread in the index under this pane's CODEX_HOME. The
+    // server retains either path only as a runtime write-back target.
     let name_source_path = match provider {
         crate::work_title::WorkTitleProvider::Claude => {
             crate::work_title::transcript_path_from_hook_input(&input)
@@ -93,35 +109,15 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
     let Ok(name_source) = std::fs::read_to_string(&name_source_path) else {
         return Ok(0);
     };
-    let agent_session_path = match provider {
-        crate::work_title::WorkTitleProvider::Claude => Some(name_source_path),
-        crate::work_title::WorkTitleProvider::Codex => None,
-    };
-    let Some(metadata) = crate::work_title::request_from_session_name(
-        provider,
-        pane_id.as_deref(),
-        &input,
-        &name_source,
-        seq,
-    ) else {
-        return Ok(0);
-    };
-    let (Some(session_id), Some(agent), Some(lifecycle_source)) = (
-        metadata.agent_session_id.clone(),
-        metadata.agent.clone(),
-        metadata.applies_to_source.clone(),
-    ) else {
-        return Ok(0);
-    };
     let session_request = Request {
         id: format!("cli:agent:session-name:session:{seq}"),
         method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
-            pane_id: metadata.pane_id.clone(),
-            source: lifecycle_source,
-            agent,
+            pane_id: pane_id.clone(),
+            source: provider.lifecycle_source().into(),
+            agent: provider.agent().into(),
             seq: Some(seq),
             agent_session_id: Some(session_id),
-            agent_session_path,
+            agent_session_path: Some(name_source_path),
             session_start_source: None,
         }),
     };
@@ -133,6 +129,15 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
         tracing::debug!(?provider, "Herdr rejected the guarded session name session");
         return Ok(0);
     }
+    let Some(metadata) = crate::work_title::request_from_session_name(
+        provider,
+        Some(&pane_id),
+        &input,
+        &name_source,
+        seq,
+    ) else {
+        return Ok(0);
+    };
     if super::send_request_unchecked(&Request {
         id: format!("cli:agent:session-name:metadata:{seq}"),
         method: Method::PaneReportMetadata(metadata),
@@ -152,6 +157,17 @@ fn codex_session_index_path() -> Option<String> {
         .join("session_index.jsonl")
         .to_str()
         .map(str::to_string)
+}
+
+fn hook_session_matches_process(
+    provider: crate::work_title::WorkTitleProvider,
+    session_id: &str,
+) -> bool {
+    provider != crate::work_title::WorkTitleProvider::Codex
+        || std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_none_or(|value| value == session_id)
 }
 
 fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
@@ -200,12 +216,7 @@ fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
     let Some(session_id) = metadata.agent_session_id.clone() else {
         return Ok(0);
     };
-    if provider == crate::work_title::WorkTitleProvider::Codex
-        && std::env::var("CODEX_THREAD_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some_and(|value| value != session_id)
-    {
+    if !hook_session_matches_process(provider, &session_id) {
         tracing::debug!(
             ?provider,
             "ignored work title hook for a different Codex session"
@@ -1018,14 +1029,21 @@ fn agent_get_request(target: &str, request_id: &str) -> Request {
 }
 
 fn agent_rename(args: &[String]) -> std::io::Result<i32> {
-    let [target, value] = args else {
+    let Some(target) = args.first() else {
         eprintln!("usage: herdr agent rename <target> <name>|--clear");
         return Ok(2);
     };
-    let name = if value == "--clear" {
+    if args.len() < 2 {
+        eprintln!("usage: herdr agent rename <target> <name>|--clear");
+        return Ok(2);
+    }
+    let name = if args.len() == 2 && args[1] == "--clear" {
         None
+    } else if args[1..].iter().any(|value| value == "--clear") {
+        eprintln!("usage: herdr agent rename <target> <name>|--clear");
+        return Ok(2);
     } else {
-        Some(value.clone())
+        Some(args[1..].join(" "))
     };
 
     super::print_response(&super::send_request(&Request {
@@ -1219,7 +1237,10 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
 
 #[cfg(test)]
 mod interactive_launch_gate_tests {
-    use super::{agent_start_gated, InteractiveLaunchContext};
+    use super::{
+        agent_start_gated, codex_session_index_path, hook_session_matches_process,
+        InteractiveLaunchContext,
+    };
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -1286,6 +1307,48 @@ mod interactive_launch_gate_tests {
     #[test]
     fn allows_a_windowed_launch_when_the_marker_declares_it_interactive() {
         assert_eq!(agent_start_gated(&args(&["worker"]), marked()).unwrap(), 2);
+    }
+
+    #[test]
+    fn codex_session_name_uses_the_pane_profile_index_path() {
+        let _lock = crate::integration::integration_env_lock();
+        let previous = std::env::var_os("CODEX_HOME");
+        let codex_home = std::env::temp_dir().join(format!(
+            "herdr-codex-session-name-home-{}",
+            std::process::id()
+        ));
+        std::env::set_var("CODEX_HOME", &codex_home);
+        assert_eq!(
+            codex_session_index_path().as_deref(),
+            codex_home.join("session_index.jsonl").to_str()
+        );
+        match previous {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+    }
+
+    #[test]
+    fn codex_hooks_reject_a_child_thread_for_the_parent_pane() {
+        let _lock = crate::integration::integration_env_lock();
+        let previous = std::env::var_os("CODEX_THREAD_ID");
+        std::env::set_var("CODEX_THREAD_ID", "parent-thread");
+        assert!(hook_session_matches_process(
+            crate::work_title::WorkTitleProvider::Codex,
+            "parent-thread"
+        ));
+        assert!(!hook_session_matches_process(
+            crate::work_title::WorkTitleProvider::Codex,
+            "child-thread"
+        ));
+        assert!(hook_session_matches_process(
+            crate::work_title::WorkTitleProvider::Claude,
+            "child-thread"
+        ));
+        match previous {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
     }
 
     // (c) A controlling terminal passes the gate. CI has no TTY, so the

@@ -2023,4 +2023,110 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn agent_rename_keeps_single_token_aliases_out_of_the_agent_session() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "herdr-agent-rename-session-name-{}-{nonce}",
+            std::process::id(),
+        ));
+        let transcript_dir = root.join("projects/-tmp-repro");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("claude-session.jsonl");
+        std::fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+        let before = std::fs::read_to_string(&transcript).unwrap();
+
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+        });
+        terminal.set_session_name_write_target(Some(
+            crate::work_title::SessionNameWriteTarget::new(
+                crate::work_title::WorkTitleProvider::Claude,
+                "claude-session".into(),
+                transcript.clone(),
+            ),
+        ));
+
+        let response = app.handle_agent_rename(
+            "rename".into(),
+            AgentRenameParams {
+                target: public_pane_id,
+                name: Some("reviewer".into()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::AgentInfo { .. }));
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_rename_writes_a_trimmed_multiword_session_name() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "herdr-agent-rename-write-session-name-{}-{nonce}",
+            std::process::id(),
+        ));
+        let transcript_dir = root.join("projects/-tmp-repro");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("claude-session.jsonl");
+        std::fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+        });
+        terminal.set_session_name_write_target(Some(
+            crate::work_title::SessionNameWriteTarget::new(
+                crate::work_title::WorkTitleProvider::Claude,
+                "claude-session".into(),
+                transcript.clone(),
+            ),
+        ));
+
+        let response = app.handle_agent_rename(
+            "rename".into(),
+            AgentRenameParams {
+                target: public_pane_id,
+                name: Some("  Review billing retries  ".into()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::AgentInfo { .. }));
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("Review billing retries")
+        );
+        let written = std::fs::read_to_string(&transcript).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(written.lines().last().unwrap()).unwrap();
+        assert_eq!(record["customTitle"], "Review billing retries");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
