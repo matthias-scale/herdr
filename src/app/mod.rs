@@ -851,6 +851,7 @@ impl App {
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            sidebar_snooze_menu: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,

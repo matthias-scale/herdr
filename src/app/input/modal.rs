@@ -1496,12 +1496,9 @@ impl App {
                 },
                 Some(crate::app::state::SETTLE_ITEM),
             ) => {
-                self.state.settle_pane_at(
-                    ws_idx,
-                    pane_id,
-                    crate::app::settled::unix_seconds(std::time::SystemTime::now()),
-                );
-                self.flush_pane_settlement_events();
+                if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.runtime_pane_settle("tui.context-menu.settle", public_pane_id);
+                }
                 leave_modal(&mut self.state);
             }
             (

@@ -113,7 +113,7 @@ use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
     render_sidebar_object_menu, render_sidebar_project_menu, render_sidebar_settled_menu,
-    render_sidebar_sort_menu, render_sidebar_subgroup_picker,
+    render_sidebar_snooze_menu, render_sidebar_sort_menu, render_sidebar_subgroup_picker,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -162,13 +162,14 @@ pub(crate) use self::{
         sidebar_project_menu_layout, sidebar_project_menu_matches, sidebar_pull_request_actions,
         sidebar_pull_request_key, sidebar_row_index_for_workspace, sidebar_row_scroll_for_target,
         sidebar_rows, sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
-        sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
-        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
-        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, AgentPanelLocalIdentity, RemoteAgentPanelEntry, SidebarFilterOption,
-        SidebarObjectMenuItem, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        sidebar_show_more_key, sidebar_snooze_menu_layout, sidebar_symphony_job_at,
+        sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
+        sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
+        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity,
+        RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
+        WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -1318,6 +1319,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_new_menu(app, frame);
     render_sidebar_new_thread(app, frame);
     render_sidebar_project_menu(app, frame);
+    render_sidebar_snooze_menu(app, frame);
     render_sidebar_settled_menu(app, frame);
     render_sidebar_object_menu(app, frame);
     render_sidebar_sort_menu(app, frame);

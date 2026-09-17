@@ -1,10 +1,10 @@
 use crate::api::schema::{
     EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
-    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWorkContextSetParams, PaneZoomParams, TabCreateParams, TabMoveParams, TabPinParams,
-    TabRenameParams, TabStarParams, TabTarget, WorkspaceCloseParams, WorkspaceCreateParams,
-    WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget,
-    WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    PaneRenameParams, PaneResizeParams, PaneSnoozeParams, PaneSplitParams, PaneSwapParams,
+    PaneTarget, PaneWorkContextSetParams, PaneZoomParams, TabCreateParams, TabMoveParams,
+    TabPinParams, TabRenameParams, TabStarParams, TabTarget, WorkspaceCloseParams,
+    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
+    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;
@@ -122,6 +122,26 @@ impl App {
 
     pub(crate) fn runtime_pane_close(&mut self, id: &'static str, pane_id: String) -> String {
         self.dispatch_runtime_mutation(id, Method::PaneClose(PaneTarget { pane_id }))
+    }
+
+    pub(crate) fn runtime_pane_settle(&mut self, id: &'static str, pane_id: String) -> String {
+        self.dispatch_runtime_mutation(id, Method::PaneSettle(PaneTarget { pane_id }))
+    }
+
+    pub(crate) fn runtime_pane_snooze(
+        &mut self,
+        id: &'static str,
+        pane_id: String,
+        duration_s: u64,
+    ) -> String {
+        self.dispatch_runtime_mutation(
+            id,
+            Method::PaneSnooze(PaneSnoozeParams {
+                pane_id,
+                duration_s: Some(duration_s),
+                snoozed_until: None,
+            }),
+        )
     }
 
     pub(crate) fn runtime_pane_rename(

@@ -203,6 +203,9 @@ impl App {
         if self.state.handle_sidebar_subgroup_picker_key(key_event) {
             return None;
         }
+        if self.handle_sidebar_snooze_menu_key(key_event) {
+            return None;
+        }
         if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
             return None;
         }
@@ -256,6 +259,9 @@ impl App {
                     self.dispatch_sidebar_work_group_plan(*plan);
                     return None;
                 }
+            }
+            if self.handle_sidebar_session_action_key(key_event) {
+                return None;
             }
             if self.handle_sidebar_settled_key(key_event) {
                 return None;
@@ -5132,7 +5138,16 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
+                    MouseAction::SnoozeMenu { index } => {
+                        self.apply_sidebar_snooze_menu_action(index)
+                    }
                     MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
+                    MouseAction::OpenSnoozeMenu {
+                        ws_idx,
+                        pane_id,
+                        column,
+                        row,
+                    } => self.open_sidebar_snooze_menu(ws_idx, pane_id, column, row),
                     MouseAction::SettlePane { ws_idx, pane_id } => {
                         self.settle_sidebar_pane(ws_idx, pane_id)
                     }

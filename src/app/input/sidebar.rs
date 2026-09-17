@@ -484,6 +484,11 @@ impl AppState {
         crate::ui::dropdown::hit_test(&layout, col, row)
     }
 
+    pub(crate) fn sidebar_snooze_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_snooze_menu_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
     /// Resolve a settled-menu row press into an action.
     ///
     /// The delete row asks once first while `ui.confirm_close` is on: the first
@@ -1197,6 +1202,134 @@ impl AppState {
 }
 
 impl super::super::App {
+    pub(crate) fn open_sidebar_snooze_menu(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        column: u16,
+        row: u16,
+    ) {
+        if self.state.pane_is_settled(ws_idx, pane_id)
+            || self.state.pane_is_snoozed(ws_idx, pane_id)
+            || self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.pane_state(pane_id))
+                .is_none()
+        {
+            return;
+        }
+        self.state.sidebar_snooze_menu = Some(crate::app::state::SidebarSnoozeMenuState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: self.state.workspaces[ws_idx].id.clone(),
+                pane_id,
+            },
+            anchor: (column, row),
+            selected: 0,
+        });
+    }
+
+    pub(crate) fn apply_sidebar_snooze_menu_action(&mut self, index: usize) {
+        let Some((_, duration_s)) = crate::app::state::SNOOZE_DURATION_ITEMS.get(index) else {
+            return;
+        };
+        let Some(menu) = self.state.sidebar_snooze_menu.take() else {
+            return;
+        };
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == menu.target.workspace_id)
+        else {
+            return;
+        };
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, menu.target.pane_id) else {
+            return;
+        };
+        self.runtime_pane_snooze("tui.sidebar.snooze", public_pane_id, *duration_s);
+    }
+
+    pub(crate) fn handle_sidebar_snooze_menu_key(&mut self, key: KeyEvent) -> bool {
+        let Some(menu) = self.state.sidebar_snooze_menu.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => self.state.sidebar_snooze_menu = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                menu.selected = menu.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                menu.selected = menu
+                    .selected
+                    .saturating_add(1)
+                    .min(crate::app::state::SNOOZE_DURATION_ITEMS.len() - 1);
+            }
+            KeyCode::Enter => {
+                let index = menu.selected;
+                self.apply_sidebar_snooze_menu_action(index);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn handle_sidebar_session_action_key(&mut self, key: KeyEvent) -> bool {
+        if !self.state.sidebar_focused
+            || !matches!(
+                self.state.mode,
+                crate::app::Mode::Terminal | crate::app::Mode::Navigate
+            )
+            || !key.modifiers.is_empty()
+            || self.state.sidebar_settled_menu_target.is_some()
+            || self.state.sidebar_selected_settled.is_some()
+            || self.state.sidebar_object_menu.is_some()
+            || self.state.sidebar_sort_menu.is_some()
+            || self.state.sidebar_group_menu_open
+            || self.state.sidebar_filter_menu_open
+            || self.state.sidebar_subgroup_picker.is_some()
+            || self.state.sidebar_new_menu.is_some()
+            || self.state.sidebar_new_thread.is_some()
+            || self.state.sidebar_project_menu.is_some()
+            || self.state.sidebar_search_active
+            || self.state.sidebar_selected_work_group.is_some()
+        {
+            return false;
+        }
+        let Some(ws_idx) = self.state.active else {
+            return false;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+        else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Char('z') => {
+                let anchor =
+                    crate::ui::compute_tab_card_areas(&self.state, self.state.view.sidebar_rect)
+                        .into_iter()
+                        .find(|card| card.ws_idx == ws_idx && card.pane_id == pane_id)
+                        .map(|card| (card.rect.right().saturating_sub(4), card.rect.y))
+                        .unwrap_or((
+                            self.state.view.sidebar_rect.x,
+                            self.state.view.sidebar_rect.y,
+                        ));
+                self.open_sidebar_snooze_menu(ws_idx, pane_id, anchor.0, anchor.1);
+                self.state.sidebar_snooze_menu.is_some()
+            }
+            KeyCode::Char('s') => {
+                self.settle_sidebar_pane(ws_idx, pane_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn handle_sidebar_object_menu_key(&mut self, key: KeyEvent) -> bool {
         if self.state.sidebar_object_menu.is_none() {
             if key.code != KeyCode::Char('m') || !key.modifiers.is_empty() {
@@ -1609,12 +1742,10 @@ impl super::super::App {
         if workspace.pane_state(pane_id).is_none() || self.state.pane_is_settled(ws_idx, pane_id) {
             return;
         }
-        self.state.settle_pane_at(
-            ws_idx,
-            pane_id,
-            crate::app::settled::unix_seconds(std::time::SystemTime::now()),
-        );
-        self.flush_pane_settlement_events();
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return;
+        };
+        self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
     }
 
     pub(crate) fn resume_settled_pane_before_input(&mut self, pane_id: crate::layout::PaneId) {
@@ -1885,15 +2016,109 @@ mod tests {
             .cloned()
             .expect("settle icon target");
         let crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } =
-            target.action.expect("settle action");
+            target.action.expect("settle action")
+        else {
+            panic!("settle target carried a different action");
+        };
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            target.rect.x + 1,
+            target.rect.x,
             target.rect.y,
         ));
 
         assert!(app.state.pane_is_settled(ws_idx, pane_id));
+    }
+
+    #[test]
+    fn clicking_sidebar_snooze_opens_durations_and_dispatches_the_api() {
+        let mut app = sidebar_order_app(false);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let target = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| target.label == "Snooze")
+            .cloned()
+            .expect("snooze control target");
+        let crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } =
+            target.action.expect("snooze action")
+        else {
+            panic!("snooze target carried a different action");
+        };
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.rect.x,
+            target.rect.y,
+        ));
+        assert!(app.state.sidebar_snooze_menu.is_some());
+        let before = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+        app.handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let deadline = app.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .and_then(crate::pane::PaneState::snoozed_until)
+            .expect("pane snoozed through runtime API");
+        assert!((before + 15 * 60..=before + 15 * 60 + 1).contains(&deadline));
+        assert!(crate::ui::sidebar_rows(&app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::SidebarRow::SectionHeader {
+                    title: crate::ui::sidebar::SNOOZED_SECTION_TITLE,
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn sidebar_keyboard_reaches_snooze_and_settle_controls() {
+        let mut snooze = sidebar_order_app(false);
+        crate::ui::compute_view(&mut snooze.state, Rect::new(0, 0, 120, 40));
+        snooze.state.sidebar_focused = true;
+        assert!(snooze.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        )));
+        assert!(snooze.state.sidebar_snooze_menu.is_some());
+        snooze.handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let snoozed_pane = snooze.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        assert!(snooze.state.pane_is_snoozed(0, snoozed_pane));
+
+        let mut settle = sidebar_order_app(false);
+        settle.state.sidebar_focused = true;
+        assert!(settle.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+        let settled_pane = settle.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        assert!(settle.state.pane_is_settled(0, settled_pane));
+    }
+
+    #[test]
+    fn sidebar_session_shortcuts_do_not_fire_through_an_open_menu() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_focused = true;
+        app.state.sidebar_group_menu_open = true;
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+
+        assert!(!app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        )));
+        assert!(!app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+        assert!(app.state.sidebar_snooze_menu.is_none());
+        assert!(!app.state.pane_is_settled(0, pane_id));
     }
 
     #[test]

@@ -4404,8 +4404,9 @@ impl HeadlessServer {
                 self.seed_client_dock_presentation(client_id);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
-                    client.sidebar_presentation.group_mode = group_mode;
-                    client.sidebar_presentation.group_menu_selected = group_mode.view_index();
+                    client
+                        .sidebar_presentation
+                        .initialize_group_mode(group_mode);
                     client.sidebar_presentation.work_filter =
                         crate::client::presentation::load_sidebar_work_filter();
                     client.sidebar_presentation.group_sorts =

@@ -41,7 +41,16 @@ pub(super) enum MouseAction {
     SettledMenu {
         index: usize,
     },
+    SnoozeMenu {
+        index: usize,
+    },
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
+    OpenSnoozeMenu {
+        ws_idx: usize,
+        pane_id: PaneId,
+        column: u16,
+        row: u16,
+    },
     SettlePane {
         ws_idx: usize,
         pane_id: PaneId,
@@ -602,6 +611,23 @@ impl AppState {
                 return None;
             }
         }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_snooze_menu.is_some() {
+            if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
+                if let Some(menu) = self.sidebar_snooze_menu.as_mut() {
+                    menu.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_snooze_menu.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
+                    return Some(MouseAction::SnoozeMenu { index });
+                }
+                self.sidebar_snooze_menu = None;
+            }
+            return None;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
         {
             if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
@@ -873,14 +899,26 @@ impl AppState {
             && self.mode == Mode::Terminal
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
-            if let Some(crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id }) = self
+            if let Some(action) = self
                 .view
                 .sidebar_hover_targets
                 .iter()
                 .find(|target| rect_contains(target.rect, mouse.column, mouse.row))
                 .and_then(|target| target.action.clone())
             {
-                return Some(MouseAction::SettlePane { ws_idx, pane_id });
+                return Some(match action {
+                    crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } => {
+                        MouseAction::OpenSnoozeMenu {
+                            ws_idx,
+                            pane_id,
+                            column: mouse.column,
+                            row: mouse.row,
+                        }
+                    }
+                    crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } => {
+                        MouseAction::SettlePane { ws_idx, pane_id }
+                    }
+                });
             }
         }
 
@@ -2437,6 +2475,18 @@ impl AppState {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
             }
+            Some(crate::ui::MobileSwitcherTarget::Snooze { ws_idx, pane_id }) => {
+                return MobileMouseResult::Action(MouseAction::OpenSnoozeMenu {
+                    ws_idx,
+                    pane_id,
+                    column: mouse.column,
+                    row: mouse.row,
+                });
+            }
+            Some(crate::ui::MobileSwitcherTarget::Settle { ws_idx, pane_id }) => {
+                self.close_workspace_picker();
+                return MobileMouseResult::Action(MouseAction::SettlePane { ws_idx, pane_id });
+            }
             Some(crate::ui::MobileSwitcherTarget::NestedHeader(key)) => {
                 self.toggle_sidebar_group(&key);
             }
@@ -3956,6 +4006,51 @@ mod tests {
             Some(&agent_ref)
         );
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn mobile_snooze_control_opens_the_bounded_duration_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("mobile snooze")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.mode = Mode::Navigate;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 60, 20));
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let target = (viewport.y..viewport.bottom())
+            .flat_map(|row| (viewport.x..viewport.right()).map(move |column| (column, row)))
+            .find(|(column, row)| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, *column, *row),
+                    Some(crate::ui::MobileSwitcherTarget::Snooze { .. })
+                )
+            })
+            .expect("mobile snooze control");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.0,
+            target.1,
+        ));
+
+        let menu = app
+            .state
+            .sidebar_snooze_menu
+            .as_ref()
+            .expect("snooze duration menu");
+        let pane_id = menu.target.pane_id;
+        assert_eq!(menu.selected, 0);
+        assert_eq!(crate::app::state::SNOOZE_DURATION_ITEMS.len(), 4);
+
+        let layout = crate::ui::sidebar_snooze_menu_layout(&app.state, Rect::new(0, 0, 60, 20))
+            .expect("mobile snooze menu layout");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.list_rect.x,
+            layout.list_rect.y,
+        ));
+        assert!(app.state.pane_is_snoozed(0, pane_id));
     }
 
     #[test]

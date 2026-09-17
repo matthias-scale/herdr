@@ -1036,6 +1036,7 @@ pub struct SidebarHoverTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHoverAction {
+    Snooze { ws_idx: usize, pane_id: PaneId },
     Settle { ws_idx: usize, pane_id: PaneId },
 }
 
@@ -1523,6 +1524,8 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) workspace_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
+    pub(crate) collapsed_groups: std::collections::HashSet<String>,
+    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     /// Global projection revision last reconciled into this attach.
     pub(crate) projection_revision: u64,
     pub(crate) group_mode: SidebarGroupMode,
@@ -1544,8 +1547,28 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) group_sorts: std::collections::HashMap<String, SidebarSortMode>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
+    pub(crate) snooze_menu: Option<SidebarSnoozeMenuState>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarSnoozeMenuState {
+    pub(crate) target: PaneFocusTarget,
+    pub(crate) anchor: (u16, u16),
+    pub(crate) selected: usize,
+}
+
+impl SidebarPresentationState {
+    pub(crate) fn initialize_group_mode(&mut self, group_mode: SidebarGroupMode) {
+        self.group_mode = group_mode;
+        self.group_menu_selected = group_mode.view_index();
+        self.collapsed_groups.insert(format!(
+            "{}:{}",
+            group_mode.collapse_namespace(),
+            crate::ui::RECENTLY_DONE_SECTION_TITLE
+        ));
+    }
 }
 
 /// Attach-local project picker opened from the sidebar header.
@@ -3137,6 +3160,12 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 pub const SETTLE_ITEM: &str = "Settle";
+pub const SNOOZE_DURATION_ITEMS: [(&str, u64); 4] = [
+    ("15 minutes", 15 * 60),
+    ("1 hour", 60 * 60),
+    ("4 hours", 4 * 60 * 60),
+    ("1 day", 24 * 60 * 60),
+];
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
@@ -3740,6 +3769,7 @@ pub struct AppState {
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
+    pub(crate) sidebar_snooze_menu: Option<SidebarSnoozeMenuState>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
     /// The settled menu's delete row has been pressed once and is waiting for
@@ -5043,6 +5073,14 @@ impl AppState {
             &mut other.mobile_switcher_scroll,
         );
         std::mem::swap(
+            &mut self.collapsed_sidebar_groups,
+            &mut other.collapsed_groups,
+        );
+        std::mem::swap(
+            &mut self.expanded_remote_host_groups,
+            &mut other.expanded_remote_host_groups,
+        );
+        std::mem::swap(
             &mut self.sidebar_presentation.projection_revision,
             &mut other.projection_revision,
         );
@@ -5087,6 +5125,7 @@ impl AppState {
             &mut self.sidebar_selected_settled,
             &mut other.selected_settled,
         );
+        std::mem::swap(&mut self.sidebar_snooze_menu, &mut other.snooze_menu);
         std::mem::swap(
             &mut self.sidebar_settled_menu_target,
             &mut other.settled_menu_target,
@@ -6216,6 +6255,7 @@ impl AppState {
             sidebar_group_sorts: std::collections::HashMap::new(),
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            sidebar_snooze_menu: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
@@ -6856,6 +6896,17 @@ impl AppState {
         for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
+        if let Some(menu) = &self.sidebar_snooze_menu {
+            let workspace = self
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == menu.target.workspace_id)
+                .expect("snooze menu workspace must exist");
+            assert!(
+                workspace.pane_state(menu.target.pane_id).is_some(),
+                "snooze menu pane must exist in its workspace"
+            );
+        }
         if let Some(menu) = &self.context_menu {
             match menu.kind {
                 ContextMenuKind::Workspace { ws_idx }
@@ -7139,6 +7190,75 @@ mod tests {
                 .as_ref()
                 .map(|picker| picker.filter.query.as_str()),
             Some("a")
+        );
+    }
+
+    #[test]
+    fn collapsed_sidebar_groups_are_isolated_between_presentations() {
+        let mut app = AppState::test_new();
+        let mut first_client = SidebarPresentationState::default();
+        let mut second_client = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut first_client);
+        app.collapsed_sidebar_groups
+            .insert("repo:Snoozed".to_string());
+        app.workspace_scroll = 7;
+        app.swap_sidebar_presentation(&mut first_client);
+
+        app.swap_sidebar_presentation(&mut second_client);
+        assert!(!app.collapsed_sidebar_groups.contains("repo:Snoozed"));
+        assert_eq!(app.workspace_scroll, 0);
+        app.swap_sidebar_presentation(&mut second_client);
+
+        app.swap_sidebar_presentation(&mut first_client);
+        assert!(app.collapsed_sidebar_groups.contains("repo:Snoozed"));
+        assert_eq!(app.workspace_scroll, 7);
+    }
+
+    #[test]
+    fn fresh_sidebar_presentation_collapses_recently_done_for_its_group_mode() {
+        let mut presentation = SidebarPresentationState::default();
+        presentation.initialize_group_mode(SidebarGroupMode::Spaces);
+
+        assert_eq!(presentation.group_mode, SidebarGroupMode::Spaces);
+        assert_eq!(
+            presentation.group_menu_selected,
+            SidebarGroupMode::Spaces.view_index()
+        );
+        assert!(presentation
+            .collapsed_groups
+            .contains("spaces:Recently done"));
+    }
+
+    #[test]
+    fn snooze_menu_selection_is_isolated_between_sidebar_presentations() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("snooze")];
+        let target = PaneFocusTarget {
+            workspace_id: app.workspaces[0].id.clone(),
+            pane_id: app.workspaces[0].tabs[0].root_pane,
+        };
+        let mut first_client = SidebarPresentationState::default();
+        let mut second_client = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut first_client);
+        app.sidebar_snooze_menu = Some(SidebarSnoozeMenuState {
+            target: target.clone(),
+            anchor: (9, 3),
+            selected: 2,
+        });
+        app.swap_sidebar_presentation(&mut first_client);
+
+        app.swap_sidebar_presentation(&mut second_client);
+        assert!(app.sidebar_snooze_menu.is_none());
+        app.swap_sidebar_presentation(&mut second_client);
+
+        app.swap_sidebar_presentation(&mut first_client);
+        assert_eq!(
+            app.sidebar_snooze_menu
+                .as_ref()
+                .map(|menu| (&menu.target, menu.anchor, menu.selected)),
+            Some((&target, (9, 3), 2))
         );
     }
 

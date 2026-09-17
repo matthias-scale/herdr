@@ -356,10 +356,10 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            // One-line mobile Space → direct tab/window projection. Digest
-            // covers style, so it moved when the active title stopped being
-            // darkened on a dark panel (`active_sidebar_title_color`).
-            "4862ecd03de63bdb4b36a72e5d784c8917d2c8d5d4430f3f2a734088e23a4b9e"
+            // One-line mobile Space → direct tab/window projection with the
+            // selected row's Snooze and Settle controls. The digest includes
+            // both content and style.
+            "d33581c1b213f4f5abbbe74b1ce35e81d796982de24c93dbb9e87c4e53fcfc05"
         );
     }
 }

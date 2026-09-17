@@ -227,6 +227,10 @@ const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
 const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
+const SIDEBAR_SELECTED_CONTROL_WIDTH: usize = 1;
+const SIDEBAR_SELECTED_CONTROLS_WIDTH: usize = SIDEBAR_SELECTED_CONTROL_WIDTH * 2;
+const SIDEBAR_SELECTED_MIN_TITLE_WIDTH: usize = 4;
+const SIDEBAR_MIN_CONTROLS_ROW_WIDTH: u16 = 19;
 
 fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
     entry.gate_count > 0 || entry.open_blockers
@@ -790,8 +794,7 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let settle_width =
-        usize::from(title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id)) * 2;
+    let controls_width = selected_row_controls_width(app, entry, tab, title_width, rect.width);
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
@@ -799,7 +802,7 @@ fn render_compact_agent_row_with_prefix(
     .then_some(SIDEBAR_STAR_SUFFIX);
     let title_text_width = title_width
         .saturating_sub(star_suffix.map_or(0, display_width))
-        .saturating_sub(settle_width);
+        .saturating_sub(controls_width);
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
@@ -845,13 +848,95 @@ fn render_compact_agent_row_with_prefix(
     spans.extend([
         Span::styled(title_pad, compact_row_style(title_style, bg)),
         Span::styled(
-            if settle_width > 0 { " ✓" } else { "" },
+            if controls_width > 0 { "z" } else { "" },
+            compact_row_style(Style::default().fg(p.mauve).add_modifier(Modifier::DIM), bg),
+        ),
+        Span::styled(
+            if controls_width > 0 { "✓" } else { "" },
             compact_row_style(Style::default().fg(p.green).add_modifier(Modifier::DIM), bg),
         ),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
     ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+fn selected_local_row_pane(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    tab: bool,
+) -> Option<crate::layout::PaneId> {
+    if tab
+        && app.active == Some(entry.ws_idx)
+        && app
+            .workspaces
+            .get(entry.ws_idx)
+            .is_some_and(|workspace| workspace.active_tab_index() == entry.tab_idx)
+    {
+        return app.workspaces[entry.ws_idx].focused_pane_id();
+    }
+    app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
+        .then_some(entry.pane_id)
+}
+
+fn selected_row_controls_width(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    tab: bool,
+    title_width: usize,
+    row_width: u16,
+) -> usize {
+    selected_local_row_pane(app, entry, tab)
+        .filter(|pane_id| !app.pane_is_settled(entry.ws_idx, *pane_id))
+        .filter(|pane_id| !app.pane_is_snoozed(entry.ws_idx, *pane_id))
+        .filter(|_| row_width >= SIDEBAR_MIN_CONTROLS_ROW_WIDTH)
+        .filter(|_| {
+            title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + SIDEBAR_SELECTED_CONTROLS_WIDTH
+        })
+        .map_or(0, |_| SIDEBAR_SELECTED_CONTROLS_WIDTH)
+}
+
+pub(crate) fn selected_row_control_at(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+    tab: bool,
+    column: u16,
+) -> Option<crate::app::state::SidebarHoverAction> {
+    let requested_prefix = usize::from(depth) * 3 + 1;
+    let provider = compact_provider(entry);
+    let title = compact_row_title_for_width(
+        compact_row_title(entry, tab),
+        &provider,
+        usize::from(rect.width),
+        requested_prefix,
+    );
+    let widths = compact_row_widths(title, &provider, usize::from(rect.width), requested_prefix);
+    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let controls_width = selected_row_controls_width(app, entry, tab, title_width, rect.width);
+    if controls_width == 0 {
+        return None;
+    }
+    let start = rect.x.saturating_add(
+        (widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width) as u16,
+    );
+    if column < start || column >= start.saturating_add(controls_width as u16) {
+        return None;
+    }
+    let pane_id = selected_local_row_pane(app, entry, tab)?;
+    if column < start.saturating_add(SIDEBAR_SELECTED_CONTROL_WIDTH as u16) {
+        Some(crate::app::state::SidebarHoverAction::Snooze {
+            ws_idx: entry.ws_idx,
+            pane_id,
+        })
+    } else {
+        Some(crate::app::state::SidebarHoverAction::Settle {
+            ws_idx: entry.ws_idx,
+            pane_id,
+        })
+    }
 }
 
 pub(super) fn tab_row_layout(
@@ -2009,6 +2094,7 @@ pub(crate) enum SidebarRow {
 /// omitted entirely when empty, which is the common case.
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
 pub(crate) const RECENTLY_DONE_SECTION_TITLE: &str = "Recently done";
+pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
 #[cfg(test)]
 pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
@@ -2334,9 +2420,12 @@ fn compact_sidebar_rows_inner(
     // Lifecycle sections count and render sessions, not split panes. Aggregate
     // first so one tab has one canonical representative in exactly one section.
     let entries = ordered_tab_entries(app, &entries);
-    let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
+    let (settled_entries, remaining_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
+    let (snoozed_entries, active_entries): (Vec<_>, Vec<_>) = remaining_entries
+        .into_iter()
+        .partition(|entry| app.pane_is_snoozed(entry.ws_idx, entry.pane_id));
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
@@ -2364,6 +2453,7 @@ fn compact_sidebar_rows_inner(
         && visible_entries.is_empty()
         && !has_remote_entries
         && recently_done.is_empty()
+        && snoozed_entries.is_empty()
         && settled_entries.is_empty()
     {
         return Vec::new();
@@ -2392,6 +2482,7 @@ fn compact_sidebar_rows_inner(
         append_tail_sections(
             app,
             &mut rows,
+            snoozed_entries,
             settled_entries,
             expand_worktrees,
             has_remote_rows.then_some(remote_terms.as_slice()),
@@ -2411,6 +2502,7 @@ fn compact_sidebar_rows_inner(
     append_tail_sections(
         app,
         &mut rows,
+        snoozed_entries,
         settled_entries,
         expand_worktrees,
         has_remote_rows.then_some(remote_terms.as_slice()),
@@ -3004,6 +3096,7 @@ fn append_object_group_rows(
 fn append_tail_sections(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
+    snoozed_entries: Vec<AgentPanelEntry>,
     settled_entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
     remote_terms: Option<&[&str]>,
@@ -3012,7 +3105,26 @@ fn append_tail_sections(
         append_remote_rows(app, rows, terms);
     }
     append_symphony_rows(app, rows);
+    append_snoozed_rows(app, rows, snoozed_entries);
     append_settled_rows(app, rows, settled_entries, expand_worktrees);
+}
+
+fn append_snoozed_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>) {
+    if entries.is_empty() {
+        return;
+    }
+    let collapsed = section_is_collapsed(app, SNOOZED_SECTION_TITLE);
+    rows.push(SidebarRow::SectionHeader {
+        title: SNOOZED_SECTION_TITLE,
+        count: entries.len(),
+        collapsed,
+    });
+    if !collapsed {
+        rows.extend(entries.into_iter().map(|entry| SidebarRow::Agent {
+            entry: Box::new(entry),
+            depth: 0,
+        }));
+    }
 }
 
 fn append_settled_rows(
@@ -3052,19 +3164,30 @@ struct SidebarTabGroup {
 
 fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
+    let lifecycle_rank = |entry: &AgentPanelEntry| {
+        if !app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
+            && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
+        {
+            usize::from(!app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id))
+        } else if app.pane_is_snoozed(entry.ws_idx, entry.pane_id) {
+            2
+        } else {
+            3
+        }
+    };
     let mut representatives = std::collections::HashMap::new();
     for entry in entries {
         let key = (entry.ws_idx, entry.tab_idx);
+        let rank = lifecycle_rank(entry);
         representatives
             .entry(key)
-            .and_modify(|pane_id| {
-                if app.pane_is_settled(entry.ws_idx, *pane_id)
-                    && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
-                {
+            .and_modify(|(pane_id, current_rank)| {
+                if rank < *current_rank {
                     *pane_id = entry.pane_id;
+                    *current_rank = rank;
                 }
             })
-            .or_insert(entry.pane_id);
+            .or_insert((entry.pane_id, rank));
     }
     let mut seen = std::collections::HashSet::new();
     entries
@@ -3075,7 +3198,7 @@ fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Agent
                 .then(|| tab_entries.get(&tab).cloned())
                 .flatten()
                 .map(|mut entry| {
-                    if let Some(pane_id) = representatives.get(&tab) {
+                    if let Some((pane_id, _)) = representatives.get(&tab) {
                         entry.pane_id = *pane_id;
                     }
                     entry
@@ -5675,21 +5798,43 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let fixed_width =
                     widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
-                if title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id) {
-                    if let Some(rect) = clamp_row_cells(
-                        body,
-                        row_y,
-                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - 2,
-                        2,
-                    ) {
-                        targets.push(crate::app::state::SidebarHoverTarget {
-                            rect,
-                            label: "Settle".into(),
-                            action: Some(crate::app::state::SidebarHoverAction::Settle {
+                let controls_width =
+                    selected_row_controls_width(app, entry, tab, title_width, body.width);
+                if controls_width > 0 {
+                    let Some(pane_id) = selected_local_row_pane(app, entry, tab) else {
+                        continue;
+                    };
+                    let start = prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
+                    for (offset, label, action) in [
+                        (
+                            0,
+                            "Snooze",
+                            crate::app::state::SidebarHoverAction::Snooze {
                                 ws_idx: entry.ws_idx,
-                                pane_id: entry.pane_id,
-                            }),
-                        });
+                                pane_id,
+                            },
+                        ),
+                        (
+                            SIDEBAR_SELECTED_CONTROL_WIDTH,
+                            "Settle",
+                            crate::app::state::SidebarHoverAction::Settle {
+                                ws_idx: entry.ws_idx,
+                                pane_id,
+                            },
+                        ),
+                    ] {
+                        if let Some(rect) = clamp_row_cells(
+                            body,
+                            row_y,
+                            start + offset,
+                            SIDEBAR_SELECTED_CONTROL_WIDTH,
+                        ) {
+                            targets.push(crate::app::state::SidebarHoverTarget {
+                                rect,
+                                label: label.into(),
+                                action: Some(action),
+                            });
+                        }
                     }
                 }
             }
@@ -7700,7 +7845,9 @@ fn render_tab_card(
         None,
         narrow_prefix,
     );
-    if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+    if app.pane_is_settled(entry.ws_idx, entry.pane_id)
+        || app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
+    {
         dim_settled_row(frame, card.rect, app.palette.overlay0);
         let target = crate::app::state::PaneFocusTarget {
             workspace_id: app.workspaces[entry.ws_idx].id.clone(),
@@ -7746,7 +7893,9 @@ fn render_agent_card(
         None,
         narrow_prefix,
     );
-    if app.pane_is_settled(detail.ws_idx, detail.pane_id) {
+    if app.pane_is_settled(detail.ws_idx, detail.pane_id)
+        || app.pane_is_snoozed(detail.ws_idx, detail.pane_id)
+    {
         dim_settled_row(frame, rect, app.palette.overlay0);
     }
 }
@@ -8694,6 +8843,76 @@ pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
     "⎇ New thread, new worktree",
     "🗑 Delete",
 ];
+
+pub(crate) fn sidebar_snooze_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let menu = app.sidebar_snooze_menu.as_ref()?;
+    let ws_idx = app
+        .workspaces
+        .iter()
+        .position(|workspace| workspace.id == menu.target.workspace_id)?;
+    let anchor = compute_tab_card_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|card| card.ws_idx == ws_idx && card.pane_id == menu.target.pane_id)
+        .map(|card| card.rect)
+        .or_else(|| {
+            compute_agent_card_areas(app, app.view.sidebar_rect)
+                .into_iter()
+                .find(|card| card.ws_idx == ws_idx && card.pane_id == menu.target.pane_id)
+                .map(|card| card.rect)
+        })
+        .unwrap_or_else(|| Rect::new(menu.anchor.0, menu.anchor.1, 1, 1));
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor,
+            item_count: crate::app::state::SNOOZE_DURATION_ITEMS.len(),
+            selected: menu.selected,
+            has_filter: false,
+            max_rows: crate::app::state::SNOOZE_DURATION_ITEMS.len(),
+            min_width: 18,
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
+    let Some(menu) = app.sidebar_snooze_menu.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_snooze_menu_layout(app, frame.area()) else {
+        return;
+    };
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    let lines = crate::app::state::SNOOZE_DURATION_ITEMS
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(index, (label, _))| {
+            let selected = index == menu.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                format!("{} {label}", if selected { "▸" } else { " " }),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
+}
 
 /// The delete row's label, which asks once before it closes the pane while
 /// `ui.confirm_close` is on.
@@ -10435,6 +10654,65 @@ pub(crate) mod tests {
         let style = terminal.backend().buffer()[(card.rect.x + 2, card.rect.y)].style();
         assert_eq!(style.fg, Some(app.palette.overlay0));
         assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn snoozed_section_hides_sessions_until_expiry_or_attention() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("expires"),
+            Workspace::test_new("attention"),
+        ];
+        app.ensure_test_terminals();
+        let expires = app.workspaces[0].tabs[0].root_pane;
+        let attention = app.workspaces[1].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(0, expires, 1_725_000_060));
+        assert!(app.snooze_pane_at(1, attention, 1_725_000_120));
+
+        let rows = sidebar_rows(&app);
+        let snoozed = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        count: 2,
+                        ..
+                    }
+                )
+            })
+            .expect("Snoozed section");
+        assert_eq!(
+            rows[snoozed + 1..]
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Agent { .. }))
+                .count(),
+            2
+        );
+        assert!(!rows[..snoozed].iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.pane_id == expires || entry.pane_id == attention
+        )));
+
+        assert!(app.refresh_snoozes_at(std::time::Instant::now(), 1_725_000_060));
+        assert!(app.unsnooze_pane_at(
+            1,
+            attention,
+            crate::api::schema::PaneUnsnoozeReason::Attention,
+            std::time::Instant::now(),
+        ));
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert!(!app.pane_is_snoozed(0, expires));
+        assert!(!app.pane_is_snoozed(1, attention));
     }
 
     #[test]
@@ -14441,13 +14719,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  sample-pr ✓ pi  2m");
+        assert_eq!(github_depth, "    ●  sample-prz✓ pi  2m");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "      ●  sample… ✓ pi  2m");
+        assert_eq!(repo_branch_depth, "      ●  sample…z✓ pi  2m");
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sample-li… ✓ pi  2m");
+        assert_eq!(nested_ticket, "   ●  sample-li…z✓ pi  2m");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -20629,8 +20907,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn unsettled_local_rows_render_a_settle_icon_and_tooltip_at_narrow_widths() {
-        for width in [18, 32] {
+    fn selected_local_rows_prioritize_title_then_render_snooze_and_settle_controls() {
+        for width in [18, 60] {
             let app = app_with_agents(&["alpha"]);
             let area = Rect::new(0, 0, width, 20);
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -20638,26 +20916,31 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
                 .unwrap();
 
-            let target = compute_sidebar_hover_targets(&app, area)
-                .into_iter()
-                .find(|target| target.label == "Settle")
-                .expect("settle hover target");
-            assert_eq!(target.rect.width, 2, "width={width}");
-            assert!(matches!(
-                target.action,
-                Some(crate::app::state::SidebarHoverAction::Settle { .. })
-            ));
-            let rendered = row_text(terminal.backend().buffer(), target.rect.y, area.width - 1);
-            assert!(rendered.contains('✓'), "width={width}: {rendered:?}");
-            assert_eq!(
-                terminal
-                    .backend()
-                    .buffer()
-                    .cell((target.rect.x + 1, target.rect.y))
-                    .map(|cell| cell.symbol()),
-                Some("✓"),
-                "width={width}: {rendered:?}"
-            );
+            let targets = compute_sidebar_hover_targets(&app, area);
+            let rendered = (0..area.height)
+                .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains('●'), "width={width}: {rendered:?}");
+            assert!(rendered.contains("alpha"), "width={width}: {rendered:?}");
+            if width == 18 {
+                assert!(
+                    targets.iter().all(|target| target.action.is_none()),
+                    "controls displaced minimum-width content: {targets:?}"
+                );
+                assert!(!rendered.contains('✓'), "{rendered:?}");
+            } else {
+                assert!(targets.iter().any(|target| matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+                )));
+                assert!(targets.iter().any(|target| matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Settle { .. })
+                )));
+                assert!(rendered.contains('z'), "{rendered:?}");
+                assert!(rendered.contains('✓'), "{rendered:?}");
+            }
         }
     }
 
