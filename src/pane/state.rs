@@ -86,6 +86,18 @@ impl PaneState {
         }
     }
 
+    pub(crate) fn snoozed_until(&self) -> Option<u64> {
+        self.activity.snoozed_until()
+    }
+
+    pub(crate) fn set_snoozed_until(&mut self, deadline: Option<u64>) {
+        self.activity.set_snoozed_until(deadline);
+    }
+
+    pub(crate) fn take_snoozed_until(&mut self) -> Option<u64> {
+        self.activity.take_snoozed_until()
+    }
+
     /// Public agent state after pane-level lifecycle policy is applied.
     /// Settling retires every outstanding demand without rewriting detector state.
     pub(crate) fn agent_projection(&self, terminal: &TerminalState) -> PaneAgentProjection {

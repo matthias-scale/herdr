@@ -173,6 +173,16 @@ impl App {
                 pane_id,
                 workspace_id,
             }
+            | EventData::PaneSnoozed {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneUnsnoozed {
+                pane_id,
+                workspace_id,
+                ..
+            }
             | EventData::PaneExited {
                 pane_id,
                 workspace_id,

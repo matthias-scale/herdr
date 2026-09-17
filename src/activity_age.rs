@@ -20,6 +20,7 @@ pub(crate) struct PaneActivity {
     detection_agent: Option<crate::detect::Agent>,
     detection_snapshot: Option<String>,
     detection_output_at: Option<Instant>,
+    snoozed_until: Option<u64>,
 }
 
 impl PaneActivity {
@@ -33,7 +34,20 @@ impl PaneActivity {
             detection_agent: None,
             detection_snapshot: None,
             detection_output_at: None,
+            snoozed_until: None,
         }
+    }
+
+    pub(crate) fn snoozed_until(&self) -> Option<u64> {
+        self.snoozed_until
+    }
+
+    pub(crate) fn set_snoozed_until(&mut self, deadline: Option<u64>) {
+        self.snoozed_until = deadline;
+    }
+
+    pub(crate) fn take_snoozed_until(&mut self) -> Option<u64> {
+        self.snoozed_until.take()
     }
 
     pub(crate) fn note(&mut self, now: Instant) {

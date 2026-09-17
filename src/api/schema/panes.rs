@@ -678,6 +678,85 @@ pub struct PaneReleaseAgentParams {
     pub seq: Option<u64>,
 }
 
+/// Exactly one of `duration_s` and `snoozed_until` must be present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[schemars(transform = require_one_snooze_time)]
+pub struct PaneSnoozeParams {
+    pub pane_id: String,
+    /// Relative duration in seconds. The server limits it to seven days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64", range(min = 1, max = 604_800))]
+    pub duration_s: Option<u64>,
+    /// Absolute future deadline, in UNIX seconds. The server limits it to seven days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
+    pub snoozed_until: Option<u64>,
+}
+
+#[derive(Default)]
+enum Present<T> {
+    #[default]
+    Missing,
+    Value(T),
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Present<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Present::Value)
+}
+
+impl<'de> Deserialize<'de> for PaneSnoozeParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawPaneSnoozeParams {
+            pane_id: String,
+            #[serde(default, deserialize_with = "deserialize_present")]
+            duration_s: Present<u64>,
+            #[serde(default, deserialize_with = "deserialize_present")]
+            snoozed_until: Present<u64>,
+        }
+
+        let raw = RawPaneSnoozeParams::deserialize(deserializer)?;
+        match (raw.duration_s, raw.snoozed_until) {
+            (Present::Value(duration_s), Present::Missing) => Ok(Self {
+                pane_id: raw.pane_id,
+                duration_s: Some(duration_s),
+                snoozed_until: None,
+            }),
+            (Present::Missing, Present::Value(snoozed_until)) => Ok(Self {
+                pane_id: raw.pane_id,
+                duration_s: None,
+                snoozed_until: Some(snoozed_until),
+            }),
+            (Present::Missing, Present::Missing) | (Present::Value(_), Present::Value(_)) => Err(
+                serde::de::Error::custom("provide exactly one of duration_s and snoozed_until"),
+            ),
+        }
+    }
+}
+
+fn require_one_snooze_time(schema: &mut schemars::Schema) {
+    let _ = schema.insert(
+        "oneOf".into(),
+        serde_json::json!([
+            {
+                "required": ["duration_s"],
+                "not": {"required": ["snoozed_until"]}
+            },
+            {
+                "required": ["snoozed_until"],
+                "not": {"required": ["duration_s"]}
+            }
+        ]),
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneInfo {
     pub pane_id: String,
@@ -688,6 +767,8 @@ pub struct PaneInfo {
     /// Unix seconds when the server moved this pane out of active work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<u64>,
     #[serde(default)]
     pub work_context: crate::work_context::PaneWorkContext,
     #[serde(default, skip_serializing_if = "Option::is_none")]

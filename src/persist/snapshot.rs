@@ -142,6 +142,8 @@ pub struct PaneSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_work_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_auto_label: Option<String>,
@@ -601,6 +603,7 @@ fn capture_tab(
                         .quiet_unix_timestamp_at(captured_at, captured_at_unix)
                 }),
                 settled_at: pane.and_then(|pane| pane.settled_at),
+                snoozed_until: pane.and_then(crate::pane::PaneState::snoozed_until),
                 settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
                 settled_auto_label: terminal
                     .and_then(|terminal| terminal.settled_auto_label.clone()),
@@ -1691,6 +1694,11 @@ mod tests {
 
     #[test]
     fn round_trip_full_workspace_snapshot() {
+        let legacy: PaneSnapshot = serde_json::from_value(serde_json::json!({
+            "cwd": "/tmp", "settled_at": null
+        }))
+        .expect("older pane snapshot still loads");
+        assert_eq!(legacy.snoozed_until, None);
         let mut panes = HashMap::new();
         panes.insert(
             0,
@@ -1700,6 +1708,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: Some(1_725_000_000),
+                snoozed_until: None,
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
                 settled_auto_label: Some("#7 Fix restore".into()),
                 work_context: Default::default(),
@@ -1719,6 +1728,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                snoozed_until: Some(1_725_000_360),
                 settled_work_key: None,
                 settled_auto_label: None,
                 work_context: Default::default(),
@@ -1788,6 +1798,10 @@ mod tests {
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&0].settled_at,
             Some(1_725_000_000)
+        );
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&1].snoozed_until,
+            Some(1_725_000_360)
         );
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&0]
@@ -2479,6 +2493,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                snoozed_until: None,
                 settled_work_key: None,
                 settled_auto_label: None,
                 work_context: Default::default(),
@@ -2500,6 +2515,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                snoozed_until: None,
                 settled_work_key: None,
                 settled_auto_label: None,
                 work_context: Default::default(),
