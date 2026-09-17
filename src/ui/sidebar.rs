@@ -16135,8 +16135,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             remote_ref,
             remote_entry,
         ))];
-        expand_remote_host(&mut app, "ub2");
-
         let area = Rect::new(0, 0, 4, 20);
         let (list, _, _) = collapsed_sidebar_sections(area);
         let rows = sidebar_rows(&app);
