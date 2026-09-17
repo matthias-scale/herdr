@@ -2506,17 +2506,41 @@ fn compact_sidebar_rows_inner(
     }
     // A split tab can contribute one row to more than one lifecycle section.
     // Resolve each pane once through its known tab, then aggregate each class.
+    let classified = entries
+        .into_iter()
+        .map(|entry| {
+            let lifecycle = sidebar_entry_lifecycle(app, &entry);
+            (entry, lifecycle)
+        })
+        .collect::<Vec<_>>();
+    let active_pane_targets = classified
+        .iter()
+        .filter(|(_, lifecycle)| *lifecycle == SidebarEntryLifecycle::Active)
+        .map(|(entry, _)| (entry.ws_idx, entry.tab_idx, entry.pane_id))
+        .collect::<std::collections::HashSet<_>>();
+    let tabs_with_active_panes = active_pane_targets
+        .iter()
+        .map(|(ws_idx, tab_idx, _)| (*ws_idx, *tab_idx))
+        .collect::<std::collections::HashSet<_>>();
     let mut active_panes = Vec::new();
     let mut snoozed_panes = Vec::new();
     let mut settled_panes = Vec::new();
-    for entry in entries {
-        match sidebar_entry_lifecycle(app, &entry) {
+    for (entry, lifecycle) in classified {
+        match lifecycle {
             SidebarEntryLifecycle::Active => active_panes.push(entry),
             SidebarEntryLifecycle::Snoozed => snoozed_panes.push(entry),
+            SidebarEntryLifecycle::Settled
+                if tabs_with_active_panes.contains(&(entry.ws_idx, entry.tab_idx)) =>
+            {
+                // A mixed active/settled tab remains one active session. Its
+                // settled panes still contribute to the tab aggregation.
+                active_panes.push(entry);
+            }
             SidebarEntryLifecycle::Settled => settled_panes.push(entry),
         }
     }
-    let active_entries = ordered_tab_entries(app, &active_panes);
+    let active_entries =
+        ordered_tab_entries_preferring(app, &active_panes, Some(&active_pane_targets));
     let snoozed_entries = ordered_tab_entries(app, &snoozed_panes);
     let settled_entries = ordered_tab_entries(app, &settled_panes);
     let visible_entries = if app.blocked_filter {
@@ -3281,11 +3305,24 @@ fn sidebar_entry_lifecycle(app: &AppState, entry: &AgentPanelEntry) -> SidebarEn
 }
 
 fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
+    ordered_tab_entries_preferring(app, entries, None)
+}
+
+fn ordered_tab_entries_preferring(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    preferred_panes: Option<&std::collections::HashSet<(usize, usize, crate::layout::PaneId)>>,
+) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
     let mut representatives = std::collections::HashMap::new();
     for entry in entries {
         let key = (entry.ws_idx, entry.tab_idx);
-        let rank = usize::from(!app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id));
+        let rank = (
+            usize::from(preferred_panes.is_some_and(|panes| {
+                !panes.contains(&(entry.ws_idx, entry.tab_idx, entry.pane_id))
+            })),
+            usize::from(!app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)),
+        );
         representatives
             .entry(key)
             .and_modify(|(pane_id, current_rank)| {
