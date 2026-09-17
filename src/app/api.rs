@@ -52,10 +52,11 @@ impl App {
         }
     }
 
-    fn install_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+    fn install_fleet_snapshot(&mut self, mut snapshot: crate::fleet::Snapshot) -> bool {
         if snapshot.config_generation != self.fleet_poller_config.generation() {
             return false;
         }
+        snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
         let changed = self.state.fleet_snapshot != snapshot;

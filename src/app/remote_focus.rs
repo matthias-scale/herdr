@@ -371,6 +371,13 @@ impl RemoteFocusOperations {
             .and_then(|operation| operation.proxy.clone())
     }
 
+    fn proxy_by_terminal_id(&self, terminal_id: &TerminalId) -> Option<PaneId> {
+        self.proxy_by_terminal
+            .get(terminal_id)
+            .and_then(|operation_id| self.proxy_location(operation_id))
+            .map(|(pane_id, _)| pane_id)
+    }
+
     pub(crate) fn agent_ref(&self, operation_id: &str) -> Option<&AgentRef> {
         self.operations
             .get(operation_id)
@@ -869,7 +876,7 @@ impl crate::app::App {
     /// identity line becomes the pane label, and the input gate opens when
     /// the first complete frame has also arrived.
     fn activate_remote_proxy(&mut self, operation_id: &str, context: &RemoteControlContext) {
-        let Some((_pane_id, terminal_id)) =
+        let Some((pane_id, terminal_id)) =
             self.remote_focus_operations.proxy_location(operation_id)
         else {
             return;
@@ -879,6 +886,15 @@ impl crate::app::App {
             .agent_ref(operation_id)
             .map(|agent_ref| agent_ref.host.as_str())
             .unwrap_or(context.host.as_str());
+        if let Some(agent_ref) = self
+            .remote_focus_operations
+            .agent_ref(operation_id)
+            .cloned()
+        {
+            self.state
+                .remote_focus_proxy_agents
+                .insert(pane_id, agent_ref);
+        }
         let identity = remote_proxy_identity_line(configured_host, context);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.manual_label = Some(identity);
@@ -925,6 +941,7 @@ impl crate::app::App {
         else {
             return;
         };
+        self.state.remote_focus_proxy_agents.remove(&pane_id);
         let Some((ws_idx, _)) = self.find_pane(pane_id) else {
             return;
         };
@@ -948,6 +965,12 @@ impl crate::app::App {
     /// operation failure). The remote server also rejects a second controller
     /// for the terminal, so the lease must go back exactly once.
     pub(crate) fn detach_remote_proxy_for_terminal(&mut self, terminal_id: &TerminalId) {
+        if let Some(pane_id) = self
+            .remote_focus_operations
+            .proxy_by_terminal_id(terminal_id)
+        {
+            self.state.remote_focus_proxy_agents.remove(&pane_id);
+        }
         let Some(operation_id) = self
             .remote_focus_operations
             .take_proxy_terminal(terminal_id)

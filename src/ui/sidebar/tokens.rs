@@ -261,6 +261,7 @@ mod tests {
             tokens: std::collections::HashMap::new(),
             tab_first_pane: false,
             remote_host: None,
+            remote_entry: None,
         }
     }
 

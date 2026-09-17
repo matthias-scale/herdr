@@ -310,6 +310,35 @@ impl Snapshot {
             .flat_map(|host| host.entries)
             .collect()
     }
+
+    /// Keep the last observed remote inventory when a configured host cannot
+    /// be polled. The fresh host state/error remains authoritative; only row
+    /// identity and display metadata are retained for an honest unknown view.
+    pub(crate) fn retain_unreachable_inventory_from(&mut self, previous: &Self) {
+        for host in &mut self.hosts {
+            if host.local || host.state != HostState::Unreachable {
+                continue;
+            }
+            let Some(old) = previous.hosts.iter().find(|old| {
+                old.name == host.name
+                    && old.target == host.target
+                    && old.local == host.local
+                    && old.session == host.session
+                    && old.socket == host.socket
+            }) else {
+                continue;
+            };
+            let mut retained = old
+                .entries
+                .iter()
+                .filter(|row| row.source != EvidenceSource::Host && row.error.is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            retained.extend(std::mem::take(&mut host.entries));
+            host.entries = retained;
+            host.remote_identity = None;
+        }
+    }
 }
 
 impl HostSnapshot {

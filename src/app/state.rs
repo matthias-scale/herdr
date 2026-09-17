@@ -3514,6 +3514,10 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Active local proxy panes keyed to the remote agent they display. This
+    /// client-only projection prevents one remote agent from appearing twice.
+    pub(crate) remote_focus_proxy_agents:
+        std::collections::HashMap<crate::layout::PaneId, crate::api::schema::AgentRef>,
     /// Read-only remote row selected by blocked navigation. Activation remains
     /// reserved for the later remote-control slice.
     pub(crate) sidebar_selected_remote_agent: Option<crate::api::schema::AgentRef>,
@@ -6093,6 +6097,7 @@ impl AppState {
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            remote_focus_proxy_agents: std::collections::HashMap::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,
             dock_symphony: None,

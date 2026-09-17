@@ -672,7 +672,8 @@ fn render_remote_compact_agent_row_with_prefix(
     );
     // Inside a host group the header already names the host, so the row spends
     // those cells on the provider and age tokens instead of repeating it.
-    let host_suffix = (depth == 0)
+    let host_suffix = remote
+        .show_host_identity
         .then(|| remote.host_suffix_for_width(max_host_width))
         .flatten();
     let provider_width = host_suffix.map_or(widths.provider, |_| 0);
@@ -979,6 +980,10 @@ pub(crate) struct AgentPanelEntry {
     /// Fleet host this pane is attached to over ssh. The pane lives in the
     /// local list, so the row names the machine next to the provider.
     pub remote_host: Option<String>,
+    /// Cached fleet row backing this entry. Local panes leave this empty;
+    /// remote entries carry the refresh-time projection through the same
+    /// grouping pipeline without acquiring local pane identity.
+    pub(crate) remote_entry: Option<std::sync::Arc<RemoteAgentPanelEntry>>,
 }
 
 #[derive(Clone)]
@@ -994,19 +999,36 @@ pub(crate) struct RemoteAgentPanelEntry {
     narrow_host_suffix: String,
     narrow_host_suffix_width: usize,
     search_key_lowercase: String,
+    work_context: crate::work_context::PaneWorkContext,
+    workspace_id: String,
+    settled: bool,
+    snoozed: bool,
+    show_host_identity: bool,
 }
 
 impl RemoteAgentPanelEntry {
     #[cfg(test)]
     pub(crate) fn new(agent_ref: crate::api::schema::AgentRef, entry: AgentPanelEntry) -> Self {
         let narrow_host = middle_elide(agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH);
-        Self::new_with_narrow_host(agent_ref, entry, narrow_host)
+        Self::new_with_narrow_host(
+            agent_ref,
+            entry,
+            narrow_host,
+            crate::work_context::PaneWorkContext::default(),
+            String::new(),
+            false,
+            false,
+        )
     }
 
     fn new_with_narrow_host(
         agent_ref: crate::api::schema::AgentRef,
         entry: AgentPanelEntry,
         narrow_host: String,
+        work_context: crate::work_context::PaneWorkContext,
+        workspace_id: String,
+        settled: bool,
+        snoozed: bool,
     ) -> Self {
         let host = agent_ref.host.as_str();
         let render_dot = compact_row_dot(&entry);
@@ -1035,6 +1057,11 @@ impl RemoteAgentPanelEntry {
             host_suffix,
             narrow_host_suffix,
             search_key_lowercase,
+            work_context,
+            workspace_id,
+            settled,
+            snoozed,
+            show_host_identity: false,
             entry,
         }
     }
@@ -1421,6 +1448,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         gate_count: detail.gate_count,
                         tab_first_pane: false,
                         remote_host,
+                        remote_entry: None,
                     }
                 })
         })
@@ -1437,8 +1465,8 @@ pub(crate) fn remote_agent_panel_entries(
         .hosts
         .iter()
         .filter(|host| !host.local)
-        .flat_map(|host| host.entries.iter())
-        .filter_map(|row| {
+        .flat_map(|host| host.entries.iter().map(move |row| (host, row)))
+        .filter_map(|(host, row)| {
             if row.source == crate::fleet::EvidenceSource::Host || row.error.is_some() {
                 return None;
             }
@@ -1521,6 +1549,24 @@ pub(crate) fn remote_agent_panel_entries(
                     )
                 },
             );
+            let unavailable = host.state == crate::fleet::HostState::Unreachable;
+            let state = if unavailable {
+                AgentState::Unknown
+            } else {
+                state
+            };
+            let stale = stale || unavailable;
+            let (work_context, workspace_id, settled, snoozed) = row
+                .agent_info()
+                .map(|info| {
+                    (
+                        info.work_context.clone(),
+                        info.workspace_id.clone(),
+                        info.settled_at.is_some(),
+                        info.snoozed_until.is_some(),
+                    )
+                })
+                .unwrap_or_default();
             let agent = row
                 .agent
                 .as_deref()
@@ -1580,8 +1626,13 @@ pub(crate) fn remote_agent_panel_entries(
                         tokens,
                         tab_first_pane: false,
                         remote_host: None,
+                        remote_entry: None,
                     },
                     narrow_host,
+                    work_context,
+                    workspace_id,
+                    settled,
+                    snoozed,
                 ),
             ))
         })
@@ -1646,11 +1697,24 @@ fn tab_lifecycle_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SidebarEntryKey {
+    Local(usize, usize),
+    Remote(crate::api::schema::AgentRef),
+}
+
+fn sidebar_entry_key(entry: &AgentPanelEntry) -> SidebarEntryKey {
+    entry.remote_entry.as_ref().map_or_else(
+        || SidebarEntryKey::Local(entry.ws_idx, entry.tab_idx),
+        |remote| SidebarEntryKey::Remote(remote.agent_ref.clone()),
+    )
+}
+
 fn aggregate_tab_entries(
     entries: &[AgentPanelEntry],
-) -> std::collections::HashMap<(usize, usize), AgentPanelEntry> {
+) -> std::collections::HashMap<SidebarEntryKey, AgentPanelEntry> {
     let mut aggregated = std::collections::HashMap::<
-        (usize, usize),
+        SidebarEntryKey,
         (
             AgentPanelEntry,
             bool,
@@ -1662,7 +1726,7 @@ fn aggregate_tab_entries(
     >::new();
 
     for entry in entries {
-        let key = (entry.ws_idx, entry.tab_idx);
+        let key = sidebar_entry_key(entry);
         let candidate = (entry.state, entry.seen);
         aggregated
             .entry(key)
@@ -2312,6 +2376,14 @@ fn compact_sidebar_rows_inner(
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
     };
+    entries.retain(|entry| {
+        !app.remote_focus_proxy_agents.contains_key(&entry.pane_id)
+            && !app
+                .workspaces
+                .get(entry.ws_idx)
+                .and_then(|workspace| workspace.pane_state(entry.pane_id))
+                .is_some_and(|pane| pane.snoozed_until().is_some())
+    });
     if sidebar_rows_are_filtered(app) {
         let scope = sidebar_project_scope(app);
         let visible_tabs = entries
@@ -2320,6 +2392,43 @@ fn compact_sidebar_rows_inner(
             .map(|entry| (entry.ws_idx, entry.tab_idx))
             .collect::<std::collections::HashSet<_>>();
         entries.retain(|entry| visible_tabs.contains(&(entry.ws_idx, entry.tab_idx)));
+    }
+    let remote_terms = sidebar_query_parts(&app.sidebar_work_filter.query).0;
+    let mut remote_entries = app
+        .remote_agent_panel_entries
+        .iter()
+        .filter(|remote| {
+            include_remote
+                && !remote.snoozed
+                && remote_sidebar_entry_matches_query(remote, &remote_terms)
+                && (!app.blocked_filter || entry_has_red_dot(remote))
+        })
+        .map(|remote| {
+            let remote = (**remote).clone();
+            let mut entry = remote.entry.clone();
+            entry.remote_entry = None;
+            let remote = std::sync::Arc::new(remote);
+            entry.remote_entry = Some(remote);
+            entry
+        })
+        .collect::<Vec<_>>();
+    entries.append(&mut remote_entries);
+    let mut title_counts = std::collections::HashMap::<String, usize>::new();
+    for entry in &entries {
+        *title_counts
+            .entry(compact_row_title(entry, false).to_ascii_lowercase())
+            .or_default() += 1;
+    }
+    for entry in &mut entries {
+        let ambiguous = title_counts
+            .get(&compact_row_title(entry, false).to_ascii_lowercase())
+            .is_some_and(|count| *count > 1);
+        if let Some(remote) = entry.remote_entry.as_ref() {
+            let mut projected = (**remote).clone();
+            projected.show_host_identity = ambiguous;
+            let projected = std::sync::Arc::new(projected);
+            entry.remote_entry = Some(projected);
+        }
     }
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
@@ -2336,7 +2445,7 @@ fn compact_sidebar_rows_inner(
     let entries = ordered_tab_entries(app, &entries);
     let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
         .into_iter()
-        .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
+        .partition(|entry| entry_is_settled(app, entry));
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
@@ -2346,23 +2455,11 @@ fn compact_sidebar_rows_inner(
     } else {
         active_entries
     };
-    let has_remote_rows = include_remote && !app.remote_agent_panel_entries.is_empty();
-    let remote_terms = if has_remote_rows {
-        sidebar_query_parts(&app.sidebar_work_filter.query).0
-    } else {
-        Vec::new()
-    };
-    let has_remote_entries = has_remote_rows
-        && app.remote_agent_panel_entries.iter().any(|entry| {
-            remote_sidebar_entry_matches_query(entry, &remote_terms)
-                && (!app.blocked_filter || entry_has_red_dot(entry))
-        });
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
     if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
-        && !has_remote_entries
         && recently_done.is_empty()
         && settled_entries.is_empty()
     {
@@ -2389,13 +2486,7 @@ fn compact_sidebar_rows_inner(
             expand_worktrees,
             terminal_runtimes,
         );
-        append_tail_sections(
-            app,
-            &mut rows,
-            settled_entries,
-            expand_worktrees,
-            has_remote_rows.then_some(remote_terms.as_slice()),
-        );
+        append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
     match app.sidebar_group_mode {
@@ -2408,13 +2499,7 @@ fn compact_sidebar_rows_inner(
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
     }
-    append_tail_sections(
-        app,
-        &mut rows,
-        settled_entries,
-        expand_worktrees,
-        has_remote_rows.then_some(remote_terms.as_slice()),
-    );
+    append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
     rows
 }
 
@@ -2711,9 +2796,14 @@ fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Sideb
 }
 
 fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, depth: u16) {
-    rows.extend(entries.into_iter().map(|entry| SidebarRow::Tab {
-        entry: Box::new(entry),
-        depth,
+    rows.extend(entries.into_iter().map(|mut entry| {
+        entry.remote_entry.take().map_or_else(
+            || SidebarRow::Tab {
+                entry: Box::new(entry),
+                depth,
+            },
+            |entry| SidebarRow::RemoteAgent { entry, depth },
+        )
     }));
 }
 
@@ -3006,11 +3096,7 @@ fn append_tail_sections(
     rows: &mut Vec<SidebarRow>,
     settled_entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
-    remote_terms: Option<&[&str]>,
 ) {
-    if let Some(terms) = remote_terms {
-        append_remote_rows(app, rows, terms);
-    }
     append_symphony_rows(app, rows);
     append_settled_rows(app, rows, settled_entries, expand_worktrees);
 }
@@ -3054,11 +3140,12 @@ fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Agent
     let tab_entries = aggregate_tab_entries(entries);
     let mut representatives = std::collections::HashMap::new();
     for entry in entries {
-        let key = (entry.ws_idx, entry.tab_idx);
+        let key = sidebar_entry_key(entry);
         representatives
-            .entry(key)
+            .entry(key.clone())
             .and_modify(|pane_id| {
-                if app.pane_is_settled(entry.ws_idx, *pane_id)
+                if matches!(key, SidebarEntryKey::Local(..))
+                    && app.pane_is_settled(entry.ws_idx, *pane_id)
                     && !app.pane_is_settled(entry.ws_idx, entry.pane_id)
                 {
                     *pane_id = entry.pane_id;
@@ -3070,8 +3157,8 @@ fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Agent
     entries
         .iter()
         .filter_map(|entry| {
-            let tab = (entry.ws_idx, entry.tab_idx);
-            seen.insert(tab)
+            let tab = sidebar_entry_key(entry);
+            seen.insert(tab.clone())
                 .then(|| tab_entries.get(&tab).cloned())
                 .flatten()
                 .map(|mut entry| {
@@ -3086,9 +3173,19 @@ fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Agent
 
 fn entry_work_context<'a>(
     app: &'a AppState,
-    entry: &AgentPanelEntry,
+    entry: &'a AgentPanelEntry,
 ) -> Option<&'a crate::work_context::PaneWorkContext> {
-    entry_terminal(app, entry).map(crate::terminal::TerminalState::effective_work_context)
+    entry.remote_entry.as_ref().map_or_else(
+        || entry_terminal(app, entry).map(crate::terminal::TerminalState::effective_work_context),
+        |remote| Some(&remote.work_context),
+    )
+}
+
+fn entry_is_settled(app: &AppState, entry: &AgentPanelEntry) -> bool {
+    entry.remote_entry.as_ref().map_or_else(
+        || app.pane_is_settled(entry.ws_idx, entry.pane_id),
+        |remote| remote.settled,
+    )
 }
 
 fn entry_terminal<'a>(
@@ -3157,7 +3254,7 @@ fn sidebar_tab_groups(
 ) -> Vec<SidebarTabGroup> {
     let mut groups = Vec::new();
     for entry in ordered_tab_entries(app, entries) {
-        let context = entry_work_context(app, &entry);
+        let context = entry_work_context(app, &entry).cloned();
         match mode {
             SidebarGroupMode::RepoPr => {
                 // Same source as the work view's groups: a declared pull
@@ -3166,11 +3263,14 @@ fn sidebar_tab_groups(
                 // pull request as well.
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
-                    match context.and_then(|context| context.branch.as_deref()) {
+                    match context
+                        .as_ref()
+                        .and_then(|context| context.branch.as_deref())
+                    {
                         Some(branch) => push_sidebar_tab_group(
                             &mut groups,
                             branch_group_key(
-                                context.and_then(|context| context.repo.as_deref()),
+                                context.as_ref().and_then(|context| context.repo.as_deref()),
                                 branch,
                             ),
                             branch_group_title(branch),
@@ -3192,15 +3292,26 @@ fn sidebar_tab_groups(
                                 .find(|item| item.pr_url.as_deref() == Some(url.as_str()))
                         })
                         .and_then(|item| item.pr_title.as_deref())
-                        .or_else(|| context.and_then(|context| context.work_title.as_deref()))
-                        .or_else(|| context.and_then(|context| context.session_name.as_deref()));
+                        .or_else(|| {
+                            context
+                                .as_ref()
+                                .and_then(|context| context.work_title.as_deref())
+                        })
+                        .or_else(|| {
+                            context
+                                .as_ref()
+                                .and_then(|context| context.session_name.as_deref())
+                        });
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
                     push_sidebar_tab_group(&mut groups, url.clone(), title, entry.clone(), false);
                 }
             }
             SidebarGroupMode::RepoWorktree => {
-                if let Some(branch) = context.and_then(|context| context.branch.as_deref()) {
+                if let Some(branch) = context
+                    .as_ref()
+                    .and_then(|context| context.branch.as_deref())
+                {
                     push_sidebar_tab_group(
                         &mut groups,
                         branch.to_string(),
@@ -3971,15 +4082,18 @@ pub(crate) fn sidebar_work_groups(
         }
     }
     for entry in ordered_tab_entries(app, entries) {
-        let context = entry_work_context(app, &entry);
+        let context = entry_work_context(app, &entry).cloned();
         match mode {
             SidebarGroupMode::RepoPr => {
                 let urls = preferred_pr_urls(app, &entry);
                 if urls.is_empty() {
-                    match context.and_then(|context| context.branch.as_deref()) {
+                    match context
+                        .as_ref()
+                        .and_then(|context| context.branch.as_deref())
+                    {
                         Some(branch) => push_branch_entry(
                             &mut groups,
-                            context.and_then(|context| context.repo.as_deref()),
+                            context.as_ref().and_then(|context| context.repo.as_deref()),
                             branch,
                             entry,
                         ),
@@ -3998,7 +4112,9 @@ pub(crate) fn sidebar_work_groups(
                                 title: github_group_title(
                                     app,
                                     &url,
-                                    context.and_then(|context| context.work_title.as_deref()),
+                                    context
+                                        .as_ref()
+                                        .and_then(|context| context.work_title.as_deref()),
                                 ),
                                 entries: Vec::new(),
                                 unlinked: false,
@@ -4014,7 +4130,7 @@ pub(crate) fn sidebar_work_groups(
                         .and_then(|item| item.pr_title.as_deref())
                         .is_none()
                     {
-                        let fallback = context.and_then(|context| {
+                        let fallback = context.as_ref().and_then(|context| {
                             context
                                 .work_title
                                 .as_deref()
@@ -4044,7 +4160,7 @@ pub(crate) fn sidebar_work_groups(
                                 key,
                                 title: work_group_header_title(
                                     ticket_id,
-                                    context.and_then(|context| {
+                                    context.as_ref().and_then(|context| {
                                         context
                                             .work_title
                                             .as_deref()
@@ -4066,6 +4182,7 @@ pub(crate) fn sidebar_work_groups(
             }
             SidebarGroupMode::Missive => {
                 let urls = context
+                    .as_ref()
                     .map(|context| context.missive_urls.as_slice())
                     .unwrap_or_default();
                 if urls.is_empty() {
@@ -9044,6 +9161,23 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[test]
+    fn remote_agents_share_the_local_group_projection_without_host_headers() {
+        let app = app_with_two_remote_hosts();
+        let rows = sidebar_rows(&app);
+
+        assert!(rows.iter().all(|row| !matches!(
+            row,
+            SidebarRow::NestedHeader { key, .. } if key.starts_with("host:")
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
+                .count(),
+            3
+        );
+    }
+
     fn expand_remote_host(app: &mut AppState, host: &str) {
         app.toggle_sidebar_group(&remote_host_collapse_key(host));
     }
@@ -11313,6 +11447,7 @@ pub(crate) mod tests {
             tokens: std::collections::HashMap::new(),
             tab_first_pane: false,
             remote_host: None,
+            remote_entry: None,
         }
     }
 
@@ -11494,7 +11629,7 @@ pub(crate) mod tests {
         let winner = aggregation_entry(AgentState::Working, false, Some("cargo"), "winner working");
         let first = aggregation_entry(AgentState::Idle, true, Some("zsh"), "first idle");
         let aggregated = aggregate_tab_entries(&[first, winner])
-            .remove(&(0, 0))
+            .remove(&SidebarEntryKey::Local(0, 0))
             .expect("aggregated tab entry");
 
         assert_eq!(aggregated.state, AgentState::Working);
@@ -11509,7 +11644,7 @@ pub(crate) mod tests {
         let first_with_process =
             aggregation_entry(AgentState::Idle, true, Some("zsh"), "first idle");
         let fallback = aggregate_tab_entries(&[first_with_process, winner_without_process])
-            .remove(&(0, 0))
+            .remove(&SidebarEntryKey::Local(0, 0))
             .expect("aggregated tab entry");
         assert_eq!(fallback.foreground_process_name.as_deref(), Some("zsh"));
     }
@@ -11521,7 +11656,7 @@ pub(crate) mod tests {
         let working = aggregation_entry(AgentState::Working, true, None, "working");
 
         let aggregated = aggregate_tab_entries(&[waiting, working])
-            .remove(&(0, 0))
+            .remove(&SidebarEntryKey::Local(0, 0))
             .expect("aggregated tab entry");
 
         assert!(aggregated.waiting_on_agents);
@@ -11539,7 +11674,7 @@ pub(crate) mod tests {
             .insert("usage".into(), "limit".into());
 
         let aggregated = aggregate_tab_entries(&[ordinary_blocker, usage_limited])
-            .remove(&(0, 0))
+            .remove(&SidebarEntryKey::Local(0, 0))
             .expect("aggregated tab entry");
 
         assert!(aggregated.usage_limited);

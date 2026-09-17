@@ -865,6 +865,7 @@ impl App {
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            remote_focus_proxy_agents: std::collections::HashMap::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
             symphony_detail: None,
