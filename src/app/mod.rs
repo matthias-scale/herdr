@@ -3298,10 +3298,12 @@ impl App {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                         if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                            self.retire_blocked_hook_authority_for_pane(
-                                pane_id,
-                                std::time::Instant::now(),
-                            );
+                            if !self.state.pane_is_settled_anywhere(pane_id) {
+                                self.retire_blocked_hook_authority_for_pane(
+                                    pane_id,
+                                    std::time::Instant::now(),
+                                );
+                            }
                         }
                     }
                 }
@@ -3320,14 +3322,24 @@ impl App {
                         self.paste_into_active_text_input(&text);
                     } else {
                         if let Some(ws_idx) = self.state.active {
+                            let focused = self
+                                .state
+                                .workspaces
+                                .get(ws_idx)
+                                .and_then(|workspace| workspace.focused_pane_id());
+                            let has_text = !text.is_empty();
+                            if has_text {
+                                if let Some(focused) = focused {
+                                    self.resume_settled_pane_before_input(focused);
+                                }
+                            }
                             if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
+                                if let Some(focused) = focused {
                                     if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
                                         &self.terminal_runtimes,
                                         ws_idx,
                                         focused,
                                     ) {
-                                        let has_text = !text.is_empty();
                                         if has_text {
                                             if let Some(terminal_id) =
                                                 ws.terminal_id(focused).cloned()
@@ -9505,6 +9517,34 @@ last_pane = "prefix+tab"
             Some("first second third")
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_paste_resumes_settled_pane_before_forwarding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("settled-client-paste");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut input_rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        assert!(app.flush_pane_settlement_events());
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("reply".into())],
+            false,
+        );
+
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded paste").as_ref(),
+            b"reply"
+        );
+        assert!(!app.state.pane_is_settled(0, pane_id));
+        assert!(app.state.pending_pane_settlement_changes.is_empty());
     }
 
     #[cfg(unix)]

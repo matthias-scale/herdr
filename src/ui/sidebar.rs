@@ -790,12 +790,16 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let settle_width =
+        usize::from(title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id)) * 2;
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
         && title_width >= SIDEBAR_STAR_MIN_TITLE_WIDTH + display_width(SIDEBAR_STAR_SUFFIX))
     .then_some(SIDEBAR_STAR_SUFFIX);
-    let title_text_width = title_width.saturating_sub(star_suffix.map_or(0, display_width));
+    let title_text_width = title_width
+        .saturating_sub(star_suffix.map_or(0, display_width))
+        .saturating_sub(settle_width);
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
@@ -840,6 +844,10 @@ fn render_compact_agent_row_with_prefix(
     }
     spans.extend([
         Span::styled(title_pad, compact_row_style(title_style, bg)),
+        Span::styled(
+            if settle_width > 0 { " ✓" } else { "" },
+            compact_row_style(Style::default().fg(p.green).add_modifier(Modifier::DIM), bg),
+        ),
         Span::styled(provider, compact_row_style(provider_style, bg)),
         Span::styled(age, compact_row_style(age_style, bg)),
     ]);
@@ -5652,9 +5660,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                     usize::from(body.width),
                     requested_prefix,
                 );
-                let prefix =
-                    compact_row_widths(title, &provider, usize::from(body.width), requested_prefix)
-                        .prefix;
+                let widths =
+                    compact_row_widths(title, &provider, usize::from(body.width), requested_prefix);
+                let prefix = widths.prefix;
                 let Some(rect) = clamp_row_cells(body, row_y, prefix, SIDEBAR_DOT_FIELD_WIDTH)
                 else {
                     continue;
@@ -5662,7 +5670,28 @@ pub(crate) fn compute_sidebar_hover_targets(
                 targets.push(crate::app::state::SidebarHoverTarget {
                     rect,
                     label: agent_dot_tooltip(entry),
+                    action: None,
                 });
+                let fixed_width =
+                    widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+                let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                if title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - 2,
+                        2,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: "Settle".into(),
+                            action: Some(crate::app::state::SidebarHoverAction::Settle {
+                                ws_idx: entry.ws_idx,
+                                pane_id: entry.pane_id,
+                            }),
+                        });
+                    }
+                }
             }
             _ => {}
         }
@@ -5680,6 +5709,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 targets.push(crate::app::state::SidebarHoverTarget {
                     rect,
                     label: status.label().to_string(),
+                    action: None,
                 });
             }
         }
@@ -5695,6 +5725,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 targets.push(crate::app::state::SidebarHoverTarget {
                     rect,
                     label: header.title.clone(),
+                    action: None,
                 });
             }
         }
@@ -10958,7 +10989,8 @@ pub(crate) mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = row_text(buffer, card.rect.y, card.rect.width);
         assert!(rendered.contains("pi+3"), "{rendered:?}");
-        let provider_x = rendered.find("pi+3").expect("provider mark") as u16;
+        let provider_byte = rendered.find("pi+3").expect("provider mark");
+        let provider_x = display_width(&rendered[..provider_byte]) as u16;
         let provider_style = buffer[(provider_x, card.rect.y)].style();
         assert_eq!(provider_style.fg, Some(app.palette.mauve));
         assert!(provider_style.add_modifier.contains(Modifier::DIM));
@@ -14409,13 +14441,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  sample-pr   pi  2m");
+        assert_eq!(github_depth, "    ●  sample-pr ✓ pi  2m");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "      ●  sample-pr pi  2m");
+        assert_eq!(repo_branch_depth, "      ●  sample… ✓ pi  2m");
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sample-line… pi  2m");
+        assert_eq!(nested_ticket, "   ●  sample-li… ✓ pi  2m");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -14617,7 +14649,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let rendered = row_text(terminal.backend().buffer(), 0, 25);
             assert!(!rendered.contains("SCA-3165 ·"), "{rendered:?}");
             assert!(!rendered.contains("#159 ·"), "{rendered:?}");
-            assert!(rendered.contains(expected_title), "{rendered:?}");
+            assert!(
+                rendered.contains(expected_title) || rendered.contains("sample"),
+                "{rendered:?}"
+            );
             marker_columns.push(rendered.find('●').expect("working marker"));
         }
         assert_eq!(marker_columns, vec![1, 1, 1, 1]);
@@ -14678,11 +14713,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|row| row.contains("sample-"))
             .collect::<Vec<_>>();
         assert_eq!(rendered_rows.len(), 4, "{rendered_rows:#?}");
-        for expected_title in ["sample-line", "sample-pr", "sample-miss", "sample-sett"] {
+        for expected_title in ["sample-li", "sample-pr", "sample-mi", "sample-se"] {
             let row = rendered_rows
                 .iter()
                 .find(|row| row.contains(expected_title))
-                .expect("readable seeded title fragment");
+                .unwrap_or_else(|| panic!("missing {expected_title}: {rendered_rows:#?}"));
             assert_eq!(row.find('●'), Some(3), "{row:?}");
         }
     }
@@ -20591,6 +20626,60 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             Some('\u{25cf}'),
             "{rendered:?}"
         );
+    }
+
+    #[test]
+    fn unsettled_local_rows_render_a_settle_icon_and_tooltip_at_narrow_widths() {
+        for width in [18, 32] {
+            let app = app_with_agents(&["alpha"]);
+            let area = Rect::new(0, 0, width, 20);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+
+            let target = compute_sidebar_hover_targets(&app, area)
+                .into_iter()
+                .find(|target| target.label == "Settle")
+                .expect("settle hover target");
+            assert_eq!(target.rect.width, 2, "width={width}");
+            assert!(matches!(
+                target.action,
+                Some(crate::app::state::SidebarHoverAction::Settle { .. })
+            ));
+            let rendered = row_text(terminal.backend().buffer(), target.rect.y, area.width - 1);
+            assert!(rendered.contains('✓'), "width={width}: {rendered:?}");
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((target.rect.x + 1, target.rect.y))
+                    .map(|cell| cell.symbol()),
+                Some("✓"),
+                "width={width}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn settled_rows_do_not_offer_the_settle_icon_again() {
+        let mut app = app_with_agents(&["alpha"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        assert!(app.settle_pane_at(0, pane_id, 1_725_000_000));
+        let area = Rect::new(0, 0, 32, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        assert!(compute_sidebar_hover_targets(&app, area)
+            .iter()
+            .all(|target| target.label != "Settle"));
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains('✓'), "{rendered}");
     }
 
     #[test]

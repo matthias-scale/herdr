@@ -365,10 +365,12 @@ mod tests {
             crate::app::state::SidebarHoverTarget {
                 rect: Rect::new(1, 4, 3, 1),
                 label: "Blocked, waiting on you".into(),
+                action: None,
             },
             crate::app::state::SidebarHoverTarget {
                 rect: Rect::new(4, 5, 1, 1),
                 label: "In Review".into(),
+                action: None,
             },
         ];
 

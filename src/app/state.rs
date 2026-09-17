@@ -1031,6 +1031,12 @@ pub struct AgentCardArea {
 pub struct SidebarHoverTarget {
     pub rect: Rect,
     pub label: String,
+    pub action: Option<SidebarHoverAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarHoverAction {
+    Settle { ws_idx: usize, pane_id: PaneId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3010,6 +3016,9 @@ pub enum ContextMenuKind {
     Tab {
         ws_idx: usize,
         tab_idx: usize,
+        /// Exact local pane represented by the sidebar row. Top tab chrome
+        /// leaves this empty because it represents the whole tab.
+        settle_pane_id: Option<PaneId>,
         /// Snapshot of the tab's star at open time, so the entry can read
         /// "Star" or "Unstar" without the menu reaching back into state.
         starred: bool,
@@ -3127,6 +3136,7 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 /// Labels of the sidebar-subgroup entries in the tab context menu.
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
+pub const SETTLE_ITEM: &str = "Settle";
 
 /// Label of the pane menu entry that binds the clicked pull request to the window.
 pub const LINK_PR_TO_WINDOW_ITEM: &str = "Link PR to this window";
@@ -3285,6 +3295,7 @@ impl ContextMenuState {
             ContextMenuKind::Tab {
                 starred,
                 has_subgroup,
+                settle_pane_id,
                 ..
             } => {
                 let mut items = vec![
@@ -3295,6 +3306,9 @@ impl ContextMenuState {
                 ];
                 if *has_subgroup {
                     items.push(REMOVE_FROM_SUBGROUP_ITEM);
+                }
+                if settle_pane_id.is_some() {
+                    items.push(SETTLE_ITEM);
                 }
                 items.push("Close");
                 items

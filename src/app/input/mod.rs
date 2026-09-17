@@ -4451,6 +4451,11 @@ impl App {
                     .get(ws_idx)
                     .and_then(|workspace| workspace.terminal_id(pane_id).cloned())
             });
+            if !text.is_empty() {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4517,6 +4522,11 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            if !text.is_empty() {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -4581,6 +4591,11 @@ impl App {
                 .and_then(|workspace| workspace.focused_pane_id());
             let draft = text.clone();
             let has_text = !text.is_empty();
+            if has_text {
+                if let Some(pane_id) = pane_id {
+                    self.resume_settled_pane_before_input(pane_id);
+                }
+            }
             let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -5105,7 +5120,9 @@ impl App {
             self.start_home_ref_refresh_if_requested();
             self.start_home_github_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                if !self.state.pane_is_settled_anywhere(pane_id) {
+                    self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                }
             }
             if let Some(action) = action {
                 match action {
@@ -5115,8 +5132,9 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
-                    MouseAction::FocusLiveSettledPane(target) => {
-                        self.focus_live_settled_pane(target)
+                    MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
+                    MouseAction::SettlePane { ws_idx, pane_id } => {
+                        self.settle_sidebar_pane(ws_idx, pane_id)
                     }
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
