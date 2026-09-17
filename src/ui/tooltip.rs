@@ -55,6 +55,9 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 
 pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<ControlId> {
     let view = &app.view;
+    if app.config_diagnostic.is_some() && rect_contains(view.config_diagnostic_hit_area, col, row) {
+        return Some(ControlId::ConfigDiagnostic);
+    }
     let fixed = [
         (
             ControlId::SidebarAnimationPause,
@@ -148,6 +151,7 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
 fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
     let view = &app.view;
     let target = match control {
+        ControlId::ConfigDiagnostic => return None,
         ControlId::SidebarStarFilter => (
             super::sidebar_header_star_filter_rect(view.sidebar_rect),
             if app.sidebar_starred_only {

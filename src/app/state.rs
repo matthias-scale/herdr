@@ -2321,6 +2321,8 @@ pub struct ViewState {
     pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
+    /// Client-side hover and click target for the compact diagnostic marker.
+    pub(crate) config_diagnostic_hit_area: Rect,
     pub toast_hit_area: Rect,
     /// `(queue index, row rect)` for each row the home view is showing.
     pub home_row_hit_areas: Vec<(usize, Rect)>,
@@ -4335,6 +4337,7 @@ pub(crate) enum SidebarFooterItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlId {
+    ConfigDiagnostic,
     SidebarNewThread,
     SidebarStarFilter,
     SidebarNewMenu,
@@ -6276,6 +6279,7 @@ impl AppState {
                 info_panel_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
+                config_diagnostic_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 home_row_hit_areas: Vec::new(),
                 home_hit_areas: Vec::new(),

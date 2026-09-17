@@ -275,6 +275,8 @@ pub struct App {
     pub(crate) last_dock_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
+    /// Swallows the rest of a click after its press dismisses the marker.
+    pub(crate) pending_config_diagnostic_click_sources: HashSet<InputSourceId>,
     pub(crate) pending_pomodoro_send_off_mouse_releases:
         HashMap<InputSourceId, crossterm::event::MouseButton>,
     pub(crate) contract_false_positive_burst_panes: HashSet<crate::layout::PaneId>,
@@ -1049,6 +1051,7 @@ impl App {
                 info_panel_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
+                config_diagnostic_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 home_row_hit_areas: Vec::new(),
                 home_hit_areas: Vec::new(),
@@ -1483,6 +1486,7 @@ impl App {
             last_dock_divider_click: None,
             last_pane_click: None,
             pending_url_click_sources: HashSet::new(),
+            pending_config_diagnostic_click_sources: HashSet::new(),
             pending_pomodoro_send_off_mouse_releases: HashMap::new(),
             contract_false_positive_burst_panes: HashSet::new(),
             contract_false_positive_log_path_override: None,
@@ -3413,6 +3417,8 @@ impl App {
         // raises the browser and costs the host terminal its focus before the
         // mouse release arrives.
         self.pending_url_click_sources.remove(&source_id);
+        self.pending_config_diagnostic_click_sources
+            .remove(&source_id);
         self.release_input_source_headless(source_id);
     }
 
@@ -3866,6 +3872,52 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn diagnostic_marker_hover_tracks_pointer_and_click_dismisses() {
+        let mut app = test_app();
+        app.state.config_diagnostic = Some("config warning".into());
+        app.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+        let marker = app.state.view.config_diagnostic_hit_area;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: marker.x,
+            row: marker.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            app.state.hovered_control,
+            Some(state::ControlId::ConfigDiagnostic)
+        );
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: marker.x.saturating_sub(1),
+            row: marker.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.state.hovered_control, None);
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: marker.x,
+            row: marker.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.state.config_diagnostic.is_none());
+        assert!(app.config_diagnostic_deadline.is_none());
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: marker.x,
+            row: marker.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.state.config_diagnostic.is_none());
+        assert!(app.pending_config_diagnostic_click_sources.is_empty());
     }
 
     #[cfg(unix)]
