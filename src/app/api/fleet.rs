@@ -2,13 +2,16 @@ use crate::api::schema::{
     FleetAgentInfo, FleetHostInfo, FleetHostStateInfo, FleetSnapshotInfo, ResponseResult,
 };
 use crate::app::App;
-use crate::fleet::{counts_as_live_agent, EvidenceSource, HostState};
+use crate::fleet::{EvidenceSource, HostState};
 
 use super::responses::encode_success;
 
 impl App {
     pub(super) fn handle_fleet_list(&self, id: String) -> String {
         let snapshot = &self.state.fleet_snapshot;
+        let now_unix_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
         let hosts = snapshot
             .hosts
             .iter()
@@ -19,13 +22,16 @@ impl App {
                     .iter()
                     .filter(|entry| entry.source != EvidenceSource::Host)
                     .map(|entry| {
-                        agent_count += usize::from(counts_as_live_agent(entry));
+                        let lifecycle = entry.effective_remote_lifecycle(host.state, now_unix_s);
+                        agent_count +=
+                            usize::from(entry.counts_as_live_agent(host.state, now_unix_s));
                         FleetAgentInfo {
                             agent_ref: entry.agent_ref.clone(),
                             name: entry.name.clone().unwrap_or_else(|| entry.handle.clone()),
                             title: entry.title.clone(),
                             agent: entry.agent.clone(),
-                            state: entry.state.clone(),
+                            state: lifecycle.state_label.to_string(),
+                            snoozed_until: lifecycle.snoozed_until,
                             source: entry.source.table_label().to_string(),
                         }
                     })
@@ -270,5 +276,39 @@ mod tests {
         assert_eq!(host["agents"].as_array().map(Vec::len), Some(6));
         assert!(dock.contains("5 agents"), "{dock}");
         assert!(dock.contains("stale"), "{dock}");
+    }
+
+    #[test]
+    fn unreachable_host_projects_unknown_without_stale_live_count_in_api_and_dock() {
+        let agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal-blocked",
+            "name": "blocked",
+            "agent": "codex",
+            "agent_status": "blocked",
+            "gates": [{"n": 1, "label": "Gate", "text": "Answer"}],
+            "snoozed_until": u64::MAX,
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "pane_id": "pane-blocked",
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("valid remote agent");
+        let mut app = app_with_entries(vec![crate::fleet::FleetRow::test_agent_info_row(
+            "ub2", agent,
+        )]);
+        app.state.fleet_snapshot.hosts[0].state = HostState::Unreachable;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&app.handle_fleet_list("x".into())).expect("fleet response");
+        let host = &value["result"]["snapshot"]["hosts"][0];
+        assert_eq!(host["agent_count"], 0);
+        assert_eq!(host["agents"][0]["state"], "status_unknown");
+        assert_eq!(host["agents"][0]["snoozed_until"], u64::MAX);
+
+        let dock = render_hosts(&app);
+        assert!(dock.contains("0 agents"), "{dock}");
+        assert!(dock.contains("status_unknown"), "{dock}");
+        assert!(!dock.contains("  blocked"), "{dock}");
     }
 }

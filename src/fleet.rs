@@ -322,6 +322,51 @@ impl Snapshot {
             .flat_map(|host| host.entries)
             .collect()
     }
+
+    /// Keep the last observed remote inventory when a configured host cannot
+    /// be polled. The fresh host state/error remains authoritative; only row
+    /// identity and display metadata are retained for an honest unknown view.
+    pub(crate) fn retain_unreachable_inventory_from(&mut self, previous: &Self) {
+        let observed_at_unix_s = self
+            .refreshed_at_unix_ms
+            .map(|milliseconds| milliseconds / 1_000)
+            .or_else(|| {
+                self.refreshed_at.and_then(|refreshed_at| {
+                    refreshed_at
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_secs())
+                })
+            });
+        for host in &mut self.hosts {
+            if host.local || host.state != HostState::Unreachable {
+                continue;
+            }
+            let Some(old) = previous.hosts.iter().find(|old| {
+                old.name == host.name
+                    && old.target == host.target
+                    && old.local == host.local
+                    && old.session == host.session
+                    && old.socket == host.socket
+            }) else {
+                continue;
+            };
+            let mut retained = old
+                .entries
+                .iter()
+                .filter(|row| row.source != EvidenceSource::Host && row.error.is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(observed_at_unix_s) = observed_at_unix_s {
+                for row in &mut retained {
+                    row.age_s = row.age_seconds_at(observed_at_unix_s);
+                }
+            }
+            retained.extend(std::mem::take(&mut host.entries));
+            host.entries = retained;
+            host.remote_identity = None;
+        }
+    }
 }
 
 impl HostSnapshot {
@@ -1299,11 +1344,112 @@ pub(crate) struct FleetRow {
     run_summary: Option<std::sync::Arc<crate::agent_runs::Summary>>,
 }
 
+#[cfg(test)]
 pub(crate) fn counts_as_live_agent(entry: &FleetRow) -> bool {
     entry.source != EvidenceSource::Host && entry.state != "status_unknown"
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EffectiveRemoteLifecycle<'a> {
+    pub(crate) state_label: &'a str,
+    pub(crate) state: crate::detect::AgentState,
+    pub(crate) seen: bool,
+    pub(crate) stale: bool,
+    pub(crate) attention_tier: Option<crate::terminal::state::AttentionTier>,
+    pub(crate) open_blockers: bool,
+    pub(crate) usage_limited: bool,
+    pub(crate) waiting_on_agents: bool,
+    pub(crate) settled: bool,
+    pub(crate) snoozed_until: Option<u64>,
+}
+
 impl FleetRow {
+    pub(crate) fn age_seconds_at(&self, now_unix_s: u64) -> Option<u64> {
+        self.reported_at
+            .as_deref()
+            .and_then(parse_utc_timestamp)
+            .and_then(|reported_at| now_unix_s.checked_sub(reported_at))
+            .or(self.age_s)
+    }
+
+    pub(crate) fn counts_as_live_agent(&self, host_state: HostState, now_unix_s: u64) -> bool {
+        self.source != EvidenceSource::Host
+            && self
+                .effective_remote_lifecycle(host_state, now_unix_s)
+                .state_label
+                != "status_unknown"
+    }
+
+    /// Combine the owning host's reachability with the last observed agent
+    /// lifecycle. Retained inventory stays useful during an outage, but stale
+    /// gates never remain actionable and a snooze only lasts until its original
+    /// server-owned deadline.
+    pub(crate) fn effective_remote_lifecycle(
+        &self,
+        host_state: HostState,
+        now_unix_s: u64,
+    ) -> EffectiveRemoteLifecycle<'_> {
+        let projection = self.agent_info.as_ref().map(AgentInfo::agent_projection);
+        let settled = projection.is_some_and(|projection| projection.settled);
+        let snoozed_until = self
+            .agent_info
+            .as_ref()
+            .and_then(|info| info.snoozed_until)
+            .filter(|deadline| *deadline > now_unix_s);
+
+        if host_state == HostState::Unreachable {
+            return EffectiveRemoteLifecycle {
+                state_label: "status_unknown",
+                state: crate::detect::AgentState::Unknown,
+                seen: true,
+                stale: true,
+                attention_tier: Some(crate::terminal::state::AttentionTier::None),
+                open_blockers: false,
+                usage_limited: false,
+                waiting_on_agents: false,
+                settled,
+                snoozed_until,
+            };
+        }
+
+        if let Some(projection) = projection {
+            return EffectiveRemoteLifecycle {
+                state_label: &self.state,
+                state: projection.state,
+                seen: projection.seen,
+                stale: projection.stale,
+                attention_tier: Some(projection.attention_tier),
+                open_blockers: projection.open_blockers,
+                usage_limited: projection.usage_limited,
+                waiting_on_agents: projection.waiting_on_agents,
+                settled,
+                snoozed_until,
+            };
+        }
+
+        let state = if self.blocked {
+            crate::detect::AgentState::Blocked
+        } else {
+            match self.state.as_str() {
+                "active" | "working" => crate::detect::AgentState::Working,
+                "waiting" | "done" | "failed" => crate::detect::AgentState::Idle,
+                _ => crate::detect::AgentState::Unknown,
+            }
+        };
+        EffectiveRemoteLifecycle {
+            state_label: &self.state,
+            state,
+            seen: !matches!(self.state.as_str(), "done" | "failed"),
+            stale: state == crate::detect::AgentState::Unknown,
+            attention_tier: None,
+            open_blockers: false,
+            usage_limited: false,
+            waiting_on_agents: false,
+            settled: false,
+            snoozed_until: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_agent_row(host: &str, name: &str) -> Self {
         Self::test_agent_row_with_id(host, name, name)
@@ -1313,9 +1459,11 @@ impl FleetRow {
     pub(crate) fn test_agent_row_with_id(host: &str, name: &str, agent_id: &str) -> Self {
         let agent_ref =
             crate::api::schema::AgentRef::new(host, agent_id).expect("valid test agent reference");
-        Self::unknown(host, EvidenceSource::Herdr, agent_ref, String::new())
+        let mut row = Self::unknown(host, EvidenceSource::Herdr, agent_ref, String::new())
             .with_test_name(name)
-            .with_test_state("working")
+            .with_test_state("working");
+        row.error = None;
+        row
     }
 
     #[cfg(test)]
@@ -2174,6 +2322,54 @@ mod tests {
             "revision": 1
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn retained_unreachable_inventory_advances_age_from_last_observation() {
+        let mut row = FleetRow::test_agent_row("remote", "worker");
+        row.reported_at = Some("1970-01-01T00:01:40Z".into());
+        row.age_s = Some(1);
+        let previous = Snapshot {
+            hosts: vec![HostSnapshot {
+                name: "remote".into(),
+                target: "remote".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![row],
+            }],
+            ..Snapshot::default()
+        };
+        let unreachable = |refreshed_at_unix_ms| Snapshot {
+            refreshed_at_unix_ms: Some(refreshed_at_unix_ms),
+            hosts: vec![HostSnapshot {
+                name: "remote".into(),
+                target: "remote".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Unreachable,
+                version: None,
+                protocol: None,
+                error: Some("offline".into()),
+                remote_identity: None,
+                entries: Vec::new(),
+            }],
+            ..Snapshot::default()
+        };
+
+        let mut first = unreachable(130_000);
+        first.retain_unreachable_inventory_from(&previous);
+        assert_eq!(first.hosts[0].entries[0].age_s, Some(30));
+
+        let mut second = unreachable(160_000);
+        second.retain_unreachable_inventory_from(&first);
+        assert_eq!(second.hosts[0].entries[0].age_s, Some(60));
     }
 
     #[test]

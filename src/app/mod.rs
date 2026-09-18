@@ -834,7 +834,6 @@ impl App {
                 crate::ui::RECENTLY_DONE_SECTION_TITLE
             ))
             .collect(),
-            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode,
             sidebar_focused: false,
             sidebar_group_menu_open: false,
@@ -863,6 +862,7 @@ impl App {
             pending_pane_settlement_changes: Vec::new(),
             pending_pane_snooze_changes: Vec::new(),
             view_observed_at: Instant::now(),
+            view_observed_unix_s: settled::unix_seconds(std::time::SystemTime::now()),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
@@ -871,6 +871,7 @@ impl App {
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
             symphony_detail: None,
@@ -1090,6 +1091,7 @@ impl App {
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
                 status_segments: Vec::new(),
+                focused_remote_host: None,
             },
             drag: None,
             workspace_presses: HashMap::new(),

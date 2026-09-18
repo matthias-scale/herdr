@@ -309,6 +309,7 @@ fn builtin_field_value(
     entry: &AgentPanelEntry,
     field: AgentViewBuiltinField,
 ) -> Option<EvalValue> {
+    let target = entry.local_target()?;
     match field {
         AgentViewBuiltinField::Status => Some(EvalValue::String(status_name(
             entry.state,
@@ -317,7 +318,7 @@ fn builtin_field_value(
         ))),
         AgentViewBuiltinField::WorkspaceId => app
             .workspaces
-            .get(entry.ws_idx)
+            .get(target.ws_idx)
             .map(|workspace| EvalValue::String(workspace.id.clone())),
         AgentViewBuiltinField::TabId => public_tab_id(app, entry).map(EvalValue::String),
         AgentViewBuiltinField::PaneId => public_pane_id(app, entry).map(EvalValue::String),
@@ -357,23 +358,24 @@ fn sort_value(
     entry: &AgentPanelEntry,
     field: &AgentViewSortField,
 ) -> Option<EvalValue> {
+    let target = entry.local_target()?;
     match field {
         AgentViewSortField::Token { token } => {
             entry.tokens.get(token).cloned().map(EvalValue::String)
         }
         AgentViewSortField::Builtin(field) => match field {
             AgentViewBuiltinSortField::WorkspaceOrder => {
-                Some(EvalValue::Number(entry.ws_idx as u64))
+                Some(EvalValue::Number(target.ws_idx as u64))
             }
             AgentViewBuiltinSortField::TabOrder => app
                 .workspaces
-                .get(entry.ws_idx)
-                .and_then(|workspace| workspace.public_tab_number(entry.tab_idx))
+                .get(target.ws_idx)
+                .and_then(|workspace| workspace.public_tab_number(target.tab_idx))
                 .map(|number| EvalValue::Number(number as u64)),
             AgentViewBuiltinSortField::PaneOrder => app
                 .workspaces
-                .get(entry.ws_idx)
-                .and_then(|workspace| workspace.public_pane_number(entry.pane_id))
+                .get(target.ws_idx)
+                .and_then(|workspace| workspace.public_pane_number(target.pane_id))
                 .map(|number| EvalValue::Number(number as u64)),
             AgentViewBuiltinSortField::Attention => Some(EvalValue::Number(u64::from(
                 crate::ui::sidebar::entry_attention_rank(entry),
@@ -407,8 +409,9 @@ fn status_name(state: crate::detect::AgentState, seen: bool, stale: bool) -> Str
 }
 
 fn public_tab_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
-    let workspace = app.workspaces.get(entry.ws_idx)?;
-    let number = workspace.public_tab_number(entry.tab_idx)?;
+    let target = entry.local_target()?;
+    let workspace = app.workspaces.get(target.ws_idx)?;
+    let number = workspace.public_tab_number(target.tab_idx)?;
     Some(crate::workspace::public_tab_id_for_number(
         &workspace.id,
         number,
@@ -416,8 +419,9 @@ fn public_tab_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
 }
 
 fn public_pane_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
-    let workspace = app.workspaces.get(entry.ws_idx)?;
-    let number = workspace.public_pane_number(entry.pane_id)?;
+    let target = entry.local_target()?;
+    let workspace = app.workspaces.get(target.ws_idx)?;
+    let number = workspace.public_pane_number(target.pane_id)?;
     Some(crate::workspace::public_pane_id_for_number(
         &workspace.id,
         number,
@@ -468,18 +472,24 @@ mod tests {
         let mut state = state_with_agents();
         state.agent_view_override = Some(current_workspace_view());
 
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].ws_idx, 0);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .ws_idx,
+            0
+        );
 
         state.mode = Mode::Navigate;
         state.selected = 1;
         let entries = crate::ui::agent_panel_entries(&state);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].ws_idx, 1);
+        assert_eq!(entries[0].local_target().unwrap().ws_idx, 1);
 
         state.mode = Mode::Settings;
         let entries = crate::ui::agent_panel_entries(&state);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].ws_idx, 0);
+        assert_eq!(entries[0].local_target().unwrap().ws_idx, 0);
     }
 
     #[test]
@@ -519,8 +529,8 @@ mod tests {
 
         let entries = crate::ui::agent_panel_entries(&state);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].ws_idx, 1);
-        assert_eq!(entries[1].ws_idx, 0);
+        assert_eq!(entries[0].local_target().unwrap().ws_idx, 1);
+        assert_eq!(entries[1].local_target().unwrap().ws_idx, 0);
     }
 
     #[test]
@@ -589,7 +599,7 @@ mod tests {
         state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
 
         let entries = crate::ui::agent_panel_entries(&state);
-        assert_eq!(entries[0].ws_idx, 0);
+        assert_eq!(entries[0].local_target().unwrap().ws_idx, 0);
         assert_eq!(
             crate::ui::sidebar::entry_attention_tier(&entries[0]),
             crate::terminal::state::AttentionTier::Attention
@@ -637,7 +647,7 @@ mod tests {
         });
 
         let entries = crate::ui::agent_panel_entries(&state);
-        assert_eq!(entries[0].ws_idx, 0);
+        assert_eq!(entries[0].local_target().unwrap().ws_idx, 0);
         assert_eq!(
             crate::ui::sidebar::entry_attention_tier(&entries[0]),
             crate::terminal::state::AttentionTier::Attention

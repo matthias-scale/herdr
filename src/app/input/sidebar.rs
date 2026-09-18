@@ -984,11 +984,7 @@ impl AppState {
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
         let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
-        if title.starts_with("host:") {
-            if !self.expanded_remote_host_groups.remove(&key) {
-                self.expanded_remote_host_groups.insert(key);
-            }
-        } else if !self.collapsed_sidebar_groups.remove(&key) {
+        if !self.collapsed_sidebar_groups.remove(&key) {
             self.collapsed_sidebar_groups.insert(key);
         }
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -998,15 +994,8 @@ impl AppState {
         );
     }
 
-    /// Select a fleet agent through the same persisted expansion state used by
-    /// an explicit host-header toggle, then keep its newly visible row in view.
+    /// Select a fleet agent, then keep its row in view.
     pub(crate) fn select_remote_agent_row(&mut self, agent_ref: crate::api::schema::AgentRef) {
-        let collapse_key = crate::ui::sidebar::remote_host_collapse_key(&agent_ref.host);
-        let expansion_key = format!(
-            "{}:{collapse_key}",
-            self.sidebar_group_mode.collapse_namespace()
-        );
-        self.expanded_remote_host_groups.insert(expansion_key);
         self.sidebar_selected_remote_agent = Some(agent_ref.clone());
         self.mark_sidebar_projection_changed();
         if let Some(target_row) = crate::ui::sidebar_rows(self).iter().position(|row| {
@@ -1069,7 +1058,9 @@ impl AppState {
         crate::ui::sidebar_rows(self)
             .get(row_idx)
             .and_then(|entry| match entry {
-                crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.pane_id)),
+                crate::ui::SidebarRow::Agent { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.pane_id)),
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
@@ -1077,7 +1068,30 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
-                crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.pane_id)),
+                crate::ui::SidebarRow::Tab { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.pane_id)),
+            })
+    }
+
+    pub(super) fn collapsed_remote_agent_target_at(
+        &self,
+        row: u16,
+    ) -> Option<crate::api::schema::AgentRef> {
+        if !self.sidebar_collapsed {
+            return None;
+        }
+        let (content, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        if content == Rect::default() || row < content.y || row >= content.bottom() {
+            return None;
+        }
+        let row_idx =
+            usize::from(row - content.y) + crate::ui::collapsed_sidebar_row_scroll(self, content);
+        crate::ui::sidebar_rows(self)
+            .get(row_idx)
+            .and_then(|entry| match entry {
+                crate::ui::SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.clone()),
+                _ => None,
             })
     }
 
@@ -1990,14 +2004,16 @@ mod tests {
                     format!("workspace:{ws_idx}:{indented}")
                 }
                 crate::ui::SidebarRow::Tab { entry, .. } => {
-                    format!("tab:{}:{}", entry.ws_idx, entry.tab_idx)
+                    let target = entry.local_target().unwrap();
+                    format!("tab:{}:{}", target.ws_idx, target.tab_idx)
                 }
                 crate::ui::SidebarRow::Agent { entry, .. } => {
+                    let target = entry.local_target().unwrap();
                     format!(
                         "pane:{}:{}:{}",
-                        entry.ws_idx,
-                        entry.tab_idx,
-                        entry.pane_id.raw()
+                        target.ws_idx,
+                        target.tab_idx,
+                        target.pane_id.raw()
                     )
                 }
                 crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
@@ -3901,7 +3917,7 @@ mod tests {
                 matches!(
                     entry,
                     crate::ui::SidebarRow::Tab { entry, .. }
-                        if entry.tab_idx == second_tab
+                        if entry.local_target().is_some_and(|target| target.tab_idx == second_tab)
                 )
             })
             .unwrap() as u16;
@@ -3957,7 +3973,7 @@ mod tests {
                     entry,
                     crate::ui::SidebarRow::Agent { entry, .. }
                         | crate::ui::SidebarRow::Tab { entry, .. }
-                        if entry.pane_id == snoozed_pane
+                        if entry.local_target().is_some_and(|target| target.pane_id == snoozed_pane)
                 )
             })
             .expect("snoozed pane row") as u16;

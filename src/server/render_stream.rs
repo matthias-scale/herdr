@@ -676,10 +676,9 @@ mod render_scale_benchmark {
                 remote_identity: None,
                 entries: (0..remote_count)
                     .map(|index| {
-                        crate::fleet::FleetRow::test_run_row(
+                        crate::fleet::FleetRow::test_agent_row(
                             "bench-remote",
                             &format!("remote-{index}"),
-                            false,
                         )
                     })
                     .collect(),
@@ -687,6 +686,14 @@ mod render_scale_benchmark {
             ..crate::fleet::Snapshot::default()
         };
         app.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(&snapshot);
+        assert_eq!(app.remote_agent_panel_entries.len(), remote_count);
+        assert_eq!(
+            crate::ui::sidebar_rows(&app)
+                .iter()
+                .filter(|row| matches!(row, crate::ui::SidebarRow::RemoteAgent { .. }))
+                .count(),
+            remote_count
+        );
         app
     }
 
@@ -772,7 +779,7 @@ mod render_scale_benchmark {
     }
 
     fn profile_remote_cardinalities() -> [(usize, RenderStats); 3] {
-        [0, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
+        [1, 15, 50].map(|count| (count, profile(app_with_remote_agents(count))))
     }
 
     fn profile_proxy_cardinalities() -> [(usize, RenderStats); 3] {
@@ -825,6 +832,13 @@ mod render_scale_benchmark {
             app_with_proxy_panes(15),
             "remote focus proxy panes",
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_render_scale_fixture_builds_requested_rows() {
+        for count in [1, 15, 50] {
+            black_box(app_with_remote_agents(count));
+        }
     }
 
     #[test]
