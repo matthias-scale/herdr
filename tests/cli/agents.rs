@@ -1,6 +1,163 @@
 use super::harness::*;
 
 #[test]
+fn agent_state_and_report_round_trip_json_without_mutating_on_malformed_input() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+
+    let initial = run_cli(&socket_path, &["agent", "state", pane_id, "--json"]);
+    assert!(initial.status.success());
+    let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
+    assert!(initial["status"].is_string());
+    assert_eq!(initial["tasks"], serde_json::json!([]));
+    assert_eq!(initial["subagents"], serde_json::json!([]));
+    assert_eq!(initial["links"], serde_json::json!([]));
+
+    let payload = r#"{"goal":"ship MAT-160","status_text":"checking","tasks":[{"text":"test CLI","status":"in_progress"}],"subagents":[{"name":"reviewer","status":"working"}]}"#;
+    let reported = run_cli(
+        &socket_path,
+        &["agent", "report", pane_id, "--json", payload],
+    );
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let reported: serde_json::Value = serde_json::from_slice(&reported.stdout).unwrap();
+    assert_eq!(reported["goal"], "ship MAT-160");
+    assert_eq!(reported["status_text"], "checking");
+    assert_eq!(reported["tasks"][0]["status"], "in_progress");
+    assert_eq!(reported["subagents"][0]["source"], "reported");
+    assert!(reported["last_acted_at"].is_string());
+
+    let malformed = run_cli(
+        &socket_path,
+        &["agent", "report", pane_id, "--json", "{not-json"],
+    );
+    assert_eq!(malformed.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&malformed.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "invalid_json");
+    let unchanged = run_cli(&socket_path, &["agent", "state", pane_id, "--json"]);
+    let unchanged: serde_json::Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(unchanged["goal"], "ship MAT-160");
+
+    let unknown = run_cli(&socket_path, &["agent", "state", "w999:p999", "--json"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&unknown.stderr).unwrap();
+    assert!(error["error"].is_object());
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn agent_report_reads_json_from_stdin() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["agent", "report", pane_id, "--json"])
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"goal":"stdin goal"}"#)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let state: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(state["goal"], "stdin goal");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn printed_url_enters_agent_state_links_with_stable_first_seen() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let url = "https://example.test/output-link";
+    assert!(run_cli(
+        &socket_path,
+        &["pane", "run", pane_id, &format!("printf '{url}\\n'")],
+    )
+    .status
+    .success());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let first = loop {
+        let output = run_cli(&socket_path, &["agent", "state", pane_id, "--json"]);
+        let state: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if let Some(link) = state["links"]
+            .as_array()
+            .and_then(|links| links.iter().find(|link| link["url"] == url))
+        {
+            break link.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "URL was not detected within one cycle"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(first["source"], "output");
+    assert_eq!(first["domain"], "example.test");
+
+    thread::sleep(Duration::from_millis(20));
+    assert!(run_cli(
+        &socket_path,
+        &["pane", "run", pane_id, &format!("printf '{url}\\n'")],
+    )
+    .status
+    .success());
+    thread::sleep(Duration::from_millis(500));
+    let state = run_cli(&socket_path, &["agent", "state", pane_id, "--json"]);
+    let state: serde_json::Value = serde_json::from_slice(&state.stdout).unwrap();
+    let matching = state["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|link| link["url"] == url)
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0]["first_seen"], first["first_seen"]);
+    assert!(matching[0]["last_seen"].as_str() >= first["last_seen"].as_str());
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn agent_explain_missing_file_reports_json_error() {
     let base = unique_test_dir();
     let missing = base.join("missing-screen.txt");

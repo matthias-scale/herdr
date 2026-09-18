@@ -3,9 +3,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
     AgentFocusParams, AgentPromptParams, AgentPromptWaitOptions, AgentReadParams,
-    AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams,
-    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams,
-    PaneReportAgentSessionParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentRenameParams, AgentReportParams, AgentReportPayload, AgentSendKeysParams,
+    AgentStartParams, AgentStateParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
+    ErrorResponse, Method, PaneProcessInfoParams, PaneReportAgentSessionParams, PaneTarget,
+    ReadFormat, ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -20,6 +21,8 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
+        "state" => agent_state(&args[1..]),
+        "report" => agent_report(&args[1..]),
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
@@ -40,6 +43,96 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn agent_state(args: &[String]) -> std::io::Result<i32> {
+    let [target, json] = args else {
+        eprintln!("usage: herdr agent state <pane> --json");
+        return Ok(2);
+    };
+    if json != "--json" {
+        eprintln!("usage: herdr agent state <pane> --json");
+        return Ok(2);
+    }
+    let response = super::send_request(&Request {
+        id: "cli:agent:state".into(),
+        method: Method::AgentState(AgentStateParams {
+            target: target.clone(),
+        }),
+    })?;
+    print_agent_state_response(&response)
+}
+
+fn agent_report(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent report <pane> --json [payload]");
+        return Ok(2);
+    };
+    if args.get(1).map(String::as_str) != Some("--json") || args.len() > 3 {
+        eprintln!("usage: herdr agent report <pane> --json [payload]");
+        return Ok(2);
+    }
+    let input = if let Some(payload) = args.get(2) {
+        payload.clone()
+    } else {
+        if io::stdin().is_terminal() {
+            return print_agent_json_error(
+                "cli:agent:report",
+                "invalid_json",
+                "JSON payload is required as an argument or on stdin",
+            );
+        }
+        let mut input = String::new();
+        io::stdin().read_to_string(&mut input)?;
+        input
+    };
+    let report = match serde_json::from_str::<AgentReportPayload>(&input) {
+        Ok(report) => report,
+        Err(error) => {
+            return print_agent_json_error(
+                "cli:agent:report",
+                "invalid_json",
+                format!("malformed agent report JSON: {error}"),
+            )
+        }
+    };
+    let response = super::send_request(&Request {
+        id: "cli:agent:report".into(),
+        method: Method::AgentReport(AgentReportParams {
+            target: target.clone(),
+            report,
+        }),
+    })?;
+    print_agent_state_response(&response)
+}
+
+fn print_agent_state_response(response: &serde_json::Value) -> std::io::Result<i32> {
+    if response.get("error").is_some() {
+        return super::print_response(response);
+    }
+    let Some(state) = response
+        .get("result")
+        .and_then(|result| result.get("state"))
+    else {
+        return print_agent_json_error(
+            "cli:agent:state",
+            "invalid_response",
+            "server response did not include agent state",
+        );
+    };
+    println!(
+        "{}",
+        serde_json::to_string(state).map_err(std::io::Error::other)?
+    );
+    Ok(0)
+}
+
+fn print_agent_json_error(
+    id: &str,
+    code: &str,
+    message: impl Into<String>,
+) -> std::io::Result<i32> {
+    super::print_response(&cli_agent_error(id, code, message))
 }
 
 fn parse_provider_flag(args: &[String]) -> Option<crate::work_title::WorkTitleProvider> {
@@ -1221,6 +1314,8 @@ fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
+    eprintln!("  herdr agent state <pane> --json");
+    eprintln!("  herdr agent report <pane> --json [payload]");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");

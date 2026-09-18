@@ -1667,6 +1667,8 @@ impl App {
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
+            Method::AgentState(params) => return self.handle_agent_state(request.id, params),
+            Method::AgentReport(params) => return self.handle_agent_report(request.id, params),
             Method::AgentFocus(params) => {
                 return self.handle_agent_focus_params(request.id, params)
             }

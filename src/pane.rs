@@ -789,6 +789,33 @@ struct FullLifecycleHookRetirementPorts<'a> {
     state_events: &'a mpsc::Sender<AppEvent>,
 }
 
+async fn publish_agent_links_if_dirty(
+    pane_id: PaneId,
+    gate: &crate::agent_state::LinkExtractionGate,
+    terminal: &PaneTerminal,
+    state_events: &mpsc::Sender<AppEvent>,
+) {
+    if !gate.take_dirty() {
+        return;
+    }
+    let output_urls = crate::agent_state::extract_urls(&terminal.detection_text());
+    let mut osc8_urls: Vec<_> = terminal
+        .visible_hyperlinks(Rect::new(0, 0, u16::MAX, u16::MAX))
+        .into_iter()
+        .map(|(_, _, url)| url)
+        .collect();
+    osc8_urls.sort_unstable();
+    osc8_urls.dedup();
+    let _ = state_events
+        .send(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls,
+            osc8_urls,
+            observed_at: std::time::SystemTime::now(),
+        })
+        .await;
+}
+
 /// Retire hook authority once sustained output contradicts its latest state.
 ///
 /// Two detect loops run this: the one `spawn_basic_detection_task` starts for a
@@ -853,6 +880,7 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     agent_output_seq: Arc<AtomicU64>,
+    link_extraction: Arc<crate::agent_state::LinkExtractionGate>,
     authority: DetectionAuthorityMirrors,
     state_events: mpsc::Sender<AppEvent>,
     initial_agent: Option<Agent>,
@@ -932,6 +960,7 @@ fn spawn_basic_detection_task(
             }
 
             let now = std::time::Instant::now();
+            publish_agent_links_if_dirty(pane_id, &link_extraction, &terminal, &state_events).await;
             let suppressed_agent = active_pending_release(&pending_release_for_task, now);
             if suppressed_agent.is_none() && release_was_active {
                 has_process_probe = false;
@@ -2749,6 +2778,7 @@ impl PaneRuntime {
         let input_delivery_seq = Arc::new(AtomicU64::new(0));
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
 
@@ -2762,6 +2792,7 @@ impl PaneRuntime {
             let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
             let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
+            let link_extraction_for_read = link_extraction.clone();
             let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
@@ -2784,6 +2815,7 @@ impl PaneRuntime {
                     );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
+                link_extraction_for_read.observe_chunk(bytes);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 observe_agent_output(bytes, &agent_output_seq);
                 if result.request_render && render_dirty.request_pty(pane_id) {
@@ -2853,6 +2885,7 @@ impl PaneRuntime {
                 detection_content_seq.clone(),
                 full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq.clone(),
+                link_extraction.clone(),
                 DetectionAuthorityMirrors {
                     full_lifecycle_active: full_lifecycle_authority_active.clone(),
                     full_lifecycle_blocked: full_lifecycle_hook_blocked.clone(),
@@ -2960,6 +2993,7 @@ impl PaneRuntime {
         let input_delivery_seq = Arc::new(AtomicU64::new(0));
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
@@ -3006,6 +3040,7 @@ impl PaneRuntime {
             let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
             let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
+            let link_extraction_for_read = link_extraction.clone();
             let agent_output_seq = agent_output_seq.clone();
             let first_output = Arc::new(AtomicBool::new(false));
             let first_output_for_read = first_output.clone();
@@ -3034,6 +3069,7 @@ impl PaneRuntime {
                     );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
+                link_extraction_for_read.observe_chunk(bytes);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                     observe_agent_output(bytes, &agent_output_seq);
@@ -3104,6 +3140,7 @@ impl PaneRuntime {
             let terminal = terminal.clone();
             let state_events = events.clone();
             let detection_content_seq = detection_content_seq.clone();
+            let link_extraction_for_task = link_extraction.clone();
             let full_lifecycle_hook_baseline_content_seq_for_task =
                 full_lifecycle_hook_baseline_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
@@ -3195,6 +3232,13 @@ impl PaneRuntime {
                     }
 
                     let now = Instant::now();
+                    publish_agent_links_if_dirty(
+                        pane_id,
+                        &link_extraction_for_task,
+                        &terminal,
+                        &state_events,
+                    )
+                    .await;
                     let suppressed_agent = active_pending_release(&pending_release_for_task, now);
                     if suppressed_agent.is_none() && release_was_active {
                         has_process_probe = false;
@@ -4362,6 +4406,7 @@ impl PaneRuntime {
                 runtime.detection_content_seq.clone(),
                 runtime.full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq,
+                Arc::new(crate::agent_state::LinkExtractionGate::default()),
                 DetectionAuthorityMirrors {
                     full_lifecycle_active: runtime.full_lifecycle_authority_active.clone(),
                     full_lifecycle_blocked: runtime.full_lifecycle_hook_blocked.clone(),
@@ -4469,6 +4514,30 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    #[tokio::test]
+    async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
+        let uri = "https://osc.example.test/target";
+        let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, screen.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(screen.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(71), &gate, &runtime.terminal, &tx).await;
+
+        let event = rx.recv().await.expect("link event");
+        let AppEvent::AgentLinksDetected {
+            output_urls,
+            osc8_urls,
+            ..
+        } = event
+        else {
+            panic!("expected agent link event");
+        };
+        assert!(output_urls.is_empty());
+        assert_eq!(osc8_urls, vec![uri]);
+    }
 
     #[tokio::test]
     async fn conditional_input_token_sends_once_and_replay_sends_nothing() {

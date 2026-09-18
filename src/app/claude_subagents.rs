@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime};
 use serde_json::Value;
 
 use crate::agent_resume::{AgentSessionRef, AgentSessionRefKind};
+use crate::agent_state::{AgentTask, AgentTaskStatus, ObservedAgentLink};
 use crate::detect::AgentState;
 
 pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -50,8 +51,24 @@ pub(crate) struct TranscriptCursor {
     line_overflowed: bool,
     pub(crate) active_ids: HashSet<String>,
     pub(crate) observations: Vec<ClaudeSubagentObservation>,
+    pub(crate) tasks: Vec<TrackedTask>,
+    pub(crate) links: Vec<TranscriptLink>,
+    pub(crate) last_row_at: Option<SystemTime>,
     pub(crate) caught_up_once: bool,
     pub(crate) trustworthy: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptLink {
+    pub(crate) url: String,
+    pub(crate) first_seen: SystemTime,
+    pub(crate) last_seen: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrackedTask {
+    id: String,
+    task: AgentTask,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,6 +180,127 @@ impl TranscriptCursor {
         (self.caught_up_once && self.trustworthy).then_some(&self.observations)
     }
 
+    pub(crate) fn tasks(&self) -> Option<Vec<AgentTask>> {
+        (self.caught_up_once && self.trustworthy)
+            .then(|| self.tasks.iter().map(|task| task.task.clone()).collect())
+    }
+
+    fn apply_task_result(&mut self, value: &Value) {
+        if let Some(task) = value
+            .get("toolUseResult")
+            .and_then(|result| result.get("task"))
+        {
+            let Some(id) = task.get("id").and_then(Value::as_str) else {
+                return;
+            };
+            let Some(text) = task
+                .get("subject")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            else {
+                return;
+            };
+            if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
+                existing.task.text = text.to_string();
+            } else {
+                self.tasks.push(TrackedTask {
+                    id: id.to_string(),
+                    task: AgentTask {
+                        text: text.to_string(),
+                        status: AgentTaskStatus::Pending,
+                    },
+                });
+            }
+        }
+        let Some(result) = value.get("toolUseResult") else {
+            return;
+        };
+        let Some(id) = result.get("taskId").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(status) = result
+            .get("statusChange")
+            .and_then(|change| change.get("to"))
+            .and_then(Value::as_str)
+            .and_then(parse_task_status)
+        else {
+            return;
+        };
+        if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
+            existing.task.status = status;
+        }
+    }
+
+    fn apply_todo_write(&mut self, value: &Value) {
+        let Some(content) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        for item in content.iter().rev() {
+            if item.get("name").and_then(Value::as_str) != Some("TodoWrite") {
+                continue;
+            }
+            let Some(todos) = item
+                .get("input")
+                .and_then(|input| input.get("todos"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            self.tasks = todos
+                .iter()
+                .enumerate()
+                .filter_map(|(index, todo)| {
+                    let text = todo
+                        .get("content")
+                        .or_else(|| todo.get("text"))?
+                        .as_str()?
+                        .trim();
+                    let status = todo
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .and_then(parse_task_status)?;
+                    (!text.is_empty()).then(|| TrackedTask {
+                        id: format!("todo-{index}"),
+                        task: AgentTask {
+                            text: text.to_string(),
+                            status,
+                        },
+                    })
+                })
+                .collect();
+            break;
+        }
+    }
+
+    fn observe_row_links(&mut self, value: &Value, observed_at: Option<SystemTime>) {
+        let Some(observed_at) = observed_at else {
+            return;
+        };
+        let mut urls = Vec::new();
+        collect_value_urls(value, &mut urls);
+        for url in urls {
+            if let Some(existing) = self.links.iter_mut().find(|link| link.url == url) {
+                existing.last_seen = existing.last_seen.max(observed_at);
+            } else {
+                self.links.push(TranscriptLink {
+                    url,
+                    first_seen: observed_at,
+                    last_seen: observed_at,
+                });
+            }
+        }
+        self.links.sort_by_key(|link| link.last_seen);
+        if self.links.len() > crate::agent_state::MAX_LINKS {
+            self.links
+                .drain(..self.links.len() - crate::agent_state::MAX_LINKS);
+        }
+    }
+
     fn apply_event(&mut self, event: TranscriptEvent) {
         match event {
             TranscriptEvent::Started(observation) => {
@@ -230,11 +368,20 @@ impl TranscriptCursor {
                         .strip_suffix(b"\r")
                         .unwrap_or(&self.line_buffer);
                     if !line.is_empty() {
-                        match parse_transcript_event(line) {
-                            Ok(event) => {
+                        match parse_transcript_row(line) {
+                            Ok((value, event, observed_at)) => {
                                 if let Some(event) = event {
                                     self.apply_event(event);
                                 }
+                                if let Some(observed_at) = observed_at {
+                                    self.last_row_at =
+                                        Some(self.last_row_at.map_or(observed_at, |current| {
+                                            current.max(observed_at)
+                                        }));
+                                }
+                                self.apply_todo_write(&value);
+                                self.apply_task_result(&value);
+                                self.observe_row_links(&value, observed_at);
                                 stats.lines_parsed = stats.lines_parsed.saturating_add(1);
                             }
                             Err(()) => {
@@ -288,6 +435,20 @@ impl TranscriptTracker {
 
     pub(crate) fn observations(&self) -> Option<Vec<ClaudeSubagentObservation>> {
         Some(self.cursor.observations()?.to_vec())
+    }
+
+    pub(crate) fn tasks(&self) -> Option<Vec<AgentTask>> {
+        self.cursor.tasks()
+    }
+
+    pub(crate) fn links(&self) -> Option<&[TranscriptLink]> {
+        (self.cursor.caught_up_once && self.cursor.trustworthy).then_some(&self.cursor.links)
+    }
+
+    pub(crate) fn last_row_at(&self) -> Option<SystemTime> {
+        (self.cursor.caught_up_once && self.cursor.trustworthy)
+            .then_some(self.cursor.last_row_at)
+            .flatten()
     }
 
     fn refresh_transcript_paths(&mut self) {
@@ -647,6 +808,29 @@ impl crate::app::App {
                 .claude_subagent_trackers
                 .get(&terminal_id)
                 .and_then(TranscriptTracker::observations);
+            let transcript_tasks = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .and_then(TranscriptTracker::tasks);
+            let transcript_last_row_at = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .and_then(TranscriptTracker::last_row_at);
+            let transcript_links = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .and_then(TranscriptTracker::links)
+                .map(|links| {
+                    links
+                        .iter()
+                        .map(|link| ObservedAgentLink {
+                            url: link.url.clone(),
+                            first_seen: link.first_seen,
+                            last_seen: link.last_seen,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let (count_changed, observation_changed) = self
                 .state
                 .terminals
@@ -654,7 +838,7 @@ impl crate::app::App {
                 .map(|terminal| {
                     (
                         terminal.set_active_subagents(count),
-                        terminal.set_claude_subagent_observations(observations),
+                        terminal.set_claude_subagent_observations(observations.clone()),
                     )
                 })
                 .unwrap_or_default();
@@ -664,10 +848,7 @@ impl crate::app::App {
             if observation_changed {
                 observations_changed = observations_changed.saturating_add(1);
             }
-            if !count_changed && !observation_changed {
-                continue;
-            }
-            if let Some(location) =
+            let location =
                 self.state
                     .workspaces
                     .iter()
@@ -679,8 +860,39 @@ impl crate::app::App {
                                     .then_some((ws_idx, *pane_id))
                             })
                         })
+                    });
+            let transcript_changed = location.is_some_and(|(_, pane_id)| {
+                let subagents = observations
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|observation| crate::agent_state::AgentSubagent {
+                        name: observation.name,
+                        status: match observation.state {
+                            AgentState::Working => crate::api::schema::AgentStatus::Working,
+                            AgentState::Blocked => crate::api::schema::AgentStatus::Blocked,
+                            AgentState::Idle => crate::api::schema::AgentStatus::Done,
+                            AgentState::Unknown => crate::api::schema::AgentStatus::Unknown,
+                        },
+                        last_active_at: observation
+                            .observed_at
+                            .and_then(crate::agent_state::format_rfc3339),
+                        pane_id: None,
+                        source: crate::agent_state::AgentSubagentSource::Observed,
                     })
-            {
+                    .collect();
+                self.state.agent_states.observe_transcript(
+                    pane_id,
+                    transcript_last_row_at,
+                    transcript_tasks.clone(),
+                    subagents,
+                    transcript_links.clone(),
+                )
+            });
+            if !count_changed && !observation_changed && !transcript_changed {
+                continue;
+            }
+            if let Some(location) = location {
                 changed_panes.push(location);
             }
         }
@@ -823,17 +1035,19 @@ pub(crate) fn validated_transcript_path(
     Some(path.to_path_buf())
 }
 
-fn parse_transcript_event(line: &[u8]) -> Result<Option<TranscriptEvent>, ()> {
+fn parse_transcript_row(
+    line: &[u8],
+) -> Result<(Value, Option<TranscriptEvent>, Option<SystemTime>), ()> {
     let value: Value = serde_json::from_slice(line).map_err(|_| ())?;
     let observed_at = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(crate::work_index::parse_rfc3339_system_time);
+        .and_then(crate::agent_state::parse_rfc3339);
     if let Some(result) = value.get("toolUseResult") {
         if result.get("status").and_then(Value::as_str) == Some("async_launched")
             && result.get("isAsync").and_then(Value::as_bool) == Some(true)
         {
-            return Ok(result
+            let event = result
                 .get("agentId")
                 .and_then(Value::as_str)
                 .and_then(valid_subagent_id)
@@ -855,10 +1069,11 @@ fn parse_transcript_event(line: &[u8]) -> Result<Option<TranscriptEvent>, ()> {
                         observed_at,
                         transcript_path: None,
                     })
-                }));
+                });
+            return Ok((value, event, observed_at));
         }
         if result.get("success").and_then(Value::as_bool) == Some(true) {
-            return Ok(result
+            let event = result
                 .get("resumedAgentId")
                 .and_then(Value::as_str)
                 .and_then(valid_subagent_id)
@@ -871,31 +1086,59 @@ fn parse_transcript_event(line: &[u8]) -> Result<Option<TranscriptEvent>, ()> {
                         observed_at,
                         transcript_path: None,
                     })
-                }));
+                });
+            return Ok((value, event, observed_at));
         }
     }
 
     if value.get("type").and_then(Value::as_str) != Some("queue-operation")
         || value.get("operation").and_then(Value::as_str) != Some("enqueue")
     {
-        return Ok(None);
+        return Ok((value, None, observed_at));
     }
     let Some(content) = value.get("content").and_then(Value::as_str) else {
-        return Ok(None);
+        return Ok((value, None, observed_at));
     };
     if !content.starts_with("<task-notification>") {
-        return Ok(None);
+        return Ok((value, None, observed_at));
     }
     let Some(state) = tag_value(content, "status").and_then(notification_state) else {
-        return Ok(None);
+        return Ok((value, None, observed_at));
     };
-    Ok(tag_value(content, "task-id")
+    let event = tag_value(content, "task-id")
         .and_then(valid_subagent_id)
         .map(|id| TranscriptEvent::StateChanged {
             id,
             state,
             observed_at,
-        }))
+        });
+    Ok((value, event, observed_at))
+}
+
+fn parse_task_status(value: &str) -> Option<AgentTaskStatus> {
+    match value {
+        "pending" => Some(AgentTaskStatus::Pending),
+        "in_progress" => Some(AgentTaskStatus::InProgress),
+        "completed" => Some(AgentTaskStatus::Completed),
+        _ => None,
+    }
+}
+
+fn collect_value_urls(value: &Value, urls: &mut Vec<String>) {
+    match value {
+        Value::String(text) => urls.extend(crate::agent_state::extract_urls(text)),
+        Value::Array(values) => {
+            for value in values {
+                collect_value_urls(value, urls);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_value_urls(value, urls);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn notification_state(value: &str) -> Option<AgentState> {
@@ -1063,7 +1306,36 @@ mod tests {
         assert_eq!(cursor.count(), Some(1), "blocked work remains active");
         assert_eq!(
             observations[1].observed_at,
-            crate::work_index::parse_rfc3339_system_time("2026-09-06T10:04:00Z")
+            crate::agent_state::parse_rfc3339("2026-09-06T10:04:00Z")
+        );
+    }
+
+    #[test]
+    fn real_stripped_transcript_fixture_projects_latest_tasks_links_and_row_time() {
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            include_bytes!("../../tests/fixtures/claude-transcripts/task-state.jsonl"),
+            true,
+        );
+
+        assert_eq!(
+            cursor.tasks(),
+            Some(vec![
+                AgentTask {
+                    text: "inspect runtime boundary".into(),
+                    status: AgentTaskStatus::InProgress,
+                },
+                AgentTask {
+                    text: "add state tests".into(),
+                    status: AgentTaskStatus::Completed,
+                },
+            ])
+        );
+        assert_eq!(cursor.links.len(), 1);
+        assert_eq!(cursor.links[0].url, "https://example.test/review/42");
+        assert_eq!(
+            cursor.last_row_at,
+            crate::agent_state::parse_rfc3339("2026-08-14T06:18:47.437Z")
         );
     }
 
@@ -1465,7 +1737,10 @@ mod tests {
     ) -> RefreshObservation {
         let mut tracker =
             TranscriptTracker::new(SESSION_ID.into(), path.clone(), target_generation);
-        tracker.cursor.ingest(&launch(active_id), true);
+        tracker.cursor.ingest(
+            &launch_named(active_id, "bounded fixture", "2026-08-14T06:18:40.100Z"),
+            true,
+        );
         RefreshObservation {
             target: TargetIdentity {
                 terminal_id,
@@ -1615,6 +1890,24 @@ mod tests {
         let dir = TestDir::new("stale-result");
         let path = dir.transcript();
         let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    subagents: vec![crate::agent_state::AgentSubagent {
+                        name: "reported reviewer".into(),
+                        status: crate::api::schema::AgentStatus::Blocked,
+                        last_active_at: None,
+                        pane_id: None,
+                        source: crate::agent_state::AgentSubagentSource::Reported,
+                    }],
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                SystemTime::now(),
+            )
+            .expect("valid report");
         app.claude_subagent_trackers.insert(
             terminal_id.clone(),
             TranscriptTracker::new(SESSION_ID.into(), path.clone(), 7),
@@ -1631,6 +1924,29 @@ mod tests {
             BatchStats::default(),
         ));
         assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
+        let projected = app
+            .state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+            .subagents;
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].name, "bounded fixture");
+        assert_eq!(
+            projected[0].status,
+            crate::api::schema::AgentStatus::Working
+        );
+        assert_eq!(
+            projected[0].last_active_at.as_deref(),
+            Some("2026-08-14T06:18:40.1Z")
+        );
+        assert_eq!(
+            projected[0].source,
+            crate::agent_state::AgentSubagentSource::Observed
+        );
+        assert_eq!(
+            projected[1].source,
+            crate::agent_state::AgentSubagentSource::Reported
+        );
 
         app.state
             .terminals

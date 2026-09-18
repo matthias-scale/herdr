@@ -3406,8 +3406,19 @@ impl AppState {
                 usage_limited,
                 process_exited,
                 observed_at,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
+            } => {
+                let entered_working = state == AgentState::Working
+                    && self
+                        .workspaces
+                        .iter()
+                        .find_map(|workspace| workspace.pane_state(pane_id))
+                        .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+                        .is_some_and(|terminal| terminal.raw_agent_state() != AgentState::Working);
+                if entered_working {
+                    self.agent_states
+                        .observe_working(pane_id, std::time::SystemTime::now());
+                }
+                self.update_terminal_state(pane_id, |terminal| {
                     Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
@@ -3420,7 +3431,8 @@ impl AppState {
                     ))
                 })
                 .into_iter()
-                .collect(),
+                .collect()
+            }
             AppEvent::PaneProcessStateChanged {
                 pane_id,
                 holds_shell,
@@ -3430,6 +3442,26 @@ impl AppState {
                 .apply_pane_process_state(pane_id, holds_shell, stale_resolution, observed_at)
                 .into_iter()
                 .collect(),
+            AppEvent::AgentLinksDetected {
+                pane_id,
+                output_urls,
+                osc8_urls,
+                observed_at,
+            } => {
+                self.agent_states.observe_links(
+                    pane_id,
+                    output_urls,
+                    crate::agent_state::AgentLinkSource::Output,
+                    observed_at,
+                );
+                self.agent_states.observe_links(
+                    pane_id,
+                    osc8_urls,
+                    crate::agent_state::AgentLinkSource::Osc8,
+                    observed_at,
+                );
+                Vec::new()
+            }
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -6258,6 +6290,14 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+        assert!(
+            state
+                .agent_states
+                .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+                .last_acted_at
+                .is_some(),
+            "transition into working records agent activity"
+        );
     }
 
     #[test]

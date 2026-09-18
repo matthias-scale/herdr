@@ -863,6 +863,29 @@ mod tests {
         )
     }
 
+    #[test]
+    fn agent_state_cache_is_absent_from_persisted_session_snapshot() {
+        let mut state = state_with_workspaces(&["runtime-only-agent-state"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    goal: Some("never-persist-this-goal".into()),
+                    status_text: Some("never-persist-this-status".into()),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                SystemTime::now(),
+            )
+            .expect("valid report");
+
+        let encoded = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        assert!(!encoded.contains("never-persist-this-goal"));
+        assert!(!encoded.contains("never-persist-this-status"));
+        assert!(!encoded.contains("agent_states"));
+    }
+
     fn capture_history_from_state_with_runtimes(
         state: &AppState,
         terminal_runtimes: &TerminalRuntimeRegistry,

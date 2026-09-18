@@ -1944,6 +1944,45 @@
           ],
           "type": "object"
         },
+        "AgentReportParams": {
+          "properties": {
+            "goal": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status_text": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subagents": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentSubagent"
+              },
+              "type": "array"
+            },
+            "target": {
+              "type": "string"
+            },
+            "tasks": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentTask"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -2026,6 +2065,17 @@
           ],
           "type": "object"
         },
+        "AgentStateParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -2034,6 +2084,45 @@
             "done",
             "stale",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentSubagent": {
+          "properties": {
+            "last_active_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/request/$defs/AgentSubagentSource",
+              "default": "reported"
+            },
+            "status": {
+              "$ref": "#/schemas/request/$defs/AgentStatus"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentSubagentSource": {
+          "enum": [
+            "observed",
+            "reported"
           ],
           "type": "string"
         },
@@ -2047,6 +2136,29 @@
             "target"
           ],
           "type": "object"
+        },
+        "AgentTask": {
+          "properties": {
+            "status": {
+              "$ref": "#/schemas/request/$defs/AgentTaskStatus"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentTaskStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "type": "string"
         },
         "AgentViewBuiltinField": {
           "enum": [
@@ -6466,6 +6578,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.state",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentStateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.read",
               "type": "string"
             },
@@ -8062,6 +8206,41 @@
           ],
           "type": "object"
         },
+        "AgentLink": {
+          "properties": {
+            "domain": {
+              "type": "string"
+            },
+            "first_seen": {
+              "type": "string"
+            },
+            "last_seen": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/AgentLinkSource"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "domain",
+            "first_seen",
+            "last_seen",
+            "source"
+          ],
+          "type": "object"
+        },
+        "AgentLinkSource": {
+          "enum": [
+            "output",
+            "osc8",
+            "transcript"
+          ],
+          "type": "string"
+        },
         "AgentManifestInfo": {
           "properties": {
             "active_version": {
@@ -8157,6 +8336,58 @@
           ],
           "type": "string"
         },
+        "AgentStateSnapshot": {
+          "properties": {
+            "goal": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_acted_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "links": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentLink"
+              },
+              "type": "array"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "status_text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subagents": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentSubagent"
+              },
+              "type": "array"
+            },
+            "tasks": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentTask"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "tasks",
+            "subagents",
+            "links"
+          ],
+          "type": "object"
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -8165,6 +8396,68 @@
             "done",
             "stale",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentSubagent": {
+          "properties": {
+            "last_active_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/AgentSubagentSource",
+              "default": "reported"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentSubagentSource": {
+          "enum": [
+            "observed",
+            "reported"
+          ],
+          "type": "string"
+        },
+        "AgentTask": {
+          "properties": {
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentTaskStatus"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentTaskStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
           ],
           "type": "string"
         },
@@ -11778,6 +12071,22 @@
               "required": [
                 "type",
                 "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "state": {
+                  "$ref": "#/schemas/success_response/$defs/AgentStateSnapshot"
+                },
+                "type": {
+                  "const": "agent_state",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "state"
               ],
               "type": "object"
             },
