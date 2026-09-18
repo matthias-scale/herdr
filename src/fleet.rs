@@ -345,12 +345,19 @@ fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot
 
 fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
     let mut polling_fleet = fleet.clone();
-    let implicit_local = !polling_fleet.hosts.iter().any(|host| host.local);
+    let self_name = polling_fleet.resolved_self_name();
+    // Skip the synthetic local host when a configured host already carries the
+    // resolved self name; select_hosts hard-errors on duplicate names.
+    let implicit_local = !polling_fleet.hosts.iter().any(|host| host.local)
+        && !polling_fleet
+            .hosts
+            .iter()
+            .any(|host| host.name == self_name);
     if implicit_local {
         polling_fleet.hosts.insert(
             0,
             FleetHostConfig {
-                name: polling_fleet.resolved_self_name(),
+                name: self_name.clone(),
                 local: true,
                 ..FleetHostConfig::default()
             },
@@ -2370,6 +2377,24 @@ mod tests {
         assert!(polled.polled);
         assert_eq!(polled.hosts.len(), 1);
         assert_eq!(polled.hosts[0].name, config.resolved_self_name());
+    }
+
+    #[test]
+    fn configured_host_named_like_self_does_not_collide_with_implicit_local() {
+        let config = FleetConfig {
+            self_name: Some("laptop".to_string()),
+            timeout_ms: MIN_TIMEOUT_MS,
+            hosts: vec![host("laptop", false)],
+            ..FleetConfig::default()
+        };
+        let polled = poll(&config);
+        assert!(polled.polled);
+        assert_eq!(polled.hosts.len(), 1);
+        assert_eq!(polled.hosts[0].name, "laptop");
+        assert_ne!(
+            polled.hosts[0].error.as_deref(),
+            Some("duplicate fleet host name: laptop")
+        );
     }
 
     #[test]

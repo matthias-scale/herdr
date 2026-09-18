@@ -220,7 +220,7 @@ pub(crate) fn summarize(
     let heartbeat_fresh = heartbeat_age_s.is_some_and(|age| age <= heartbeat_stale_s);
     let live = observation.pid_alive || heartbeat_fresh;
     let display_state = match state.state {
-        State::Active if live => DisplayState::Active,
+        State::Active | State::Waiting | State::Unknown if live => DisplayState::Active,
         State::Blocked if live => DisplayState::Blocked,
         State::Active | State::Blocked | State::Waiting | State::Unknown => DisplayState::Stale,
         State::Done => DisplayState::Done,
@@ -352,6 +352,41 @@ mod tests {
             summarize("ub2", fresh_heartbeat, now, 60).state,
             DisplayState::Blocked
         );
+    }
+
+    #[test]
+    fn live_waiting_and_unknown_runs_are_not_stale() {
+        let now =
+            crate::fleet::parse_utc_timestamp("2026-09-17T09:00:00Z").expect("valid timestamp");
+        for state in ["waiting", "unknown"] {
+            let live = Observation {
+                state: parse_state(
+                    &fixture(state, "2026-09-17T08:59:30Z"),
+                    "fixture/state.json",
+                )
+                .expect("state"),
+                pid_alive: false,
+            };
+            let stale = Observation {
+                state: parse_state(
+                    &fixture(state, "2026-09-17T08:00:00Z"),
+                    "fixture/state.json",
+                )
+                .expect("state"),
+                pid_alive: false,
+            };
+
+            assert_eq!(
+                summarize("ub2", live, now, 60).state,
+                DisplayState::Active,
+                "live {state} run"
+            );
+            assert_eq!(
+                summarize("ub2", stale, now, 60).state,
+                DisplayState::Stale,
+                "stale {state} run"
+            );
+        }
     }
 
     #[test]
