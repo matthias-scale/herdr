@@ -231,7 +231,6 @@ mod tests {
                 usage_limited: false,
                 primary_label: "repo".into(),
                 space_label: String::new(),
-                space_label_redundant: false,
                 primary_tab_label: None,
                 tab_has_custom_name: false,
                 tab_label_leads_with_agent: false,

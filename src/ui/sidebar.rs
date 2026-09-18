@@ -1032,10 +1032,6 @@ pub(crate) struct AgentPanelEntryData {
     /// Server-owned Space label. Grouping views render this in the existing
     /// trailing tag cell instead of deriving a label from the pane title.
     pub space_label: String,
-    /// The enclosing group repeats this Space label, or the projection has no
-    /// second Space label to distinguish. Disambiguated headers preserve the
-    /// raw tag when another distinct Space label is present.
-    pub space_label_redundant: bool,
     pub primary_tab_label: Option<String>,
     pub tab_has_custom_name: bool,
     pub tab_label_leads_with_agent: bool,
@@ -1096,11 +1092,10 @@ pub(crate) struct AgentPanelEntryData {
 
 impl AgentPanelEntry {
     pub(crate) fn new(identity: AgentPanelIdentity, data: AgentPanelEntryData) -> Self {
-        let space_label_redundant = data.space_label_redundant;
         Self {
             identity,
             data: std::sync::Arc::new(data),
-            space_label_redundant,
+            space_label_redundant: false,
             remote_entry: None,
             remote_show_host_identity: false,
         }
@@ -1569,7 +1564,6 @@ fn collect_agent_panel_entries_with_runtimes(
                         AgentPanelEntryData {
                             primary_label: workspace_label.clone(),
                             space_label: space_label.clone(),
-                            space_label_redundant: false,
                             primary_tab_label: crate::workspace::session_title(
                                 projection.as_ref(),
                                 thread_title,
@@ -1719,7 +1713,6 @@ pub(crate) fn remote_agent_panel_entries_at(
                         AgentPanelEntryData {
                             primary_label: row.agent_ref.host.clone(),
                             space_label: workspace_id.clone(),
-                            space_label_redundant: false,
                             primary_tab_label: Some(title),
                             tab_has_custom_name,
                             tab_label_leads_with_agent: false,
@@ -12549,7 +12542,6 @@ pub(crate) mod tests {
                 usage_limited: false,
                 primary_label: "workspace".into(),
                 space_label: String::new(),
-                space_label_redundant: false,
                 primary_tab_label: Some("tab".into()),
                 tab_has_custom_name: false,
                 tab_label_leads_with_agent: false,

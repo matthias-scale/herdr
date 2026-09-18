@@ -1591,7 +1591,6 @@ mod tests {
                 usage_limited: false,
                 primary_label: "herdr".into(),
                 space_label: String::new(),
-                space_label_redundant: false,
                 primary_tab_label: primary_tab_label.map(str::to_string),
                 tab_has_custom_name: false,
                 tab_label_leads_with_agent: false,
