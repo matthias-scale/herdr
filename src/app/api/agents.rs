@@ -551,8 +551,12 @@ mod tests {
         let agent = agents.into_iter().next().expect("one agent");
         let sidebar_title = crate::ui::sidebar_thread_entries(&app.state)
             .into_iter()
-            .find(|entry| entry.pane_id == pane_id)
-            .and_then(|entry| entry.primary_tab_label)
+            .find(|entry| {
+                entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == pane_id)
+            })
+            .and_then(|entry| entry.primary_tab_label.clone())
             .expect("sidebar title");
         assert_eq!(agent.display_title.as_deref(), Some(expected));
         assert_eq!(agent.display_title.as_deref(), Some(sidebar_title.as_str()));

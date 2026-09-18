@@ -1538,7 +1538,11 @@ pub(super) fn render_home(
             .map(|(idx, agent)| {
                 let cells = entries
                     .iter()
-                    .find(|entry| entry.pane_id == agent.pane_id)
+                    .find(|entry| {
+                        entry
+                            .local_target()
+                            .is_some_and(|target| target.pane_id == agent.pane_id)
+                    })
                     .map(|entry| crate::ui::sidebar::agent_row_cells(entry, &app.palette));
                 agent_line(app, agent, cells.as_ref(), idx == selected, body.width)
             })

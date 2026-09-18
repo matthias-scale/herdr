@@ -24,18 +24,21 @@ impl AppState {
     ) -> Vec<AgentPickerCandidate> {
         crate::ui::sidebar::all_agent_panel_entries(self)
             .into_iter()
-            .filter(|entry| exclude != Some((entry.ws_idx, entry.pane_id)))
-            .map(|entry| {
+            .filter_map(|entry| {
+                let target = entry.local_target()?;
+                if exclude == Some((target.ws_idx, target.pane_id)) {
+                    return None;
+                }
                 let label = if entry.space_label.is_empty() || entry.space_label_redundant {
                     entry.primary_label.clone()
                 } else {
                     format!("{} · {}", entry.primary_label, entry.space_label)
                 };
-                AgentPickerCandidate {
-                    ws_idx: entry.ws_idx,
-                    pane_id: entry.pane_id,
+                Some(AgentPickerCandidate {
+                    ws_idx: target.ws_idx,
+                    pane_id: target.pane_id,
                     label,
-                }
+                })
             })
             .collect()
     }

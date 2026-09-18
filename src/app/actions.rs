@@ -1686,6 +1686,9 @@ impl AppState {
         let Some(target) = entries.get(idx) else {
             return false;
         };
+        let Some(target) = target.local_target() else {
+            return false;
+        };
         let ws_idx = target.ws_idx;
         let pane_id = target.pane_id;
 
@@ -1705,6 +1708,9 @@ impl AppState {
     #[cfg(test)]
     fn cycle_agent_entry(&mut self, forward: bool) {
         if let Some((_idx, target)) = crate::ui::relative_agent_navigation_entry(self, forward) {
+            let Some(target) = target.local_target() else {
+                return;
+            };
             let (ws_idx, pane_id) = (target.ws_idx, target.pane_id);
             self.focus_pane_in_workspace(ws_idx, pane_id);
             self.ensure_agent_row_visible(ws_idx, pane_id);
@@ -1726,7 +1732,9 @@ impl AppState {
             matches!(
                 row,
                 crate::ui::SidebarRow::Tab { entry, .. }
-                    if entry.ws_idx == ws_idx && Some(entry.tab_idx) == tab_idx
+                    if entry.local_target().is_some_and(|target| {
+                        target.ws_idx == ws_idx && Some(target.tab_idx) == tab_idx
+                    })
             )
         };
         if self.sidebar_collapsed {
@@ -5709,7 +5717,10 @@ mod tests {
         set_agent_state(&mut state, 0, 0, first_second, AgentState::Working);
         set_agent_state(&mut state, 1, 0, second_root, AgentState::Blocked);
         assert_eq!(
-            crate::ui::agent_panel_entries(&state)[0].pane_id,
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
             second_root
         );
 
@@ -5740,11 +5751,23 @@ mod tests {
 
         transition_agent_state(&mut state, first, AgentState::Idle);
         transition_agent_state(&mut state, second, AgentState::Working);
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
+            second
+        );
 
         transition_agent_state(&mut state, second, AgentState::Idle);
 
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
+            second
+        );
         state.assert_invariants_for_test();
     }
 

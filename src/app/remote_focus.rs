@@ -113,6 +113,7 @@ pub(crate) struct RemoteFocusOperation {
     /// A later detailed failure replaces it.
     error_is_placeholder: bool,
     created_at: Instant,
+    operation_sequence: u64,
     completed_at: Option<Instant>,
 }
 
@@ -204,7 +205,7 @@ impl RemoteFocusOperations {
             }
         }
 
-        let operation_id = self.next_operation_id();
+        let (operation_id, operation_sequence) = self.next_operation_id();
         let proxy_pane_id = format!("remote-focus-proxy-{operation_id}");
         self.operations.insert(
             operation_id.clone(),
@@ -219,6 +220,7 @@ impl RemoteFocusOperations {
                 first_frame_processed: false,
                 error_is_placeholder: false,
                 created_at: now,
+                operation_sequence,
                 completed_at: None,
             },
         );
@@ -371,6 +373,40 @@ impl RemoteFocusOperations {
             .and_then(|operation| operation.proxy.clone())
     }
 
+    pub(crate) fn proxy_pane_for_agent(
+        &self,
+        agent_ref: &AgentRef,
+        pane_exists: impl Fn(PaneId) -> bool,
+    ) -> Option<PaneId> {
+        self.operations
+            .iter()
+            .filter(|(_, operation)| {
+                operation.agent_ref == *agent_ref
+                    && matches!(
+                        operation.state,
+                        RemoteFocusState::Connecting | RemoteFocusState::Active
+                    )
+                    && !operation.operation_state.is_terminal()
+            })
+            .filter_map(|(operation_id, operation)| {
+                let pane_id = operation.proxy.as_ref().map(|(pane_id, _)| *pane_id)?;
+                pane_exists(pane_id).then_some((operation_id, operation, pane_id))
+            })
+            .max_by(|(_, left, _), (_, right, _)| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.operation_sequence.cmp(&right.operation_sequence))
+            })
+            .map(|(_, _, pane_id)| pane_id)
+    }
+
+    fn proxy_by_terminal_id(&self, terminal_id: &TerminalId) -> Option<PaneId> {
+        self.proxy_by_terminal
+            .get(terminal_id)
+            .and_then(|operation_id| self.proxy_location(operation_id))
+            .map(|(pane_id, _)| pane_id)
+    }
+
     pub(crate) fn agent_ref(&self, operation_id: &str) -> Option<&AgentRef> {
         self.operations
             .get(operation_id)
@@ -418,13 +454,13 @@ impl RemoteFocusOperations {
         self.operations.len()
     }
 
-    fn next_operation_id(&mut self) -> String {
+    fn next_operation_id(&mut self) -> (String, u64) {
         loop {
             let number = self.next_operation_id;
             self.next_operation_id = self.next_operation_id.saturating_add(1);
             let operation_id = format!("remote-focus-{number}");
             if !self.operations.contains_key(&operation_id) {
-                return operation_id;
+                return (operation_id, number);
             }
         }
     }
@@ -712,6 +748,7 @@ impl crate::app::App {
                     terminal_id,
                     public_pane_id,
                 );
+                self.state.remote_focus_proxy_panes.insert(pane_id);
                 channels
             }
             Err(error) => {
@@ -927,6 +964,7 @@ impl crate::app::App {
         else {
             return;
         };
+        self.state.remote_focus_proxy_panes.remove(&pane_id);
         let Some((ws_idx, _)) = self.find_pane(pane_id) else {
             return;
         };
@@ -950,6 +988,12 @@ impl crate::app::App {
     /// operation failure). The remote server also rejects a second controller
     /// for the terminal, so the lease must go back exactly once.
     pub(crate) fn detach_remote_proxy_for_terminal(&mut self, terminal_id: &TerminalId) {
+        if let Some(pane_id) = self
+            .remote_focus_operations
+            .proxy_by_terminal_id(terminal_id)
+        {
+            self.state.remote_focus_proxy_panes.remove(&pane_id);
+        }
         let Some(operation_id) = self
             .remote_focus_operations
             .take_proxy_terminal(terminal_id)
@@ -1134,6 +1178,74 @@ mod tests {
                 .is_err(),
             "refused keystrokes never reach the transport"
         );
+    }
+
+    #[test]
+    fn connecting_proxy_deduplicates_source_and_remote_row_refocuses_it() {
+        let (mut app, recording) = proxy_app();
+        let source = agent_ref();
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: source.host.clone(),
+                target: source.host.clone(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![crate::fleet::FleetRow::test_agent_row(
+                    &source.host,
+                    &source.agent,
+                )],
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(&snapshot);
+
+        let started = app
+            .start_remote_focus_operation(source.clone())
+            .expect("operation starts");
+        let (proxy_pane, _) = app
+            .remote_focus_operations
+            .proxy_location(&started.operation_id)
+            .expect("connecting proxy location");
+        assert_eq!(
+            app.remote_focus_operations.agent_ref(&started.operation_id),
+            Some(&source),
+            "dedup identity starts with the proxy, before ControlReady"
+        );
+        assert!(app.state.remote_focus_proxy_panes.contains(&proxy_pane));
+        let rows = crate::ui::sidebar_rows(&app.state);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, crate::ui::SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref == source))
+                .count(),
+            1
+        );
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            crate::ui::SidebarRow::Tab { entry, .. }
+                | crate::ui::SidebarRow::Agent { entry, .. }
+                if entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == proxy_pane)
+        )));
+
+        let original = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.focus_pane_in_workspace(0, original);
+        app.open_fleet_host_focused(&source.host, Some(&source.agent));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        let workspace = &app.state.workspaces[0];
+        assert_eq!(
+            workspace.tabs[workspace.active_tab_index()]
+                .layout
+                .focused(),
+            proxy_pane
+        );
+        assert_eq!(recording.lock().expect("lock").started.len(), 1);
     }
 
     #[test]
@@ -1770,6 +1882,139 @@ mod tests {
                 .as_ref()
                 .map(|error| error.code.as_str()),
             Some("host_unreachable")
+        );
+    }
+
+    #[test]
+    fn proxy_reuse_prefers_the_retained_live_operation_with_an_existing_pane() {
+        let now = Instant::now();
+        let source = agent_ref();
+        let mut operations = RemoteFocusOperations::default();
+
+        let closed = operations
+            .begin(source.clone(), now)
+            .expect("closed operation starts");
+        let closed_pane = PaneId::from_raw(101);
+        operations.attach_proxy(
+            &closed.operation_id,
+            closed_pane,
+            TerminalId::alloc(),
+            "closed-proxy".into(),
+        );
+        operations.transition(&closed.operation_id, RemoteFocusTransition::Closed, now);
+
+        let live = operations
+            .begin(source.clone(), now + Duration::from_secs(1))
+            .expect("live operation starts");
+        let live_pane = PaneId::from_raw(102);
+        operations.attach_proxy(
+            &live.operation_id,
+            live_pane,
+            TerminalId::alloc(),
+            "live-proxy".into(),
+        );
+
+        let missing = operations
+            .begin(source.clone(), now + Duration::from_secs(2))
+            .expect("operation with removed pane starts");
+        operations.attach_proxy(
+            &missing.operation_id,
+            PaneId::from_raw(103),
+            TerminalId::alloc(),
+            "missing-proxy".into(),
+        );
+
+        assert_eq!(
+            operations.proxy_pane_for_agent(&source, |pane_id| pane_id == live_pane),
+            Some(live_pane)
+        );
+    }
+
+    #[test]
+    fn proxy_reuse_skips_a_terminated_but_unreconciled_operation() {
+        let now = Instant::now();
+        let source = agent_ref();
+        let mut operations = RemoteFocusOperations::default();
+
+        let live = operations
+            .begin(source.clone(), now)
+            .expect("live operation starts");
+        let live_pane = PaneId::from_raw(104);
+        operations.attach_proxy(
+            &live.operation_id,
+            live_pane,
+            TerminalId::alloc(),
+            "live-proxy".into(),
+        );
+
+        let terminated = operations
+            .begin(source.clone(), now + Duration::from_secs(1))
+            .expect("terminated operation starts");
+        let terminated_pane = PaneId::from_raw(105);
+        operations.attach_proxy(
+            &terminated.operation_id,
+            terminated_pane,
+            TerminalId::alloc(),
+            "terminated-proxy".into(),
+        );
+        let operation_state = operations
+            .operation_state(&terminated.operation_id)
+            .expect("terminated operation state");
+        assert!(operation_state.terminate(), "transport marks the loss");
+
+        assert_eq!(
+            operations.proxy_pane_for_agent(&source, |pane_id| {
+                pane_id == live_pane || pane_id == terminated_pane
+            }),
+            Some(live_pane)
+        );
+        assert_eq!(
+            operations
+                .operations
+                .get(&terminated.operation_id)
+                .expect("terminated operation remains retained")
+                .state,
+            RemoteFocusState::Connecting,
+            "the app record is still unreconciled while reuse checks transport state"
+        );
+    }
+
+    #[test]
+    fn proxy_reuse_prefers_newest_operation_when_created_at_ties() {
+        let now = Instant::now();
+        let source = agent_ref();
+        let mut operations = RemoteFocusOperations::default();
+        let mut selected = None;
+
+        for operation_number in 1..=10 {
+            let operation = operations
+                .begin(source.clone(), now)
+                .expect("operation starts");
+            if operation_number == 9 {
+                let pane_id = PaneId::from_raw(106);
+                operations.attach_proxy(
+                    &operation.operation_id,
+                    pane_id,
+                    TerminalId::alloc(),
+                    "older-proxy".into(),
+                );
+            } else if operation_number == 10 {
+                let pane_id = PaneId::from_raw(107);
+                operations.attach_proxy(
+                    &operation.operation_id,
+                    pane_id,
+                    TerminalId::alloc(),
+                    "newer-proxy".into(),
+                );
+                selected = Some(pane_id);
+            }
+        }
+
+        assert_eq!(
+            operations.proxy_pane_for_agent(&source, |pane_id| {
+                pane_id == PaneId::from_raw(106) || pane_id == PaneId::from_raw(107)
+            }),
+            selected
         );
     }
 
