@@ -1178,7 +1178,7 @@ impl HeadlessServer {
                     message = %error.message,
                     "failed to create workspace at requested cwd"
                 );
-                self.app.state.mode = app::Mode::Navigate;
+                self.app.state.set_server_mode(app::Mode::Navigate);
             }
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_workspace_cwd");
@@ -3270,6 +3270,28 @@ impl HeadlessServer {
             return self.handle_client_owned_worktree_event(client_id, ev);
         }
         match &ev {
+            AppEvent::FleetRefreshed { .. } => {
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                let remote_entries = &self.app.state.remote_agent_panel_entries;
+                let mut client_changed = false;
+                for client in self.clients.values_mut() {
+                    let selection_is_gone = client
+                        .sidebar_presentation
+                        .selected_remote_agent
+                        .as_ref()
+                        .is_some_and(|selected| {
+                            !remote_entries
+                                .iter()
+                                .any(|entry| &entry.agent_ref == selected)
+                        });
+                    if selection_is_gone {
+                        client.sidebar_presentation.selected_remote_agent = None;
+                        client.request_repaint();
+                        client_changed = true;
+                    }
+                }
+                changed || client_changed
+            }
             #[cfg(unix)]
             AppEvent::RemoteControlGatePoisoned { pane_id } => {
                 let controlled_clients: Vec<u64> = self
@@ -4155,7 +4177,7 @@ impl HeadlessServer {
                     .and_then(|client| client.sidebar_presentation.overlay.kind.mode())
             })
             .flatten()
-            .unwrap_or(self.app.state.mode);
+            .unwrap_or(self.app.state.server_mode());
         let render_neutral_mouse_motion =
             events_are_render_neutral_mouse_motion(&events, source_mode) && !hover_motion_changes;
         if let Some(client) = self.clients.get_mut(&client_id) {
@@ -5999,7 +6021,7 @@ impl HeadlessServer {
     }
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
-        self.app.state.mode == app::Mode::Terminal
+        self.app.state.server_mode() == app::Mode::Terminal
             && !self.app.state.tab_surface_replaced()
             && self.app.state.popup_pane.is_none()
             && self.app.state.selection.is_none()
@@ -7075,7 +7097,7 @@ fn seed_startup_workspace_if_empty(app: &mut app::App) {
         }
         Err(err) => {
             warn!(cwd = %cwd.display(), err = %err, "failed to create startup workspace");
-            app.state.mode = app::Mode::Navigate;
+            app.state.set_server_mode(app::Mode::Navigate);
         }
     }
 }
@@ -7495,7 +7517,7 @@ mod tests {
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let detached = Arc::new(std::sync::Mutex::new(Vec::new()));
         server.app.remote_focus_transport = Box::new(RecordingRemoteFocusTransport {
@@ -7979,7 +8001,7 @@ esac
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.ensure_test_terminals();
         let first_terminal = server.app.state.workspaces[0]
             .terminal_id(first_pane)
@@ -8085,7 +8107,7 @@ esac
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.sidebar_width = 30;
         server.app.state.sidebar_agents.rows = vec![vec![
             crate::config::AgentSidebarToken::TerminalTitleStripped,
@@ -8642,7 +8664,7 @@ esac
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
         server.clients.insert(
@@ -8950,7 +8972,7 @@ esac
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.ensure_test_terminals();
         server
             .app
@@ -9027,7 +9049,7 @@ esac
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.ensure_test_terminals();
         server
             .app
@@ -9174,7 +9196,7 @@ esac
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         for (index, &terminal_size) in client_sizes.iter().enumerate() {
             let client_id = index as u64 + 1;
@@ -9438,7 +9460,7 @@ next_tab = ""
             direct_graphics: false,
             writer,
         }));
-        server.app.state.mode = crate::app::Mode::Settings;
+        server.app.state.set_server_mode(crate::app::Mode::Settings);
         server.app.state.settings.section = crate::app::state::SettingsSection::Toast;
         server.app.state.settings.list.selected = 1;
 
@@ -9510,7 +9532,7 @@ next_tab = ""
             direct_graphics: false,
             writer: writer_a,
         }));
-        server.app.state.mode = crate::app::Mode::Settings;
+        server.app.state.set_server_mode(crate::app::Mode::Settings);
         server.app.state.settings.section = crate::app::state::SettingsSection::Toast;
         server.app.state.settings.list.selected = 1;
 
@@ -9725,7 +9747,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.agent_host_name = "buildbox".into();
         server.app.state.ensure_test_terminals();
         server
@@ -10031,7 +10053,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.agent_host_name = "buildbox".to_owned();
         server.app.state.ensure_test_terminals();
         let terminal_id = server.app.state.workspaces[0]
@@ -10303,7 +10325,7 @@ next_tab = ""
         client.state.ensure_test_terminals();
         client.state.active = Some(0);
         client.state.selected = 0;
-        client.state.mode = crate::app::Mode::Terminal;
+        client.state.set_server_mode(crate::app::Mode::Terminal);
         client.state.agent_host_name = "client".to_owned();
         let fleet = crate::config::FleetConfig {
             hosts: vec![crate::config::FleetHostConfig {
@@ -12144,7 +12166,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         let started = Instant::now() - Duration::from_secs(119);
         server
             .app
@@ -13139,7 +13161,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -13175,7 +13197,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -13210,7 +13232,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
@@ -13241,7 +13263,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let initial_area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, initial_area, true);
@@ -13276,7 +13298,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -13317,7 +13339,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
@@ -13353,7 +13375,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -13395,7 +13417,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -13423,7 +13445,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -13448,7 +13470,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Navigate;
+        state.set_server_mode(crate::app::Mode::Navigate);
 
         let area = Rect::new(0, 0, 44, 24);
         let (_buffer, cursor) =
@@ -13473,7 +13495,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.set_server_mode(crate::app::Mode::Terminal);
 
         let area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
@@ -14569,7 +14591,7 @@ next_tab = ""
     #[test]
     fn background_mouse_motion_promotes_once_then_becomes_render_neutral() {
         let mut server = test_headless_server();
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.clients.insert(1, test_app_client(Some(true), 1));
         server.clients.insert(2, test_app_client(Some(true), 2));
         server.foreground_client_id = Some(1);
@@ -14595,7 +14617,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("menu")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.clients.insert(1, test_app_client(Some(true), 1));
         server.clients.insert(2, test_app_client(Some(true), 2));
         server
@@ -14639,7 +14661,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("snooze")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         let target = crate::app::state::PaneFocusTarget {
             workspace_id: server.app.state.workspaces[0].id.clone(),
             pane_id: server.app.state.workspaces[0].tabs[0].root_pane,
@@ -14718,7 +14740,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         input_rx
     }
 
@@ -14732,6 +14754,244 @@ next_tab = ""
             RenderEncoding::SemanticFrame,
             None,
         )
+    }
+
+    fn test_key(
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> crate::raw_input::RawInputEvent {
+        crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(code, modifiers))
+    }
+
+    #[test]
+    fn attached_overlay_action_preserves_the_shared_full_screen_mode_and_draft() {
+        for server_mode in [
+            crate::app::Mode::Settings,
+            crate::app::Mode::GlobalMenu,
+            crate::app::Mode::AddAction,
+        ] {
+            let mut server = test_headless_server();
+            server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("mode")];
+            server.app.state.ensure_test_terminals();
+            server.app.state.active = Some(0);
+            server.app.state.selected = 0;
+            server.app.state.set_server_mode(server_mode);
+            server.app.state.settings.search = "keep settings draft".into();
+            server.app.state.global_menu.highlighted = 2;
+            server.app.state.add_action = Some(crate::app::state::AddActionState {
+                name: "keep action draft".into(),
+                command: "cargo test".into(),
+                ..Default::default()
+            });
+            let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+            let workspace_id = server.app.state.workspaces[0].id.clone();
+            let tab_id = crate::workspace::public_tab_id_for_number(
+                &workspace_id,
+                server.app.state.workspaces[0].tabs[0].number,
+            );
+            let mut client_a = test_app_client(Some(true), 1);
+            client_a.sidebar_presentation.overlay = crate::app::state::ClientOverlayState {
+                kind: crate::app::state::ClientOverlay::ContextMenu,
+                context_menu: Some(crate::app::state::ContextMenuState {
+                    kind: crate::app::state::ContextMenuKind::Tab {
+                        workspace_id,
+                        tab_id,
+                        ws_idx: 0,
+                        tab_idx: 0,
+                        settle_pane_id: Some(pane_id),
+                        snooze_target: Some(pane_id),
+                        starred: false,
+                        has_subgroup: false,
+                    },
+                    x: 2,
+                    y: 2,
+                    selected: crate::app::state::ContextMenuAction::Settle,
+                }),
+                ..Default::default()
+            };
+            server.clients.insert(1, client_a);
+            server.clients.insert(2, test_app_client(Some(true), 2));
+            server.foreground_client_id = Some(2);
+            server.sync_foreground_client_state();
+
+            assert!(server.handle_client_input_events(
+                1,
+                vec![test_key(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::empty(),
+                )],
+            ));
+
+            assert_eq!(server.app.state.server_mode(), server_mode);
+            assert_eq!(server.app.state.settings.search, "keep settings draft");
+            assert_eq!(server.app.state.global_menu.highlighted, 2);
+            let add_action = server
+                .app
+                .state
+                .add_action
+                .as_ref()
+                .expect("add-action draft");
+            assert_eq!(add_action.name, "keep action draft");
+            assert_eq!(add_action.command, "cargo test");
+            assert!(server.app.state.pane_is_settled(0, pane_id));
+            assert_eq!(
+                server.clients[&1].sidebar_presentation.overlay.kind,
+                crate::app::state::ClientOverlay::None
+            );
+        }
+    }
+
+    #[test]
+    fn attached_rename_overlay_takes_keys_before_the_files_dock() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("rename")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        let workspace_id = server.app.state.workspaces[0].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            server.app.state.workspaces[0].tabs[0].number,
+        );
+        let mut client = test_app_client(Some(true), 1);
+        client.sidebar_presentation.overlay = crate::app::state::ClientOverlayState {
+            kind: crate::app::state::ClientOverlay::RenameTab,
+            rename_target: Some(crate::app::state::RenameTarget::Tab {
+                workspace_id,
+                tab_id,
+            }),
+            name_input_replace_on_type: false,
+            ..Default::default()
+        };
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Files);
+        client.dock_presentation.files_focused = true;
+        server.clients.insert(1, client);
+
+        assert!(server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        ));
+
+        assert_eq!(
+            server.clients[&1].sidebar_presentation.overlay.name_input,
+            "x"
+        );
+        assert!(server.clients[&1].dock_presentation.files_filter.is_empty());
+    }
+
+    #[test]
+    fn fleet_refresh_clears_every_clients_missing_remote_selection() {
+        let mut server = test_headless_server();
+        let selected =
+            crate::api::schema::AgentRef::new("remote", "worker").expect("valid remote selection");
+        for client_id in [1, 2] {
+            let mut client = test_app_client(Some(true), client_id);
+            client.sidebar_presentation.selected_remote_agent = Some(selected.clone());
+            server.clients.insert(client_id, client);
+        }
+
+        assert!(server.handle_internal_event_with_forwarding(
+            crate::events::AppEvent::FleetRefreshed {
+                snapshot: crate::fleet::Snapshot::default(),
+            },
+        ));
+
+        for client_id in [1, 2] {
+            assert!(server.clients[&client_id]
+                .sidebar_presentation
+                .selected_remote_agent
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn attached_clients_keep_sidebar_snooze_editor_and_actions_isolated() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("isolation");
+        workspace.test_add_tab(Some("client-b"));
+        let editor_pane = workspace.tabs[0].root_pane;
+        let client_pane = workspace.tabs[1].root_pane;
+        let workspace_id = workspace.id.clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.sidebar_presentation.focused = true;
+        client_a.sidebar_presentation.overlay.snooze =
+            Some(crate::app::state::SidebarSnoozeUiState {
+                target: crate::app::state::PaneFocusTarget {
+                    workspace_id,
+                    pane_id: editor_pane,
+                },
+                anchor: (2, 2),
+                selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
+                time_draft: Some(String::new()),
+                error: Some("client A only".into()),
+            });
+        let mut client_b = test_app_client(Some(true), 2);
+        client_b.sidebar_presentation.focused = true;
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, client_b);
+
+        assert!(server.handle_client_input_events(
+            1,
+            "14:30"
+                .chars()
+                .map(|ch| {
+                    test_key(
+                        crossterm::event::KeyCode::Char(ch),
+                        crossterm::event::KeyModifiers::empty(),
+                    )
+                })
+                .collect(),
+        ));
+        server
+            .clients
+            .get_mut(&1)
+            .expect("client A")
+            .sidebar_presentation
+            .overlay
+            .snooze
+            .as_mut()
+            .expect("client A editor")
+            .error = Some("client A only".into());
+        server.app.state.workspaces[0].active_tab = 1;
+        assert!(server.handle_client_input_events(
+            2,
+            ['z', '\n', 'z', '\n', 's']
+                .into_iter()
+                .map(|ch| {
+                    test_key(
+                        if ch == '\n' {
+                            crossterm::event::KeyCode::Enter
+                        } else {
+                            crossterm::event::KeyCode::Char(ch)
+                        },
+                        crossterm::event::KeyModifiers::empty(),
+                    )
+                })
+                .collect(),
+        ));
+
+        assert!(server.app.state.pane_is_settled(0, client_pane));
+        assert!(!server.app.state.pane_is_settled(0, editor_pane));
+        assert!(!server.app.state.pane_is_snoozed(0, editor_pane));
+        let editor = server.clients[&1]
+            .sidebar_presentation
+            .overlay
+            .snooze
+            .as_ref()
+            .expect("client A editor");
+        assert_eq!(editor.target.pane_id, editor_pane);
+        assert_eq!(editor.time_draft.as_deref(), Some("14:30"));
+        assert_eq!(editor.error.as_deref(), Some("client A only"));
     }
 
     #[test]
@@ -14769,7 +15029,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.set_server_mode(crate::app::Mode::Navigate);
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -14790,13 +15050,16 @@ next_tab = ""
             data: b"\x1b".to_vec(),
         }));
 
-        assert_eq!(server.app.state.mode, crate::app::Mode::Terminal);
+        assert_eq!(server.app.state.server_mode(), crate::app::Mode::Terminal);
     }
 
     #[test]
     fn semantic_client_input_events_route_through_app_input() {
         let mut server = test_headless_server();
-        server.app.state.mode = crate::app::Mode::Onboarding;
+        server
+            .app
+            .state
+            .set_server_mode(crate::app::Mode::Onboarding);
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -14825,7 +15088,7 @@ next_tab = ""
             }],
         }));
 
-        assert_eq!(server.app.state.mode, crate::app::Mode::Settings);
+        assert_eq!(server.app.state.server_mode(), crate::app::Mode::Settings);
         assert_eq!(
             server.app.state.settings.section,
             crate::app::state::SettingsSection::Integrations
@@ -14864,7 +15127,7 @@ next_tab = ""
                 })
                 .expect("valid work context");
         }
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         let first_key = server.app.state.dock_home_projection().rows[0].key.clone();
 
         let mut client = test_app_client(Some(true), 1);
@@ -14935,7 +15198,7 @@ next_tab = ""
                 })
                 .expect("valid work context");
         }
-        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.set_server_mode(crate::app::Mode::Navigate);
         let first_key = server.app.state.dock_home_projection().rows[0].key.clone();
 
         let mut client = ClientConnection::new(
@@ -14983,7 +15246,10 @@ next_tab = ""
     #[test]
     fn semantic_client_escape_closes_keybind_help() {
         let mut server = test_headless_server();
-        server.app.state.mode = crate::app::Mode::KeybindHelp;
+        server
+            .app
+            .state
+            .set_server_mode(crate::app::Mode::KeybindHelp);
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -15013,13 +15279,16 @@ next_tab = ""
             }],
         }));
 
-        assert_eq!(server.app.state.mode, crate::app::Mode::Navigate);
+        assert_eq!(server.app.state.server_mode(), crate::app::Mode::Navigate);
     }
 
     #[test]
     fn semantic_client_down_scrolls_keybind_help() {
         let mut server = test_headless_server();
-        server.app.state.mode = crate::app::Mode::KeybindHelp;
+        server
+            .app
+            .state
+            .set_server_mode(crate::app::Mode::KeybindHelp);
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -15050,7 +15319,10 @@ next_tab = ""
             }],
         }));
 
-        assert_eq!(server.app.state.mode, crate::app::Mode::KeybindHelp);
+        assert_eq!(
+            server.app.state.server_mode(),
+            crate::app::Mode::KeybindHelp
+        );
         assert_eq!(server.app.state.keybind_help.scroll, 1);
     }
 
@@ -15065,7 +15337,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -15129,7 +15401,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let (desktop_tx, _desktop_control_rx, desktop_rx) = test_client_writer();
         let (mobile_tx, _mobile_control_rx, mobile_rx) = test_client_writer();
@@ -16075,7 +16347,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         server.clients.insert(
             1,
@@ -16131,7 +16403,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.terminal_runtimes.insert(
             terminal_id.clone(),
             crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
@@ -16269,7 +16541,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
 
         server.clients.insert(
@@ -16324,7 +16596,7 @@ next_tab = ""
             other => panic!("expected terminal frame, got {other:?}"),
         }
 
-        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.set_server_mode(crate::app::Mode::Navigate);
         server.render_and_stream();
         match read_server_message(
             client_rx
@@ -16681,7 +16953,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
 
@@ -16752,7 +17024,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
         server.clients.insert(
@@ -17081,7 +17353,7 @@ next_tab = ""
             ),
         );
 
-        server.app.state.mode = crate::app::Mode::Prefix;
+        server.app.state.set_server_mode(crate::app::Mode::Prefix);
         server.stream_host_keyboard_enhancement_flags();
         assert!(matches!(
             read_server_message(
@@ -17092,7 +17364,7 @@ next_tab = ""
             ServerMessage::KittyKeyboardReportAll { enabled: true }
         ));
 
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.stream_host_keyboard_enhancement_flags();
         assert!(matches!(
             read_server_message(
@@ -17136,7 +17408,7 @@ next_tab = ""
         ));
 
         assert!(server.app.close_popup_pane());
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.stream_host_keyboard_enhancement_flags();
         assert!(matches!(
             read_server_message(
@@ -17411,11 +17683,11 @@ next_tab = ""
             .expect("runtime");
         runtime.test_process_pty_bytes(b"\rZ");
 
-        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.set_server_mode(crate::app::Mode::Navigate);
         assert!(!server.render_retained_pty_update_and_stream());
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         assert!(server.render_retained_pty_update_and_stream());
         let patched = read_server_frame(
             client_rx
@@ -17663,7 +17935,7 @@ next_tab = ""
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
 
         let mut server = test_headless_server();
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.sidebar_collapsed = false;
         crate::ui::compute_view(
             &mut server.app.state,
@@ -17794,7 +18066,7 @@ next_tab = ""
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &server_path);
 
         let mut server = test_headless_server();
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.sidebar_collapsed = false;
         crate::ui::compute_view(
             &mut server.app.state,
@@ -18888,7 +19160,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
         server.app.state.toast_config.delay_seconds = 0;
         server.app.state.sound.enabled = true;
@@ -18984,7 +19256,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
         server.app.state.toast_config.delay_seconds = 0;
         server.app.state.sound.enabled = true;
@@ -19138,7 +19410,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
         server.app.state.sound.enabled = true;
@@ -19228,7 +19500,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
         server.app.state.sound.enabled = true;
@@ -19365,7 +19637,7 @@ next_tab = ""
             );
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
         server.clients.insert(
@@ -19442,7 +19714,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let terminal_id = server.app.state.workspaces[0]
             .pane_state(pane_id)

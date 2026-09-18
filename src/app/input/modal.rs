@@ -97,13 +97,13 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
 
 pub(super) fn open_global_menu(state: &mut AppState) {
     state.global_menu = MenuListState::new(0);
-    state.mode = Mode::GlobalMenu;
+    state.set_server_mode(Mode::GlobalMenu);
 }
 
 pub(crate) fn handle_git_menu_key(state: &mut AppState, key: KeyEvent) {
     let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(state);
     match key.code {
-        KeyCode::Esc => state.mode = Mode::Terminal,
+        KeyCode::Esc => state.set_server_mode(Mode::Terminal),
         KeyCode::Up | KeyCode::Char('k') if in_git_repo => state.git_menu.move_prev(),
         KeyCode::Down | KeyCode::Char('j') if in_git_repo => state
             .git_menu
@@ -112,7 +112,7 @@ pub(crate) fn handle_git_menu_key(state: &mut AppState, key: KeyEvent) {
             state.request_git_action = crate::app::state::GitAction::ALL
                 .get(state.git_menu.highlighted)
                 .copied();
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         _ => {}
     }
@@ -122,7 +122,7 @@ pub(super) fn open_keybind_help(state: &mut AppState) {
     state.keybind_help.scroll = 0;
     state.keybind_help.query.clear();
     state.keybind_help.search_focused = false;
-    state.mode = Mode::KeybindHelp;
+    state.set_server_mode(Mode::KeybindHelp);
 }
 
 fn open_update_release_notes(state: &mut AppState) {
@@ -136,7 +136,7 @@ fn open_update_release_notes(state: &mut AppState) {
         scroll: 0,
         preview: notes.preview,
     });
-    state.mode = Mode::ReleaseNotes;
+    state.set_server_mode(Mode::ReleaseNotes);
 }
 
 pub(super) fn request_detach(state: &mut AppState) {
@@ -513,9 +513,9 @@ pub(super) fn leave_modal(state: &mut AppState) {
     if state.client_overlay != ClientOverlay::None {
         state.close_client_overlay();
     } else if state.active.is_some() {
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
     } else {
-        state.mode = Mode::Navigate;
+        state.set_server_mode(Mode::Navigate);
     }
 }
 
@@ -575,7 +575,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             } else {
                 state.name_input.trim().to_string()
             };
-            match state.input_mode() {
+            match state.effective_interaction_mode() {
                 Mode::RenameWorkspace
                     if state.pending_workspace_create_cwd.is_none()
                         && !state.workspaces.is_empty()
@@ -872,9 +872,9 @@ pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
         || state.keybinds.resize_mode.matches_direct_key(&raw_key)
     {
         if state.active.is_some() {
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         } else {
-            state.mode = Mode::Navigate;
+            state.set_server_mode(Mode::Navigate);
         }
         return;
     }
@@ -981,7 +981,7 @@ pub(super) fn apply_context_menu_action(
                 open_confirm_close(state);
             } else {
                 state.close_selected_workspace();
-                state.mode = Mode::Navigate;
+                state.set_server_mode(Mode::Navigate);
             }
         }
         (
@@ -1020,11 +1020,11 @@ pub(super) fn apply_context_menu_action(
                 tab.starred = !tab.starred;
                 state.mark_session_dirty();
             }
-            state.mode = if state.active.is_some() {
+            state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
-            };
+            });
         }
         (
             ContextMenuKind::Tab {
@@ -1040,11 +1040,11 @@ pub(super) fn apply_context_menu_action(
                 anchor: (menu_x, menu_y),
                 filter: crate::ui::dropdown::DropdownFilterState::default(),
             });
-            state.mode = if state.active.is_some() {
+            state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
-            };
+            });
         }
         (
             ContextMenuKind::Tab {
@@ -1053,11 +1053,11 @@ pub(super) fn apply_context_menu_action(
             Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
         ) => {
             state.clear_tab_subgroup(ws_idx, tab_idx);
-            state.mode = if state.active.is_some() {
+            state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
-            };
+            });
         }
         (
             ContextMenuKind::Tab {
@@ -1084,11 +1084,11 @@ pub(super) fn apply_context_menu_action(
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
             if !state.close_tab() {
-                state.mode = if state.active.is_some() {
+                state.set_server_mode(if state.active.is_some() {
                     Mode::Terminal
                 } else {
                     Mode::Navigate
-                };
+                });
             }
         }
         (
@@ -1129,7 +1129,7 @@ pub(super) fn apply_context_menu_action(
                     Err(err) => tracing::warn!(err = %err, "failed to link work item to window"),
                 }
             }
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1138,7 +1138,7 @@ pub(super) fn apply_context_menu_action(
             Some(crate::app::state::COPY_LINK_ITEM),
         ) => {
             state.request_clipboard_write = Some(link.into_bytes());
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1155,7 +1155,7 @@ pub(super) fn apply_context_menu_action(
                     }
                 }
             }
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1182,7 +1182,7 @@ pub(super) fn apply_context_menu_action(
                     }
                 }
             }
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1198,7 +1198,7 @@ pub(super) fn apply_context_menu_action(
             state.switch_tab(tab_idx);
             state.focus_pane_in_workspace(ws_idx, pane_id);
             state.split_pane(terminal_runtimes, Direction::Horizontal);
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1214,7 +1214,7 @@ pub(super) fn apply_context_menu_action(
             state.switch_tab(tab_idx);
             state.focus_pane_in_workspace(ws_idx, pane_id);
             state.split_pane(terminal_runtimes, Direction::Vertical);
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1230,7 +1230,7 @@ pub(super) fn apply_context_menu_action(
             state.switch_tab(tab_idx);
             state.focus_pane_in_workspace(ws_idx, pane_id);
             state.toggle_zoom();
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         (
             ContextMenuKind::Pane {
@@ -1246,11 +1246,11 @@ pub(super) fn apply_context_menu_action(
             state.switch_tab(tab_idx);
             state.focus_pane_in_workspace(ws_idx, pane_id);
             if !state.close_pane() {
-                state.mode = if state.active.is_some() {
+                state.set_server_mode(if state.active.is_some() {
                     Mode::Terminal
                 } else {
                     Mode::Navigate
-                };
+                });
             }
         }
         _ => leave_modal(state),
@@ -1361,7 +1361,7 @@ impl App {
             self.state.name_input.trim().to_string()
         };
 
-        match self.state.input_mode() {
+        match self.state.effective_interaction_mode() {
             Mode::RenameWorkspace => {
                 if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
                     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
@@ -1593,11 +1593,11 @@ impl App {
             || self.state.keybinds.resize_mode.matches_prefix_key(&raw_key)
             || self.state.keybinds.resize_mode.matches_direct_key(&raw_key)
         {
-            self.state.mode = if self.state.active.is_some() {
+            self.state.set_server_mode(if self.state.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
-            };
+            });
             return;
         }
 
@@ -1672,7 +1672,6 @@ impl App {
             KeyCode::Enter => {
                 if let Some(menu) = self.state.context_menu.take() {
                     let action = menu.selected;
-                    leave_modal(&mut self.state);
                     self.apply_context_menu_action_via_api(menu, action);
                 }
             }
@@ -1717,7 +1716,7 @@ impl App {
         action: ContextMenuAction,
     ) {
         if !self.state.rebase_context_menu_indices(&mut menu) {
-            leave_modal(&mut self.state);
+            self.state.close_client_overlay();
             return;
         }
         let actions = self.state.context_menu_actions(&menu);
@@ -1729,15 +1728,15 @@ impl App {
         match (menu.kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Delete worktree checkout...")) => {
                 self.state.request_remove_linked_worktree = Some(ws_idx);
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Open worktree...")) => {
                 self.state.request_open_existing_worktree = Some(ws_idx);
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::GitWorkspace {
@@ -1754,7 +1753,7 @@ impl App {
                     }
                     self.state.mark_session_dirty();
                 }
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Workspace { ws_idx, .. }
@@ -1801,7 +1800,7 @@ impl App {
                 Some(crate::app::state::STAR_ITEM | crate::app::state::UNSTAR_ITEM),
             ) => {
                 self.toggle_tab_star_via_api(ws_idx, tab_idx);
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Tab {
@@ -1818,7 +1817,7 @@ impl App {
                         anchor: (menu_x, menu_y),
                         filter: crate::ui::dropdown::DropdownFilterState::default(),
                     });
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Tab {
@@ -1827,7 +1826,7 @@ impl App {
                 Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
             ) => {
                 self.state.clear_tab_subgroup(ws_idx, tab_idx);
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Tab {
@@ -1837,7 +1836,7 @@ impl App {
                 },
                 Some(crate::app::state::SNOOZE_ITEM),
             ) => {
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
                 self.open_sidebar_snooze_menu(ws_idx, target, menu_x, menu_y);
             }
             (
@@ -1847,7 +1846,10 @@ impl App {
                     ..
                 },
                 Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
-            ) => self.open_snooze_time_input(ws_idx, target),
+            ) => {
+                self.state.close_client_overlay();
+                self.open_snooze_time_input(ws_idx, target);
+            }
             (
                 ContextMenuKind::Tab {
                     ws_idx,
@@ -1859,7 +1861,7 @@ impl App {
                 if let Some(pane_id) = self.public_pane_id(ws_idx, target) {
                     self.runtime_pane_unsnooze("tui.context-menu.unsnooze", pane_id);
                 }
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Tab {
@@ -1872,7 +1874,7 @@ impl App {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
                     self.runtime_pane_settle("tui.context-menu.settle", public_pane_id);
                 }
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Tab {
@@ -1883,7 +1885,7 @@ impl App {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
                 if !self.close_active_tab_via_api_requires_confirmation() {
-                    leave_modal(&mut self.state);
+                    self.state.close_client_overlay();
                 }
             }
             (
@@ -1902,7 +1904,7 @@ impl App {
                 },
                 Some(crate::app::state::SNOOZE_ITEM),
             ) => {
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
                 self.open_sidebar_snooze_menu(ws_idx, pane_id, menu_x, menu_y);
             }
             (
@@ -1910,7 +1912,10 @@ impl App {
                     ws_idx, pane_id, ..
                 },
                 Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
-            ) => self.open_snooze_time_input(ws_idx, pane_id),
+            ) => {
+                self.state.close_client_overlay();
+                self.open_snooze_time_input(ws_idx, pane_id);
+            }
             (
                 ContextMenuKind::Pane {
                     ws_idx, pane_id, ..
@@ -1920,7 +1925,7 @@ impl App {
                 if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
                     self.runtime_pane_unsnooze("tui.context-menu.unsnooze", pane_id);
                 }
-                leave_modal(&mut self.state);
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2124,7 +2129,7 @@ impl App {
                     self.state.close_client_overlay();
                 }
             }
-            _ => leave_modal(&mut self.state),
+            _ => self.state.close_client_overlay(),
         }
     }
 }
@@ -2221,11 +2226,11 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
-        app.state.mode = if app.state.active.is_some() {
+        app.state.set_server_mode(if app.state.active.is_some() {
             Mode::Terminal
         } else {
             Mode::Navigate
-        };
+        });
         app
     }
 
@@ -2337,20 +2342,20 @@ mod tests {
             .cwd
             .clone();
         app.state.git_root_for_cwd.insert(cwd, None);
-        app.state.mode = Mode::GitMenu;
+        app.state.set_server_mode(Mode::GitMenu);
 
         handle_git_menu_key(
             &mut app.state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         assert_eq!(app.state.request_git_action, None);
-        assert_eq!(app.state.mode, Mode::GitMenu);
+        assert_eq!(app.state.server_mode(), Mode::GitMenu);
 
         handle_git_menu_key(
             &mut app.state,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -2377,7 +2382,7 @@ mod tests {
     #[test]
     fn custom_resize_key_exits_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::Resize;
+        state.set_server_mode(Mode::Resize);
         state.keybinds.resize_mode = crate::config::ActionKeybinds::prefix("g");
 
         handle_resize_key(
@@ -2385,13 +2390,13 @@ mod tests {
             TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
     fn direct_resize_key_exits_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::Resize;
+        state.set_server_mode(Mode::Resize);
         state.keybinds.resize_mode = crate::config::ActionKeybinds::direct("ctrl+alt+r");
 
         handle_resize_key(
@@ -2402,13 +2407,13 @@ mod tests {
             ),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
     fn resize_key_exit_matches_enhanced_shifted_punctuation() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::Resize;
+        state.set_server_mode(Mode::Resize);
         state.keybinds.resize_mode = crate::config::ActionKeybinds::prefix("?");
 
         handle_resize_key(
@@ -2417,7 +2422,7 @@ mod tests {
                 .with_shifted_codepoint('?' as u32),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -2457,7 +2462,7 @@ mod tests {
 
         apply_global_menu_action(&mut state, GlobalMenuAction::WhatsNew);
 
-        assert_eq!(state.mode, Mode::ReleaseNotes);
+        assert_eq!(state.server_mode(), Mode::ReleaseNotes);
         assert_eq!(
             state
                 .release_notes
@@ -2473,7 +2478,7 @@ mod tests {
     #[test]
     fn rename_modal_keyboard_and_mouse_share_actions() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameWorkspace;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "hello".into();
 
         handle_rename_key(
@@ -2487,7 +2492,7 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
         assert_eq!(state.workspaces[0].display_name(), "renamed");
         let snapshot = capture_snapshot(&state);
         assert_eq!(
@@ -2497,7 +2502,7 @@ mod tests {
 
         state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
         state.view.terminal_area = Rect::new(26, 0, 80, 20);
-        state.mode = Mode::RenameWorkspace;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "mouse".into();
         let inner = state.rename_modal_inner().unwrap();
         let (save, _, _) = crate::ui::rename_button_rects(inner);
@@ -2508,7 +2513,7 @@ mod tests {
     #[test]
     fn tab_rename_updates_captured_snapshot() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         state.name_input = "logs".into();
 
         handle_rename_key(
@@ -2526,7 +2531,7 @@ mod tests {
     #[test]
     fn rename_cancel_returns_to_terminal_when_workspace_is_active() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         state.name_input = "test".into();
 
         handle_rename_key(
@@ -2534,14 +2539,14 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
         assert!(state.name_input.is_empty());
     }
 
     #[test]
     fn rename_modal_replaces_prefilled_text_on_first_type() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         state.name_input = "2".into();
         state.name_input_replace_on_type = true;
 
@@ -2562,7 +2567,7 @@ mod tests {
     #[test]
     fn rename_modal_replaces_prefilled_text_on_paste() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         state.name_input = "2".into();
         state.name_input_replace_on_type = true;
 
@@ -2579,7 +2584,7 @@ mod tests {
     #[test]
     fn rename_modal_handles_line_editing_shortcuts() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameWorkspace;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "website zero".into();
 
         handle_rename_key(
@@ -2632,7 +2637,7 @@ mod tests {
     #[test]
     fn rename_modal_does_not_insert_modified_shortcut_chars() {
         let mut state = state_with_workspaces(&["test"]);
-        state.mode = Mode::RenameWorkspace;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "website".into();
 
         handle_rename_key(
@@ -2726,7 +2731,7 @@ mod tests {
             &mut state,
             TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()),
         );
-        assert_eq!(state.mode, Mode::KeybindHelp);
+        assert_eq!(state.server_mode(), Mode::KeybindHelp);
         assert!(!state.keybind_help.search_focused);
         assert!(state.keybind_help.query.is_empty());
 
@@ -2734,7 +2739,7 @@ mod tests {
             &mut state,
             TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()),
         );
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -2762,7 +2767,7 @@ mod tests {
                 .with_shifted_codepoint('?' as u32),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
 
         open_keybind_help(&mut state);
         handle_keybind_help_key(
@@ -2782,7 +2787,7 @@ mod tests {
     fn navigator_search_accepts_pasted_text_when_focused() {
         let mut state = state_with_workspaces(&["alpha", "beta"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = true;
         state.navigator.state_filter = Some(NavigatorStateFilter::Working);
 
@@ -2796,7 +2801,7 @@ mod tests {
     fn navigator_search_ignores_paste_when_search_is_not_focused() {
         let mut state = state_with_workspaces(&["alpha", "beta"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = false;
 
         insert_navigator_search_text(&mut state, &terminal_runtimes, "beta");
@@ -2808,7 +2813,7 @@ mod tests {
     fn navigator_empty_search_escape_returns_to_commands() {
         let mut state = state_with_workspaces(&["alpha", "beta"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = true;
 
         handle_navigator_key(
@@ -2817,7 +2822,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Navigator);
+        assert_eq!(state.server_mode(), Mode::Navigator);
         assert!(!state.navigator.search_focused);
         assert!(state.navigator.query.is_empty());
 
@@ -2839,14 +2844,14 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
     fn navigator_search_escape_blurs_then_next_escape_closes() {
         let mut state = state_with_workspaces(&["alpha", "beta"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = true;
         state.navigator.query = "a".into();
 
@@ -2856,7 +2861,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Navigator);
+        assert_eq!(state.server_mode(), Mode::Navigator);
         assert!(!state.navigator.search_focused);
         assert_eq!(state.navigator.query, "a");
 
@@ -2875,7 +2880,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Navigator);
+        assert_eq!(state.server_mode(), Mode::Navigator);
         assert!(state.navigator.search_focused);
         assert_eq!(state.navigator.query, "a");
 
@@ -2893,7 +2898,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Navigator);
+        assert_eq!(state.server_mode(), Mode::Navigator);
         assert!(!state.navigator.search_focused);
 
         handle_navigator_key(
@@ -2902,14 +2907,14 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
     fn navigator_ignores_modified_j_and_k() {
         let mut state = state_with_workspaces(&["alpha", "beta"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.selected = 1;
 
         handle_navigator_key(
@@ -2937,7 +2942,7 @@ mod tests {
 
         open_rename_active_tab(&mut state, true);
 
-        assert_eq!(state.input_mode(), Mode::RenameTab);
+        assert_eq!(state.effective_interaction_mode(), Mode::RenameTab);
         assert_eq!(state.name_input, "2");
         assert!(state.name_input_replace_on_type);
     }
@@ -3091,7 +3096,7 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
-        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.server_mode(), Mode::Navigate);
         assert_eq!(state.workspaces.len(), 2);
 
         open_confirm_close(&mut state);
@@ -3167,7 +3172,7 @@ mod tests {
         );
 
         assert_eq!(state.selected, 0);
-        assert_eq!(state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(state.effective_interaction_mode(), Mode::ConfirmClose);
 
         confirm_close_accept(&mut state);
 
@@ -3264,7 +3269,7 @@ mod tests {
         );
 
         assert_eq!(state.selected, 0);
-        assert_eq!(state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
     }
 
@@ -3293,7 +3298,7 @@ mod tests {
 
         app.focus_workspace_idx_via_api(2);
         assert_eq!(app.state.selected, 2);
-        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
 
         app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
@@ -3319,7 +3324,8 @@ mod tests {
         mark_worktree_space_member(&mut app.state, 1, "repo-key");
         app.state.active = Some(0);
         app.state.selected = 1;
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
         let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Tab {
@@ -3339,7 +3345,7 @@ mod tests {
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::CloseTab);
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
     }
 
@@ -3425,7 +3431,7 @@ mod tests {
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::Settle);
 
         assert!(app.state.pane_is_settled(0, pane_id));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -3490,7 +3496,8 @@ mod tests {
         mark_worktree_space_member(&mut app.state, 1, "repo-key");
         app.state.active = Some(0);
         app.state.selected = 1;
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let mut menu = ContextMenuState {
@@ -3521,7 +3528,7 @@ mod tests {
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
     }
@@ -3626,7 +3633,8 @@ mod tests {
             .context_menu_items(&menu)
             .contains(&crate::app::state::SETTLE_ITEM));
         app.state.context_menu = Some(menu);
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
 
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, pane_id, deadline));
@@ -3639,7 +3647,7 @@ mod tests {
         assert!(!live_items.contains(&crate::app::state::SETTLE_ITEM));
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 30));
         assert!(app.state.context_menu.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
@@ -3772,7 +3780,7 @@ mod tests {
 
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::RenamePane);
 
-        assert_eq!(app.state.input_mode(), Mode::RenamePane);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::RenamePane);
         assert_eq!(
             app.state.rename_target,
             Some(crate::app::state::RenameTarget::Pane {
@@ -3835,7 +3843,7 @@ mod tests {
 
         app.state.swap_sidebar_presentation(&mut client_b);
         assert!(app.state.context_menu.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!app.state.pane_is_snoozed(0, first_pane));
@@ -3938,7 +3946,8 @@ mod tests {
             pane_id,
             ContextMenuAction::SetTime,
         ));
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
         app.route_client_events_from(
             42,
             vec![crate::raw_input::RawInputEvent::Key(
@@ -3946,7 +3955,7 @@ mod tests {
             )],
             false,
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app
             .state
             .sidebar_snooze
@@ -3976,7 +3985,8 @@ mod tests {
             pane_id,
             ContextMenuAction::SetTime,
         ));
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
         app.route_client_events_from(
             42,
             vec![crate::raw_input::RawInputEvent::Key(

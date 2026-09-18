@@ -82,7 +82,7 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
         .sidebar_snooze
         .as_ref()
         .filter(|snooze| snooze.time_draft.is_some());
-    let title = match app.input_mode() {
+    let title = match app.effective_interaction_mode() {
         _ if snooze.is_some() => "set snooze time",
         Mode::RenameWorkspace if app.pending_workspace_create_cwd.is_some() => "new workspace",
         Mode::RenameWorkspace => "rename workspace",
@@ -818,7 +818,7 @@ pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::{state::WorktreeCreateState, AppState, Mode},
+        app::{state::WorktreeCreateState, AppState},
         workspace::Workspace,
     };
     use ratatui::{
@@ -1024,9 +1024,12 @@ mod tests {
         Rect::new(inner.x, inner.y + 2, inner.width, 1)
     }
 
-    fn rename_overlay_caret_in(mode: Mode, name: &str) -> (Position, Buffer) {
+    fn rename_overlay_caret_in(
+        overlay: crate::app::state::ClientOverlay,
+        name: &str,
+    ) -> (Position, Buffer) {
         let mut app = AppState::test_new();
-        app.mode = mode;
+        app.open_client_overlay(overlay);
         app.name_input = name.into();
 
         let mut terminal = Terminal::new(TestBackend::new(RENAME_AREA.width, RENAME_AREA.height))
@@ -1039,7 +1042,7 @@ mod tests {
     }
 
     fn rename_overlay_caret(name: &str) -> Position {
-        rename_overlay_caret_in(Mode::RenameWorkspace, name).0
+        rename_overlay_caret_in(crate::app::state::ClientOverlay::RenameWorkspace, name).0
     }
 
     fn worktree_overlay_caret(branch: &str) -> Position {
@@ -1086,7 +1089,8 @@ mod tests {
 
         // The cell under the caret has to be blank: a host terminal draws its
         // cursor by inverting that cell, so a glyph there would swallow it.
-        let (caret, buffer) = rename_overlay_caret_in(Mode::RenameWorkspace, "ab");
+        let (caret, buffer) =
+            rename_overlay_caret_in(crate::app::state::ClientOverlay::RenameWorkspace, "ab");
         assert_eq!(caret, Position::new(input.x + 3, input.y));
         assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
         assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "b");
@@ -1097,11 +1101,15 @@ mod tests {
         let input = rename_input_rect(RENAME_AREA);
         let expected = Position::new(input.x + 3, input.y);
 
-        for mode in [Mode::RenameWorkspace, Mode::RenameTab, Mode::RenamePane] {
+        for overlay in [
+            crate::app::state::ClientOverlay::RenameWorkspace,
+            crate::app::state::ClientOverlay::RenameTab,
+            crate::app::state::ClientOverlay::RenamePane,
+        ] {
             assert_eq!(
-                rename_overlay_caret_in(mode, "ab").0,
+                rename_overlay_caret_in(overlay, "ab").0,
                 expected,
-                "{mode:?} should anchor the caret like the other rename modes"
+                "{overlay:?} should anchor the caret like the other rename modes"
             );
         }
     }
@@ -1173,7 +1181,10 @@ mod tests {
 
         // The clamped cell has to stay blank as well, or the host cursor would
         // sit on a glyph and the IME would compose over it.
-        let (caret, buffer) = rename_overlay_caret_in(Mode::RenameWorkspace, &"a".repeat(200));
+        let (caret, buffer) = rename_overlay_caret_in(
+            crate::app::state::ClientOverlay::RenameWorkspace,
+            &"a".repeat(200),
+        );
         assert_eq!(caret, Position::new(last_column, input.y));
         assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
         assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "a");
@@ -1185,7 +1196,7 @@ mod tests {
         let mut app = AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         let workspace_id = app.workspaces[0].id.clone();
-        app.mode = Mode::RenameWorkspace;
+        app.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         app.rename_target = Some(crate::app::state::RenameTarget::Workspace { workspace_id });
         app.name_input = "ab".into();
 

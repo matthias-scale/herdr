@@ -104,12 +104,13 @@ impl App {
         use crossterm::event::KeyCode;
 
         let Some(picker) = self.state.agent_picker.clone() else {
-            self.state.mode = crate::app::state::Mode::Terminal;
+            self.state
+                .set_server_mode(crate::app::state::Mode::Terminal);
             return;
         };
         if key.code == KeyCode::Esc {
             self.state.agent_picker = None;
-            self.state.mode = picker.return_mode;
+            self.state.set_server_mode(picker.return_mode);
             return;
         }
         let Some(index) = (match key.code {
@@ -124,7 +125,7 @@ impl App {
             return;
         };
         self.state.agent_picker = None;
-        self.state.mode = picker.return_mode;
+        self.state.set_server_mode(picker.return_mode);
         let still_live = self
             .state
             .agent_send_candidates(None)
@@ -167,7 +168,8 @@ impl App {
                     text,
                     return_mode: crate::app::state::Mode::Terminal,
                 });
-                self.state.mode = crate::app::state::Mode::AgentPicker;
+                self.state
+                    .set_server_mode(crate::app::state::Mode::AgentPicker);
             }
         }
     }
@@ -196,7 +198,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
 
         let panes = app.state.window_pane_ids(0, 0);
@@ -228,7 +230,7 @@ mod tests {
             .collect();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 1;
         app.state.ensure_test_terminals();
@@ -350,7 +352,7 @@ mod tests {
         app.send_text_to_chosen_agent(0, panes[0], "look at this".into());
 
         assert!(app.state.agent_picker.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     /// Two or more targets earn the second step.
@@ -363,7 +365,7 @@ mod tests {
         let picker = app.state.agent_picker.as_ref().expect("agent picker");
         assert_eq!(picker.candidates.len(), 2);
         assert_eq!(picker.text, "look at this");
-        assert_eq!(app.state.mode, Mode::AgentPicker);
+        assert_eq!(app.state.server_mode(), Mode::AgentPicker);
     }
 
     /// The only agent is the one you clicked, so there is nowhere to send.
@@ -385,7 +387,7 @@ mod tests {
         app.handle_agent_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
 
         assert!(app.state.agent_picker.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     /// A digit past the last candidate is a miss, not a send to something else.
@@ -397,7 +399,7 @@ mod tests {
         app.handle_agent_picker_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::empty()));
 
         assert!(app.state.agent_picker.is_some());
-        assert_eq!(app.state.mode, Mode::AgentPicker);
+        assert_eq!(app.state.server_mode(), Mode::AgentPicker);
     }
 
     #[test]
@@ -408,7 +410,7 @@ mod tests {
         app.handle_agent_picker_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
 
         assert!(app.state.agent_picker.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[tokio::test(flavor = "current_thread")]

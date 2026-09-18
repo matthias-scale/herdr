@@ -946,7 +946,7 @@ impl App {
             previous_pane_focus: None,
             selected,
             client_overlay: state::ClientOverlay::None,
-            mode,
+            server_interaction: state::ServerInteractionState::new(mode),
             should_quit: false,
             detach_exits: no_session,
             detach_requested: false,
@@ -1650,11 +1650,11 @@ impl App {
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
         app.state.prio_panel_collapsed = snapshot.prio_panel_collapsed;
-        app.state.mode = if app.state.active.is_some() {
+        app.state.set_server_mode(if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
             state::Mode::Navigate
-        };
+        });
         app.last_focus = app.state.active.and_then(|idx| {
             app.state
                 .workspaces
@@ -1801,7 +1801,7 @@ impl App {
         // always fires on exit, so a mid-interaction flag toggle can't strand the host on ASCII.
         let active = match (
             previous_mode.wants_ascii_input(),
-            self.state.input_mode().wants_ascii_input(),
+            self.state.effective_interaction_mode().wants_ascii_input(),
         ) {
             (false, true) if self.state.switch_ascii_input_source_in_prefix => true,
             (true, false) => false,
@@ -1819,7 +1819,7 @@ impl App {
         &mut self,
         event: crate::events::AppEvent,
     ) -> bool {
-        let previous_mode = self.state.input_mode();
+        let previous_mode = self.state.effective_interaction_mode();
         let changed = self.handle_internal_event_with_render_impact(event);
         self.sync_prefix_input_source(previous_mode);
         changed
@@ -2210,13 +2210,13 @@ impl App {
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
         if !self.state.workspaces.is_empty()
-            || self.state.mode == Mode::Onboarding
+            || self.state.server_mode() == Mode::Onboarding
             || self.state.pending_workspace_create_cwd.is_some()
         {
             return false;
         }
 
-        let previous_mode = self.state.mode;
+        let previous_mode = self.state.server_mode();
         let preserve_mode = matches!(
             previous_mode,
             Mode::ReleaseNotes | Mode::ProductAnnouncement | Mode::Settings
@@ -2226,13 +2226,13 @@ impl App {
         match self.create_workspace_with_options(cwd, true) {
             Ok(_) => {
                 if preserve_mode {
-                    self.state.mode = previous_mode;
+                    self.state.set_server_mode(previous_mode);
                 }
                 true
             }
             Err(err) => {
                 tracing::error!(err = %err, "failed to create default workspace");
-                self.state.mode = Mode::Navigate;
+                self.state.set_server_mode(Mode::Navigate);
                 false
             }
         }
@@ -2255,13 +2255,13 @@ impl App {
         }
 
         if self.state.product_announcement.is_some() {
-            self.state.mode = Mode::ProductAnnouncement;
+            self.state.set_server_mode(Mode::ProductAnnouncement);
         } else {
-            self.state.mode = if self.state.active.is_some() {
+            self.state.set_server_mode(if self.state.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
-            };
+            });
         }
     }
 
@@ -2278,11 +2278,11 @@ impl App {
             }
         }
 
-        self.state.mode = if self.state.active.is_some() {
+        self.state.set_server_mode(if self.state.active.is_some() {
             Mode::Terminal
         } else {
             Mode::Navigate
-        };
+        });
     }
 
     pub(crate) fn scroll_release_notes(&mut self, delta: i16) {
@@ -2865,7 +2865,7 @@ impl App {
             None
         } else if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
-        } else if self.state.input_mode() == Mode::Terminal {
+        } else if self.state.effective_interaction_mode() == Mode::Terminal {
             Some(TerminalInputContext::Pane)
         } else {
             None
@@ -3088,7 +3088,7 @@ impl App {
                 *pomodoro_presentation,
                 std::time::Instant::now(),
             );
-            let previous_mode = self.state.input_mode();
+            let previous_mode = self.state.effective_interaction_mode();
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
@@ -3334,7 +3334,7 @@ impl App {
                         || self.route_text_to_sidebar_subgroup_picker(&text)
                         || self.try_route_text_to_home(&text)
                     {
-                    } else if self.state.input_mode() != Mode::Terminal
+                    } else if self.state.effective_interaction_mode() != Mode::Terminal
                         || self.state.notepad.focused
                         || self
                             .state
@@ -3473,7 +3473,7 @@ impl App {
             return;
         }
 
-        match self.state.input_mode() {
+        match self.state.effective_interaction_mode() {
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }
@@ -3823,7 +3823,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let release = crate::input::TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())
             .with_windows_record(crate::input::WindowsKeyRecord {
@@ -3958,7 +3958,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         (app, terminal_id, input_rx)
     }
 
@@ -4241,7 +4241,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         (app, input_rx)
     }
 
@@ -4320,12 +4320,12 @@ mod tests {
         app.state.switch_ascii_input_source_in_prefix = true;
 
         // Terminal -> Prefix emits the ASCII-switch intent.
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Prefix -> Terminal emits the restore intent.
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.sync_prefix_input_source(Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4336,13 +4336,13 @@ mod tests {
         app.state.switch_ascii_input_source_in_prefix = false;
 
         // Entering the realm with the flag off emits nothing.
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert!(drained_prefix_active(&mut app).is_empty());
 
         // Leaving the realm still emits the restore (harmless if nothing was switched), so a
         // mid-interaction flag toggle can't strand the host on ASCII.
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.sync_prefix_input_source(Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4388,14 +4388,14 @@ mod tests {
         app.state.switch_ascii_input_source_in_prefix = true;
 
         // Terminal -> Prefix switches once.
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Prefix -> sub-mode and sub-mode -> sub-mode stay in the realm: no emit.
-        app.state.mode = Mode::Navigator;
+        app.state.set_server_mode(Mode::Navigator);
         app.sync_prefix_input_source(Mode::Prefix);
-        app.state.mode = Mode::Resize;
+        app.state.set_server_mode(Mode::Resize);
         app.sync_prefix_input_source(Mode::Navigator);
         assert!(
             drained_prefix_active(&mut app).is_empty(),
@@ -4403,7 +4403,7 @@ mod tests {
         );
 
         // Leaving the realm back to the terminal restores.
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.sync_prefix_input_source(Mode::Resize);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4413,12 +4413,13 @@ mod tests {
         let mut app = test_app();
         app.state.switch_ascii_input_source_in_prefix = true;
 
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Prefix -> RenameTab leaves the realm (text entry wants the IME): restore.
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.sync_prefix_input_source(Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4465,7 +4466,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         // ctrl+b (the default prefix key) enters prefix mode → switch intent.
         app.handle_raw_input_event(raw_key(
@@ -4474,7 +4475,7 @@ mod tests {
             KeyEventKind::Press,
         ))
         .await;
-        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Esc leaves prefix mode → restore intent.
@@ -4484,8 +4485,68 @@ mod tests {
             KeyEventKind::Press,
         ))
         .await;
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn context_menu_input_source_transition_restores_on_escape() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
+            x: 2,
+            y: 2,
+            selected: state::ContextMenuAction::RenameWorkspace,
+        });
+
+        app.state
+            .open_client_overlay(state::ClientOverlay::ContextMenu);
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn local_rename_overlay_takes_keys_before_the_files_dock() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(state::DockSurface::Files);
+        app.state.dock_files_focused = true;
+        app.state
+            .open_client_overlay(state::ClientOverlay::RenameTab);
+        app.state.name_input.clear();
+        app.state.name_input_replace_on_type = false;
+
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+
+        assert_eq!(app.state.name_input, "x");
+        assert!(app.state.dock_files_filter.is_empty());
     }
 
     fn temp_config_path(name: &str) -> std::path::PathBuf {
@@ -5022,7 +5083,10 @@ mod tests {
 
         app.begin_tui_workspace_create("test.workspace.create");
 
-        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
+        assert_eq!(
+            app.state.effective_interaction_mode(),
+            Mode::RenameWorkspace
+        );
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(!app.ensure_default_workspace());
         assert!(app.state.workspaces.is_empty());
@@ -5542,7 +5606,7 @@ mod tests {
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         assert!(app.state.release_notes.is_none());
         assert!(app.state.latest_release_notes_available);
 
@@ -5579,7 +5643,7 @@ mod tests {
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
-        assert_eq!(app.state.mode, Mode::ProductAnnouncement);
+        assert_eq!(app.state.server_mode(), Mode::ProductAnnouncement);
         assert_eq!(
             app.state
                 .product_announcement
@@ -5661,7 +5725,7 @@ mod tests {
         );
         assert!(app.last_pane_click.is_some());
 
-        app.state.mode = Mode::Copy;
+        app.state.set_server_mode(Mode::Copy);
         app.state.selection = Some(crate::selection::Selection::range(
             selection_pane,
             0,
@@ -6501,7 +6565,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let handled = app
             .handle_raw_input_event(raw_key(
@@ -6525,7 +6589,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         for kind in [
             KeyEventKind::Press,
@@ -6604,7 +6668,7 @@ mod tests {
 
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.outer_terminal_focus = Some(false);
         let focused_pane = app.state.workspaces[0].focused_pane_id().unwrap();
 
@@ -6758,7 +6822,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.last_focus = Some((0, previous_pane));
 
         assert!(app.state.focus_pane_in_workspace(0, next_pane));
@@ -6813,7 +6877,7 @@ mod tests {
     #[tokio::test]
     async fn repeat_key_events_are_ignored_outside_terminal_mode() {
         let mut app = test_app();
-        app.state.mode = Mode::ReleaseNotes;
+        app.state.set_server_mode(Mode::ReleaseNotes);
         app.state.release_notes = Some(release_notes_state());
 
         let handled = app
@@ -6825,7 +6889,7 @@ mod tests {
             .await;
 
         assert!(!handled);
-        assert_eq!(app.state.mode, Mode::ReleaseNotes);
+        assert_eq!(app.state.server_mode(), Mode::ReleaseNotes);
         assert!(app.state.release_notes.is_some());
     }
 
@@ -6835,7 +6899,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::ReleaseNotes;
+        app.state.set_server_mode(Mode::ReleaseNotes);
         app.state.release_notes = Some(release_notes_state());
 
         let press_handled = app
@@ -6868,7 +6932,7 @@ mod tests {
             .await;
 
         assert!(press_handled);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(!repeat_handled);
         assert!(!release_handled);
         assert!(next_press_handled);
@@ -7064,7 +7128,7 @@ mod tests {
         app.state.workspaces = vec![first, second];
         app.state.active = Some(0);
         app.state.selected = 1;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         let ws_idx = app.workspace_creation_source().unwrap();
         let seed_cwd = app.seed_cwd_from_workspace(ws_idx).unwrap();
@@ -7808,7 +7872,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["error"]["code"], "confirmation_required");
-        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.workspaces.len(), 2);
     }
@@ -8219,7 +8283,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let terminal_id = app.state.workspaces[0]
             .pane_state(pane_id)
@@ -8315,7 +8379,7 @@ mod tests {
         app.state.selected = 0;
 
         // Start in navigate mode.
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         // Send Ctrl+B then Esc (prefix → leave navigate mode).
         // Ctrl+B is 0x02 in raw terminal input.
@@ -8324,7 +8388,7 @@ mod tests {
         app.route_client_input(esc_bytes);
         // Esc in navigate mode should leave navigate mode.
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "Esc should leave navigate mode and return to Terminal mode"
         );
@@ -8337,7 +8401,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.detach_exits = false;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         app.route_client_events(
             vec![crate::raw_input::RawInputEvent::Text(
@@ -8347,7 +8411,7 @@ mod tests {
         );
 
         assert!(!app.state.detach_requested);
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         assert!(app.input_leases.is_empty());
     }
 
@@ -8360,7 +8424,7 @@ mod tests {
         app.state.detach_exits = false;
 
         // Start in navigate mode.
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         assert!(!app.state.detach_requested);
 
         let q_bytes = b"q".to_vec();
@@ -8371,7 +8435,7 @@ mod tests {
             "q should detach in persistence mode"
         );
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "q should leave navigate mode"
         );
@@ -8386,7 +8450,7 @@ mod tests {
         app.state.detach_exits = false;
 
         // Start in terminal mode (default after workspace creation).
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         assert!(!app.state.detach_requested);
 
         // Send Ctrl+B (prefix key, raw byte 0x02).
@@ -8394,7 +8458,7 @@ mod tests {
         app.route_client_input(prefix_bytes);
 
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Prefix,
             "prefix key should enter prefix mode"
         );
@@ -8411,7 +8475,7 @@ mod tests {
             "q should detach in persistence mode"
         );
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "q should leave navigate mode"
         );
@@ -8436,13 +8500,13 @@ last_pane = "prefix+tab"
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.keybinds = config.keybinds();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.switch_workspace_tab(0, first_second_tab);
         app.state.switch_workspace_tab(1, 0);
 
         app.route_client_input(vec![0x02, b'\t']);
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].active_tab, first_second_tab);
         assert_eq!(
@@ -8467,7 +8531,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("new-tab-status")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         // This test clicks the new-tab button, so it needs a tab row rather
         // than the shipped `Hidden` default.
         app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
@@ -8536,7 +8600,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("runtime-status")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let pane = app.state.workspaces[0].tabs[0].root_pane;
         let terminal = app.state.workspaces[0]
@@ -8570,7 +8634,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let first_terminal = app.state.workspaces[0]
             .terminal_id(first_pane)
@@ -8617,7 +8681,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let terminal = app.state.workspaces[0]
             .terminal_id(focused_pane)
@@ -8657,15 +8721,15 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.prefix_code = KeyCode::Char('l');
         app.state.prefix_mods = KeyModifiers::CONTROL;
 
         app.route_client_input(vec![0x0c]);
-        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
 
         app.route_client_input(vec![0x0c]);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![0x0c]));
     }
 
@@ -8679,7 +8743,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         // Ghostty/kitty-style Ctrl-C should be normalized back to the pane's
         // negotiated encoding instead of being forwarded verbatim.
@@ -8720,7 +8784,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         assert!(app.host_keyboard_report_all_requested());
 
@@ -8764,7 +8828,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         assert!(app.host_keyboard_report_all_requested());
 
@@ -8788,11 +8852,12 @@ last_pane = "prefix+tab"
         assert!(!app.host_keyboard_report_all_requested());
 
         assert!(app.state.focus_pane_in_workspace(0, focused));
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         assert!(app.host_keyboard_report_all_requested());
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         assert!(app.host_keyboard_report_all_requested());
-        app.state.mode = Mode::RenameWorkspace;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         assert!(!app.host_keyboard_report_all_requested());
     }
 
@@ -8807,7 +8872,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106u\x1b[106;1:2u\x1b[106;1:3u".to_vec());
 
@@ -8837,7 +8902,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events(
             vec![crate::raw_input::RawInputEvent::Text(
@@ -8862,7 +8927,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input("你".as_bytes().to_vec());
 
@@ -8884,7 +8949,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"A".to_vec());
 
@@ -8903,7 +8968,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106u".to_vec());
         app.route_client_input(b"j".to_vec());
@@ -8935,7 +9000,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events(
             vec![
@@ -8970,7 +9035,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.notepad.enabled = true;
         app.state.notepad.focused = true;
 
@@ -9001,7 +9066,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.notepad.enabled = true;
         app.state.notepad.focused = true;
         let note_before = app.state.notepad.body().to_string();
@@ -9051,7 +9116,7 @@ last_pane = "prefix+tab"
             app.state.workspaces = vec![workspace];
             app.state.active = Some(0);
             app.state.selected = 0;
-            app.state.mode = Mode::Terminal;
+            app.state.set_server_mode(Mode::Terminal);
             app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
                 ws_idx: 0,
                 tab_idx: 0,
@@ -9126,7 +9191,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events_from(
             42,
@@ -9168,7 +9233,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let record = crate::input::WindowsKeyRecord {
             key_down: true,
@@ -9245,7 +9310,7 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let (runtime, mut rx) =
             TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>15u", 2);
         app.terminal_runtimes.insert(terminal_id.clone(), runtime);
@@ -9316,7 +9381,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106u".to_vec());
         assert!(app.state.focus_pane_in_workspace(0, other_pane));
@@ -9356,7 +9421,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events_from(
             1,
@@ -9420,7 +9485,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106:74;2u\x1b[106;1:3u".to_vec());
 
@@ -9446,11 +9511,11 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[98;5u\x1b[98;5:3u".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
         assert!(rx.try_recv().is_err());
     }
 
@@ -9465,7 +9530,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[13;2u".to_vec());
 
@@ -9485,7 +9550,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"ab".to_vec());
 
@@ -9506,7 +9571,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(text.as_bytes().to_vec());
 
@@ -9531,7 +9596,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(text.as_bytes().to_vec());
 
@@ -9562,11 +9627,11 @@ last_pane = "prefix+tab"
     #[test]
     fn route_client_input_advances_onboarding_modal() {
         let mut app = test_app();
-        app.state.mode = Mode::Onboarding;
+        app.state.set_server_mode(Mode::Onboarding);
 
         app.route_client_input(b"\r".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Settings);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
         assert_eq!(
             app.state.settings.section,
             state::SettingsSection::Integrations
@@ -9579,7 +9644,8 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.state.name_input = "2".into();
         app.state.name_input_replace_on_type = true;
 
@@ -9599,7 +9665,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.home = Some(home::HomeState::default());
 
         app.route_client_events(
@@ -9629,7 +9695,7 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
         assert!(app.flush_pane_settlement_events());
 
@@ -9690,7 +9756,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_object_preview = Some(state::DockObjectRef {
             surface: state::DockSurface::Linear,
             key: "SCA-1".into(),
@@ -9718,7 +9784,7 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_hook_authority(
@@ -9748,7 +9814,8 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("old")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameWorkspace;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         app.state.rename_target = Some(state::RenameTarget::Workspace {
             workspace_id: app.state.workspaces[0].id.clone(),
         });
@@ -9778,7 +9845,8 @@ last_pane = "prefix+tab"
             y: 2,
             selected: state::ContextMenuAction::CloseWorkspace,
         });
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
 
         app.route_client_input(b"\r".to_vec());
 
@@ -9802,7 +9870,8 @@ last_pane = "prefix+tab"
     #[test]
     fn route_client_events_pastes_text_into_new_linked_worktree_modal() {
         let mut app = test_app();
-        app.state.mode = Mode::NewLinkedWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::NewLinkedWorktree);
         app.state.name_input = "generated-branch".into();
         app.state.name_input_replace_on_type = true;
         app.state.worktree_create = Some(state::WorktreeCreateState {
@@ -9845,7 +9914,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let (popup_runtime, mut popup_rx) = TerminalRuntime::test_with_channel(40, 12);
         app.install_test_popup_runtime(popup_runtime);
@@ -9878,7 +9947,7 @@ last_pane = "prefix+tab"
         );
         assert!(tiled_rx.try_recv().is_err());
 
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
         assert!(
             app.handle_raw_input_event(raw_key(
                 KeyCode::Char('y'),
@@ -9904,7 +9973,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let install_missing_popup = |app: &mut App| {
             let popup_terminal_id = crate::terminal::TerminalId::alloc();
             app.state.terminals.insert(
@@ -9945,7 +10014,7 @@ last_pane = "prefix+tab"
     #[tokio::test]
     async fn popup_mouse_motion_preserves_scrollback() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         let (popup_runtime, mut popup_rx) = TerminalRuntime::test_with_channel_and_scrollback_bytes(
             40,
@@ -9992,7 +10061,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.mouse_capture = false;
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
@@ -10042,12 +10111,12 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::ReleaseNotes;
+        app.state.set_server_mode(Mode::ReleaseNotes);
         app.state.release_notes = Some(release_notes_state());
 
         app.route_client_input(b"\x1b".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app.state.release_notes.is_none());
     }
 
@@ -10057,13 +10126,13 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
         app.state.settings.original_theme = Some(app.state.theme_name.clone());
         app.state.settings.original_palette = Some(app.state.palette.clone());
 
         app.route_client_input(b"\x1b".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -10120,7 +10189,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b]".to_vec());
 

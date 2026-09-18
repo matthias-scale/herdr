@@ -1421,7 +1421,7 @@ impl super::super::App {
     pub(crate) fn handle_sidebar_session_action_key(&mut self, key: KeyEvent) -> bool {
         if !self.state.sidebar_focused
             || !matches!(
-                self.state.input_mode(),
+                self.state.effective_interaction_mode(),
                 crate::app::Mode::Terminal | crate::app::Mode::Navigate
             )
             || !key.modifiers.is_empty()
@@ -1988,7 +1988,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.reconcile_sidebar_presentation();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         app
@@ -2655,7 +2655,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.reconcile_sidebar_presentation();
         app
     }
@@ -2851,7 +2851,7 @@ mod tests {
     async fn a_pane_keeps_its_own_keys_while_a_sidebar_row_stays_selected() {
         let mut app = app_for_mouse_test();
         app.state = crate::ui::sidebar_work_item_fixture();
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         app.state.sidebar_selected_work_group = Some("linear:SCA-3102".into());
         app.state.sidebar_focused = false;
@@ -3271,7 +3271,7 @@ mod tests {
             rect.y,
         ));
 
-        assert_eq!(app.state.mode, Mode::GlobalMenu);
+        assert_eq!(app.state.server_mode(), Mode::GlobalMenu);
     }
 
     #[test]
@@ -3360,7 +3360,7 @@ mod tests {
             menu.y + 2,
         ));
 
-        assert_eq!(app.state.mode, Mode::KeybindHelp);
+        assert_eq!(app.state.server_mode(), Mode::KeybindHelp);
     }
 
     #[test]
@@ -3380,7 +3380,7 @@ mod tests {
             menu.y + 1,
         ));
 
-        assert_eq!(app.state.mode, Mode::Settings);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
     }
 
     #[test]
@@ -3401,7 +3401,7 @@ mod tests {
         ));
 
         assert!(app.state.request_reload_config);
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
     }
 
     #[test]
@@ -3456,7 +3456,7 @@ mod tests {
 
         assert!(app.state.detach_requested);
         assert!(!app.state.should_quit);
-        assert_ne!(app.state.mode, Mode::GlobalMenu);
+        assert_ne!(app.state.server_mode(), Mode::GlobalMenu);
     }
 
     #[test]
@@ -3507,7 +3507,7 @@ mod tests {
             .detected_agent = Some(Agent::Claude);
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.reconcile_sidebar_presentation();
         let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
             .iter()
@@ -3526,7 +3526,7 @@ mod tests {
             app.state.workspaces[0].tabs[1].layout.focused(),
             second_pane
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.workspaces[0].active_tab, first_tab);
         assert_eq!(
@@ -3720,7 +3720,7 @@ mod tests {
             .detected_agent = Some(Agent::Claude);
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.reconcile_sidebar_presentation();
         assert!(app.state.workspace_agents_expanded(1));
         let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
@@ -3784,7 +3784,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.agent_panel_sort = AgentPanelSort::Priority;
         app.state.view.sidebar_rect = Rect::new(0, 0, 26, 5);
         app.state.view.terminal_area = Rect::new(26, 0, 80, 5);
@@ -3848,7 +3848,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         app.state.sidebar_agents.rows_by_agent.insert(
             "claude".into(),
@@ -3875,7 +3875,7 @@ mod tests {
             app.state.workspaces[0].tabs[second_tab].layout.focused(),
             second_pane
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -3905,7 +3905,7 @@ mod tests {
             .detected_agent = Some(Agent::Claude);
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.sidebar_collapsed = true;
         app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
         app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
@@ -3933,7 +3933,7 @@ mod tests {
             app.state.workspaces[0].tabs[1].layout.focused(),
             second_pane
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -3957,7 +3957,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.sidebar_collapsed = true;
         app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
         app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
@@ -4002,7 +4002,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.sidebar_collapsed = true;
         app.state.agent_panel_sort = AgentPanelSort::Priority;
         app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
@@ -4177,7 +4177,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let screen = Rect::new(0, 0, 106, 40);
         crate::ui::compute_view(&mut app.state, screen);
         let area = app.state.view.sidebar_rect;
@@ -4197,7 +4197,7 @@ mod tests {
             app.state.workspaces[1].tabs[0].layout.focused(),
             blocked_pane
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -4215,7 +4215,7 @@ mod tests {
                 });
         }
         app.state.active = None;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let parent = app.state.view.workspace_card_areas[0].rect;
 
@@ -4249,7 +4249,7 @@ mod tests {
                 });
         }
         app.state.active = None;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         app.state.reconcile_sidebar_presentation();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
@@ -4297,7 +4297,7 @@ mod tests {
         }
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
         let list = app.state.workspace_list_rect();
         assert!(!crate::ui::should_show_scrollbar(

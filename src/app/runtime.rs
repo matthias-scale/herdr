@@ -98,7 +98,7 @@ impl App {
         &mut self,
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
-        let previous_mode = self.state.mode;
+        let previous_mode = self.state.effective_interaction_mode();
         let stream_open = match &msg.request.method {
             crate::api::schema::Method::PaneGraphicsStreamOpen(params) => Some(params.clone()),
             _ => None,
@@ -292,7 +292,7 @@ impl App {
         {
             return true;
         }
-        let previous_mode = self.state.mode;
+        let previous_mode = self.state.effective_interaction_mode();
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let lease_key = super::input::InputLeaseKey::new(super::LOCAL_INPUT_SOURCE, &key);
@@ -404,7 +404,10 @@ impl App {
                     }
                 }
                 !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
-                    || self.state.mode.mouse_motion_changes_view()
+                    || self
+                        .state
+                        .effective_interaction_mode()
+                        .mouse_motion_changes_view()
                     || self.state.hovered_control != previous_hover
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
@@ -1581,7 +1584,7 @@ mod tests {
             .expect("test pane terminal");
         let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.terminal_runtimes.insert(terminal_id, runtime);
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
             started: crate::pomodoro::PomodoroPhase::ShortBreak,
             shown_at: Instant::now(),
@@ -1703,7 +1706,7 @@ mod tests {
             "reproduction requires a mouse-reporting pane"
         );
         app.terminal_runtimes.insert(terminal_id, runtime);
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.pomodoro.send_off = Some(crate::pomodoro::PomodoroSendOff {
             started: crate::pomodoro::PomodoroPhase::ShortBreak,
             shown_at: Instant::now(),
@@ -1752,7 +1755,7 @@ mod tests {
                 4,
             );
         app.terminal_runtimes.insert(terminal_id, runtime);
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.mouse_capture = false;
         let mouse = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -2139,7 +2142,7 @@ mod tests {
     #[tokio::test]
     async fn passive_mouse_motion_does_not_request_monolithic_render() {
         let (mut app, _) = test_app_with_pane();
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         let motion = || {
             crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
                 kind: crossterm::event::MouseEventKind::Moved,
@@ -2150,7 +2153,7 @@ mod tests {
         };
 
         assert!(!app.handle_raw_input_event(motion()).await);
-        app.state.mode = crate::app::Mode::GlobalMenu;
+        app.state.set_server_mode(crate::app::Mode::GlobalMenu);
         assert!(app.handle_raw_input_event(motion()).await);
     }
 

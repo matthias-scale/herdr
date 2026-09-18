@@ -6,7 +6,7 @@ impl App {
     pub(crate) fn handle_add_action_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.state.add_action = None;
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
             return;
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
@@ -31,7 +31,7 @@ impl App {
         }
 
         let Some(field) = self.state.add_action.as_ref().map(|action| action.field) else {
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
             return;
         };
         if key.code == KeyCode::Enter {
@@ -130,7 +130,7 @@ impl App {
         match self.persist_add_action(&draft) {
             Ok(()) => {
                 self.state.add_action = None;
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             Err(error) => {
                 if let Some(action) = self.state.add_action.as_mut() {
@@ -223,7 +223,7 @@ mod tests {
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
-        app.state.mode = Mode::AddAction;
+        app.state.set_server_mode(Mode::AddAction);
         app.state.add_action = Some(crate::app::state::AddActionState {
             name: "test".into(),
             key: "ctrl+t".into(),
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(parsed.actions[0].name, "test");
         assert_eq!(parsed.actions[0].command, "just test");
         assert!(parsed.actions[0].run_on_worktree_create);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(app.state.keybinds.user_actions.len(), 1);
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
@@ -263,7 +263,7 @@ mod tests {
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
-        app.state.mode = Mode::AddAction;
+        app.state.set_server_mode(Mode::AddAction);
         app.state.add_action = Some(crate::app::state::AddActionState {
             name: "test".into(),
             command: "just test".into(),

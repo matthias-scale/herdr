@@ -1052,7 +1052,7 @@ impl App {
                     result_path.clone(),
                 ) {
                     self.state.clear_home();
-                    self.state.mode = Mode::Terminal;
+                    self.state.set_server_mode(Mode::Terminal);
                 } else {
                     self.finish_home_worktree_hooks(plan, create, result_path, true);
                 }
@@ -1122,7 +1122,7 @@ impl App {
                     }
                 }
                 self.state.clear_home();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             Err(error) => {
                 let message = format!("created worktree but failed to launch agent: {error}");
@@ -1486,7 +1486,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
         assert!(app.state.home.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         shutdown_test_runtimes(&mut app);
     }
 
@@ -1966,7 +1966,7 @@ mod tests {
     fn worktree_create_and_open_dialogs_reject_linked_child_source() {
         let mut app = app_for_worktree_tests();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),
             label: "herdr".into(),
@@ -1977,7 +1977,7 @@ mod tests {
 
         app.open_new_linked_worktree_dialog(0);
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         assert!(app.state.worktree_create.is_none());
         assert_eq!(
             app.state.config_diagnostic.as_deref(),
@@ -2042,7 +2042,8 @@ mod tests {
         let checkout_key = crate::worktree::canonical_or_original(&checkout_path);
         app.pending_api_worktree_creates.insert(checkout_key, 1);
         app.state.workspaces[0].worktree_space = Some(source_membership.clone());
-        app.state.mode = Mode::NewLinkedWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::NewLinkedWorktree);
         app.state.name_input = branch.into();
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id,
@@ -2096,7 +2097,8 @@ mod tests {
             is_linked_worktree: false,
         };
         app.state.workspaces[0].worktree_space = Some(source_membership.clone());
-        app.state.mode = Mode::OpenExistingWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(WorktreeOpenState {
             source_workspace_id,
             source_existing_membership: Some(source_membership),
@@ -2481,7 +2483,10 @@ mod tests {
 
         app.open_new_linked_worktree_dialog(0);
 
-        assert_eq!(app.state.input_mode(), Mode::NewLinkedWorktree);
+        assert_eq!(
+            app.state.effective_interaction_mode(),
+            Mode::NewLinkedWorktree
+        );
         assert!(app.state.config_diagnostic.is_none());
         let create = app.state.worktree_create.as_ref().unwrap();
         assert_eq!(create.source_checkout_path, bare);

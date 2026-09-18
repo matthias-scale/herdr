@@ -1556,7 +1556,7 @@ pub(crate) struct SidebarPresentationState {
 }
 
 /// The client-owned overlay tag. Server-owned full-screen modes never enter
-/// this enum and remain in `AppState::mode`.
+/// this enum and remain in `AppState::server_interaction`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ClientOverlay {
     #[default]
@@ -1585,6 +1585,12 @@ impl ClientOverlay {
             Self::ContextMenu => Some(Mode::ContextMenu),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeOwner {
+    Server,
+    Client(ClientOverlay),
 }
 
 /// Attach-local overlay state. `AppState` keeps matching active slots because
@@ -2614,6 +2620,38 @@ impl Default for AddActionState {
 }
 
 impl Mode {
+    /// Classify every mode by the state owner that may store it. Keep this
+    /// match exhaustive so a new mode cannot silently acquire an owner.
+    fn owner(self) -> ModeOwner {
+        match self {
+            Self::RenameWorkspace => ModeOwner::Client(ClientOverlay::RenameWorkspace),
+            Self::RenameTab => ModeOwner::Client(ClientOverlay::RenameTab),
+            Self::RenamePane => ModeOwner::Client(ClientOverlay::RenamePane),
+            Self::NewLinkedWorktree => ModeOwner::Client(ClientOverlay::NewLinkedWorktree),
+            Self::OpenExistingWorktree => ModeOwner::Client(ClientOverlay::OpenExistingWorktree),
+            Self::ConfirmRemoveWorktree => ModeOwner::Client(ClientOverlay::ConfirmRemoveWorktree),
+            Self::ConfirmClose => ModeOwner::Client(ClientOverlay::ConfirmClose),
+            Self::ContextMenu => ModeOwner::Client(ClientOverlay::ContextMenu),
+            Self::Onboarding
+            | Self::ReleaseNotes
+            | Self::ProductAnnouncement
+            | Self::Navigate
+            | Self::Prefix
+            | Self::Copy
+            | Self::Terminal
+            | Self::Resize
+            | Self::GitMenu
+            | Self::AddAction
+            | Self::Settings
+            | Self::GlobalMenu
+            | Self::KeybindHelp
+            | Self::Navigator
+            | Self::CommandPalette
+            | Self::WorkLinkPicker
+            | Self::AgentPicker => ModeOwner::Server,
+        }
+    }
+
     pub(crate) fn mouse_motion_changes_view(self) -> bool {
         matches!(
             self,
@@ -2653,6 +2691,23 @@ impl Mode {
                 | Mode::WorkLinkPicker
                 | Mode::AgentPicker
         )
+    }
+}
+
+/// The raw server-owned mode. The contained `Mode` stays private to this
+/// module so consumers must choose between server state and client-effective
+/// interaction explicitly.
+pub(crate) struct ServerInteractionState {
+    mode: Mode,
+}
+
+impl ServerInteractionState {
+    pub(crate) fn new(mode: Mode) -> Self {
+        assert!(
+            matches!(mode.owner(), ModeOwner::Server),
+            "client-owned overlay cannot be stored as the server mode"
+        );
+        Self { mode }
     }
 }
 
@@ -3969,10 +4024,9 @@ pub struct AppState {
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
     /// Overlay discriminator for the client presentation currently being
-    /// handled or rendered. This is swapped with `ClientOverlayState::kind`;
-    /// `mode` remains server-owned.
+    /// handled or rendered. This is swapped with `ClientOverlayState::kind`.
     pub(crate) client_overlay: ClientOverlay,
-    pub mode: Mode,
+    pub(crate) server_interaction: ServerInteractionState,
     /// Stable workspace identity captured when the close confirmation opens.
     pub(crate) confirm_close_workspace_id: Option<String>,
     /// Stable target for an existing-object rename. Creation dialogs use their
@@ -5501,8 +5555,18 @@ impl AppState {
         );
     }
 
-    pub(crate) fn input_mode(&self) -> Mode {
-        self.client_overlay.mode().unwrap_or(self.mode)
+    pub(crate) fn server_mode(&self) -> Mode {
+        self.server_interaction.mode
+    }
+
+    pub(crate) fn set_server_mode(&mut self, mode: Mode) {
+        self.server_interaction = ServerInteractionState::new(mode);
+    }
+
+    pub(crate) fn effective_interaction_mode(&self) -> Mode {
+        self.client_overlay
+            .mode()
+            .unwrap_or(self.server_interaction.mode)
     }
 
     pub(crate) fn open_client_overlay(&mut self, overlay: ClientOverlay) {
@@ -5571,10 +5635,19 @@ impl AppState {
         }
 
         if self.sidebar_snooze.as_ref().is_some_and(|snooze| {
-            self.workspaces
+            let target = self
+                .workspaces
                 .iter()
-                .find(|workspace| workspace.id == snooze.target.workspace_id)
-                .is_none_or(|workspace| workspace.pane_state(snooze.target.pane_id).is_none())
+                .enumerate()
+                .find(|(_, workspace)| workspace.id == snooze.target.workspace_id)
+                .and_then(|(ws_idx, workspace)| {
+                    workspace
+                        .pane_state(snooze.target.pane_id)
+                        .map(|_| (ws_idx, snooze.target.pane_id))
+                });
+            target.is_none_or(|(ws_idx, pane_id)| {
+                !self.pane_is_snoozed(ws_idx, pane_id) && !self.pane_can_snooze(ws_idx, pane_id)
+            })
         }) {
             self.sidebar_snooze = None;
         }
@@ -6441,7 +6514,7 @@ impl AppState {
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        self.mode == Mode::Terminal
+        self.effective_interaction_mode() == Mode::Terminal
             && self
                 .active
                 .and_then(|idx| self.focused_runtime_in_workspace(terminal_runtimes, idx))
@@ -6640,7 +6713,7 @@ impl AppState {
             previous_pane_focus: None,
             selected: 0,
             client_overlay: ClientOverlay::None,
-            mode: Mode::Navigate,
+            server_interaction: ServerInteractionState::new(Mode::Navigate),
             confirm_close_workspace_id: None,
             rename_target: None,
             should_quit: false,
@@ -7734,7 +7807,7 @@ mod tests {
         app.workspaces = vec![crate::workspace::Workspace::test_new("context-menu")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let workspace_id = app.workspaces[0].id.clone();
         let tab_id = crate::workspace::public_tab_id_for_number(
@@ -7765,13 +7838,13 @@ mod tests {
 
         app.swap_sidebar_presentation(&mut second_client);
         assert!(app.context_menu.is_none());
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert_eq!(app.client_overlay, ClientOverlay::None);
         app.swap_sidebar_presentation(&mut second_client);
 
         app.swap_sidebar_presentation(&mut first_client);
-        assert_eq!(app.input_mode(), Mode::ContextMenu);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.effective_interaction_mode(), Mode::ContextMenu);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         let menu = app.context_menu.as_ref().expect("first client's menu");
         assert_eq!(
             menu.kind,
@@ -7795,7 +7868,7 @@ mod tests {
         app.workspaces = vec![crate::workspace::Workspace::test_new("client-modal")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let workspace_id = app.workspaces[0].id.clone();
         let tab_id = crate::workspace::public_tab_id_for_number(
             &workspace_id,
@@ -7814,7 +7887,7 @@ mod tests {
         app.swap_sidebar_presentation(&mut client_a);
 
         app.swap_sidebar_presentation(&mut client_b);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert!(app.rename_target.is_none());
         assert!(app.name_input.is_empty());
         app.context_menu = Some(ContextMenuState {
@@ -7834,13 +7907,13 @@ mod tests {
         });
         app.open_client_overlay(ClientOverlay::ContextMenu);
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 30));
-        assert_eq!(app.input_mode(), Mode::ContextMenu);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.effective_interaction_mode(), Mode::ContextMenu);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         app.swap_sidebar_presentation(&mut client_b);
 
         app.swap_sidebar_presentation(&mut client_a);
-        assert_eq!(app.input_mode(), Mode::RenameTab);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.effective_interaction_mode(), Mode::RenameTab);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert_eq!(app.name_input, "client a draft");
         assert!(matches!(
             app.rename_target,
@@ -7855,7 +7928,7 @@ mod tests {
         app.workspaces = vec![crate::workspace::Workspace::test_new("client-overlay")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let workspace_id = app.workspaces[0].id.clone();
         let mut client_a = SidebarPresentationState::default();
         let mut client_b = SidebarPresentationState::default();
@@ -7878,7 +7951,7 @@ mod tests {
         app.swap_sidebar_presentation(&mut client_b);
 
         app.swap_sidebar_presentation(&mut client_a);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert!(app.worktree_create.is_none());
         app.open_client_overlay(ClientOverlay::RenameWorkspace);
         app.rename_target = Some(RenameTarget::Workspace {
@@ -7886,13 +7959,13 @@ mod tests {
         });
         app.name_input = "client a rename".into();
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 30));
-        assert_eq!(app.input_mode(), Mode::RenameWorkspace);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.effective_interaction_mode(), Mode::RenameWorkspace);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         app.swap_sidebar_presentation(&mut client_a);
 
         app.swap_sidebar_presentation(&mut client_b);
-        assert_eq!(app.input_mode(), Mode::NewLinkedWorktree);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.effective_interaction_mode(), Mode::NewLinkedWorktree);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert_eq!(app.name_input, "feature/client-b-draft");
         let draft = app
             .worktree_create
@@ -7908,7 +7981,7 @@ mod tests {
         app.workspaces = vec![crate::workspace::Workspace::test_new("client-overlay")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let workspace_id = app.workspaces[0].id.clone();
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let target = PaneFocusTarget {
@@ -7927,7 +8000,7 @@ mod tests {
         app.swap_sidebar_presentation(&mut client_a);
 
         app.swap_sidebar_presentation(&mut client_b);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert!(app.confirm_close_workspace_id.is_none());
         assert!(app.sidebar_settled_menu_target.is_none());
         assert!(!app.sidebar_settled_menu_delete_armed);
@@ -7935,8 +8008,8 @@ mod tests {
         app.swap_sidebar_presentation(&mut client_b);
 
         app.swap_sidebar_presentation(&mut client_a);
-        assert_eq!(app.input_mode(), Mode::ConfirmClose);
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.effective_interaction_mode(), Mode::ConfirmClose);
+        assert_eq!(app.server_mode(), Mode::Terminal);
         assert_eq!(
             app.confirm_close_workspace_id.as_deref(),
             Some(workspace_id.as_str())
@@ -7953,7 +8026,7 @@ mod tests {
             app.workspaces = vec![crate::workspace::Workspace::test_new("server-mode")];
             app.active = Some(0);
             app.selected = 0;
-            app.mode = server_mode;
+            app.set_server_mode(server_mode);
             app.add_action = (server_mode == Mode::AddAction).then(|| AddActionState {
                 name: "keep this draft".into(),
                 command: "cargo test".into(),
@@ -8006,7 +8079,7 @@ mod tests {
             app.swap_sidebar_presentation(&mut client_a);
             app.swap_sidebar_presentation(&mut client_b);
 
-            assert_eq!(app.mode, server_mode);
+            assert_eq!(app.server_mode(), server_mode);
             assert_eq!(app.add_action, expected_draft);
             assert_eq!(app.client_overlay, ClientOverlay::None);
             assert!(app.context_menu.is_none());

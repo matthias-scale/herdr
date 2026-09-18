@@ -981,16 +981,17 @@ fn row_control_pane(
     tab: bool,
 ) -> Option<(crate::layout::PaneId, bool)> {
     let target = entry.local_target()?;
-    if app.pane_is_snoozed(target.ws_idx, target.pane_id)
-        && !app.pane_is_settled(target.ws_idx, target.pane_id)
-    {
+    if !app.pane_can_snooze(target.ws_idx, target.pane_id) {
+        return None;
+    }
+    if app.pane_is_snoozed(target.ws_idx, target.pane_id) {
         return Some((target.pane_id, false));
     }
     let pane_id = selected_local_row_pane(app, entry, tab)?;
-    if app.pane_is_settled(target.ws_idx, pane_id) {
-        None
-    } else {
+    if app.pane_can_snooze(target.ws_idx, pane_id) {
         Some((pane_id, !app.pane_is_snoozed(target.ws_idx, pane_id)))
+    } else {
+        None
     }
 }
 
@@ -5575,7 +5576,7 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
         .map(|(key, _)| key.clone())
         .collect::<std::collections::HashSet<_>>();
 
-    let visible_group_idx = if matches!(app.mode, Mode::Navigate) {
+    let visible_group_idx = if matches!(app.server_mode(), Mode::Navigate) {
         Some(app.selected)
     } else {
         app.active
@@ -7074,7 +7075,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         return;
     }
 
-    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let is_navigating = matches!(app.server_mode(), Mode::Navigate);
 
     let p = &app.palette;
     fill_sidebar_background(frame, area, p);
@@ -7467,7 +7468,7 @@ pub(super) fn render_sidebar(
 ) {
     let p = &app.palette;
     fill_sidebar_background(frame, area, p);
-    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let is_navigating = matches!(app.server_mode(), Mode::Navigate);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {
@@ -7493,7 +7494,7 @@ pub(super) fn render_sidebar(
         let style = sidebar_footer_style(
             app,
             crate::app::state::SidebarFooterItem::Settings,
-            app.mode == Mode::Settings,
+            app.server_mode() == Mode::Settings,
             p,
         );
         frame.render_widget(Paragraph::new(Span::styled("⚙ ", style)), settings);
@@ -14882,7 +14883,7 @@ row_gap = 1
         app.workspaces = vec![active, queued];
         app.ensure_test_terminals();
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_spaces.row_gap = 1;
 
         let terminal_id = app.workspaces[0].tabs[0].panes[&active_root]
@@ -14965,7 +14966,7 @@ row_gap = 1
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         for pane_id in [root_pane, split_pane] {
             let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
                 .attached_terminal_id
@@ -15020,7 +15021,7 @@ row_gap = 1
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -15866,7 +15867,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         app.palette = crate::app::state::Palette::one_light();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 26, 20);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         let first_row = app.view.workspace_card_areas[0].rect.y;
@@ -15905,7 +15906,7 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
         app.sidebar_spaces = config.ui.sidebar.spaces;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.workspaces[0].metadata_tokens.patch(
             std::collections::HashMap::from([("hype".into(), Some("HI".into()))]),
             None,
@@ -17659,7 +17660,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
@@ -20293,7 +20294,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.ensure_test_terminals();
         app.reconcile_sidebar_presentation();
         app.active = Some(1);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 30, 10);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         let row = app.view.workspace_card_areas[0].rect.y;
@@ -20997,7 +20998,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         // Search adds one header row without changing the three-row viewport
         // this metric contract exercises.
@@ -21019,7 +21020,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         // Land on "notes" without coupling the fixture to the set of section
         // headers that precede the Spaces tree.
         app.workspace_scroll = sidebar_rows(&app)
@@ -21167,7 +21168,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
         ];
         app.active = Some(1);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.collapsed_space_keys.insert("repo-key".into());
 
         assert_eq!(
@@ -21185,7 +21186,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.active = None;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         assert_eq!(
             workspace_list_entries(&app),
             vec![WorkspaceListEntry::Workspace {
@@ -21202,7 +21203,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
         ];
-        app.mode = Mode::Navigate;
+        app.set_server_mode(Mode::Navigate);
         app.selected = 1;
         app.active = Some(1);
         app.collapsed_space_keys.insert("repo-key".into());
@@ -22791,6 +22792,60 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn attention_gated_row_hides_timer_control_and_closes_its_dropdown() {
+        let mut app = app_with_agents(&["alpha"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: app.workspaces[0].id.clone(),
+                pane_id,
+            },
+            anchor: (2, 2),
+            selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
+            time_draft: None,
+            error: None,
+        });
+        let area = Rect::new(0, 0, 60, 20);
+
+        crate::ui::compute_view(&mut app, area);
+        assert!(app.sidebar_snooze.is_none());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let targets = compute_sidebar_hover_targets(&app, area);
+        assert!(targets.iter().all(|target| {
+            target.label != "Set time"
+                && !matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+                )
+        }));
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains('◷'), "{rendered}");
+    }
+
+    #[test]
     fn settled_rows_do_not_offer_the_settle_icon_again() {
         let mut app = app_with_agents(&["alpha"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -22803,12 +22858,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert!(compute_sidebar_hover_targets(&app, area)
             .iter()
-            .all(|target| target.label != "Settle"));
+            .all(|target| {
+                target.label != "Settle"
+                    && target.label != "Set time"
+                    && !matches!(
+                        target.action,
+                        Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+                    )
+            }));
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!rendered.contains('✓'), "{rendered}");
+        assert!(!rendered.contains('◷'), "{rendered}");
     }
 
     #[test]

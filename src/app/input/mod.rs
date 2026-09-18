@@ -329,7 +329,7 @@ impl App {
             return None;
         }
 
-        let input_mode = self.state.input_mode();
+        let input_mode = self.state.effective_interaction_mode();
         match input_mode {
             Mode::Terminal => return self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
@@ -377,7 +377,7 @@ impl App {
     /// Keys of the surface chooser: the card-grid shortcuts of an empty dock,
     /// the open `+` menu, and the one keypress that restores a maximised dock.
     fn handle_dock_chooser_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.input_mode() != Mode::Terminal || self.state.dock_collapsed {
+        if self.state.effective_interaction_mode() != Mode::Terminal || self.state.dock_collapsed {
             return false;
         }
         let event = key.as_key_event();
@@ -444,7 +444,7 @@ impl App {
     }
 
     fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Home)
             || !self.state.dock_home_focused
@@ -534,7 +534,7 @@ impl App {
     }
 
     fn handle_dock_diff_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Diff)
             || !self.state.dock_diff_focused
@@ -572,7 +572,7 @@ impl App {
     }
 
     fn handle_dock_agents_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Agents)
             || !self.state.dock_agents_focused
@@ -602,7 +602,7 @@ impl App {
     }
 
     fn handle_dock_hosts_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Hosts)
             || !self.state.dock_hosts_focused
@@ -971,7 +971,7 @@ impl App {
                     .is_some_and(|home| home.close_composer_or_home());
                 if close_home {
                     self.state.clear_home();
-                    self.state.mode = Mode::Terminal;
+                    self.state.set_server_mode(Mode::Terminal);
                 }
             }
             KeyCode::Char('d')
@@ -1118,7 +1118,7 @@ impl App {
                     .is_none_or(|home| home.pending_dispatch.is_none())
                 {
                     self.state.clear_home();
-                    self.state.mode = Mode::Terminal;
+                    self.state.set_server_mode(Mode::Terminal);
                 }
             }
             Err(error) => {
@@ -1135,7 +1135,7 @@ impl App {
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.state.clear_loop_run_history();
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
         }
         true
     }
@@ -1150,7 +1150,7 @@ impl App {
         let event = key.as_key_event();
         if event.code == KeyCode::Esc && event.modifiers.is_empty() {
             self.state.clear_inbox();
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
             return None;
         }
         let queue = self.state.blocked_agents();
@@ -1170,7 +1170,7 @@ impl App {
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.state.clear_inbox();
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
             return true;
         }
         let queue = self.state.blocked_agents();
@@ -1242,7 +1242,7 @@ impl App {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_symphony();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 detail.selected = detail.selected.saturating_sub(1);
@@ -1330,7 +1330,7 @@ impl App {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_usage_view();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => {
                 if let Some(view) = self.state.usage_view.as_mut() {
@@ -1829,7 +1829,7 @@ impl App {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_work_view();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
@@ -3652,7 +3652,7 @@ impl App {
                 .is_some_and(|object| object.surface == crate::app::DockSurface::Pr);
         let dock_hosted =
             !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || !(previewed || dock_hosted)
             || !self.state.dock_pr_focused
         {
@@ -3981,7 +3981,7 @@ impl App {
                 .is_some_and(|object| object.surface == crate::app::DockSurface::Linear);
         let dock_hosted = !self.state.dock_collapsed
             && self.state.dock_tab == Some(crate::app::DockSurface::Linear);
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || !(previewed || dock_hosted)
             || !self.state.dock_linear_focused
         {
@@ -4405,7 +4405,7 @@ impl App {
         // surface is saved under the old pane and the checkout opens without it.
         self.state.bind_symphony_dock_to_focused_pane(workflow);
         self.state.clear_symphony();
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
     }
 
     #[cfg(test)]
@@ -4440,7 +4440,7 @@ impl App {
         if self.try_route_text_to_home(text) {
             return;
         }
-        if self.state.input_mode() != Mode::Terminal || self.state.notepad.focused {
+        if self.state.effective_interaction_mode() != Mode::Terminal || self.state.notepad.focused {
             self.paste_into_active_text_input(text);
             return;
         }
@@ -4517,7 +4517,7 @@ impl App {
         if self.try_route_text_to_home(&text) {
             return;
         }
-        if self.state.input_mode() != Mode::Terminal {
+        if self.state.effective_interaction_mode() != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
         }
@@ -4582,7 +4582,7 @@ impl App {
         if self.try_route_text_to_home(&text) {
             return;
         }
-        if self.state.input_mode() != Mode::Terminal {
+        if self.state.effective_interaction_mode() != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
         }
@@ -4655,7 +4655,7 @@ impl App {
                 return true;
             }
         }
-        match self.state.input_mode() {
+        match self.state.effective_interaction_mode() {
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
                 true
@@ -4955,8 +4955,10 @@ impl App {
             return;
         }
 
-        if matches!(self.state.input_mode(), Mode::Terminal | Mode::Navigate)
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if matches!(
+            self.state.effective_interaction_mode(),
+            Mode::Terminal | Mode::Navigate
+        ) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             let notifications = self.state.view.notification_hit_area;
             if self
@@ -5449,12 +5451,13 @@ impl App {
     }
 
     fn focus_pane_before_mouse_press(&mut self, mouse: MouseEvent) {
-        if !matches!(self.state.input_mode(), Mode::Terminal | Mode::Resize)
-            || !matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
-            )
-        {
+        if !matches!(
+            self.state.effective_interaction_mode(),
+            Mode::Terminal | Mode::Resize
+        ) || !matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+        ) {
             return;
         }
 
@@ -5502,7 +5505,7 @@ impl App {
         mouse: MouseEvent,
         open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
     ) -> bool {
-        if self.state.input_mode() != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
         {
@@ -5621,7 +5624,7 @@ impl App {
             return None;
         }
 
-        if self.state.input_mode() != Mode::Terminal {
+        if self.state.effective_interaction_mode() != Mode::Terminal {
             self.last_pane_click = None;
             return None;
         }
@@ -5740,7 +5743,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     {
         return true;
     }
-    match state.input_mode() {
+    match state.effective_interaction_mode() {
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
             true
         }
@@ -5846,7 +5849,7 @@ impl AppState {
                     .insert(new_pane.terminal.id.clone(), new_pane.terminal);
                 self.record_pane_focus_change(previous_focus, ws_idx, new_id);
                 self.mark_session_dirty();
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
             }
         }
     }
@@ -5862,7 +5865,7 @@ fn state_with_workspaces(names: &[&str]) -> AppState {
     if !state.workspaces.is_empty() {
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Navigate;
+        state.set_server_mode(Mode::Navigate);
     }
     state
 }
@@ -5877,7 +5880,7 @@ fn app_for_mouse_test() -> App {
         api_rx,
         crate::api::EventHub::default(),
     );
-    app.state.mode = Mode::Terminal;
+    app.state.set_server_mode(Mode::Terminal);
     app.state.sidebar_collapsed = false;
     // Deliberately not the shipped default (`Hidden`): these tests click on a
     // tab row, so they need one.
@@ -6028,7 +6031,7 @@ enabled = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("ub1")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -6412,7 +6415,7 @@ enabled = true
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(
             Some(crate::detect::Agent::Codex),
@@ -6540,7 +6543,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_open_surfaces.clear();
         app.state.dock_tab = None;
@@ -6601,7 +6604,7 @@ enabled = true
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
@@ -6618,7 +6621,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Scratchpad);
         app.state.dock_maximized = true;
@@ -6644,7 +6647,7 @@ enabled = true
     #[test]
     fn diff_whitespace_key_updates_session_state_and_invalidates_the_active_projection() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Diff);
         app.state.dock_diff_focused = true;
@@ -6668,7 +6671,7 @@ enabled = true
     #[test]
     fn dock_hosted_pr_keys_open_checkout_and_shared_action_menus() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Pr);
         app.state.dock_pr_focused = true;
@@ -6844,7 +6847,7 @@ enabled = true
     #[test]
     fn pr_comment_digits_only_bind_on_the_sub_tab_that_shows_comments() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Pr);
         app.state.dock_pr_focused = true;
@@ -6864,7 +6867,7 @@ enabled = true
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Linear);
         app.state.dock_linear_focused = true;
@@ -7159,7 +7162,7 @@ enabled = true
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Pr);
         app.state.dock_pr_focused = true;
@@ -7655,7 +7658,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
 
@@ -7679,7 +7682,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("claude")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let pane_id = app.state.workspaces[0]
             .focused_pane_id()
             .expect("focused pane");
@@ -7757,7 +7760,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Files);
         app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
@@ -8192,7 +8195,7 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
         let mut app = ticket_view_app();
         let area = ratatui::layout::Rect::new(0, 0, 120, 40);
         app.state.view.terminal_area = area;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let key = app
             .visible_ticket_view_keys()
             .first()
@@ -8514,7 +8517,7 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
         app.state.ensure_test_terminals();
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
@@ -8762,7 +8765,7 @@ navigate_workspace_down = "ctrl+j"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         for pane_id in &pane_ids {
             let terminal_id = app.state.workspaces[0]
                 .terminal_id(*pane_id)
@@ -9230,7 +9233,7 @@ navigate_workspace_down = "ctrl+j"
         app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
             .await;
         assert!(app.state.home.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[tokio::test]
@@ -9362,7 +9365,8 @@ navigate_workspace_down = "ctrl+j"
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.state.name_input = "2".into();
         app.state.name_input_replace_on_type = true;
 
@@ -9498,7 +9502,7 @@ navigate_workspace_down = "ctrl+j"
     #[tokio::test]
     async fn paste_routes_to_keybind_help_query_only_when_searching() {
         let mut app = test_app();
-        app.state.mode = Mode::KeybindHelp;
+        app.state.set_server_mode(Mode::KeybindHelp);
         app.handle_paste("ignored".into()).await;
         assert!(app.state.keybind_help.query.is_empty());
 
@@ -9513,7 +9517,8 @@ navigate_workspace_down = "ctrl+j"
     #[tokio::test]
     async fn paste_routes_to_new_linked_worktree_input() {
         let mut app = test_app();
-        app.state.mode = Mode::NewLinkedWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::NewLinkedWorktree);
         app.state.name_input = "generated-branch".into();
         app.state.name_input_replace_on_type = true;
         app.state.worktree_create = Some(crate::app::state::WorktreeCreateState {
@@ -9566,22 +9571,22 @@ navigate_workspace_down = "ctrl+j"
     fn modal_paste_target_is_active_only_for_text_inputs() {
         let mut state = AppState::test_new();
 
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         assert!(modal_paste_target_active(&state));
 
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = false;
         assert!(!modal_paste_target_active(&state));
         state.navigator.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
-        state.mode = Mode::KeybindHelp;
+        state.set_server_mode(Mode::KeybindHelp);
         state.keybind_help.search_focused = false;
         assert!(!modal_paste_target_active(&state));
         state.keybind_help.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
-        state.mode = Mode::ConfirmClose;
+        state.open_client_overlay(crate::app::state::ClientOverlay::ConfirmClose);
         assert!(!modal_paste_target_active(&state));
     }
 

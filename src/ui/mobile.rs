@@ -2038,7 +2038,7 @@ mod tests {
         app.ensure_test_terminals();
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
         app.view.terminal_area = Rect::new(0, 2, 40, 16);
@@ -2099,7 +2099,7 @@ mod tests {
             }
             app.active = Some(0);
             app.selected = 0;
-            app.mode = crate::app::Mode::Navigate;
+            app.set_server_mode(crate::app::Mode::Navigate);
             app.view.layout = crate::app::state::ViewLayout::Mobile;
             app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
             app.view.terminal_area = Rect::new(0, 2, width, 16);
@@ -2170,7 +2170,7 @@ mod tests {
             terminal_state.set_active_subagents(Some(3));
             app.active = Some(0);
             app.selected = 0;
-            app.mode = crate::app::Mode::Navigate;
+            app.set_server_mode(crate::app::Mode::Navigate);
             app.view.layout = crate::app::state::ViewLayout::Mobile;
             app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
             app.view.terminal_area = Rect::new(0, 2, width, 16);
@@ -2224,7 +2224,7 @@ mod tests {
         }
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 24, 2);
         app.view.terminal_area = Rect::new(0, 2, 24, 16);
@@ -2268,7 +2268,7 @@ mod tests {
         }
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 6, 2);
         app.view.terminal_area = Rect::new(0, 2, 6, 8);
@@ -2684,7 +2684,7 @@ mod tests {
             );
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.status_bar_enabled = false;
         app.mobile_width_threshold = 80;
         let runtimes = TerminalRuntimeRegistry::new();
@@ -2698,7 +2698,7 @@ mod tests {
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 4));
         assert!(app.view.visible_agent_activity_instants.is_empty());
 
-        app.mode = crate::app::Mode::Terminal;
+        app.set_server_mode(crate::app::Mode::Terminal);
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
         assert!(app.view.visible_agent_activity_instants.is_empty());
     }

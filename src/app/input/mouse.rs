@@ -155,7 +155,7 @@ impl AppState {
         mouse: MouseEvent,
     ) {
         self.forwarded_pane_input = None;
-        if self.input_mode() != Mode::Terminal
+        if self.effective_interaction_mode() != Mode::Terminal
             || self.symphony_detail.is_some()
             || self.inbox.is_some()
             || self.work_view.is_some()
@@ -223,7 +223,7 @@ impl AppState {
             self.hyperspace.toggle_paused(std::time::Instant::now());
             return None;
         }
-        if self.input_mode() == Mode::Onboarding {
+        if self.effective_interaction_mode() == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
         }
@@ -278,7 +278,7 @@ impl AppState {
             }
             return None;
         }
-        if self.input_mode() == Mode::AddAction {
+        if self.effective_interaction_mode() == Mode::AddAction {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if rect_contains(self.view.add_action_close_hit_area, mouse.column, mouse.row)
                     || rect_contains(
@@ -288,7 +288,7 @@ impl AppState {
                     )
                 {
                     self.add_action = None;
-                    self.mode = Mode::Terminal;
+                    self.set_server_mode(Mode::Terminal);
                 } else if rect_contains(self.view.add_action_save_hit_area, mouse.column, mouse.row)
                 {
                     self.request_save_add_action = true;
@@ -393,21 +393,21 @@ impl AppState {
             return None;
         }
 
-        if self.input_mode() == Mode::Terminal
+        if self.effective_interaction_mode() == Mode::Terminal
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return Some(MouseAction::FocusToastTarget);
         }
 
-        if self.input_mode() == Mode::Terminal
+        if self.effective_interaction_mode() == Mode::Terminal
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
         {
             return None;
         }
 
-        if self.input_mode() == Mode::Settings {
+        if self.effective_interaction_mode() == Mode::Settings {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
         }
 
@@ -422,7 +422,7 @@ impl AppState {
         let group_menu_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(
-                self.input_mode(),
+                self.effective_interaction_mode(),
                 Mode::Terminal | Mode::Navigate | Mode::Resize
             );
         let new_thread_anchor = crate::ui::sidebar_header_new_thread_rect(self.view.sidebar_rect);
@@ -768,7 +768,7 @@ impl AppState {
         let launcher_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(
-                self.input_mode(),
+                self.effective_interaction_mode(),
                 Mode::Terminal
                     | Mode::Navigate
                     | Mode::Resize
@@ -782,7 +782,9 @@ impl AppState {
             && mouse.row >= launcher.y
             && mouse.row < launcher.y + launcher.height;
 
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.input_mode() == Mode::GlobalMenu {
+        if matches!(mouse.kind, MouseEventKind::Moved)
+            && self.effective_interaction_mode() == Mode::GlobalMenu
+        {
             let actions = global_menu_actions(self);
             let hovered = self
                 .global_menu_item_at(mouse.column, mouse.row)
@@ -792,7 +794,7 @@ impl AppState {
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && launcher_hit {
-            if self.input_mode() == Mode::GlobalMenu {
+            if self.effective_interaction_mode() == Mode::GlobalMenu {
                 leave_modal(self);
             } else {
                 open_global_menu(self);
@@ -800,7 +802,7 @@ impl AppState {
             return None;
         }
 
-        if self.input_mode() == Mode::GlobalMenu {
+        if self.effective_interaction_mode() == Mode::GlobalMenu {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(action) = self.global_menu_item_at(mouse.column, mouse.row) {
                     apply_global_menu_action(self, action);
@@ -817,11 +819,14 @@ impl AppState {
                 mouse.column,
                 mouse.row,
             )
-            && matches!(self.input_mode(), Mode::Terminal | Mode::Navigate)
+            && matches!(
+                self.effective_interaction_mode(),
+                Mode::Terminal | Mode::Navigate
+            )
         {
             if self.repo_editor_available() {
                 self.request_open_repo_editor = true;
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
             }
             return None;
         }
@@ -832,15 +837,21 @@ impl AppState {
                 mouse.column,
                 mouse.row,
             )
-            && matches!(self.input_mode(), Mode::Terminal | Mode::Navigate)
+            && matches!(
+                self.effective_interaction_mode(),
+                Mode::Terminal | Mode::Navigate
+            )
         {
             self.add_action = Some(AddActionState::default());
-            self.mode = Mode::AddAction;
+            self.set_server_mode(Mode::AddAction);
             return None;
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && matches!(self.input_mode(), Mode::Terminal | Mode::Navigate)
+            && matches!(
+                self.effective_interaction_mode(),
+                Mode::Terminal | Mode::Navigate
+            )
         {
             if let Some(index) = self
                 .view
@@ -851,7 +862,7 @@ impl AppState {
                 })
             {
                 self.request_user_action = Some(index);
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
                 return None;
             }
         }
@@ -859,16 +870,19 @@ impl AppState {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.on_git_menu_button(mouse.column, mouse.row)
         {
-            if self.input_mode() == Mode::GitMenu {
-                self.mode = Mode::Terminal;
-            } else if matches!(self.input_mode(), Mode::Terminal | Mode::Navigate) {
+            if self.effective_interaction_mode() == Mode::GitMenu {
+                self.set_server_mode(Mode::Terminal);
+            } else if matches!(
+                self.effective_interaction_mode(),
+                Mode::Terminal | Mode::Navigate
+            ) {
                 self.git_menu = MenuListState::new(0);
-                self.mode = Mode::GitMenu;
+                self.set_server_mode(Mode::GitMenu);
             }
             return None;
         }
 
-        if self.input_mode() == Mode::GitMenu {
+        if self.effective_interaction_mode() == Mode::GitMenu {
             let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(self);
             match mouse.kind {
                 MouseEventKind::Moved => {
@@ -886,13 +900,13 @@ impl AppState {
                                 crate::app::state::GitAction::ALL.get(index).copied()
                             {
                                 self.request_git_action = Some(action);
-                                self.mode = Mode::Terminal;
+                                self.set_server_mode(Mode::Terminal);
                             }
                         } else {
-                            self.mode = Mode::Terminal;
+                            self.set_server_mode(Mode::Terminal);
                         }
                     } else if self.git_menu_row_at(mouse.column, mouse.row).is_none() {
-                        self.mode = Mode::Terminal;
+                        self.set_server_mode(Mode::Terminal);
                     }
                 }
                 _ => {}
@@ -900,7 +914,7 @@ impl AppState {
             return None;
         }
 
-        if self.input_mode() == Mode::KeybindHelp {
+        if self.effective_interaction_mode() == Mode::KeybindHelp {
             return None;
         }
 
@@ -933,7 +947,7 @@ impl AppState {
         }
 
         if in_sidebar
-            && self.input_mode() == Mode::Terminal
+            && self.effective_interaction_mode() == Mode::Terminal
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             if let Some(action) = self
@@ -959,7 +973,7 @@ impl AppState {
             }
         }
 
-        if self.input_mode() == Mode::OpenExistingWorktree {
+        if self.effective_interaction_mode() == Mode::OpenExistingWorktree {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     if let Some(open) = &mut self.worktree_open {
@@ -978,7 +992,7 @@ impl AppState {
         }
 
         if matches!(
-            self.input_mode(),
+            self.effective_interaction_mode(),
             Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
         ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
@@ -1069,7 +1083,7 @@ impl AppState {
                 self.selection_autoscroll = None;
                 self.clear_chrome_press(source_id);
 
-                if self.input_mode() == Mode::ConfirmClose {
+                if self.effective_interaction_mode() == Mode::ConfirmClose {
                     let popup = self.confirm_close_rect();
                     let inner = Rect::new(
                         popup.x + 1,
@@ -1095,7 +1109,7 @@ impl AppState {
                     return None;
                 }
 
-                if self.input_mode() == Mode::NewLinkedWorktree {
+                if self.effective_interaction_mode() == Mode::NewLinkedWorktree {
                     if let Some(inner) =
                         crate::ui::new_linked_worktree_inner_rect(self.screen_rect())
                     {
@@ -1128,7 +1142,7 @@ impl AppState {
                     return None;
                 }
 
-                if self.input_mode() == Mode::OpenExistingWorktree {
+                if self.effective_interaction_mode() == Mode::OpenExistingWorktree {
                     if let Some(open) = self.worktree_open.as_ref() {
                         if let Some(inner) = crate::ui::open_existing_worktree_inner_rect(
                             self.screen_rect(),
@@ -1191,7 +1205,7 @@ impl AppState {
                     return None;
                 }
 
-                if self.input_mode() == Mode::ConfirmRemoveWorktree {
+                if self.effective_interaction_mode() == Mode::ConfirmRemoveWorktree {
                     if let Some(popup) = crate::ui::remove_worktree_popup_rect(self.screen_rect()) {
                         let inner = Rect::new(
                             popup.x + 1,
@@ -1236,7 +1250,7 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|snooze| snooze.time_draft.is_some())
                     || matches!(
-                        self.input_mode(),
+                        self.effective_interaction_mode(),
                         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
                     )
                 {
@@ -1258,7 +1272,7 @@ impl AppState {
                     return Some(MouseAction::RenameModal(action));
                 }
 
-                if self.input_mode() == Mode::ContextMenu {
+                if self.effective_interaction_mode() == Mode::ContextMenu {
                     let action = self.context_menu_action_at(mouse.column, mouse.row);
                     if let Some(menu) = self.context_menu.take() {
                         if let Some(action) = action {
@@ -1575,8 +1589,8 @@ impl AppState {
                                 );
                             }
                         }
-                        if self.input_mode() != Mode::Terminal {
-                            self.mode = Mode::Terminal;
+                        if self.effective_interaction_mode() != Mode::Terminal {
+                            self.set_server_mode(Mode::Terminal);
                         }
                         return None;
                     }
@@ -1588,7 +1602,7 @@ impl AppState {
 
                 if let Some(direction) = self.pane_toggle_at(mouse.column, mouse.row) {
                     self.request_pane_toggle = Some(direction);
-                    self.mode = Mode::Terminal;
+                    self.set_server_mode(Mode::Terminal);
                     return None;
                 }
                 if self.on_tab_scroll_left_button(mouse.column, mouse.row) {
@@ -1624,7 +1638,7 @@ impl AppState {
                         open_new_tab_dialog(self);
                     } else {
                         self.request_new_tab = true;
-                        self.mode = Mode::Terminal;
+                        self.set_server_mode(Mode::Terminal);
                     }
                     return None;
                 }
@@ -1640,21 +1654,20 @@ impl AppState {
                         if let Some(agent_ref) = self.collapsed_remote_agent_target_at(mouse.row) {
                             self.sidebar_selected_work_group = None;
                             self.select_remote_agent_row(agent_ref.clone());
-                            self.mode = Mode::Terminal;
                             return Some(MouseAction::OpenFleetHost {
                                 name: agent_ref.host,
                                 focus_agent: Some(agent_ref.agent),
                             });
                         }
                         if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
-                            self.mode = Mode::Terminal;
+                            self.set_server_mode(Mode::Terminal);
                             return Some(MouseAction::FocusWorkspace { ws_idx: idx });
                         }
 
                         if let Some((ws_idx, pane_id)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
-                            self.mode = Mode::Terminal;
+                            self.set_server_mode(Mode::Terminal);
                             return Some(MouseAction::FocusPane { ws_idx, pane_id });
                         }
                         return None;
@@ -1767,7 +1780,7 @@ impl AppState {
                     if self.sidebar_settled_target_at(mouse.row).is_some() {
                         self.sidebar_selected_work_group = None;
                         self.sidebar_selected_settled = None;
-                        self.mode = Mode::Terminal;
+                        self.set_server_mode(Mode::Terminal);
                         if let Some((ws_idx, tab_idx)) =
                             self.tab_target_at(mouse.row).or_else(|| {
                                 self.agent_detail_target_at(mouse.row)
@@ -1790,19 +1803,19 @@ impl AppState {
                     if let Some((ws_idx, _tab_idx, pane_id)) = self.sidebar_local_pane_at(mouse.row)
                     {
                         self.selected = ws_idx;
-                        self.mode = Mode::Terminal;
+                        self.set_server_mode(Mode::Terminal);
                         return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
 
                     if let Some((ws_idx, _tab_idx, pane_id)) =
                         self.agent_detail_target_at(mouse.row)
                     {
-                        self.mode = Mode::Terminal;
+                        self.set_server_mode(Mode::Terminal);
                         return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
-                    if self.input_mode() != Mode::Terminal {
-                        self.mode = Mode::Terminal;
+                    if self.effective_interaction_mode() != Mode::Terminal {
+                        self.set_server_mode(Mode::Terminal);
                     }
                     // Clicking pane content aims the keyboard at the shell, and
                     // it reaches here even when that pane already held focus, so
@@ -1838,8 +1851,8 @@ impl AppState {
                         && mouse.row < p.rect.y + p.rect.height
                 }) {
                     let id = info.id;
-                    if self.input_mode() != Mode::Terminal {
-                        self.mode = Mode::Terminal;
+                    if self.effective_interaction_mode() != Mode::Terminal {
+                        self.set_server_mode(Mode::Terminal);
                     }
                     self.release_surface_focus_to_pane();
                     return self.mouse_pane_focus_action(id);
@@ -2100,7 +2113,7 @@ impl AppState {
                             },
                     }) => {
                         if self.active == Some(ws_idx) {
-                            self.mode = Mode::Terminal;
+                            self.set_server_mode(Mode::Terminal);
                             return Some(MouseAction::MoveTab {
                                 ws_idx,
                                 source_tab_idx,
@@ -2167,7 +2180,9 @@ impl AppState {
             }
 
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
-                if self.input_mode() == Mode::Terminal && !in_sidebar && !in_dock =>
+                if self.effective_interaction_mode() == Mode::Terminal
+                    && !in_sidebar
+                    && !in_dock =>
             {
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
@@ -2235,7 +2250,7 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Moved if self.input_mode() == Mode::ContextMenu => {
+            MouseEventKind::Moved if self.effective_interaction_mode() == Mode::ContextMenu => {
                 let hovered = self.context_menu_item_at(mouse.column, mouse.row);
                 if let Some(menu) = &mut self.context_menu {
                     if let Some(action) = hovered {
@@ -2245,7 +2260,9 @@ impl AppState {
             }
 
             MouseEventKind::Moved
-                if self.input_mode() == Mode::Terminal && !in_sidebar && !in_dock =>
+                if self.effective_interaction_mode() == Mode::Terminal
+                    && !in_sidebar
+                    && !in_dock =>
             {
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     let _ = self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
@@ -2491,7 +2508,7 @@ impl AppState {
     }
 
     fn handle_mobile_mouse(&mut self, mouse: MouseEvent) -> MobileMouseResult {
-        if self.input_mode() == Mode::Navigate {
+        if self.effective_interaction_mode() == Mode::Navigate {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     self.scroll_mobile_switcher_at(mouse.column, mouse.row, -1);
@@ -2508,13 +2525,16 @@ impl AppState {
             return MobileMouseResult::Ignored;
         }
 
-        if self.input_mode() != Mode::Navigate {
-            if !matches!(self.input_mode(), Mode::Terminal | Mode::Resize) {
+        if self.effective_interaction_mode() != Mode::Navigate {
+            if !matches!(
+                self.effective_interaction_mode(),
+                Mode::Terminal | Mode::Resize
+            ) {
                 return MobileMouseResult::Ignored;
             }
             if rect_contains(self.view.mobile_menu_hit_area, mouse.column, mouse.row) {
                 self.begin_workspace_picker_presentation();
-                self.mode = Mode::Navigate;
+                self.set_server_mode(Mode::Navigate);
                 return MobileMouseResult::Consumed;
             }
             return MobileMouseResult::Ignored;
@@ -2609,7 +2629,7 @@ impl AppState {
 
     fn close_workspace_picker(&mut self) {
         self.end_workspace_picker_presentation();
-        self.mode = Mode::Terminal;
+        self.set_server_mode(Mode::Terminal);
     }
 
     fn scroll_mobile_switcher_at(&mut self, _col: u16, _row: u16, delta: i16) {
@@ -2839,7 +2859,7 @@ impl AppState {
     fn mode_bar_covers_tab_row(&self, col: u16, row: u16) -> bool {
         self.tab_bar_position == crate::config::TabBarPositionConfig::Bottom
             && matches!(
-                self.input_mode(),
+                self.effective_interaction_mode(),
                 Mode::Navigate | Mode::Prefix | Mode::Copy | Mode::Resize
             )
             && self.on_tab_bar(col, row)
@@ -3382,7 +3402,7 @@ impl AppState {
         tab_press: Option<TabPressState>,
     ) -> Option<MouseAction> {
         if let Some(press) = workspace_press {
-            self.mode = Mode::Terminal;
+            self.set_server_mode(Mode::Terminal);
             if let Some(target) = self.sidebar_settled_target_at(press.start_row) {
                 return Some(MouseAction::FocusLiveSettledPane(target));
             }
@@ -3392,11 +3412,11 @@ impl AppState {
         }
         if let Some(press) = tab_press {
             if let Some(target) = self.sidebar_settled_target_at(press.start_row) {
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
                 return Some(MouseAction::FocusLiveSettledPane(target));
             }
             if self.active == Some(press.ws_idx) {
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
                 return Some(MouseAction::FocusTab {
                     tab_idx: press.tab_idx,
                 });
@@ -3551,7 +3571,7 @@ impl AppState {
             }
         }
 
-        if self.input_mode() != Mode::Terminal
+        if self.effective_interaction_mode() != Mode::Terminal
             || in_sidebar
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
         {
@@ -4169,7 +4189,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         let target_col = viewport.x + 2;
@@ -4197,7 +4217,7 @@ mod tests {
             app.state.sidebar_selected_remote_agent.as_ref(),
             Some(&agent_ref)
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -4207,7 +4227,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.ensure_test_terminals();
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 60, 20));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         let target = (viewport.y..viewport.bottom())
@@ -5134,7 +5154,7 @@ mod tests {
     fn seeded_wide_sidebar_app() -> App {
         let mut app = app_for_mouse_test();
         app.state = crate::ui::sidebar_work_item_fixture();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.sidebar_collapsed = false;
         app.state.sidebar_min_width = 18;
         app.state.sidebar_max_width = 60;
@@ -5297,7 +5317,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toggle_workspace_agent_disclosure(1);
         let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
@@ -5332,7 +5352,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toggle_workspace_agent_disclosure(1);
         let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
@@ -5372,7 +5392,7 @@ mod tests {
                 snooze_target: Some(target.pane_id),
             }
         );
-        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
         assert!(
             menu.items().contains(&crate::app::state::STAR_ITEM),
             "an unstarred session offers Star, got {:?}",
@@ -5393,14 +5413,14 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
         let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
 
         for pane_id in [active_pane, snoozed_pane] {
-            app.state.mode = Mode::Terminal;
+            app.state.set_server_mode(Mode::Terminal);
             app.state.close_client_overlay();
             app.state.context_menu = None;
             let rect = crate::ui::compute_tab_card_areas(&app.state, sidebar)
@@ -5433,7 +5453,7 @@ mod tests {
                 }) if target == pane_id
             ));
 
-            app.state.mode = Mode::Terminal;
+            app.state.set_server_mode(Mode::Terminal);
             app.state.close_client_overlay();
             app.state.context_menu = None;
             app.state.handle_mouse(
@@ -5473,7 +5493,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toggle_workspace_agent_disclosure(1);
         app.state.workspaces[1].tabs[0].starred = true;
         let sidebar = Rect::new(0, 0, 40, 16);
@@ -5510,7 +5530,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
         let sidebar = Rect::new(0, 0, 40, 16);
@@ -5549,7 +5569,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
         let row = crate::ui::compute_sidebar_row_areas(&app.state, sidebar)
@@ -5705,7 +5725,7 @@ mod tests {
             Some(crate::app::DockSurface::Symphony),
             "opening a job brings its surface up"
         );
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.dock_rect = Rect::new(60, 0, 40, 20);
         app.state.view.dock_body_rect = Rect::new(60, 2, 40, 18);
         let link =
@@ -5849,7 +5869,7 @@ mod tests {
     #[test]
     fn clicking_the_dock_handle_toggles_it_without_touching_pane_focus() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = true;
         app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.view.dock_rect = Rect::new(79, 0, 1, 20);
@@ -5875,7 +5895,7 @@ mod tests {
     #[test]
     fn clicking_a_dock_tab_selects_only_that_dock_tab() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_open_surfaces = vec![
             crate::app::DockSurface::Home,
@@ -5905,7 +5925,7 @@ mod tests {
     #[test]
     fn files_header_clicks_route_sort_and_refresh_actions() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Files);
         app.state.view.dock_rect = Rect::new(80, 0, 20, 20);
@@ -5941,7 +5961,7 @@ mod tests {
     #[test]
     fn clicking_an_empty_panel_card_opens_it_as_the_first_tab() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let home_index = crate::app::DockSurface::CARDS
@@ -5966,7 +5986,7 @@ mod tests {
     #[test]
     fn a_work_link_in_the_context_tab_copies_the_same_value_the_panel_would() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.workspaces = vec![Workspace::test_new("links")];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
@@ -6014,7 +6034,7 @@ mod tests {
         // The hand-placed rects above cannot catch a geometry mistake, and one shipped:
         // the handle covered the whole open dock, so every click inside it toggled.
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_open_surfaces = vec![
             crate::app::DockSurface::Home,
@@ -6242,7 +6262,7 @@ mod tests {
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
         app.state.dock_tab = Some(crate::app::DockSurface::Files);
@@ -6280,7 +6300,7 @@ mod tests {
     #[test]
     fn dragging_the_dock_divider_resizes_and_persists_the_width() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_width = 30;
         app.state.view.terminal_area = Rect::new(0, 0, 50, 20);
@@ -6303,7 +6323,7 @@ mod tests {
     #[test]
     fn ac26_info_panel_link_click_copies_without_opening() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
             rect: Rect::new(60, 5, 30, 1),
             copy_value: "MAT-124".into(),
@@ -6367,7 +6387,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         app.state.mouse_scroll_lines = 7;
 
@@ -6405,7 +6425,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         assert!(
             app.state.mouse_capture,
@@ -6464,7 +6484,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         app.state.toggle_symphony();
         let event = mouse(
@@ -6500,7 +6520,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let input = format!(
@@ -6529,7 +6549,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         let passthrough_info = app.state.pane_info_by_id(passthrough_pane).unwrap().clone();
@@ -6558,7 +6578,7 @@ mod tests {
         let row = passthrough_info.inner_rect.y + 3;
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app.state.context_menu.is_none());
         assert_eq!(
             passthrough_input.try_recv().unwrap(),
@@ -6590,7 +6610,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let pane_ids = app.state.window_pane_ids(0, 0);
         for pane_id in pane_ids.iter().copied() {
@@ -6768,7 +6788,7 @@ mod tests {
             String::from_utf8(copied).expect("utf8"),
             "https://example.com/build/logs?run=42"
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[tokio::test]
@@ -6915,7 +6935,7 @@ mod tests {
         right_click_link(&mut app, &info, line, "github");
         click_menu_item(&mut app, crate::app::state::LINK_PR_TO_WINDOW_ITEM);
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         for pane_id in panes {
             assert_eq!(
                 pane_work_context(&app, pane_id).pr_urls,
@@ -7072,7 +7092,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let info = app.state.pane_info_by_id(pane_id).unwrap().clone();
         app.state.insert_test_runtime(
@@ -7090,7 +7110,7 @@ mod tests {
             info.inner_rect.y + 3,
         ));
 
-        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
     }
 
@@ -7114,7 +7134,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
 
@@ -7133,7 +7153,7 @@ mod tests {
             ..mouse(MouseEventKind::Up(MouseButton::Right), 0, 0)
         });
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app.state.context_menu.is_none());
         assert!(app.state.right_click_passthrough.is_none());
         assert_eq!(
@@ -7210,7 +7230,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         app.state.handle_pane_mouse_only(
@@ -7247,7 +7267,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let info = app.state.view.pane_infos[0].clone();
         assert!(info.inner_rect.x > 0, "sidebar offset should be present");
@@ -7287,7 +7307,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.host_cell_size = crate::kitty_graphics::HostCellSize {
             width_px: 10,
             height_px: 20,
@@ -7331,7 +7351,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.mouse_capture = false;
         app.state.host_cell_size = crate::kitty_graphics::HostCellSize {
             width_px: 10,
@@ -7403,7 +7423,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let info = app.state.view.pane_infos[0].clone();
 
@@ -7436,7 +7456,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         app.state.right_click_passthrough_modifiers = None;
 
@@ -7449,7 +7469,7 @@ mod tests {
             )
         });
 
-        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
         assert!(app.state.right_click_passthrough.is_none());
         assert!(input_rx.try_recv().is_err());
@@ -7465,7 +7485,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 100, 20));
         let target_info = app
             .state
@@ -7516,7 +7536,7 @@ mod tests {
         );
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 100, 20));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
         assert_eq!(
             app.state
@@ -7606,7 +7626,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
@@ -7618,7 +7638,7 @@ mod tests {
             ..mouse(MouseEventKind::Down(MouseButton::Right), col, row)
         });
 
-        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
         assert!(app.state.right_click_passthrough.is_none());
         assert!(input_rx.try_recv().is_err());
@@ -7633,7 +7653,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.right_click_passthrough_modifiers = Some(KeyModifiers::CONTROL);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
@@ -7673,7 +7693,7 @@ mod tests {
             )
         });
 
-        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
         assert!(app.state.right_click_passthrough.is_none());
         assert!(input_rx.try_recv().is_err());
@@ -7724,7 +7744,8 @@ mod tests {
             y: 2,
             selected: ContextMenuAction::RenameWorkspace,
         });
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
 
         let menu = app.state.context_menu_rect().unwrap();
         app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
@@ -7785,7 +7806,7 @@ mod tests {
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
         assert!(app.state.toast.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
 
         app.state.last_pane();
 
@@ -7817,7 +7838,7 @@ mod tests {
                 pane_id: target_pane,
             }),
         });
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         let hit = app.state.view.toast_hit_area;
@@ -7855,7 +7876,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces.len(), 1);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -7886,7 +7907,8 @@ mod tests {
     #[test]
     fn clicking_open_worktree_row_selects_and_requests_open() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::OpenExistingWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(sample_worktree_open_state());
         let inner =
             crate::ui::open_existing_worktree_inner_rect(app.state.screen_rect(), 2).unwrap();
@@ -7904,7 +7926,8 @@ mod tests {
     #[test]
     fn clicking_open_worktree_buttons_requests_open_or_cancels() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::OpenExistingWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(sample_worktree_open_state());
         let inner =
             crate::ui::open_existing_worktree_inner_rect(app.state.screen_rect(), 2).unwrap();
@@ -7920,7 +7943,8 @@ mod tests {
         assert!(app.state.request_submit_worktree_open);
 
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::OpenExistingWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(sample_worktree_open_state());
         let inner =
             crate::ui::open_existing_worktree_inner_rect(app.state.screen_rect(), 2).unwrap();
@@ -7933,13 +7957,14 @@ mod tests {
         ));
 
         assert!(app.state.worktree_open.is_none());
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
     }
 
     #[test]
     fn scrolling_open_worktree_picker_moves_selection() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::OpenExistingWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(sample_worktree_open_state());
 
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, 1, 1));
@@ -7952,7 +7977,8 @@ mod tests {
     #[test]
     fn clicking_remove_worktree_buttons_requests_remove_or_cancels() {
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::ConfirmRemoveWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ConfirmRemoveWorktree);
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
             workspace_id: "issue".into(),
             repo_root: "/repo/herdr".into(),
@@ -7980,7 +8006,8 @@ mod tests {
         assert!(app.state.request_submit_worktree_remove);
 
         let mut app = app_for_mouse_test();
-        app.state.mode = Mode::ConfirmRemoveWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ConfirmRemoveWorktree);
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
             workspace_id: "issue".into(),
             repo_root: "/repo/herdr".into(),
@@ -8005,7 +8032,7 @@ mod tests {
         ));
 
         assert!(app.state.worktree_remove.is_none());
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
     }
 
     #[test]
@@ -8014,7 +8041,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.state.context_menu = Some(ContextMenuState {
             kind: ContextMenuKind::Workspace {
@@ -8025,13 +8052,14 @@ mod tests {
             y: 2,
             selected: ContextMenuAction::CloseWorkspace,
         });
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
         handle_context_menu_key(
             &mut app.state,
             &mut app.terminal_runtimes,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
-        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.selected, 1);
 
         let popup = app.state.confirm_close_rect();
@@ -8068,7 +8096,8 @@ mod tests {
             y: 2,
             selected: ContextMenuAction::CloseWorkspace,
         });
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
 
         let menu = app.state.context_menu_rect().unwrap();
         app.handle_mouse(mouse(
@@ -8091,7 +8120,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 100, 30);
         crate::ui::compute_view(&mut app.state, area);
         let pane = app.state.view.pane_infos[0].clone();
@@ -8216,7 +8245,8 @@ mod tests {
         };
         assert!(menu.items().contains(&"Split right"));
         app.state.context_menu = Some(menu);
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
 
         handle_context_menu_key(
             &mut app.state,
@@ -8224,7 +8254,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
         assert_eq!(app.terminal_runtimes.len(), runtime_count + 1);
 
@@ -8634,7 +8664,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let tab_bar = app.state.view.tab_bar_rect;
@@ -8664,7 +8694,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.tab_bar_position = crate::config::TabBarPositionConfig::Hidden;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
@@ -8691,7 +8721,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.state.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
@@ -8748,7 +8778,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let second_tab = app.state.view.tab_hit_areas[1];
@@ -8777,7 +8807,7 @@ mod tests {
                 snooze_target: None,
             }
         );
-        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
     }
 
     #[test]
@@ -8788,7 +8818,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let second_tab = app.state.view.tab_hit_areas[1];
@@ -8823,7 +8853,7 @@ mod tests {
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert_eq!(app.state.workspaces[0].display_name(), "one");
         assert!(app.state.context_menu.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app
             .event_hub
             .events_after(0)
@@ -8841,7 +8871,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let first_info = app
@@ -8878,7 +8908,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert!(app.state.context_menu.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::PaneClosed)
         }));
@@ -8895,7 +8925,7 @@ mod tests {
         app.state.workspaces = vec![parent, child];
         app.state.active = Some(0);
         app.state.selected = 1;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let pane_info = app
@@ -8931,7 +8961,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
     }
@@ -8946,7 +8976,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
         assert!(app.state.view.tab_scroll_right_hit_area.width > 0);
@@ -8975,7 +9005,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let terminal = app.state.view.terminal_area;
@@ -8995,7 +9025,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         assert_eq!(app.state.view.layout, ViewLayout::Mobile);
@@ -9007,7 +9037,7 @@ mod tests {
             switch.y + 1,
         ));
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
 
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         let workspace_row = (viewport.y..viewport.y + viewport.height)
@@ -9025,7 +9055,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.active, Some(1));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -9035,7 +9065,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9045,7 +9075,7 @@ mod tests {
             switch.y + 1,
         ));
         assert_ne!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "the switcher should be open for this test"
         );
@@ -9072,7 +9102,7 @@ mod tests {
             tab_row,
         ));
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -9088,7 +9118,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9120,7 +9150,7 @@ mod tests {
             app.state.workspaces[0].tabs[target_tab].layout.focused(),
             focused_pane
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -9134,7 +9164,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
 
@@ -9173,7 +9203,7 @@ mod tests {
             app.state.workspaces[0].tabs[0].layout.focused(),
             snoozed_pane
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -9184,7 +9214,7 @@ mod tests {
             .collect();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9193,7 +9223,7 @@ mod tests {
             switch.x + 1,
             switch.y + 1,
         ));
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
 
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         app.handle_mouse(mouse(
@@ -9219,7 +9249,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.active, Some(1));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -9232,7 +9262,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 12));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9277,7 +9307,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.prompt_new_workspace_name = true;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
@@ -9294,7 +9324,10 @@ mod tests {
             viewport.y + 1,
         ));
 
-        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
+        assert_eq!(
+            app.state.effective_interaction_mode(),
+            Mode::RenameWorkspace
+        );
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(app.state.name_input_replace_on_type);
         assert_eq!(app.state.workspaces.len(), 1);
@@ -9306,7 +9339,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.prompt_new_workspace_name = true;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
@@ -9324,7 +9357,10 @@ mod tests {
             menu.list_rect.y,
         ));
 
-        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
+        assert_eq!(
+            app.state.effective_interaction_mode(),
+            Mode::RenameWorkspace
+        );
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(app.state.name_input_replace_on_type);
         assert_eq!(app.state.workspaces.len(), 1);
@@ -9453,7 +9489,7 @@ mod tests {
         ));
         assert_eq!(app.state.hovered_control, None);
         assert!(!app.state.hover_tooltip_visible);
-        assert_eq!(app.state.mode, Mode::Settings);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
     }
 
     #[test]
@@ -9732,7 +9768,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let new_workspace = crate::ui::sidebar_header_new_menu_rect(app.state.view.sidebar_rect);
@@ -9750,7 +9786,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces.len(), 2);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app.state.pending_workspace_create_cwd.is_none());
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }
@@ -9763,7 +9799,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9787,7 +9823,7 @@ mod tests {
             new_tab_row,
         ));
 
-        assert_eq!(app.state.input_mode(), Mode::RenameTab);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::RenameTab);
         assert!(app.state.creating_new_tab);
     }
 
@@ -9799,7 +9835,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.prompt_new_tab_name = false;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
@@ -9824,7 +9860,7 @@ mod tests {
             viewport.x + 2,
             new_tab_row,
         ));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(!app.state.creating_new_tab);
         assert!(app.state.request_new_tab);
         assert!(app.state.requested_new_tab_name.is_none());
@@ -9836,7 +9872,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.prompt_new_tab_name = false;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
@@ -9847,7 +9883,7 @@ mod tests {
             new_tab_area.y,
         ));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(!app.state.creating_new_tab);
         assert!(app.state.request_new_tab);
         assert!(app.state.requested_new_tab_name.is_none());
@@ -9859,7 +9895,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9868,7 +9904,7 @@ mod tests {
             switch.x + 1,
             switch.y + 1,
         ));
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
 
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         app.handle_mouse(mouse(
@@ -9877,7 +9913,7 @@ mod tests {
             viewport.y + 2,
         ));
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         assert!(app.state.context_menu.is_none());
     }
 
@@ -9887,7 +9923,8 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.state.creating_new_tab = true;
         app.state.name_input = "new tab".into();
 
@@ -9899,7 +9936,7 @@ mod tests {
             switch.y + 1,
         ));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(!app.state.creating_new_tab);
         assert!(!app.state.request_new_tab);
     }
@@ -9910,7 +9947,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -9919,7 +9956,7 @@ mod tests {
             switch.x + 1,
             switch.y + 1,
         ));
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
 
         let close = crate::ui::mobile_switcher_areas(&app.state).close;
         app.handle_mouse(mouse(
@@ -9928,7 +9965,7 @@ mod tests {
             close.y,
         ));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -9976,7 +10013,7 @@ mod tests {
             app.state.workspaces = vec![Workspace::test_new("one")];
             app.state.active = Some(0);
             app.state.selected = 0;
-            app.state.mode = Mode::Terminal;
+            app.state.set_server_mode(Mode::Terminal);
             app.state.ensure_test_terminals();
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
@@ -10008,7 +10045,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         app.state.repo_editor_argv = None;
 
@@ -10038,7 +10075,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let focused_pane = app.state.workspaces[0]
             .focused_pane_id()
@@ -10066,7 +10103,7 @@ mod tests {
             button.x + 1,
             button.y,
         ));
-        assert_eq!(app.state.mode, Mode::GitMenu);
+        assert_eq!(app.state.server_mode(), Mode::GitMenu);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let commit = app.state.view.git_menu_row_hit_areas[1];
@@ -10079,12 +10116,12 @@ mod tests {
             app.state.request_git_action,
             Some(crate::app::state::GitAction::Commit)
         );
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
 
         app.state.request_git_action = None;
         app.state.status_git_cwd = app.state.status_focused_cwd.clone();
         app.state.status_git_ahead_behind = Some((0, 1));
-        app.state.mode = Mode::GitMenu;
+        app.state.set_server_mode(Mode::GitMenu);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let status = app.state.view.git_menu_row_hit_areas[4];
         app.handle_mouse(mouse(
@@ -10093,7 +10130,7 @@ mod tests {
             status.y,
         ));
         assert_eq!(app.state.request_git_action, None);
-        assert_eq!(app.state.mode, Mode::GitMenu);
+        assert_eq!(app.state.server_mode(), Mode::GitMenu);
 
         app.state.git_root_for_cwd.insert(cwd, None);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
@@ -10105,7 +10142,7 @@ mod tests {
             info.y,
         ));
         assert_eq!(app.state.request_git_action, None);
-        assert_eq!(app.state.mode, Mode::GitMenu);
+        assert_eq!(app.state.server_mode(), Mode::GitMenu);
     }
 
     #[test]
@@ -10129,7 +10166,7 @@ mod tests {
             app.state.workspaces = vec![ws];
             app.state.active = Some(0);
             app.state.selected = 0;
-            app.state.mode = Mode::Terminal;
+            app.state.set_server_mode(Mode::Terminal);
             app.state.ensure_test_terminals();
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));

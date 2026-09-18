@@ -105,7 +105,7 @@ pub(crate) fn tab_surface_cursor(
     terminal_runtimes: &TerminalRuntimeRegistry,
     surface: TabSurfaceView<'_>,
 ) -> Option<CursorState> {
-    if app.mode != Mode::Terminal {
+    if app.effective_interaction_mode() != Mode::Terminal {
         return None;
     }
 
@@ -189,7 +189,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         let full_area = Rect::new(0, 0, 106, 20);
         crate::ui::compute_view(&mut app, full_area);
@@ -310,7 +310,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app
     }
 
@@ -346,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn mobile_full_app_semantic_frame_is_characterized() {
         let mut app = full_app_characterization_state("https://example.com/mobile");
-        app.mode = Mode::Navigate;
+        app.set_server_mode(Mode::Navigate);
         let frame = full_app_frame(&mut app, Rect::new(0, 0, 44, 20));
 
         assert_eq!((frame.width, frame.height), (44, 20));

@@ -546,7 +546,7 @@ mod tests {
         app.state.workspaces.insert(0, parent);
         app.state.active = Some(1);
         app.state.selected = 1;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app
     }
 
@@ -574,7 +574,7 @@ mod tests {
             let response: serde_json::Value = serde_json::from_str(&response).unwrap();
             assert_eq!(response["error"]["code"], "workspace_group_close_required");
             assert!(app.event_hub.events_after(0).is_empty());
-            assert_eq!(app.state.mode, crate::app::Mode::Terminal);
+            assert_eq!(app.state.server_mode(), crate::app::Mode::Terminal);
             assert_eq!(app.state.active, Some(1));
             assert_eq!(app.state.selected, 1);
             assert_eq!(
@@ -599,7 +599,7 @@ mod tests {
         app.state.workspaces.push(linked);
         app.state.active = Some(1);
         app.state.selected = 1;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.ensure_test_terminals();
         let closed_pane_ids = [0, 2].map(|index| app.state.workspaces[index].tabs[0].root_pane);
         let closed_terminal_ids = [0, 2].map(|index| {

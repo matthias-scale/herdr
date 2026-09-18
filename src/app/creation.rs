@@ -152,7 +152,7 @@ impl App {
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
-        if self.state.mode == Mode::Navigate
+        if self.state.server_mode() == Mode::Navigate
             && self.state.workspaces.get(self.state.selected).is_some()
         {
             return Some(self.state.selected);
@@ -194,11 +194,11 @@ impl App {
                 &error.error.message,
             );
         }
-        self.state.mode = if self.state.active.is_some() {
+        self.state.set_server_mode(if self.state.active.is_some() {
             Mode::Terminal
         } else {
             Mode::Navigate
-        };
+        });
     }
 
     /// Create a workspace with a real PTY (needs event_tx).
@@ -211,7 +211,7 @@ impl App {
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         if let Err(e) = self.create_workspace_with_events(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
-            self.state.mode = Mode::Navigate;
+            self.state.set_server_mode(Mode::Navigate);
         }
     }
 
@@ -286,7 +286,7 @@ impl App {
         self.state.remove_alias_shadowed_by_new_pane(root_pane);
         if focus {
             self.state.switch_workspace_tab(ws_idx, idx);
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
         }
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
         let tab_id = self
@@ -350,8 +350,8 @@ impl App {
                     });
             if let Some(pane_id) = proxy_pane {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
-                    self.state.mode = Mode::Terminal;
                     self.state.focus_pane_in_workspace(ws_idx, pane_id);
+                    self.state.settle_terminal_mode_after_focus();
                     return;
                 }
             }
@@ -442,7 +442,7 @@ impl App {
         };
         self.state.switch_workspace_tab(ws_idx, tab_idx);
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
         true
     }
 
@@ -478,7 +478,7 @@ impl App {
         self.pending_first_frame_pane = Some(root_pane);
         self.state.remove_alias_shadowed_by_new_pane(root_pane);
         self.state.switch_workspace_tab(ws_idx, tab_idx);
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
         self.emit_tab_created_events(ws_idx, tab_idx);
         self.schedule_session_save();
         Ok(())
@@ -538,7 +538,7 @@ impl App {
                     self.state.workspaces[ws_idx].tabs[0].root_pane,
                 );
                 self.state.switch_workspace(ws_idx);
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
                 self.emit_workspace_open_events(ws_idx);
             }
             crate::app::home::HomeTarget::Existing(workspace_id) => {
@@ -581,7 +581,7 @@ impl App {
                 crate::logging::home_dispatch_completed(root_pane.raw());
                 self.state.remove_alias_shadowed_by_new_pane(root_pane);
                 self.state.switch_workspace_tab(ws_idx, tab_idx);
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
                 self.emit_tab_created_events(ws_idx, tab_idx);
             }
         }
@@ -642,7 +642,7 @@ impl App {
         crate::logging::workspace_created(&workspace_id, root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
         }
         self.schedule_session_save();
         Ok(idx)
@@ -1264,7 +1264,7 @@ mod tests {
             new_terminal.launch_argv.as_ref(),
             Some(&new_space_plan.argv)
         );
-        assert_eq!(new_space_app.state.mode, Mode::Terminal);
+        assert_eq!(new_space_app.state.server_mode(), Mode::Terminal);
 
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut existing_app = App::new(
@@ -1297,7 +1297,7 @@ mod tests {
         );
         assert_eq!(existing_app.state.active, Some(0));
         assert_eq!(existing_app.state.workspaces[0].active_tab, 1);
-        assert_eq!(existing_app.state.mode, Mode::Terminal);
+        assert_eq!(existing_app.state.server_mode(), Mode::Terminal);
     }
 
     #[tokio::test]

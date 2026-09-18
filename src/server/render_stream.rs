@@ -180,7 +180,7 @@ fn focused_agent_pane_id(app_state: &AppState) -> Option<crate::layout::PaneId> 
 }
 
 fn focused_editor_terminal_id(app_state: &AppState) -> Option<crate::terminal::TerminalId> {
-    if app_state.mode != Mode::Terminal
+    if app_state.effective_interaction_mode() != Mode::Terminal
         || !app_state.dock_editor_focused
         || app_state.dock_collapsed
         || app_state.dock_tab != Some(crate::app::DockSurface::Editor)
@@ -518,7 +518,8 @@ fn focused_terminal_owns_host_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal || dock_editor_is_focused(app_state) {
+    if app_state.effective_interaction_mode() != Mode::Terminal || dock_editor_is_focused(app_state)
+    {
         return false;
     }
 
@@ -546,7 +547,8 @@ fn focused_terminal_suppresses_host_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal || dock_editor_is_focused(app_state) {
+    if app_state.effective_interaction_mode() != Mode::Terminal || dock_editor_is_focused(app_state)
+    {
         return false;
     }
 
@@ -741,13 +743,37 @@ mod render_scale_benchmark {
 
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.pane_scrollbars = true;
         app.workspaces = workspaces;
         app.refresh_local_agent_panel_identities();
         app.active = Some(0);
         app.selected = 0;
         app
+    }
+
+    #[tokio::test]
+    async fn client_overlay_caret_owns_the_host_cursor_over_the_terminal() {
+        let mut app = app_with_workspaces(1);
+        let workspace_id = app.workspaces[0].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            app.workspaces[0].tabs[0].number,
+        );
+        app.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
+        app.rename_target = Some(crate::app::state::RenameTarget::Tab {
+            workspace_id,
+            tab_id,
+        });
+        app.name_input = "ab".into();
+
+        let (buffer, cursor) = render_virtual(&mut app, AREA, true);
+        let cursor = cursor.expect("rename caret");
+
+        assert!(cursor.visible);
+        assert!(cursor.x > 0);
+        assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "b");
+        assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), " ");
     }
 
     fn profile(mut app: AppState) -> RenderStats {

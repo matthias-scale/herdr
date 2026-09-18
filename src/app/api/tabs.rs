@@ -123,7 +123,7 @@ impl App {
                 }
                 if focus {
                     self.state.switch_workspace_tab(ws_idx, tab_idx);
-                    self.state.mode = Mode::Terminal;
+                    self.state.set_server_mode(Mode::Terminal);
                 }
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
