@@ -4334,6 +4334,52 @@ mod tests {
     }
 
     #[test]
+    fn api_pane_close_drops_agent_state_and_late_links_do_not_recreate_it() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let (_, pane_id) = app.parse_pane_id(&public_pane_id).unwrap();
+        app.state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    goal: Some("remove on close".into()),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                std::time::SystemTime::now(),
+            )
+            .expect("valid report");
+
+        let response = app.handle_pane_close(
+            "close".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let after_close = app
+            .state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown);
+        assert!(after_close.goal.is_none());
+
+        app.state
+            .handle_app_event(crate::events::AppEvent::AgentLinksDetected {
+                pane_id,
+                output_urls: vec!["https://late.example.test/stale".into()],
+                osc8_urls: Vec::new(),
+                observed_at: std::time::SystemTime::now(),
+            });
+        assert!(app
+            .state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .links
+            .is_empty());
+    }
+
+    #[test]
     fn api_pane_close_closes_linked_worktree_workspace_only() {
         let mut app = app_with_linked_worktree();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
@@ -6148,6 +6194,60 @@ mod tests {
         ]);
         app.handle_pane_report_metadata("untrusted".into(), untrusted);
         assert!(app.state.terminals[&terminal_id].closing_contract.is_none());
+    }
+
+    #[test]
+    fn pane_report_agent_working_transition_stamps_agent_activity_once() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let report = |seq| PaneReportAgentParams {
+            pane_id: pane_id.clone(),
+            source: "custom:hook-test".into(),
+            agent: "pi".into(),
+            state: crate::api::schema::PaneAgentState::Working,
+            v: None,
+            message: None,
+            seq: Some(seq),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            agent_session_id: None,
+            agent_session_path: None,
+            gates: None,
+            items: None,
+            decisions: None,
+            agents: None,
+        };
+
+        let response = app.handle_pane_report_agent("working-1".into(), report(1));
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let first = app
+            .state
+            .agent_states
+            .snapshot(internal_pane_id, crate::api::schema::AgentStatus::Working)
+            .last_acted_at
+            .expect("accepted transition into working must stamp receipt time");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let response = app.handle_pane_report_agent("working-2".into(), report(2));
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let repeated = app
+            .state
+            .agent_states
+            .snapshot(internal_pane_id, crate::api::schema::AgentStatus::Working)
+            .last_acted_at
+            .expect("working activity timestamp");
+        assert_eq!(repeated, first, "repeated working is not a transition");
     }
 
     #[test]

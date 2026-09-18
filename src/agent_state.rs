@@ -156,6 +156,10 @@ pub(crate) struct AgentStateStore {
 }
 
 impl AgentStateStore {
+    pub(crate) fn remove(&mut self, pane_id: PaneId) {
+        self.panes.remove(&pane_id);
+    }
+
     pub(crate) fn report(
         &mut self,
         pane_id: PaneId,

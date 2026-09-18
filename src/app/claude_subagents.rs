@@ -15,10 +15,15 @@ pub(crate) const WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from
 pub(crate) const PER_TARGET_READ_QUANTUM: usize = 128 * 1024;
 pub(crate) const BATCH_READ_BUDGET: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_CARRY: usize = 2 * 1024 * 1024;
-const MAX_BUFFERED_JSON_ROW: usize = 256 * 1024;
+// Real Claude rows have reached 514,181 bytes. Keep one row up to 1 MiB so
+// those valid records parse across bounded read quanta. A row beyond this cap
+// is discarded and makes subagent history untrustworthy: it could itself be a
+// lifecycle event, so later rows must not silently restore authority.
+const MAX_BUFFERED_JSON_ROW: usize = 1024 * 1024;
 const MAX_ACTIVE_IDS: usize = 4096;
 const MAX_SUBAGENT_ID_BYTES: usize = 512;
 const MAX_TRANSCRIPT_PATH_BYTES: usize = 4096;
+const PENDING_TASK_ID_PREFIX: &str = "tool-use:";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TranscriptEvent {
@@ -203,6 +208,12 @@ impl TranscriptCursor {
             };
             if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
                 existing.task.text = text.to_string();
+            } else if let Some(pending) = self
+                .tasks
+                .iter_mut()
+                .find(|task| task.id.starts_with(PENDING_TASK_ID_PREFIX) && task.task.text == text)
+            {
+                pending.id = id.to_string();
             } else {
                 self.tasks.push(TrackedTask {
                     id: id.to_string(),
@@ -229,6 +240,74 @@ impl TranscriptCursor {
         };
         if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
             existing.task.status = status;
+        }
+    }
+
+    fn apply_task_tool_calls(&mut self, value: &Value) {
+        let Some(content) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        for item in content {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(input) = item.get("input") else {
+                continue;
+            };
+            match name {
+                "TaskCreate" => {
+                    let Some(tool_use_id) = item.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(text) = input
+                        .get("subject")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                    else {
+                        continue;
+                    };
+                    let id = format!("{PENDING_TASK_ID_PREFIX}{tool_use_id}");
+                    if self.tasks.iter().any(|task| task.id == id) {
+                        continue;
+                    }
+                    self.tasks.push(TrackedTask {
+                        id,
+                        task: AgentTask {
+                            text: text.to_string(),
+                            status: AgentTaskStatus::Pending,
+                        },
+                    });
+                }
+                "TaskUpdate" => {
+                    let Some(task_id) = input.get("taskId").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) else {
+                        continue;
+                    };
+                    if let Some(text) = input
+                        .get("subject")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                    {
+                        task.task.text = text.to_string();
+                    }
+                    if let Some(status) = input
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .and_then(parse_task_status)
+                    {
+                        task.task.status = status;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -380,6 +459,7 @@ impl TranscriptCursor {
                                         }));
                                 }
                                 self.apply_todo_write(&value);
+                                self.apply_task_tool_calls(&value);
                                 self.apply_task_result(&value);
                                 self.observe_row_links(&value, observed_at);
                                 stats.lines_parsed = stats.lines_parsed.saturating_add(1);
@@ -1340,6 +1420,161 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_calls_project_before_results_and_reconcile_without_duplicates() {
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-14T06:18:40.100Z",
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "name": "TaskCreate",
+                    "id": "toolu_task_create",
+                    "input": {
+                        "subject": "inspect runtime boundary",
+                        "description": "stripped fixture",
+                        "activeForm": "inspecting runtime boundary"
+                    }
+                }]}
+            })),
+            true,
+        );
+        assert_eq!(
+            cursor.tasks(),
+            Some(vec![AgentTask {
+                text: "inspect runtime boundary".into(),
+                status: AgentTaskStatus::Pending,
+            }])
+        );
+
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-14T06:18:40.126Z",
+                "toolUseResult": {"task": {
+                    "id": "17",
+                    "subject": "inspect runtime boundary",
+                    "description": "stripped fixture"
+                }}
+            })),
+            true,
+        );
+        assert_eq!(cursor.tasks().expect("tasks after result").len(), 1);
+
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-14T06:18:47.401Z",
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "name": "TaskUpdate",
+                    "id": "toolu_task_update",
+                    "input": {
+                        "taskId": "17",
+                        "subject": "inspect shared runtime boundary",
+                        "status": "in_progress"
+                    }
+                }]}
+            })),
+            true,
+        );
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-14T06:18:47.437Z",
+                "toolUseResult": {
+                    "success": true,
+                    "taskId": "17",
+                    "updatedFields": ["subject", "status"]
+                }
+            })),
+            true,
+        );
+        assert_eq!(
+            cursor.tasks(),
+            Some(vec![AgentTask {
+                text: "inspect shared runtime boundary".into(),
+                status: AgentTaskStatus::InProgress,
+            }])
+        );
+    }
+
+    #[test]
+    fn valid_large_row_does_not_hide_later_transcript_projections() {
+        let oversized_for_old_limit = line(serde_json::json!({
+            "type": "attachment",
+            "timestamp": "2026-08-14T06:18:39.000Z",
+            "unrelatedPayload": "x".repeat(600 * 1024)
+        }));
+        assert!(oversized_for_old_limit.len() > 514_181);
+        let mut fixture = oversized_for_old_limit;
+        fixture.extend(line(serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-08-14T06:18:40.100Z",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "name": "TaskCreate",
+                "id": "toolu_after_large_row",
+                "input": {"subject": "recover transcript projection"}
+            }]}
+        })));
+        fixture.extend(line(serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-08-14T06:18:40.126Z",
+            "toolUseResult": {"task": {
+                "id": "23",
+                "subject": "recover transcript projection"
+            }}
+        })));
+        fixture.extend(line(serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-08-14T06:18:41.000Z",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "name": "TaskUpdate",
+                "id": "toolu_update_after_large_row",
+                "input": {"taskId": "23", "status": "completed"}
+            }]}
+        })));
+        fixture.extend(launch_named(
+            AGENT_A,
+            "review recovered rows",
+            "2026-08-14T06:18:42.000Z",
+        ));
+        fixture.extend(line(serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-08-14T06:18:43.125Z",
+            "message": {"role": "user", "content":
+                "See https://example.test/after-large-row for context."
+            }
+        })));
+
+        let mut cursor = TranscriptCursor::new();
+        let stats = cursor.ingest(&fixture, true);
+
+        assert_eq!(stats.oversized_rows, 0);
+        assert_eq!(
+            cursor.tasks(),
+            Some(vec![AgentTask {
+                text: "recover transcript projection".into(),
+                status: AgentTaskStatus::Completed,
+            }])
+        );
+        let observations = cursor.observations().expect("authoritative later rows");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].name, "review recovered rows");
+        assert_eq!(observations[0].state, AgentState::Working);
+        assert!(cursor
+            .links
+            .iter()
+            .any(|link| link.url == "https://example.test/after-large-row"));
+        assert_eq!(
+            cursor.last_row_at,
+            crate::agent_state::parse_rfc3339("2026-08-14T06:18:43.125Z")
+        );
+    }
+
+    #[test]
     fn tracker_exposes_only_existing_regular_subagent_transcripts() {
         let dir = TestDir::new("transcript-path");
         let path = dir.transcript();
@@ -1448,6 +1683,12 @@ mod tests {
         let stats = oversized.ingest(&row, true);
         assert_eq!(stats.oversized_rows, 1);
         assert_eq!(oversized.count(), None);
+        oversized.ingest(&launch(AGENT_A), true);
+        assert_eq!(
+            oversized.count(),
+            None,
+            "a discarded lifecycle-sized row keeps later history fail-closed"
+        );
     }
 
     #[test]

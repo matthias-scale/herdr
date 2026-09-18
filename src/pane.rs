@@ -789,6 +789,11 @@ struct FullLifecycleHookRetirementPorts<'a> {
     state_events: &'a mpsc::Sender<AppEvent>,
 }
 
+// URL extraction runs only after a chunk marked the gate dirty. Reading 128
+// recent rows covers the reproduced 80-line burst while keeping terminal lock
+// time and the allocated snapshot independent of total scrollback size.
+const AGENT_LINK_RECENT_LINES: usize = 128;
+
 async fn publish_agent_links_if_dirty(
     pane_id: PaneId,
     gate: &crate::agent_state::LinkExtractionGate,
@@ -798,7 +803,8 @@ async fn publish_agent_links_if_dirty(
     if !gate.take_dirty() {
         return;
     }
-    let output_urls = crate::agent_state::extract_urls(&terminal.detection_text());
+    let recent = terminal.recent_text_snapshot(AGENT_LINK_RECENT_LINES);
+    let output_urls = crate::agent_state::extract_urls(&recent.text);
     let mut osc8_urls: Vec<_> = terminal
         .visible_hyperlinks(Rect::new(0, 0, u16::MAX, u16::MAX))
         .into_iter()
@@ -4537,6 +4543,27 @@ mod tests {
         };
         assert!(output_urls.is_empty());
         assert_eq!(osc8_urls, vec![uri]);
+    }
+
+    #[tokio::test]
+    async fn dirty_link_snapshot_keeps_url_before_eighty_following_lines() {
+        let uri = "https://scrollback.example.test/kept";
+        let mut screen = format!("{uri}\r\n");
+        for index in 0..80 {
+            screen.push_str(&format!("ordinary line {index}\r\n"));
+        }
+        let runtime = PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, screen.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(uri.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(72), &gate, &runtime.terminal, &tx).await;
+
+        let event = rx.recv().await.expect("link event");
+        let AppEvent::AgentLinksDetected { output_urls, .. } = event else {
+            panic!("expected agent link event");
+        };
+        assert!(output_urls.iter().any(|url| url == uri));
     }
 
     #[tokio::test]

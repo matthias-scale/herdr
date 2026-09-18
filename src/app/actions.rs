@@ -1855,6 +1855,7 @@ impl AppState {
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
             self.local_agent_panel_identities.remove(&pane_id);
+            self.agent_states.remove(pane_id);
         }
     }
 
@@ -3406,19 +3407,8 @@ impl AppState {
                 usage_limited,
                 process_exited,
                 observed_at,
-            } => {
-                let entered_working = state == AgentState::Working
-                    && self
-                        .workspaces
-                        .iter()
-                        .find_map(|workspace| workspace.pane_state(pane_id))
-                        .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
-                        .is_some_and(|terminal| terminal.raw_agent_state() != AgentState::Working);
-                if entered_working {
-                    self.agent_states
-                        .observe_working(pane_id, std::time::SystemTime::now());
-                }
-                self.update_terminal_state(pane_id, |terminal| {
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
                     Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
@@ -3431,8 +3421,7 @@ impl AppState {
                     ))
                 })
                 .into_iter()
-                .collect()
-            }
+                .collect(),
             AppEvent::PaneProcessStateChanged {
                 pane_id,
                 holds_shell,
@@ -3448,6 +3437,13 @@ impl AppState {
                 osc8_urls,
                 observed_at,
             } => {
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.pane_state(pane_id).is_some())
+                {
+                    return Vec::new();
+                }
                 self.agent_states.observe_links(
                     pane_id,
                     output_urls,
@@ -3845,6 +3841,10 @@ impl AppState {
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
+        if change.previous_state != AgentState::Working && change.state == AgentState::Working {
+            self.agent_states
+                .observe_working(pane_id, std::time::SystemTime::now());
+        }
         let fresh_attention = {
             let pane = self.workspaces[ws_idx].pane_state(pane_id)?;
             let terminal = self.terminals.get(&terminal_id)?;
@@ -6172,11 +6172,39 @@ mod tests {
     fn pane_died_last_pane_removes_workspace() {
         let mut state = app_with_workspaces(&["a", "b"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    goal: Some("remove on process death".into()),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                std::time::SystemTime::now(),
+            )
+            .expect("valid report");
 
         state.handle_pane_died(pane_id);
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].custom_name.as_deref(), Some("b"));
+        assert!(state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .goal
+            .is_none());
+
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://late.example.test/stale".into()],
+            osc8_urls: Vec::new(),
+            observed_at: std::time::SystemTime::now(),
+        });
+        assert!(state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .links
+            .is_empty());
         state.assert_invariants_for_test();
     }
 
