@@ -5792,6 +5792,11 @@ impl AppState {
         if self.dock_surface_menu.is_some() {
             return InputOwner::Client(ClientInputOwner::DockSurfaceMenu);
         }
+        // The notepad is a visible client editor. Once focused it owns input
+        // and the host cursor ahead of shared modes and underlying surfaces.
+        if self.notepad.focused {
+            return InputOwner::Notepad;
+        }
         if self.add_project_active() {
             return InputOwner::AddProject;
         }
@@ -5806,9 +5811,6 @@ impl AppState {
         }
         if self.popup_pane.is_some() {
             return InputOwner::Popup;
-        }
-        if self.notepad.focused {
-            return InputOwner::Notepad;
         }
         match self.terminal_area_surface() {
             TerminalAreaSurface::EditorPreview => {
