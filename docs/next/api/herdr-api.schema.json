@@ -1971,11 +1971,14 @@
               "type": "string"
             },
             "tasks": {
-              "default": [],
+              "default": null,
               "items": {
                 "$ref": "#/schemas/request/$defs/AgentTask"
               },
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
             }
           },
           "required": [
