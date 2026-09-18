@@ -199,6 +199,18 @@ class UiHotPathArchitectureTests(unittest.TestCase):
 
         self.assertNotIn("has_pending_human_input", pane_projection)
         self.assertEqual(pane_projection.count(".closing_items"), 1)
+        self.assertNotIn(".sidebar_projection(", pane_projection)
+        self.assertIn(
+            ".sidebar_projection_with_pending_human_input(", pane_projection
+        )
+        preclassified_projection = function_body(
+            (PROJECT_ROOT / "src" / "terminal" / "state.rs").read_text(
+                encoding="utf-8"
+            ),
+            "fn sidebar_projection_with_pending_human_input",
+        )
+        self.assertNotIn("has_pending_human_input()", preclassified_projection)
+        self.assertNotIn(".closing_items", preclassified_projection)
         pane_details = function_body(
             (PROJECT_ROOT / "src" / "workspace" / "aggregate.rs").read_text(
                 encoding="utf-8"

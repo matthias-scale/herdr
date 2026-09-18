@@ -1055,10 +1055,14 @@ impl TerminalState {
         })
     }
 
-    fn closing_task_projection(&self, state: AgentState) -> (AgentState, &'static str) {
+    fn closing_task_projection(
+        &self,
+        state: AgentState,
+        has_pending_human_input: bool,
+    ) -> (AgentState, &'static str) {
         if self.closing_external_wait().is_some() {
             (AgentState::Working, "closing_external_wait")
-        } else if state != AgentState::Working && self.has_pending_human_input() {
+        } else if state != AgentState::Working && has_pending_human_input {
             (AgentState::Blocked, "closing_human_input")
         } else if state == AgentState::Idle
             && (self.closing_task_reported() && !self.closing_task_complete()
@@ -1364,6 +1368,14 @@ impl TerminalState {
     }
 
     pub(crate) fn sidebar_projection(&self, seen: bool) -> (AgentState, bool) {
+        self.sidebar_projection_with_pending_human_input(seen, self.has_pending_human_input())
+    }
+
+    pub(crate) fn sidebar_projection_with_pending_human_input(
+        &self,
+        seen: bool,
+        has_pending_human_input: bool,
+    ) -> (AgentState, bool) {
         let active_subagents = self.verified_active_subagents();
         let (state, seen) = if self.supervisor_stale {
             self.stale_resolution.unwrap_or((self.state, seen))
@@ -1375,7 +1387,9 @@ impl TerminalState {
         if active_subagents.is_some_and(|count| count > 0) {
             (AgentState::Working, seen)
         } else {
-            let state = self.closing_task_projection(state).0;
+            let state = self
+                .closing_task_projection(state, has_pending_human_input)
+                .0;
             (state, seen)
         }
     }
@@ -3980,7 +3994,8 @@ impl TerminalState {
 
     fn effective_state_and_arbitration(&self) -> (AgentState, &'static str) {
         let (state, arbitration) = self.lifecycle_state_and_arbitration();
-        let (projected, task_arbitration) = self.closing_task_projection(state);
+        let (projected, task_arbitration) =
+            self.closing_task_projection(state, self.has_pending_human_input());
         if projected == state {
             (state, arbitration)
         } else {

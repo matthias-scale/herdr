@@ -113,13 +113,16 @@ impl PaneState {
                 waiting_on_agents: false,
             };
         }
-        let (state, seen) = terminal.sidebar_projection(self.seen);
         let blocking_item_count = terminal
             .closing_items()
             .iter()
             .filter(|item| item.requires_human_input())
             .count();
         let has_closing_gates = !terminal.closing_gates().is_empty();
+        let (state, seen) = terminal.sidebar_projection_with_pending_human_input(
+            self.seen,
+            has_closing_gates || blocking_item_count > 0,
+        );
         PaneAgentProjection {
             state,
             seen,
