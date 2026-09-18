@@ -1668,7 +1668,7 @@ impl AppState {
                 if in_sidebar {
                     self.sidebar_selected_settled = None;
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
-                        self.sidebar_collapsed = !self.sidebar_collapsed;
+                        self.toggle_sidebar_collapsed();
                         return None;
                     }
 

@@ -3539,6 +3539,9 @@ impl App {
                 if self.state.handle_sidebar_search_key(key_event) {
                     return;
                 }
+                if self.handle_sidebar_object_menu_key(key_event) {
+                    return;
+                }
                 match self.state.handle_sidebar_work_group_key(key_event) {
                     input::SidebarWorkGroupKeyAction::Ignored => {}
                     input::SidebarWorkGroupKeyAction::Consumed => return,

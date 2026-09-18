@@ -354,6 +354,9 @@ impl App {
                 if self.state.handle_sidebar_search_key(key_event) {
                     return None;
                 }
+                if self.handle_sidebar_object_menu_key(key_event) {
+                    return None;
+                }
                 match self.state.handle_sidebar_work_group_key(key_event) {
                     sidebar::SidebarWorkGroupKeyAction::Ignored => {}
                     sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
@@ -5250,7 +5253,7 @@ impl App {
         let handled_pane_double_click = !client_overlay_owns_input
             && !editor_preview_hit
             && self.handle_pane_double_click(mouse);
-        if !client_overlay_owns_input && !handled_pane_double_click && !editor_preview_hit {
+        if owner == InputOwner::Pane && !handled_pane_double_click && !editor_preview_hit {
             self.focus_pane_before_mouse_press(mouse);
         }
 

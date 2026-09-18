@@ -2342,7 +2342,7 @@ mod tests {
         let mut client_b = crate::app::state::SidebarPresentationState::default();
 
         app.state.swap_sidebar_presentation(&mut client_a);
-        app.state.sidebar_focused = true;
+        app.state.focus_client_on_sidebar();
         app.open_snooze_time_input(0, editor_pane);
         if let Some(snooze) = app.state.sidebar_snooze.as_mut() {
             snooze.time_draft = Some("14:30".into());
@@ -2871,7 +2871,15 @@ mod tests {
         );
         drop(consumed);
 
-        app.state.sidebar_focused = true;
+        app.state.focus_client_on_sidebar();
+        assert_eq!(
+            app.state.input_owner(),
+            crate::app::state::InputOwner::Sidebar
+        );
+        assert_eq!(
+            app.state.sidebar_selected_work_group.as_deref(),
+            Some("linear:SCA-3102")
+        );
         let _ = app
             .handle_key_inner(crate::input::TerminalKey::new(
                 KeyCode::Char('m'),

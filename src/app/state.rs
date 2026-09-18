@@ -5715,7 +5715,15 @@ impl AppState {
     pub(crate) fn focus_client_on_sidebar(&mut self) {
         self.client_focus_intent = ClientFocusIntent::FollowShared;
         self.release_dock_focus_to_pane();
+        self.sidebar_collapsed = false;
         self.sidebar_focused = true;
+    }
+
+    pub(crate) fn toggle_sidebar_collapsed(&mut self) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        if self.sidebar_collapsed {
+            self.sidebar_focused = false;
+        }
     }
 
     pub(crate) fn input_owner(&self) -> InputOwner {
@@ -5771,11 +5779,14 @@ impl AppState {
         if self.dock_surface_menu.is_some() {
             return InputOwner::Client(ClientInputOwner::DockSurfaceMenu);
         }
-        if self.client_focus_intent == ClientFocusIntent::Pane {
-            return InputOwner::Pane;
-        }
         if self.add_project_active() {
             return InputOwner::AddProject;
+        }
+        if self.sidebar_focused && !self.sidebar_collapsed {
+            return InputOwner::Sidebar;
+        }
+        if self.client_focus_intent == ClientFocusIntent::Pane {
+            return InputOwner::Pane;
         }
         if let Some(owner) = ServerInputOwner::from_mode(self.server_mode()) {
             return InputOwner::Server(owner);
@@ -5806,32 +5817,31 @@ impl AppState {
             TerminalAreaSurface::Tab => {}
             TerminalAreaSurface::Empty => return InputOwner::None,
         }
-        let dock_owner = if self.dock_editor_focused {
+        let dock_owner = if self.dock_collapsed {
+            None
+        } else if self.dock_editor_focused && self.dock_tab == Some(DockSurface::Editor) {
             Some(DockInputOwner::Editor)
-        } else if self.dock_home_focused {
+        } else if self.dock_home_focused && self.dock_tab == Some(DockSurface::Home) {
             Some(DockInputOwner::Home)
-        } else if self.dock_pr_focused {
+        } else if self.dock_pr_focused && self.dock_tab == Some(DockSurface::Pr) {
             Some(DockInputOwner::PullRequest)
-        } else if self.dock_linear_focused {
+        } else if self.dock_linear_focused && self.dock_tab == Some(DockSurface::Linear) {
             Some(DockInputOwner::Linear)
-        } else if self.dock_diff_focused {
+        } else if self.dock_diff_focused && self.dock_tab == Some(DockSurface::Diff) {
             Some(DockInputOwner::Diff)
-        } else if self.dock_files_focused {
+        } else if self.dock_files_focused && self.dock_tab == Some(DockSurface::Files) {
             Some(DockInputOwner::Files)
-        } else if self.dock_agents_focused {
+        } else if self.dock_agents_focused && self.dock_tab == Some(DockSurface::Agents) {
             Some(DockInputOwner::Agents)
-        } else if self.dock_hosts_focused {
+        } else if self.dock_hosts_focused && self.dock_tab == Some(DockSurface::Hosts) {
             Some(DockInputOwner::Hosts)
-        } else if self.dock_chooser_focused {
+        } else if self.dock_chooser_focused && self.dock_tab.is_none() {
             Some(DockInputOwner::Chooser)
         } else {
             None
         };
         if let Some(owner) = dock_owner {
             return InputOwner::Dock(owner);
-        }
-        if self.sidebar_focused {
-            return InputOwner::Sidebar;
         }
         InputOwner::Pane
     }

@@ -195,8 +195,7 @@ impl App {
                 // The picker takes keys through the sidebar's input path, so
                 // opening it without giving the sidebar the keyboard would draw
                 // a filter box that nothing can type into.
-                self.state.sidebar_focused = true;
-                self.state.sidebar_collapsed = false;
+                self.state.focus_client_on_sidebar();
                 self.state.open_sidebar_new_thread();
                 leave_navigate_mode(&mut self.state);
             }
@@ -490,12 +489,11 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::ToggleSidebar => {
-                self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
+                self.state.toggle_sidebar_collapsed();
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::FocusSidebar => {
-                self.state.sidebar_focused = true;
-                self.state.sidebar_collapsed = false;
+                self.state.focus_client_on_sidebar();
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::CycleSidebarGroupMode => {
@@ -2746,8 +2744,7 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NewThread => {
-            state.sidebar_focused = true;
-            state.sidebar_collapsed = false;
+            state.focus_client_on_sidebar();
             state.open_sidebar_new_thread();
             leave_navigate_mode(state);
         }
@@ -3016,12 +3013,11 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::ToggleSidebar => {
-            state.sidebar_collapsed = !state.sidebar_collapsed;
+            state.toggle_sidebar_collapsed();
             leave_navigate_mode(state);
         }
         NavigateAction::FocusSidebar => {
-            state.sidebar_focused = true;
-            state.sidebar_collapsed = false;
+            state.focus_client_on_sidebar();
             leave_navigate_mode(state);
         }
         NavigateAction::CycleSidebarGroupMode => {
@@ -6675,7 +6671,8 @@ command = "printf literal > '{}'"
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::SHIFT));
 
         assert_eq!(app.state.workspaces.len(), 2);
-        assert_eq!(app.state.server_mode(), Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
     }
 
     #[tokio::test]
@@ -6696,7 +6693,8 @@ command = "printf literal > '{}'"
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('N'), KeyModifiers::empty()));
 
         assert_eq!(app.state.workspaces.len(), 2);
-        assert_eq!(app.state.server_mode(), Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
     }
 
     #[tokio::test]
