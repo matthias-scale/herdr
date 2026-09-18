@@ -228,6 +228,12 @@ const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
 const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
+const SIDEBAR_SNOOZE_CONTROL_WIDTH: usize = 3;
+const SIDEBAR_SETTLE_CONTROL_WIDTH: usize = 2;
+const SIDEBAR_SELECTED_CONTROLS_WIDTH: usize =
+    SIDEBAR_SNOOZE_CONTROL_WIDTH + SIDEBAR_SETTLE_CONTROL_WIDTH;
+const SIDEBAR_SELECTED_MIN_TITLE_WIDTH: usize = 4;
+const SIDEBAR_MIN_CONTROLS_ROW_WIDTH: u16 = 19;
 
 fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
     entry.gate_count > 0 || entry.open_blockers
@@ -874,8 +880,10 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let settle_width =
-        usize::from(title_width >= 2 && !app.pane_is_settled(target.ws_idx, target.pane_id)) * 2;
+    let control_pane = row_control_pane(app, entry, tab);
+    let controls_width = selected_row_controls_width(control_pane, title_width, rect.width);
+    let snoozed =
+        control_pane.is_some_and(|(pane_id, _)| app.pane_is_snoozed(target.ws_idx, pane_id));
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
@@ -883,7 +891,7 @@ fn render_compact_agent_row_with_prefix(
     .then_some(SIDEBAR_STAR_SUFFIX);
     let title_text_width = title_width
         .saturating_sub(star_suffix.map_or(0, display_width))
-        .saturating_sub(settle_width);
+        .saturating_sub(controls_width);
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
@@ -931,13 +939,124 @@ fn render_compact_agent_row_with_prefix(
     spans.extend([
         Span::styled(title_pad, working_row_style(app, fade, title_style, bg)),
         Span::styled(
-            if settle_width > 0 { " ✓" } else { "" },
+            if controls_width > 0 { " ◷ " } else { "" },
+            working_row_style(app, fade, Style::default().fg(p.mauve), bg),
+        ),
+        Span::styled(
+            if controls_width == SIDEBAR_SELECTED_CONTROLS_WIDTH && !snoozed {
+                " ✓"
+            } else {
+                ""
+            },
             working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
         ),
         Span::styled(provider, working_row_style(app, fade, provider_style, bg)),
         Span::styled(age, working_row_style(app, fade, age_style, bg)),
     ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+fn selected_local_row_pane(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    tab: bool,
+) -> Option<crate::layout::PaneId> {
+    let target = entry.local_target()?;
+    if tab
+        && app.active == Some(target.ws_idx)
+        && app
+            .workspaces
+            .get(target.ws_idx)
+            .is_some_and(|workspace| workspace.active_tab_index() == target.tab_idx)
+    {
+        return Some(target.pane_id);
+    }
+    app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id)
+        .then_some(target.pane_id)
+}
+
+fn row_control_pane(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    tab: bool,
+) -> Option<(crate::layout::PaneId, bool)> {
+    let target = entry.local_target()?;
+    if !app.pane_can_snooze(target.ws_idx, target.pane_id) {
+        return None;
+    }
+    if app.pane_is_snoozed(target.ws_idx, target.pane_id) {
+        return Some((target.pane_id, false));
+    }
+    let pane_id = selected_local_row_pane(app, entry, tab)?;
+    if app.pane_can_snooze(target.ws_idx, pane_id) {
+        Some((pane_id, !app.pane_is_snoozed(target.ws_idx, pane_id)))
+    } else {
+        None
+    }
+}
+
+fn selected_row_controls_width(
+    control_pane: Option<(crate::layout::PaneId, bool)>,
+    title_width: usize,
+    row_width: u16,
+) -> usize {
+    control_pane
+        .filter(|_| row_width >= SIDEBAR_MIN_CONTROLS_ROW_WIDTH)
+        .filter(|(_, show_settle)| {
+            let controls_width = SIDEBAR_SNOOZE_CONTROL_WIDTH
+                + usize::from(*show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH;
+            title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + controls_width
+        })
+        .map_or(0, |(_, show_settle)| {
+            SIDEBAR_SNOOZE_CONTROL_WIDTH + usize::from(show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH
+        })
+}
+
+pub(crate) fn selected_row_control_at(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+    tab: bool,
+    column: u16,
+) -> Option<crate::app::state::SidebarHoverAction> {
+    let requested_prefix = usize::from(depth) * 3 + 1;
+    let provider = compact_provider(entry);
+    let title = compact_row_title_for_width(
+        compact_row_title(entry, tab),
+        &provider,
+        usize::from(rect.width),
+        requested_prefix,
+    );
+    let widths = compact_row_widths(title, &provider, usize::from(rect.width), requested_prefix);
+    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let control_pane = row_control_pane(app, entry, tab);
+    let controls_width = selected_row_controls_width(control_pane, title_width, rect.width);
+    if controls_width == 0 {
+        return None;
+    }
+    let start = rect.x.saturating_add(
+        (widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width) as u16,
+    );
+    if column < start || column >= start.saturating_add(controls_width as u16) {
+        return None;
+    }
+    let (pane_id, show_settle) = control_pane?;
+    let target = entry.local_target()?;
+    if column < start.saturating_add(SIDEBAR_SNOOZE_CONTROL_WIDTH as u16) {
+        Some(crate::app::state::SidebarHoverAction::Snooze {
+            ws_idx: target.ws_idx,
+            pane_id,
+        })
+    } else if show_settle {
+        Some(crate::app::state::SidebarHoverAction::Settle {
+            ws_idx: target.ws_idx,
+            pane_id,
+        })
+    } else {
+        None
+    }
 }
 
 pub(super) fn tab_row_layout(
@@ -2237,6 +2356,7 @@ pub(crate) enum SidebarRow {
 /// omitted entirely when empty, which is the common case.
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
 pub(crate) const RECENTLY_DONE_SECTION_TITLE: &str = "Recently done";
+pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
 #[cfg(test)]
 pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
@@ -2540,14 +2660,9 @@ fn compact_sidebar_rows_inner(
         None => sidebar_thread_entries(app),
     };
     entries.retain(|entry| {
-        entry.local_target().is_some_and(|target| {
-            !app.remote_focus_proxy_panes.contains(&target.pane_id)
-                && app
-                    .workspaces
-                    .get(target.ws_idx)
-                    .and_then(|workspace| workspace.pane_state(target.pane_id))
-                    .is_none_or(|pane| pane.snoozed_until().is_none())
-        })
+        entry
+            .local_target()
+            .is_some_and(|target| !app.remote_focus_proxy_panes.contains(&target.pane_id))
     });
     if sidebar_rows_are_filtered(app) {
         let scope = sidebar_project_scope(app);
@@ -2597,12 +2712,52 @@ fn compact_sidebar_rows_inner(
             entry.space_label_redundant = true;
         }
     }
-    // Lifecycle sections count and render sessions, not split panes. Aggregate
-    // first so one tab has one canonical representative in exactly one section.
-    let entries = ordered_tab_entries(app, &entries);
-    let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
+    // A split tab can contribute one row to more than one lifecycle section.
+    // Resolve each pane once through its known tab, then aggregate each class.
+    let classified = entries
         .into_iter()
-        .partition(|entry| entry_is_settled(app, entry));
+        .map(|entry| {
+            let lifecycle = sidebar_entry_lifecycle(app, &entry);
+            (entry, lifecycle)
+        })
+        .collect::<Vec<_>>();
+    let active_pane_targets = classified
+        .iter()
+        .filter(|(_, lifecycle)| *lifecycle == SidebarEntryLifecycle::Active)
+        .filter_map(|(entry, _)| {
+            entry
+                .local_target()
+                .map(|target| (target.ws_idx, target.tab_idx, target.pane_id))
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let tabs_with_active_panes = active_pane_targets
+        .iter()
+        .map(|(ws_idx, tab_idx, _)| (*ws_idx, *tab_idx))
+        .collect::<std::collections::HashSet<_>>();
+    let mut active_panes = Vec::new();
+    let mut snoozed_panes = Vec::new();
+    let mut settled_panes = Vec::new();
+    for (entry, lifecycle) in classified {
+        let local_tab = entry
+            .local_target()
+            .map(|target| (target.ws_idx, target.tab_idx));
+        match lifecycle {
+            SidebarEntryLifecycle::Active => active_panes.push(entry),
+            SidebarEntryLifecycle::Snoozed => snoozed_panes.push(entry),
+            SidebarEntryLifecycle::Settled
+                if local_tab.is_some_and(|tab| tabs_with_active_panes.contains(&tab)) =>
+            {
+                // A mixed active/settled tab remains one active session. Its
+                // settled panes still contribute to the tab aggregation.
+                active_panes.push(entry);
+            }
+            SidebarEntryLifecycle::Settled => settled_panes.push(entry),
+        }
+    }
+    let active_entries =
+        ordered_tab_entries_preferring(app, &active_panes, Some(&active_pane_targets));
+    let snoozed_entries = ordered_tab_entries(app, &snoozed_panes);
+    let settled_entries = ordered_tab_entries(app, &settled_panes);
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
@@ -2618,6 +2773,7 @@ fn compact_sidebar_rows_inner(
     if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
         && recently_done.is_empty()
+        && snoozed_entries.is_empty()
         && settled_entries.is_empty()
     {
         return Vec::new();
@@ -2643,7 +2799,13 @@ fn compact_sidebar_rows_inner(
             expand_worktrees,
             terminal_runtimes,
         );
-        append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
+        append_tail_sections(
+            app,
+            &mut rows,
+            snoozed_entries,
+            settled_entries,
+            expand_worktrees,
+        );
         let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
         mark_ambiguous_remote_titles(&mut rows, row_width);
         return rows;
@@ -2658,7 +2820,13 @@ fn compact_sidebar_rows_inner(
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
     }
-    append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
+    append_tail_sections(
+        app,
+        &mut rows,
+        snoozed_entries,
+        settled_entries,
+        expand_worktrees,
+    );
     let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
     mark_ambiguous_remote_titles(&mut rows, row_width);
     rows
@@ -3354,12 +3522,32 @@ fn append_object_group_rows(
 fn append_tail_sections(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
+    snoozed_entries: Vec<AgentPanelEntry>,
     settled_entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
 ) {
     runs::append_rows(app, rows);
     append_symphony_rows(app, rows);
+    append_snoozed_rows(app, rows, snoozed_entries);
     append_settled_rows(app, rows, settled_entries, expand_worktrees);
+}
+
+fn append_snoozed_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>) {
+    if entries.is_empty() {
+        return;
+    }
+    let collapsed = section_is_collapsed(app, SNOOZED_SECTION_TITLE);
+    rows.push(SidebarRow::SectionHeader {
+        title: SNOOZED_SECTION_TITLE,
+        count: entries.len(),
+        collapsed,
+    });
+    if !collapsed {
+        rows.extend(entries.into_iter().map(|entry| SidebarRow::Agent {
+            entry: Box::new(entry),
+            depth: 0,
+        }));
+    }
 }
 
 fn append_settled_rows(
@@ -3397,7 +3585,50 @@ struct SidebarTabGroup {
     unlinked: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarEntryLifecycle {
+    Active,
+    Snoozed,
+    Settled,
+}
+
+fn sidebar_entry_lifecycle(app: &AppState, entry: &AgentPanelEntry) -> SidebarEntryLifecycle {
+    if let Some(remote) = entry.remote_entry.as_ref() {
+        return if remote.settled {
+            SidebarEntryLifecycle::Settled
+        } else {
+            SidebarEntryLifecycle::Active
+        };
+    }
+    let Some(target) = entry.local_target() else {
+        return SidebarEntryLifecycle::Active;
+    };
+    let Some(pane) = app
+        .workspaces
+        .get(target.ws_idx)
+        .and_then(|workspace| workspace.tabs.get(target.tab_idx))
+        .and_then(|tab| tab.panes.get(&target.pane_id))
+    else {
+        return SidebarEntryLifecycle::Active;
+    };
+    if pane.settled_at.is_some() {
+        SidebarEntryLifecycle::Settled
+    } else if pane.snoozed_until().is_some() {
+        SidebarEntryLifecycle::Snoozed
+    } else {
+        SidebarEntryLifecycle::Active
+    }
+}
+
 fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<AgentPanelEntry> {
+    ordered_tab_entries_preferring(app, entries, None)
+}
+
+fn ordered_tab_entries_preferring(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    preferred_panes: Option<&std::collections::HashSet<(usize, usize, crate::layout::PaneId)>>,
+) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(entries);
     let mut representatives = std::collections::HashMap::new();
     for entry in entries {
@@ -3405,16 +3636,26 @@ fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Agent
         let Some(target) = entry.local_target() else {
             continue;
         };
+        let focused_pane = app
+            .workspaces
+            .get(target.ws_idx)
+            .and_then(|workspace| workspace.tabs.get(target.tab_idx))
+            .map(|tab| tab.layout.focused());
+        let rank = (
+            usize::from(preferred_panes.is_some_and(|panes| {
+                !panes.contains(&(target.ws_idx, target.tab_idx, target.pane_id))
+            })),
+            usize::from(focused_pane != Some(target.pane_id)),
+        );
         representatives
-            .entry(key.clone())
-            .and_modify(|pane_id| {
-                if app.pane_is_settled(target.ws_idx, *pane_id)
-                    && !app.pane_is_settled(target.ws_idx, target.pane_id)
-                {
+            .entry(key)
+            .and_modify(|(pane_id, current_rank)| {
+                if rank < *current_rank {
                     *pane_id = target.pane_id;
+                    *current_rank = rank;
                 }
             })
-            .or_insert(target.pane_id);
+            .or_insert((target.pane_id, rank));
     }
     let mut seen = std::collections::HashSet::new();
     entries
@@ -3425,7 +3666,7 @@ fn ordered_tab_entries(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Agent
                 .then(|| tab_entries.get(&tab).cloned())
                 .flatten()
                 .map(|mut entry| {
-                    if let (Some(target), Some(pane_id)) =
+                    if let (Some(target), Some((pane_id, _))) =
                         (entry.local_target(), representatives.get(&tab))
                     {
                         entry.identity = AgentPanelIdentity::Local(AgentPanelLocalTarget {
@@ -3446,17 +3687,6 @@ fn entry_work_context<'a>(
     entry.remote_entry.as_ref().map_or_else(
         || entry_terminal(app, entry).map(crate::terminal::TerminalState::effective_work_context),
         |remote| Some(&remote.work_context),
-    )
-}
-
-fn entry_is_settled(app: &AppState, entry: &AgentPanelEntry) -> bool {
-    entry.remote_entry.as_ref().map_or_else(
-        || {
-            entry
-                .local_target()
-                .is_some_and(|target| app.pane_is_settled(target.ws_idx, target.pane_id))
-        },
-        |remote| remote.settled,
     )
 }
 
@@ -5346,7 +5576,7 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
         .map(|(key, _)| key.clone())
         .collect::<std::collections::HashSet<_>>();
 
-    let visible_group_idx = if matches!(app.mode, Mode::Navigate) {
+    let visible_group_idx = if matches!(app.server_mode(), Mode::Navigate) {
         Some(app.selected)
     } else {
         app.active
@@ -6019,6 +6249,36 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     .to_string()
 }
 
+fn snooze_deadline_tooltip(
+    now: time::PrimitiveDateTime,
+    deadline: time::PrimitiveDateTime,
+) -> String {
+    let clock = format!("{:02}:{:02}", deadline.hour(), deadline.minute());
+    if deadline.date() == now.date() {
+        format!("Unsnoozes at {clock}")
+    } else {
+        format!("Unsnoozes {} at {clock}", deadline.date())
+    }
+}
+
+fn snooze_control_tooltip(app: &AppState, ws_idx: usize, pane_id: crate::layout::PaneId) -> String {
+    let deadline = app
+        .workspaces
+        .get(ws_idx)
+        .and_then(|workspace| workspace.pane_state(pane_id))
+        .and_then(crate::pane::PaneState::snoozed_until);
+    let Some(deadline) = deadline else {
+        return "Set time".to_string();
+    };
+    match (
+        crate::platform::local_datetime(),
+        crate::platform::local_datetime_at(deadline),
+    ) {
+        (Some(now), Some(deadline)) => snooze_deadline_tooltip(now, deadline),
+        _ => format!("Unsnoozes at UNIX {deadline}"),
+    }
+}
+
 /// Hover explanations for the parts of a sidebar row that are a glyph or a
 /// truncation rather than words: status glyphs, agent dots, and work titles the
 /// row was too narrow to spell out.
@@ -6093,21 +6353,42 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let fixed_width =
                     widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
-                if title_width >= 2 && !app.pane_is_settled(target.ws_idx, target.pane_id) {
-                    if let Some(rect) = clamp_row_cells(
-                        body,
-                        row_y,
-                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - 2,
-                        2,
-                    ) {
+                let control_pane = row_control_pane(app, entry, tab);
+                let controls_width =
+                    selected_row_controls_width(control_pane, title_width, body.width);
+                if controls_width > 0 {
+                    let Some((pane_id, show_settle)) = control_pane else {
+                        continue;
+                    };
+                    let start = prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
+                    if let Some(rect) =
+                        clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
+                    {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
-                            label: "Settle".into(),
-                            action: Some(crate::app::state::SidebarHoverAction::Settle {
+                            label: snooze_control_tooltip(app, target.ws_idx, pane_id),
+                            action: Some(crate::app::state::SidebarHoverAction::Snooze {
                                 ws_idx: target.ws_idx,
-                                pane_id: target.pane_id,
+                                pane_id,
                             }),
                         });
+                    }
+                    if show_settle {
+                        if let Some(rect) = clamp_row_cells(
+                            body,
+                            row_y,
+                            start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                            SIDEBAR_SETTLE_CONTROL_WIDTH,
+                        ) {
+                            targets.push(crate::app::state::SidebarHoverTarget {
+                                rect,
+                                label: "Settle".into(),
+                                action: Some(crate::app::state::SidebarHoverAction::Settle {
+                                    ws_idx: target.ws_idx,
+                                    pane_id,
+                                }),
+                            });
+                        }
                     }
                 }
             }
@@ -6794,7 +7075,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         return;
     }
 
-    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let is_navigating = matches!(app.server_mode(), Mode::Navigate);
 
     let p = &app.palette;
     fill_sidebar_background(frame, area, p);
@@ -6965,8 +7246,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(target.ws_idx, target.pane_id) {
-                    dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
+                if app.pane_is_settled(target.ws_idx, target.pane_id)
+                    || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+                {
+                    dim_inactive_pane_row(
+                        frame,
+                        Rect::new(ws_area.x, y, ws_area.width, 1),
+                        p.overlay0,
+                    );
                 }
             }
             SidebarRow::RemoteAgent {
@@ -7031,8 +7318,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(target.ws_idx, target.pane_id) {
-                    dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
+                if app.pane_is_settled(target.ws_idx, target.pane_id)
+                    || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+                {
+                    dim_inactive_pane_row(
+                        frame,
+                        Rect::new(ws_area.x, y, ws_area.width, 1),
+                        p.overlay0,
+                    );
                 }
             }
             SidebarRow::SectionHeader { title, .. } => {
@@ -7175,7 +7468,7 @@ pub(super) fn render_sidebar(
 ) {
     let p = &app.palette;
     fill_sidebar_background(frame, area, p);
-    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let is_navigating = matches!(app.server_mode(), Mode::Navigate);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {
@@ -7201,7 +7494,7 @@ pub(super) fn render_sidebar(
         let style = sidebar_footer_style(
             app,
             crate::app::state::SidebarFooterItem::Settings,
-            app.mode == Mode::Settings,
+            app.server_mode() == Mode::Settings,
             p,
         );
         frame.render_widget(Paragraph::new(Span::styled("⚙ ", style)), settings);
@@ -8179,8 +8472,11 @@ fn render_tab_card(
     let Some(target) = entry.local_target() else {
         return;
     };
-    if app.pane_is_settled(target.ws_idx, target.pane_id) {
-        dim_settled_row(frame, card.rect, app.palette.overlay0);
+    let settled = app.pane_is_settled(target.ws_idx, target.pane_id);
+    if settled || app.pane_is_snoozed(target.ws_idx, target.pane_id) {
+        dim_inactive_pane_row(frame, card.rect, app.palette.overlay0);
+    }
+    if settled {
         let target = crate::app::state::PaneFocusTarget {
             workspace_id: app.workspaces[target.ws_idx].id.clone(),
             pane_id: target.pane_id,
@@ -8200,7 +8496,9 @@ fn tab_card_entry<'a>(
     rows.iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
             if entry.local_target().is_some_and(|target| {
-                target.ws_idx == card.ws_idx && target.tab_idx == card.tab_idx
+                target.ws_idx == card.ws_idx
+                    && target.tab_idx == card.tab_idx
+                    && target.pane_id == card.pane_id
             }) =>
         {
             Some((entry.as_ref(), *depth))
@@ -8227,16 +8525,16 @@ fn render_agent_card(
         None,
         narrow_prefix,
     );
-    if detail
-        .local_target()
-        .is_some_and(|target| app.pane_is_settled(target.ws_idx, target.pane_id))
-    {
-        dim_settled_row(frame, rect, app.palette.overlay0);
+    if detail.local_target().is_some_and(|target| {
+        app.pane_is_settled(target.ws_idx, target.pane_id)
+            || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+    }) {
+        dim_inactive_pane_row(frame, rect, app.palette.overlay0);
     }
 }
 
 /// Preserve the frozen row layout, then replace only its foreground styling.
-fn dim_settled_row(frame: &mut Frame, rect: Rect, color: ratatui::style::Color) {
+pub(super) fn dim_inactive_pane_row(frame: &mut Frame, rect: Rect, color: ratatui::style::Color) {
     let buffer = frame.buffer_mut();
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
@@ -8930,7 +9228,10 @@ pub(super) fn render_sidebar_object_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                format!("{} {label}", if selected { "▸" } else { " " }),
+                super::dropdown::pad_menu_row(
+                    &format!(" {} {label} ", if selected { "▸" } else { " " }),
+                    layout.list_rect.width,
+                ),
                 style,
             ))
         })
@@ -9187,6 +9488,99 @@ pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
     "⎇ New thread, new worktree",
     "🗑 Delete",
 ];
+
+pub(crate) fn sidebar_snooze_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let menu = app.sidebar_snooze.as_ref()?;
+    if menu.time_draft.is_some() {
+        return None;
+    }
+    let ws_idx = app
+        .workspaces
+        .iter()
+        .position(|workspace| workspace.id == menu.target.workspace_id)?;
+    let anchor = compute_tab_card_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|card| card.ws_idx == ws_idx && card.pane_id == menu.target.pane_id)
+        .map(|card| card.rect)
+        .or_else(|| {
+            compute_agent_card_areas(app, app.view.sidebar_rect)
+                .into_iter()
+                .find(|card| card.ws_idx == ws_idx && card.pane_id == menu.target.pane_id)
+                .map(|card| card.rect)
+        })
+        .unwrap_or_else(|| Rect::new(menu.anchor.0, menu.anchor.1, 1, 1));
+    let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
+    let items = crate::app::state::sidebar_snooze_menu_items(snoozed);
+    let selected = items
+        .iter()
+        .position(|(_, action)| *action == menu.selected)
+        .unwrap_or(0);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor,
+            item_count: items.len(),
+            selected,
+            has_filter: false,
+            max_rows: items.len(),
+            min_width: 34,
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
+    let Some(menu) = app.sidebar_snooze.as_ref() else {
+        return;
+    };
+    if menu.time_draft.is_some() {
+        return;
+    }
+    let Some(layout) = sidebar_snooze_menu_layout(app, frame.area()) else {
+        return;
+    };
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    let Some(ws_idx) = app
+        .workspaces
+        .iter()
+        .position(|workspace| workspace.id == menu.target.workspace_id)
+    else {
+        return;
+    };
+    let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
+    let lines = crate::app::state::sidebar_snooze_menu_items(snoozed)
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(_index, (label, action))| {
+            let selected = *action == menu.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                super::dropdown::pad_menu_row(
+                    &format!("{} {label}", if selected { "▸" } else { " " }),
+                    layout.list_rect.width,
+                ),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
+}
 
 /// The delete row's label, which asks once before it closes the pane while
 /// `ui.confirm_close` is on.
@@ -9734,7 +10128,19 @@ pub(crate) mod tests {
                 )
             })
             .expect("settled section");
-        assert!(!rows.iter().any(|row| matches!(
+        let snoozed_at = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("snoozed section");
+        assert!(!rows[..snoozed_at].iter().any(|row| matches!(
             row,
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
                 if entry.local_target().is_some_and(|target| target.pane_id == snoozed_pane)
@@ -11622,6 +12028,203 @@ pub(crate) mod tests {
         let style = terminal.backend().buffer()[(card.rect.x + 2, card.rect.y)].style();
         assert_eq!(style.fg, Some(app.palette.overlay0));
         assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn snoozed_section_hides_sessions_until_expiry_or_attention() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("expires"),
+            Workspace::test_new("attention"),
+        ];
+        app.ensure_test_terminals();
+        let expires = app.workspaces[0].tabs[0].root_pane;
+        let attention = app.workspaces[1].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(0, expires, 1_725_000_060));
+        assert!(app.snooze_pane_at(1, attention, 1_725_000_120));
+
+        let rows = sidebar_rows(&app);
+        let snoozed = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        count: 2,
+                        ..
+                    }
+                )
+            })
+            .expect("Snoozed section");
+        assert_eq!(
+            rows[snoozed + 1..]
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Agent { .. }))
+                .count(),
+            2
+        );
+        assert!(!rows[..snoozed].iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.local_target().is_some_and(|target| {
+                    target.pane_id == expires || target.pane_id == attention
+                })
+        )));
+
+        assert!(app.refresh_snoozes_at(std::time::Instant::now(), 1_725_000_060));
+        assert!(app.unsnooze_pane_at(
+            1,
+            attention,
+            crate::api::schema::PaneUnsnoozeReason::Attention,
+            std::time::Instant::now(),
+        ));
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert!(!app.pane_is_snoozed(0, expires));
+        assert!(!app.pane_is_snoozed(1, attention));
+    }
+
+    #[test]
+    fn split_tab_keeps_active_and_snoozed_panes_in_separate_rows() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("split snooze");
+        let active_pane = workspace.tabs[0].root_pane;
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+
+        let snoozed_terminal = app.workspaces[0].tabs[0].panes[&snoozed_pane]
+            .attached_terminal_id
+            .clone();
+        let working_at = std::time::Instant::now();
+        app.terminals
+            .get_mut(&snoozed_terminal)
+            .expect("snoozed pane terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                working_at,
+            );
+        app.reconcile_sidebar_presentation();
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
+
+        let rows = sidebar_rows(&app);
+        let snoozed_section = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )
+            })
+            .expect("Snoozed section");
+        let active_entry = rows[..snoozed_section]
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("active sibling row");
+        assert_eq!(active_entry.local_target().unwrap().pane_id, active_pane);
+        assert_eq!(active_entry.state, AgentState::Unknown);
+        let snoozed_entry = rows[snoozed_section + 1..]
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("snoozed pane row");
+        assert_eq!(snoozed_entry.local_target().unwrap().pane_id, snoozed_pane);
+        assert_eq!(snoozed_entry.state, AgentState::Working);
+
+        app.sidebar_width = 40;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        let area = app.view.sidebar_rect;
+        let tab_cards = compute_tab_card_areas(&app, area);
+        let agent_cards = compute_agent_card_areas(&app, area);
+        for pane_id in [active_pane, snoozed_pane] {
+            let rendered_entry =
+                if let Some(card) = tab_cards.iter().find(|card| card.pane_id == pane_id) {
+                    tab_card_entry(&rows, card)
+                        .map(|(entry, _)| entry)
+                        .expect("tab render entry")
+                } else {
+                    let card = agent_cards
+                        .iter()
+                        .find(|card| card.pane_id == pane_id)
+                        .unwrap_or_else(|| {
+                            panic!(
+                            "pane {pane_id:?} card missing from {tab_cards:?} and {agent_cards:?}"
+                        )
+                        });
+                    match &rows[card.row_idx] {
+                        SidebarRow::Agent { entry, .. } => entry,
+                        _ => panic!("agent card resolved to a non-agent row"),
+                    }
+                };
+            assert_eq!(
+                rendered_entry.local_target().unwrap().pane_id,
+                pane_id,
+                "render must resolve split rows by pane id"
+            );
+        }
+
+        assert!(app.unsnooze_pane_at(
+            0,
+            snoozed_pane,
+            crate::api::schema::PaneUnsnoozeReason::Explicit,
+            std::time::Instant::now(),
+        ));
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+                .count(),
+            1
+        );
+
+        assert!(app.snooze_pane_at(0, snoozed_pane, 1_725_000_120));
+        assert!(app.refresh_snoozes_at(std::time::Instant::now(), 1_725_000_120));
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -14292,7 +14895,7 @@ row_gap = 1
         app.workspaces = vec![active, queued];
         app.ensure_test_terminals();
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_spaces.row_gap = 1;
 
         let terminal_id = app.workspaces[0].tabs[0].panes[&active_root]
@@ -14375,7 +14978,7 @@ row_gap = 1
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         for pane_id in [root_pane, split_pane] {
             let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
                 .attached_terminal_id
@@ -14430,7 +15033,7 @@ row_gap = 1
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -15276,7 +15879,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         app.palette = crate::app::state::Palette::one_light();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 26, 20);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         let first_row = app.view.workspace_card_areas[0].rect.y;
@@ -15315,7 +15918,7 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
         app.sidebar_spaces = config.ui.sidebar.spaces;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.workspaces[0].metadata_tokens.patch(
             std::collections::HashMap::from([("hype".into(), Some("HI".into()))]),
             None,
@@ -15741,13 +16344,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  sample-pr ✓ pi  2m");
+        assert_eq!(github_depth, "    ●  sampl… ◷  ✓ pi  2m");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "      ●  sample… ✓ pi  2m");
+        assert_eq!(repo_branch_depth, "      ●  sam… ◷  ✓ pi  2m");
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sample-li… ✓ pi  2m");
+        assert_eq!(nested_ticket, "   ●  sample… ◷  ✓ pi  2m");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -16008,16 +16611,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 render_sidebar(&rendered_app, &TerminalRuntimeRegistry::new(), frame, area)
             })
             .expect("narrow grouped view should render");
-        let rendered_rows = (0..area.height)
-            .map(|y| row_text(terminal.backend().buffer(), y, area.width - 1))
-            .filter(|row| row.contains("sample-"))
+        let rendered_rows = compute_tab_card_areas(&rendered_app, area)
+            .into_iter()
+            .map(|card| row_text(terminal.backend().buffer(), card.rect.y, area.width - 1))
             .collect::<Vec<_>>();
         assert_eq!(rendered_rows.len(), 4, "{rendered_rows:#?}");
-        for expected_title in ["sample-li", "sample-pr", "sample-mi", "sample-se"] {
-            let row = rendered_rows
-                .iter()
-                .find(|row| row.contains(expected_title))
-                .unwrap_or_else(|| panic!("missing {expected_title}: {rendered_rows:#?}"));
+        for row in &rendered_rows {
+            assert!(!row.contains("SCA-3165 ·"), "{row:?}");
+            assert!(!row.contains("#159 ·"), "{row:?}");
+            assert!(row.contains("samp"), "{row:?}");
             assert_eq!(row.find('●'), Some(3), "{row:?}");
         }
     }
@@ -16790,6 +17392,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn collapsed_sidebar_dims_snoozed_panes_like_expanded_rows() {
+        let (mut app, first_pane, _) = collapsed_agent_app();
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, first_pane, deadline));
+        let row_position = sidebar_rows(&app)
+            .iter()
+            .filter(|row| matches!(row, SidebarRow::Agent { .. } | SidebarRow::Tab { .. }))
+            .position(|row| match row {
+                SidebarRow::Agent { entry, .. } | SidebarRow::Tab { entry, .. } => entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == first_pane),
+                _ => false,
+            })
+            .expect("snoozed pane row");
+
+        let area = Rect::new(0, 0, 4, 14);
+        let rows = collapsed_agent_row_styles(&app, area, 3);
+        let styles = &rows[row_position];
+        assert!(styles.iter().all(|style| {
+            style.fg == Some(app.palette.overlay0) && style.add_modifier.contains(Modifier::DIM)
+        }));
+    }
+
+    #[test]
     fn collapsed_sidebar_does_not_highlight_agents_without_active_workspace() {
         let (mut app, _, _) = collapsed_agent_app();
         app.active = None;
@@ -17046,7 +17672,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
@@ -19680,7 +20306,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.ensure_test_terminals();
         app.reconcile_sidebar_presentation();
         app.active = Some(1);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 30, 10);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         let row = app.view.workspace_card_areas[0].rect.y;
@@ -20384,7 +21010,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         // Search adds one header row without changing the three-row viewport
         // this metric contract exercises.
@@ -20406,7 +21032,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         // Land on "notes" without coupling the fixture to the set of section
         // headers that precede the Spaces tree.
         app.workspace_scroll = sidebar_rows(&app)
@@ -20554,7 +21180,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
         ];
         app.active = Some(1);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.collapsed_space_keys.insert("repo-key".into());
 
         assert_eq!(
@@ -20572,7 +21198,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.active = None;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         assert_eq!(
             workspace_list_entries(&app),
             vec![WorkspaceListEntry::Workspace {
@@ -20589,7 +21215,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
         ];
-        app.mode = Mode::Navigate;
+        app.set_server_mode(Mode::Navigate);
         app.selected = 1;
         app.active = Some(1);
         app.collapsed_space_keys.insert("repo-key".into());
@@ -22013,6 +22639,42 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn snooze_control_tooltip_names_the_action_and_wake_time() {
+        let app = app_with_agents(&["alpha"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        assert_eq!(snooze_control_tooltip(&app, 0, pane_id), "Set time");
+
+        let today =
+            time::Date::from_calendar_date(2026, time::Month::September, 17).expect("valid date");
+        let tomorrow =
+            time::Date::from_calendar_date(2026, time::Month::September, 18).expect("valid date");
+        let now = time::PrimitiveDateTime::new(
+            today,
+            time::Time::from_hms(13, 5, 0).expect("valid time"),
+        );
+        assert_eq!(
+            snooze_deadline_tooltip(
+                now,
+                time::PrimitiveDateTime::new(
+                    today,
+                    time::Time::from_hms(14, 30, 0).expect("valid time"),
+                )
+            ),
+            "Unsnoozes at 14:30"
+        );
+        assert_eq!(
+            snooze_deadline_tooltip(
+                now,
+                time::PrimitiveDateTime::new(
+                    tomorrow,
+                    time::Time::from_hms(9, 0, 0).expect("valid time"),
+                )
+            ),
+            "Unsnoozes 2026-09-18 at 09:00"
+        );
+    }
+
+    #[test]
     fn hover_targets_anchor_on_the_agent_dot_a_row_actually_drew() {
         let app = app_with_agents(&["alpha"]);
         let area = Rect::new(0, 0, 32, 20);
@@ -22039,8 +22701,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn unsettled_local_rows_render_a_settle_icon_and_tooltip_at_narrow_widths() {
-        for width in [18, 32] {
+    fn selected_local_rows_prioritize_title_then_render_snooze_and_settle_controls() {
+        for width in [18, 60] {
             let app = app_with_agents(&["alpha"]);
             let area = Rect::new(0, 0, width, 20);
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -22048,34 +22710,152 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
                 .unwrap();
 
-            let target = compute_sidebar_hover_targets(&app, area)
-                .into_iter()
-                .find(|target| target.label == "Settle")
-                .expect("settle hover target");
-            assert_eq!(target.rect.width, 2, "width={width}");
-            assert!(matches!(
-                target.action,
-                Some(crate::app::state::SidebarHoverAction::Settle { .. })
-            ));
-            let rendered = row_text(terminal.backend().buffer(), target.rect.y, area.width - 1);
-            assert!(rendered.contains('✓'), "width={width}: {rendered:?}");
-            assert_eq!(
-                terminal
+            let targets = compute_sidebar_hover_targets(&app, area);
+            let rendered = (0..area.height)
+                .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains('●'), "width={width}: {rendered:?}");
+            assert!(rendered.contains("alpha"), "width={width}: {rendered:?}");
+            if width == 18 {
+                assert!(
+                    targets.iter().all(|target| target.action.is_none()),
+                    "controls displaced minimum-width content: {targets:?}"
+                );
+                assert!(!rendered.contains('✓'), "{rendered:?}");
+            } else {
+                assert!(targets.iter().any(|target| matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+                )));
+                assert!(targets.iter().any(|target| matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Settle { .. })
+                )));
+                assert!(rendered.contains('◷'), "{rendered:?}");
+                assert!(rendered.contains('✓'), "{rendered:?}");
+                let settle = targets
+                    .iter()
+                    .find(|target| target.label == "Settle")
+                    .expect("settle hover target");
+                let icon = terminal
                     .backend()
                     .buffer()
-                    .cell((target.rect.x + 1, target.rect.y))
-                    .map(|cell| cell.symbol()),
-                Some("✓"),
-                "width={width}: {rendered:?}"
-            );
-            let icon = terminal
-                .backend()
-                .buffer()
-                .cell((target.rect.x + 1, target.rect.y))
-                .expect("settle icon cell");
-            assert_eq!(icon.fg, app.palette.overlay0, "width={width}");
-            assert_ne!(icon.fg, app.palette.green, "width={width}");
+                    .cell((settle.rect.x, settle.rect.y))
+                    .expect("settle icon cell");
+                assert_eq!(icon.fg, app.palette.overlay0, "width={width}");
+                assert_ne!(icon.fg, app.palette.green, "width={width}");
+            }
         }
+    }
+
+    #[test]
+    fn active_row_controls_keep_the_rows_pane_when_a_snoozed_sibling_has_focus() {
+        let mut app = app_with_agents(&["split"]);
+        let active_pane = app.workspaces[0].tabs[0].root_pane;
+        let snoozed_pane = app.workspaces[0].test_split(Direction::Horizontal);
+        app.ensure_test_terminals();
+        for pane_id in [active_pane, snoozed_pane] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal");
+            terminal.detected_agent = Some(Agent::Pi);
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+        }
+        app.workspaces[0].tabs[0].layout.focus_pane(snoozed_pane);
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
+        app.refresh_local_agent_panel_identities();
+        app.reconcile_sidebar_presentation();
+
+        let (entry, depth, tab) = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Agent { entry, depth }
+                    if entry
+                        .local_target()
+                        .is_some_and(|target| target.pane_id == active_pane) =>
+                {
+                    Some((entry, depth, false))
+                }
+                SidebarRow::Tab { entry, depth }
+                    if entry
+                        .local_target()
+                        .is_some_and(|target| target.pane_id == active_pane) =>
+                {
+                    Some((entry, depth, true))
+                }
+                _ => None,
+            })
+            .expect("active pane row");
+        let rect = Rect::new(0, 0, 60, 1);
+        let actions = (rect.x..rect.right())
+            .filter_map(|column| selected_row_control_at(&app, &entry, rect, depth, tab, column))
+            .collect::<Vec<_>>();
+
+        assert!(!actions.is_empty());
+        assert!(actions.iter().all(|action| match action {
+            crate::app::state::SidebarHoverAction::Snooze { pane_id, .. }
+            | crate::app::state::SidebarHoverAction::Settle { pane_id, .. } => {
+                *pane_id == active_pane
+            }
+        }));
+    }
+
+    #[test]
+    fn attention_gated_row_hides_timer_control_and_closes_its_dropdown() {
+        let mut app = app_with_agents(&["alpha"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: app.workspaces[0].id.clone(),
+                pane_id,
+            },
+            anchor: (2, 2),
+            selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
+            time_draft: None,
+            error: None,
+        });
+        let area = Rect::new(0, 0, 60, 20);
+
+        app.reconcile_client_modal_target();
+        crate::ui::compute_view(&mut app, area);
+        assert!(app.sidebar_snooze.is_none());
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let targets = compute_sidebar_hover_targets(&app, area);
+        assert!(targets.iter().all(|target| {
+            target.label != "Set time"
+                && !matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+                )
+        }));
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains('◷'), "{rendered}");
     }
 
     #[test]
@@ -22091,12 +22871,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert!(compute_sidebar_hover_targets(&app, area)
             .iter()
-            .all(|target| target.label != "Settle"));
+            .all(|target| {
+                target.label != "Settle"
+                    && target.label != "Set time"
+                    && !matches!(
+                        target.action,
+                        Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+                    )
+            }));
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!rendered.contains('✓'), "{rendered}");
+        assert!(!rendered.contains('◷'), "{rendered}");
     }
 
     #[test]
@@ -22767,5 +23555,39 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ],
             "the current choice is marked and the cursor starts on it"
         );
+    }
+
+    #[test]
+    fn snooze_menu_selected_row_fills_the_dropdown_width() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("snooze menu")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: app.workspaces[0].id.clone(),
+                pane_id,
+            },
+            anchor: (10, 3),
+            selected: crate::app::state::SidebarSnoozeMenuAction::Preset(
+                crate::app::state::SidebarSnoozePreset::Duration(15 * 60),
+            ),
+            time_draft: None,
+            error: None,
+        });
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = sidebar_snooze_menu_layout(&app, area).expect("snooze dropdown");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_snooze_menu(&app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for x in layout.list_rect.x..layout.list_rect.right() {
+            assert_eq!(
+                buffer[(x, layout.list_rect.y)].bg,
+                app.palette.surface1,
+                "selected menu row must cover column {x}"
+            );
+        }
     }
 }

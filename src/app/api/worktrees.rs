@@ -153,6 +153,9 @@ impl App {
                 Err(err) => return encode_error(id, "worktree_open_failed", err.to_string()),
             }
         };
+        if params.focus {
+            self.focus_client_on_pane();
+        }
         if created_workspace {
             self.bind_workspace_root_work_context(ws_idx, work_context);
         }
@@ -1237,6 +1240,7 @@ mod tests {
         app.handle_api_worktree_add_finished(WorktreeAddResult {
             path: checkout.clone(),
             api_request: Some(ApiWorktreeAddRequest {
+                client_id: None,
                 id: "req".into(),
                 operation_id: 9,
                 checkout_key,
@@ -2294,6 +2298,7 @@ mod tests {
             worktree: Some(Box::new(worktree_snapshot)),
             forced: false,
             api_request: Some(ApiWorktreeRemoveRequest {
+                client_id: None,
                 id: "req".into(),
                 operation_id: 7,
                 checkout_key: crate::worktree::canonical_or_original(&checkout),
@@ -2355,6 +2360,7 @@ mod tests {
             worktree: Some(Box::new(worktree_snapshot)),
             forced: true,
             api_request: Some(ApiWorktreeRemoveRequest {
+                client_id: None,
                 id: "req".into(),
                 operation_id: 7,
                 checkout_key: crate::worktree::canonical_or_original(&checkout),

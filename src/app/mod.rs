@@ -147,6 +147,13 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    /// Attached client whose overlay is currently swapped into `state`.
+    /// Deferred worktree operations copy this id into their completion event.
+    pub(crate) active_overlay_client_id: Option<u64>,
+    /// A focus completion selected the current client's pane. The headless
+    /// server drains this after the mutation so external API focus can be
+    /// projected into each attached client's presentation.
+    pub(crate) pending_client_pane_focus: bool,
     pub(crate) pane_graphics: pane_graphics::Runtime,
     pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
     pub(crate) direct_graphics_available: bool,
@@ -833,6 +840,7 @@ impl App {
             .collect(),
             sidebar_group_mode,
             sidebar_focused: false,
+            client_focus_intent: state::ClientFocusIntent::FollowShared,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: sidebar_group_mode.view_index(),
             sidebar_work_filter,
@@ -852,6 +860,7 @@ impl App {
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
@@ -941,7 +950,8 @@ impl App {
             active,
             previous_pane_focus: None,
             selected,
-            mode,
+            client_overlay: state::ClientOverlay::None,
+            server_interaction: state::ServerInteractionState::new(mode),
             should_quit: false,
             detach_exits: no_session,
             detach_requested: false,
@@ -1326,6 +1336,7 @@ impl App {
             session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
             confirm_close_workspace_id: None,
+            rename_target: None,
         };
 
         state.terminals = restored_terminals;
@@ -1383,6 +1394,8 @@ impl App {
             last_api_notification_at: None,
             missing_terminal_notification_backend_warned: std::cell::Cell::new(false),
             state,
+            active_overlay_client_id: None,
+            pending_client_pane_focus: false,
             pane_graphics: pane_graphics::Runtime::default(),
             pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
             direct_graphics_available: false,
@@ -1643,11 +1656,11 @@ impl App {
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
         app.state.prio_panel_collapsed = snapshot.prio_panel_collapsed;
-        app.state.mode = if app.state.active.is_some() {
+        app.state.set_server_mode(if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
             state::Mode::Navigate
-        };
+        });
         app.last_focus = app.state.active.and_then(|idx| {
             app.state
                 .workspaces
@@ -1794,7 +1807,7 @@ impl App {
         // always fires on exit, so a mid-interaction flag toggle can't strand the host on ASCII.
         let active = match (
             previous_mode.wants_ascii_input(),
-            self.state.mode.wants_ascii_input(),
+            self.state.effective_interaction_mode().wants_ascii_input(),
         ) {
             (false, true) if self.state.switch_ascii_input_source_in_prefix => true,
             (true, false) => false,
@@ -1808,11 +1821,35 @@ impl App {
         }
     }
 
+    /// Reconcile client-owned input state after runtime mutations and before
+    /// view computation. Rendering must not open or close input owners.
+    pub(crate) fn reconcile_client_interaction(&mut self, sync_input_source: bool) -> bool {
+        let previous_mode = self.state.effective_interaction_mode();
+        self.state.reconcile_client_modal_target();
+        self.state.reconcile_context_menu_selection();
+        let changed = self.state.effective_interaction_mode() != previous_mode;
+        if sync_input_source {
+            self.sync_prefix_input_source(previous_mode);
+        }
+        changed
+    }
+
+    /// Complete a creation or focus transition for the current presentation
+    /// without changing the server-owned mode used by other attached clients.
+    pub(crate) fn focus_client_on_pane(&mut self) {
+        self.state.focus_client_on_pane();
+        self.pending_client_pane_focus = true;
+    }
+
+    pub(crate) fn take_pending_client_pane_focus(&mut self) -> bool {
+        std::mem::take(&mut self.pending_client_pane_focus)
+    }
+
     pub(crate) fn handle_internal_event_with_prefix_sync(
         &mut self,
         event: crate::events::AppEvent,
     ) -> bool {
-        let previous_mode = self.state.mode;
+        let previous_mode = self.state.effective_interaction_mode();
         let changed = self.handle_internal_event_with_render_impact(event);
         self.sync_prefix_input_source(previous_mode);
         changed
@@ -2027,6 +2064,7 @@ impl App {
             }
 
             if needs_render && self.can_render_now(now) {
+                self.reconcile_client_interaction(true);
                 self.sync_status_context_before_render();
                 let _ = self.render_dirty.take();
                 if self.window_title_configured() {
@@ -2203,13 +2241,13 @@ impl App {
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
         if !self.state.workspaces.is_empty()
-            || self.state.mode == Mode::Onboarding
+            || self.state.server_mode() == Mode::Onboarding
             || self.state.pending_workspace_create_cwd.is_some()
         {
             return false;
         }
 
-        let previous_mode = self.state.mode;
+        let previous_mode = self.state.server_mode();
         let preserve_mode = matches!(
             previous_mode,
             Mode::ReleaseNotes | Mode::ProductAnnouncement | Mode::Settings
@@ -2219,13 +2257,13 @@ impl App {
         match self.create_workspace_with_options(cwd, true) {
             Ok(_) => {
                 if preserve_mode {
-                    self.state.mode = previous_mode;
+                    self.state.set_server_mode(previous_mode);
                 }
                 true
             }
             Err(err) => {
                 tracing::error!(err = %err, "failed to create default workspace");
-                self.state.mode = Mode::Navigate;
+                self.state.set_server_mode(Mode::Navigate);
                 false
             }
         }
@@ -2248,13 +2286,13 @@ impl App {
         }
 
         if self.state.product_announcement.is_some() {
-            self.state.mode = Mode::ProductAnnouncement;
+            self.state.set_server_mode(Mode::ProductAnnouncement);
         } else {
-            self.state.mode = if self.state.active.is_some() {
+            self.state.set_server_mode(if self.state.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
-            };
+            });
         }
     }
 
@@ -2271,11 +2309,11 @@ impl App {
             }
         }
 
-        self.state.mode = if self.state.active.is_some() {
+        self.state.set_server_mode(if self.state.active.is_some() {
             Mode::Terminal
         } else {
             Mode::Navigate
-        };
+        });
     }
 
     pub(crate) fn scroll_release_notes(&mut self, delta: i16) {
@@ -2583,6 +2621,11 @@ impl App {
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.show_pull_button = config.ui.show_pull_button;
+                // The button is the Git menu's only anchor and entry point.
+                // Close it at the config transition, never during view computation.
+                if self.state.server_mode() == Mode::GitMenu && !self.state.show_pull_button {
+                    self.state.set_server_mode(Mode::Terminal);
+                }
                 self.state.open_dock_on_work_link = config.ui.open_dock_on_work_link;
                 self.state.show_pane_toggle_buttons = config.ui.show_pane_toggle_buttons;
                 self.state.pane_gaps = config.ui.pane_gaps;
@@ -2838,13 +2881,6 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
-    fn headless_overlay_precedes_subgroup_picker(&self) -> bool {
-        self.state.loop_run_history_detail.is_some()
-            || self.state.usage_view.is_some()
-            || self.state.inbox.is_some()
-            || self.try_route_paste_to_overlay()
-    }
-
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         // Full-frame overlays bypass ordinary pane context. The inbox routes keys
         // to a selected pane, while Symphony and home consume them themselves.
@@ -2858,7 +2894,7 @@ impl App {
             None
         } else if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
-        } else if self.state.mode == Mode::Terminal {
+        } else if self.state.effective_interaction_mode() == Mode::Terminal {
             Some(TerminalInputContext::Pane)
         } else {
             None
@@ -3081,7 +3117,10 @@ impl App {
                 *pomodoro_presentation,
                 std::time::Instant::now(),
             );
-            let previous_mode = self.state.mode;
+            let previous_mode = self.state.effective_interaction_mode();
+            let owner = self
+                .state
+                .input_owner_with_pomodoro(pomodoro_presentation.prompt.is_some());
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
@@ -3108,7 +3147,7 @@ impl App {
                         crossterm::event::KeyEventKind::Press => {
                             // A due break reminder still outranks every other
                             // input surface visible beneath it.
-                            if pomodoro_presentation.prompt.is_some()
+                            if owner == state::InputOwner::Pomodoro
                                 && self.intercept_notepad_key_with_prompt_visibility(&key, true)
                             {
                                 pomodoro_changed = true;
@@ -3118,102 +3157,40 @@ impl App {
                                 );
                                 continue;
                             }
-                            // Popup input is routed below by its terminal context.
-                            // Non-Home full-frame overlays keep input precedence;
-                            // otherwise the floating subgroup picker owns keys
-                            // before a stale notepad or sidebar focus can take them.
-                            if self.state.popup_pane.is_none()
-                                && !self.headless_overlay_precedes_subgroup_picker()
-                                && self
-                                    .state
-                                    .handle_sidebar_subgroup_picker_key(key.as_key_event())
-                            {
+                            if self.paste_clipboard_shortcut_for_input_owner(
+                                owner,
+                                &key.as_key_event(),
+                                crate::platform::read_clipboard_text,
+                            ) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
                                 );
                                 continue;
                             }
-                            if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
-                                pomodoro_changed = true;
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
+                            if let state::InputOwner::Dock(dock_owner) = owner {
+                                if dock_owner != state::DockInputOwner::Editor
+                                    && self.handle_dock_key_for_owner_headless(dock_owner, &key)
+                                {
+                                    self.input_leases.insert_consumed(
+                                        lease_key,
+                                        input::ConsumedInputLease::SuppressRepeats,
+                                    );
+                                    continue;
+                                }
+                            }
+                            let terminal_owner = owner.forwards_unhandled_input_to_pane()
+                                || matches!(
+                                    owner,
+                                    state::InputOwner::Popup
+                                        | state::InputOwner::Dock(state::DockInputOwner::Editor)
                                 );
-                                continue;
-                            }
-                            if self.handle_dock_surface_menu_key(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            // Home is a launch overlay, and `terminal_input_context`
-                            // reports no pane context while it is open. Settle home
-                            // first: a key it has no use for closes it and then
-                            // travels on as if home had never been there, rather
-                            // than being spent dismissing it.
-                            if self.state.home.is_some()
-                                && self.handle_home_key_headless(key.as_key_event())
-                            {
-                                continue;
-                            }
-                            if self.handle_dock_home_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_diff_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_files_key(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_pr_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_linear_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_chooser_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.state.popup_pane.is_none()
-                                && self.state.dock_object_preview.is_some()
-                            {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            let initial_context = self.terminal_input_context();
+                            let initial_context = terminal_owner
+                                .then(|| self.terminal_input_context())
+                                .flatten();
                             let proxy_input_gate_closed =
-                                self.focused_remote_proxy_input_gate_closed();
-                            let target = if initial_context.is_some() {
+                                terminal_owner && self.focused_remote_proxy_input_gate_closed();
+                            let target = if terminal_owner && initial_context.is_some() {
                                 self.handle_terminal_key_headless_from_with_hook(
                                     source_id,
                                     key.clone(),
@@ -3221,10 +3198,12 @@ impl App {
                                     controlled_owners,
                                 )
                             } else {
-                                self.handle_non_terminal_key_headless(key.clone());
+                                self.handle_non_terminal_key_headless(owner, key.clone());
                                 None
                             };
-                            let resulting_context = self.terminal_input_context();
+                            let resulting_context = terminal_owner
+                                .then(|| self.terminal_input_context())
+                                .flatten();
                             let plan = self.input_leases.complete_press_with_reprocess(
                                 lease_key,
                                 &key,
@@ -3243,7 +3222,14 @@ impl App {
                             );
                         }
                         crossterm::event::KeyEventKind::Repeat => {
-                            let current_context = self.terminal_input_context();
+                            let current_context = (owner.forwards_unhandled_input_to_pane()
+                                || matches!(
+                                    owner,
+                                    state::InputOwner::Popup
+                                        | state::InputOwner::Dock(state::DockInputOwner::Editor)
+                                ))
+                            .then(|| self.terminal_input_context())
+                            .flatten();
                             let plan = self.input_leases.plan_repeat(
                                 lease_key,
                                 &key,
@@ -3281,55 +3267,38 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
-                    self.handle_text_commit_headless_with_hook(
+                    self.handle_text_commit_headless_for_owner_with_hook(
+                        owner,
                         text.as_str(),
                         before_terminal_input,
                         controlled_owners,
                     );
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                    if pomodoro_presentation.prompt.is_some()
-                        || self.state.popup_pane.is_some()
-                        || self.state.mouse_capture
-                    {
-                        if pomodoro_presentation.prompt.is_some() {
-                            pomodoro_changed = true;
-                        }
-                        self.handle_mouse_event_headless_with_pomodoro_presentation(
-                            source_id,
-                            mouse,
-                            *pomodoro_presentation,
-                        );
-                    } else {
-                        if pomodoro_presentation.prompt.is_some() {
-                            pomodoro_changed = true;
-                        }
-                        self.state
-                            .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
-                        if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                            if !self.state.pane_is_settled_anywhere(pane_id) {
-                                self.retire_blocked_hook_authority_for_pane(
-                                    pane_id,
-                                    std::time::Instant::now(),
-                                );
-                            }
-                        }
+                    if owner == state::InputOwner::Pomodoro {
+                        pomodoro_changed = true;
                     }
+                    self.handle_mouse_for_input_owner(
+                        source_id,
+                        mouse,
+                        *pomodoro_presentation,
+                        owner,
+                    );
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
-                    if pomodoro_presentation.prompt.is_some() {
+                    if owner == state::InputOwner::Pomodoro {
                         pomodoro_changed = true;
                         continue;
                     }
                     self.state.clear_hovered_control();
-                    if self.try_route_paste_to_overlay()
-                        || self.try_route_paste_to_popup(&text)
-                        || self.route_text_to_sidebar_subgroup_picker(&text)
-                        || self.try_route_text_to_home(&text)
-                    {
-                    } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
-                        self.paste_into_active_text_input(&text);
-                    } else {
+                    if owner == state::InputOwner::Popup {
+                        self.try_route_paste_to_popup(&text);
+                    } else if owner == state::InputOwner::Dock(state::DockInputOwner::Editor) {
+                        if let Some(runtime) = self.dock_editor_runtime() {
+                            let _ = runtime.try_send_paste(text);
+                        }
+                    } else if self.paste_into_input_owner(owner, &text) {
+                    } else if owner.forwards_unhandled_input_to_pane() {
                         if let Some(ws_idx) = self.state.active {
                             let focused = self
                                 .state
@@ -3431,116 +3400,167 @@ impl App {
     ///
     /// Uses the standalone handler functions that work on `&mut AppState`
     /// since the server doesn't have the async context of the monolithic App.
-    fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
+    fn handle_non_terminal_key_headless(
+        &mut self,
+        owner: state::InputOwner,
+        key: crate::input::TerminalKey,
+    ) {
         let key_event = key.as_key_event();
-        if self.handle_symphony_key(key_event) {
-            return;
-        }
-        if self.handle_loop_run_history_key(key_event) {
-            return;
-        }
-        if self.handle_usage_view_key(key_event) {
-            return;
-        }
-        if self.handle_work_view_key(key_event) {
-            return;
-        }
-        // Home was already settled in `route_client_events_from`, before the
-        // pane-context decision that sends a key down this path at all.
-        if self.handle_inbox_key_headless(key_event) {
-            return;
-        }
-        if input::modal_paste_target_active(&self.state)
-            && input::is_modal_paste_shortcut(&key_event)
-        {
-            if let Some(text) = crate::platform::read_clipboard_text() {
-                self.paste_into_active_text_input(&text);
+        match owner {
+            state::InputOwner::Pomodoro | state::InputOwner::Popup | state::InputOwner::Pane => {}
+            state::InputOwner::Client(owner) => match owner {
+                state::ClientInputOwner::Overlay(overlay) => {
+                    self.handle_client_overlay_key(overlay, key_event);
+                }
+                state::ClientInputOwner::SnoozeMenu => {
+                    self.handle_sidebar_snooze_menu_key(key_event);
+                }
+                state::ClientInputOwner::SnoozeTime => {
+                    self.handle_sidebar_snooze_time_key(key_event);
+                }
+                state::ClientInputOwner::SettledMenu
+                | state::ClientInputOwner::SettledDeleteConfirm => {
+                    self.handle_sidebar_settled_key(key_event);
+                }
+                state::ClientInputOwner::AgentPicker => self.handle_agent_picker_key(key_event),
+                state::ClientInputOwner::SidebarGroupMenu => {
+                    self.state.handle_sidebar_group_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarFilterMenu => {
+                    self.state.handle_sidebar_filter_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarNewMenu => {
+                    self.state.handle_sidebar_new_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarNewThread => {
+                    self.state.handle_sidebar_new_thread_key(key_event);
+                }
+                state::ClientInputOwner::SidebarProjectMenu => {
+                    self.state.handle_sidebar_project_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarObjectMenu => {
+                    self.handle_sidebar_object_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarSortMenu => {
+                    self.state.handle_sidebar_sort_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarSubgroupPicker => {
+                    self.state.handle_sidebar_subgroup_picker_key(key_event);
+                }
+                state::ClientInputOwner::PrActionConfirmation => {
+                    self.handle_pr_action_confirmation_key(key_event);
+                }
+                state::ClientInputOwner::DockSurfaceMenu => {
+                    self.handle_dock_surface_menu_key(&key);
+                }
+            },
+            state::InputOwner::AddProject
+            | state::InputOwner::Surface(state::SurfaceInputOwner::Home) => {
+                self.handle_home_key_headless(key_event);
             }
-            return;
-        }
-
-        match self.state.mode {
-            Mode::Prefix => {
-                self.handle_prefix_key(key);
+            state::InputOwner::Server(owner) => match owner {
+                state::ServerInputOwner::Onboarding => self.handle_onboarding_key(key_event),
+                state::ServerInputOwner::ReleaseNotes => self.handle_release_notes_key(key_event),
+                state::ServerInputOwner::ProductAnnouncement => {
+                    self.handle_product_announcement_key(key_event)
+                }
+                state::ServerInputOwner::Navigate => self.handle_navigate_key(key),
+                state::ServerInputOwner::Prefix => self.handle_prefix_key(key),
+                state::ServerInputOwner::Copy => self.handle_copy_mode_key(key),
+                state::ServerInputOwner::Resize => self.handle_resize_key_via_api(key),
+                state::ServerInputOwner::GitMenu => {
+                    input::handle_git_menu_key(&mut self.state, key_event)
+                }
+                state::ServerInputOwner::AddAction => self.handle_add_action_key(key_event),
+                state::ServerInputOwner::Settings => self.handle_settings_key(key_event),
+                state::ServerInputOwner::GlobalMenu => {
+                    input::handle_global_menu_key(&mut self.state, key_event)
+                }
+                state::ServerInputOwner::KeybindHelp => {
+                    input::handle_keybind_help_key(&mut self.state, key)
+                }
+                state::ServerInputOwner::Navigator => {
+                    input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
+                }
+                state::ServerInputOwner::CommandPalette => {
+                    self.handle_command_palette_key(key_event)
+                }
+                state::ServerInputOwner::WorkLinkPicker => {
+                    self.handle_work_link_picker_key(key_event)
+                }
+            },
+            state::InputOwner::Surface(state::SurfaceInputOwner::Symphony) => {
+                self.handle_symphony_key(key_event);
             }
-            Mode::Navigate => {
-                self.handle_navigate_key(key);
+            state::InputOwner::Surface(state::SurfaceInputOwner::LoopRunHistory) => {
+                self.handle_loop_run_history_key(key_event);
             }
-            Mode::Copy => {
-                self.handle_copy_mode_key(key);
+            state::InputOwner::Surface(state::SurfaceInputOwner::Usage) => {
+                self.handle_usage_view_key(key_event);
             }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                self.handle_rename_key_via_api(key_event);
+            state::InputOwner::Surface(state::SurfaceInputOwner::Work) => {
+                self.handle_work_view_key(key_event);
             }
-            Mode::NewLinkedWorktree => {
-                self.handle_worktree_create_key(key_event);
+            state::InputOwner::Surface(state::SurfaceInputOwner::DockObjectPreview) => {
+                if key_event.code == crossterm::event::KeyCode::Esc
+                    && key_event.modifiers.is_empty()
+                {
+                    self.state.dock_object_preview = None;
+                    self.state.dock_pr_focused = false;
+                    self.state.dock_linear_focused = false;
+                }
             }
-            Mode::OpenExistingWorktree => {
-                self.handle_worktree_open_key(key_event);
+            state::InputOwner::Surface(state::SurfaceInputOwner::Inbox) => {
+                self.handle_inbox_key_headless(key_event);
             }
-            Mode::ConfirmRemoveWorktree => {
-                self.handle_worktree_remove_key(key_event);
+            state::InputOwner::Surface(state::SurfaceInputOwner::EditorPreview) => {}
+            state::InputOwner::Notepad => {
+                self.intercept_notepad_key_with_prompt_visibility(&key, false);
             }
-            Mode::Resize => {
-                self.handle_resize_key_via_api(key);
+            state::InputOwner::Dock(owner) => {
+                self.handle_dock_key_for_owner_headless(owner, &key);
             }
-            Mode::ConfirmClose => {
-                self.handle_confirm_close_key_via_api(key_event);
+            state::InputOwner::Sidebar => {
+                if self.state.handle_sidebar_search_key(key_event) {
+                    return;
+                }
+                if self.handle_sidebar_object_menu_key(key_event) {
+                    return;
+                }
+                match self.state.handle_sidebar_work_group_key(key_event) {
+                    input::SidebarWorkGroupKeyAction::Ignored => {}
+                    input::SidebarWorkGroupKeyAction::Consumed => return,
+                    input::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                        self.dispatch_sidebar_work_group_plan(*plan);
+                        return;
+                    }
+                }
+                if !self.handle_sidebar_session_action_key(key_event) {
+                    self.handle_sidebar_settled_key(key_event);
+                }
             }
-            Mode::ContextMenu => {
-                self.handle_context_menu_key_via_api(key_event);
-            }
-            Mode::GitMenu => {
-                input::handle_git_menu_key(&mut self.state, key_event);
-            }
-            Mode::AddAction => {
-                self.handle_add_action_key(key_event);
-            }
-            Mode::KeybindHelp => {
-                input::handle_keybind_help_key(&mut self.state, key);
-            }
-            Mode::GlobalMenu => {
-                input::handle_global_menu_key(&mut self.state, key_event);
-            }
-            Mode::Onboarding => {
-                self.handle_onboarding_key(key_event);
-            }
-            Mode::ReleaseNotes => {
-                self.handle_release_notes_key(key_event);
-            }
-            Mode::ProductAnnouncement => {
-                self.handle_product_announcement_key(key_event);
-            }
-            Mode::Settings => {
-                self.handle_settings_key(key_event);
-            }
-            Mode::Navigator => {
-                input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
-            }
-            Mode::CommandPalette => self.handle_command_palette_key(key_event),
-            Mode::WorkLinkPicker => {
-                self.handle_work_link_picker_key(key_event);
-            }
-            Mode::AgentPicker => {
-                self.handle_agent_picker_key(key_event);
-            }
-            Mode::Terminal => {
-                // Should not be called in terminal mode.
-            }
+            state::InputOwner::None => {}
         }
     }
 
-    fn handle_mouse_event_headless_with_pomodoro_presentation(
+    fn handle_dock_key_for_owner_headless(
         &mut self,
-        source_id: InputSourceId,
-        mouse: crossterm::event::MouseEvent,
-        presentation: crate::ui::pomodoro::InputPresentation,
-    ) {
-        self.handle_mouse_from_input_source_with_pomodoro_presentation(
-            source_id,
-            mouse,
-            presentation,
-        );
+        owner: state::DockInputOwner,
+        key: &crate::input::TerminalKey,
+    ) -> bool {
+        if self.handle_dock_chooser_key_headless(key) {
+            return true;
+        }
+        match owner {
+            state::DockInputOwner::Home => self.handle_dock_home_key_headless(key),
+            state::DockInputOwner::PullRequest => self.handle_dock_pr_key_headless(key),
+            state::DockInputOwner::Linear => self.handle_dock_linear_key_headless(key),
+            state::DockInputOwner::Diff => self.handle_dock_diff_key_headless(key),
+            state::DockInputOwner::Files => self.handle_dock_files_key(key),
+            state::DockInputOwner::Agents => self.handle_dock_agents_key(key),
+            state::DockInputOwner::Hosts => self.handle_dock_hosts_key(key),
+            state::DockInputOwner::Editor | state::DockInputOwner::Chooser => false,
+        }
     }
 }
 
@@ -3552,7 +3572,7 @@ mod tests {
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
     use crossterm::event::{
-        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -3809,7 +3829,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let release = crate::input::TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())
             .with_windows_record(crate::input::WindowsKeyRecord {
@@ -3944,7 +3964,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         (app, terminal_id, input_rx)
     }
 
@@ -4227,7 +4247,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         (app, input_rx)
     }
 
@@ -4306,12 +4326,12 @@ mod tests {
         app.state.switch_ascii_input_source_in_prefix = true;
 
         // Terminal -> Prefix emits the ASCII-switch intent.
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Prefix -> Terminal emits the restore intent.
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.sync_prefix_input_source(Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4322,13 +4342,13 @@ mod tests {
         app.state.switch_ascii_input_source_in_prefix = false;
 
         // Entering the realm with the flag off emits nothing.
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert!(drained_prefix_active(&mut app).is_empty());
 
         // Leaving the realm still emits the restore (harmless if nothing was switched), so a
         // mid-interaction flag toggle can't strand the host on ASCII.
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.sync_prefix_input_source(Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4374,14 +4394,14 @@ mod tests {
         app.state.switch_ascii_input_source_in_prefix = true;
 
         // Terminal -> Prefix switches once.
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Prefix -> sub-mode and sub-mode -> sub-mode stay in the realm: no emit.
-        app.state.mode = Mode::Navigator;
+        app.state.set_server_mode(Mode::Navigator);
         app.sync_prefix_input_source(Mode::Prefix);
-        app.state.mode = Mode::Resize;
+        app.state.set_server_mode(Mode::Resize);
         app.sync_prefix_input_source(Mode::Navigator);
         assert!(
             drained_prefix_active(&mut app).is_empty(),
@@ -4389,7 +4409,7 @@ mod tests {
         );
 
         // Leaving the realm back to the terminal restores.
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.sync_prefix_input_source(Mode::Resize);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4399,12 +4419,13 @@ mod tests {
         let mut app = test_app();
         app.state.switch_ascii_input_source_in_prefix = true;
 
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         app.sync_prefix_input_source(Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Prefix -> RenameTab leaves the realm (text entry wants the IME): restore.
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.sync_prefix_input_source(Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
@@ -4451,7 +4472,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         // ctrl+b (the default prefix key) enters prefix mode → switch intent.
         app.handle_raw_input_event(raw_key(
@@ -4460,7 +4481,7 @@ mod tests {
             KeyEventKind::Press,
         ))
         .await;
-        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
         assert_eq!(drained_prefix_active(&mut app), vec![true]);
 
         // Esc leaves prefix mode → restore intent.
@@ -4470,8 +4491,221 @@ mod tests {
             KeyEventKind::Press,
         ))
         .await;
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn context_menu_input_source_transition_restores_on_escape() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
+            x: 2,
+            y: 2,
+            selected: state::ContextMenuAction::RenameWorkspace,
+        });
+
+        app.state
+            .open_client_overlay(state::ClientOverlay::ContextMenu);
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[test]
+    fn compute_view_does_not_reconcile_an_invalid_context_menu() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
+            x: 2,
+            y: 2,
+            selected: state::ContextMenuAction::RenameWorkspace,
+        });
+        app.state
+            .open_client_overlay(state::ClientOverlay::ContextMenu);
+        app.state.workspaces.clear();
+        app.state.active = None;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 80, 24));
+
+        assert!(app.state.context_menu.is_some());
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
+    }
+
+    #[test]
+    fn stale_context_menu_reconciliation_restores_prefix_input_source() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
+            x: 2,
+            y: 2,
+            selected: state::ContextMenuAction::RenameWorkspace,
+        });
+        app.state
+            .open_client_overlay(state::ClientOverlay::ContextMenu);
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+        app.state.workspaces.clear();
+        app.state.active = None;
+
+        assert!(app.reconcile_client_interaction(true));
+
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn local_rename_overlay_takes_keys_before_the_files_dock() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(state::DockSurface::Files);
+        app.state.dock_files_focused = true;
+        input::open_new_tab_dialog(&mut app.state);
+        app.state.name_input.clear();
+        app.state.name_input_replace_on_type = false;
+
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+
+        assert_eq!(app.state.name_input, "x");
+        assert!(app.state.dock_files_filter.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_rename_overlay_takes_keys_before_an_open_dock_surface_menu() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.dock_surface_menu = Some(state::DockSurfaceMenu { selected: 0 });
+        input::open_new_tab_dialog(&mut app.state);
+        app.state.name_input.clear();
+        app.state.name_input_replace_on_type = false;
+
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+
+        assert_eq!(app.state.name_input, "x");
+        assert_eq!(
+            app.state.dock_surface_menu,
+            Some(state::DockSurfaceMenu { selected: 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn client_local_create_overlays_preserve_another_clients_settings_mode() {
+        let mut app = test_app();
+        app.state.default_shell = crate::app::api::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app.state.workspaces = vec![Workspace::test_new("existing")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.set_server_mode(Mode::Settings);
+        let mut client_a = state::SidebarPresentationState::default();
+        let mut client_b = state::SidebarPresentationState::default();
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        input::open_new_workspace_dialog(&mut app.state, std::env::temp_dir());
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.state.swap_sidebar_presentation(&mut client_a);
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+        app.state.swap_sidebar_presentation(&mut client_b);
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        input::open_new_tab_dialog(&mut app.state);
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.state.swap_sidebar_presentation(&mut client_a);
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn client_overlay_mouse_precedes_another_clients_server_picker() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let mut client_a = state::SidebarPresentationState::default();
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        input::open_new_tab_dialog(&mut app.state);
+        app.state.name_input = "client a draft".into();
+        app.state.name_input_replace_on_type = false;
+        app.state.set_server_mode(Mode::WorkLinkPicker);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        let popup =
+            crate::ui::centered_popup_rect(app.state.screen_rect(), 56, 7).expect("rename modal");
+        let inner = ratatui::layout::Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (_, clear, _) = crate::ui::rename_button_rects(inner);
+
+        app.handle_mouse_from_input_source(
+            41,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: clear.x,
+                row: clear.y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        assert!(app.state.name_input.is_empty());
+        assert_eq!(app.state.server_mode(), Mode::WorkLinkPicker);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::RenameTab);
     }
 
     fn temp_config_path(name: &str) -> std::path::PathBuf {
@@ -5008,7 +5242,10 @@ mod tests {
 
         app.begin_tui_workspace_create("test.workspace.create");
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(
+            app.state.effective_interaction_mode(),
+            Mode::RenameWorkspace
+        );
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(!app.ensure_default_workspace());
         assert!(app.state.workspaces.is_empty());
@@ -5170,6 +5407,18 @@ mod tests {
             crate::config::HostAppearanceOverride::Dark
         );
         assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+    }
+
+    #[test]
+    fn config_reload_closes_a_git_menu_when_its_button_is_hidden() {
+        let (mut config, mut app) = app_with_auto_switch_theme_config();
+        config.ui.show_pull_button = false;
+        app.state.show_pull_button = true;
+        app.state.set_server_mode(Mode::GitMenu);
+
+        app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -5528,7 +5777,7 @@ mod tests {
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         assert!(app.state.release_notes.is_none());
         assert!(app.state.latest_release_notes_available);
 
@@ -5565,7 +5814,7 @@ mod tests {
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
-        assert_eq!(app.state.mode, Mode::ProductAnnouncement);
+        assert_eq!(app.state.server_mode(), Mode::ProductAnnouncement);
         assert_eq!(
             app.state
                 .product_announcement
@@ -5647,7 +5896,7 @@ mod tests {
         );
         assert!(app.last_pane_click.is_some());
 
-        app.state.mode = Mode::Copy;
+        app.state.set_server_mode(Mode::Copy);
         app.state.selection = Some(crate::selection::Selection::range(
             selection_pane,
             0,
@@ -6487,7 +6736,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let handled = app
             .handle_raw_input_event(raw_key(
@@ -6511,7 +6760,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         for kind in [
             KeyEventKind::Press,
@@ -6590,7 +6839,7 @@ mod tests {
 
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.outer_terminal_focus = Some(false);
         let focused_pane = app.state.workspaces[0].focused_pane_id().unwrap();
 
@@ -6744,7 +6993,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.last_focus = Some((0, previous_pane));
 
         assert!(app.state.focus_pane_in_workspace(0, next_pane));
@@ -6799,7 +7048,7 @@ mod tests {
     #[tokio::test]
     async fn repeat_key_events_are_ignored_outside_terminal_mode() {
         let mut app = test_app();
-        app.state.mode = Mode::ReleaseNotes;
+        app.state.set_server_mode(Mode::ReleaseNotes);
         app.state.release_notes = Some(release_notes_state());
 
         let handled = app
@@ -6811,7 +7060,7 @@ mod tests {
             .await;
 
         assert!(!handled);
-        assert_eq!(app.state.mode, Mode::ReleaseNotes);
+        assert_eq!(app.state.server_mode(), Mode::ReleaseNotes);
         assert!(app.state.release_notes.is_some());
     }
 
@@ -6821,7 +7070,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::ReleaseNotes;
+        app.state.set_server_mode(Mode::ReleaseNotes);
         app.state.release_notes = Some(release_notes_state());
 
         let press_handled = app
@@ -6854,7 +7103,7 @@ mod tests {
             .await;
 
         assert!(press_handled);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(!repeat_handled);
         assert!(!release_handled);
         assert!(next_press_handled);
@@ -7050,7 +7299,7 @@ mod tests {
         app.state.workspaces = vec![first, second];
         app.state.active = Some(0);
         app.state.selected = 1;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         let ws_idx = app.workspace_creation_source().unwrap();
         let seed_cwd = app.seed_cwd_from_workspace(ws_idx).unwrap();
@@ -7794,7 +8043,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["error"]["code"], "confirmation_required");
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.workspaces.len(), 2);
     }
@@ -8205,7 +8454,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let terminal_id = app.state.workspaces[0]
             .pane_state(pane_id)
@@ -8301,7 +8550,7 @@ mod tests {
         app.state.selected = 0;
 
         // Start in navigate mode.
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         // Send Ctrl+B then Esc (prefix → leave navigate mode).
         // Ctrl+B is 0x02 in raw terminal input.
@@ -8310,7 +8559,7 @@ mod tests {
         app.route_client_input(esc_bytes);
         // Esc in navigate mode should leave navigate mode.
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "Esc should leave navigate mode and return to Terminal mode"
         );
@@ -8323,7 +8572,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.detach_exits = false;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         app.route_client_events(
             vec![crate::raw_input::RawInputEvent::Text(
@@ -8333,7 +8582,7 @@ mod tests {
         );
 
         assert!(!app.state.detach_requested);
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         assert!(app.input_leases.is_empty());
     }
 
@@ -8346,7 +8595,7 @@ mod tests {
         app.state.detach_exits = false;
 
         // Start in navigate mode.
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         assert!(!app.state.detach_requested);
 
         let q_bytes = b"q".to_vec();
@@ -8357,7 +8606,7 @@ mod tests {
             "q should detach in persistence mode"
         );
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "q should leave navigate mode"
         );
@@ -8372,7 +8621,7 @@ mod tests {
         app.state.detach_exits = false;
 
         // Start in terminal mode (default after workspace creation).
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         assert!(!app.state.detach_requested);
 
         // Send Ctrl+B (prefix key, raw byte 0x02).
@@ -8380,7 +8629,7 @@ mod tests {
         app.route_client_input(prefix_bytes);
 
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Prefix,
             "prefix key should enter prefix mode"
         );
@@ -8397,7 +8646,7 @@ mod tests {
             "q should detach in persistence mode"
         );
         assert_eq!(
-            app.state.mode,
+            app.state.server_mode(),
             Mode::Terminal,
             "q should leave navigate mode"
         );
@@ -8422,13 +8671,13 @@ last_pane = "prefix+tab"
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.keybinds = config.keybinds();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.switch_workspace_tab(0, first_second_tab);
         app.state.switch_workspace_tab(1, 0);
 
         app.route_client_input(vec![0x02, b'\t']);
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].active_tab, first_second_tab);
         assert_eq!(
@@ -8453,7 +8702,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("new-tab-status")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         // This test clicks the new-tab button, so it needs a tab row rather
         // than the shipped `Hidden` default.
         app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
@@ -8522,7 +8771,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("runtime-status")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let pane = app.state.workspaces[0].tabs[0].root_pane;
         let terminal = app.state.workspaces[0]
@@ -8556,7 +8805,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let first_terminal = app.state.workspaces[0]
             .terminal_id(first_pane)
@@ -8603,7 +8852,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
         let terminal = app.state.workspaces[0]
             .terminal_id(focused_pane)
@@ -8643,15 +8892,15 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.prefix_code = KeyCode::Char('l');
         app.state.prefix_mods = KeyModifiers::CONTROL;
 
         app.route_client_input(vec![0x0c]);
-        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
 
         app.route_client_input(vec![0x0c]);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![0x0c]));
     }
 
@@ -8665,7 +8914,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         // Ghostty/kitty-style Ctrl-C should be normalized back to the pane's
         // negotiated encoding instead of being forwarded verbatim.
@@ -8706,7 +8955,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         assert!(app.host_keyboard_report_all_requested());
 
@@ -8750,7 +8999,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         assert!(app.host_keyboard_report_all_requested());
 
@@ -8774,11 +9023,12 @@ last_pane = "prefix+tab"
         assert!(!app.host_keyboard_report_all_requested());
 
         assert!(app.state.focus_pane_in_workspace(0, focused));
-        app.state.mode = Mode::Prefix;
+        app.state.set_server_mode(Mode::Prefix);
         assert!(app.host_keyboard_report_all_requested());
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
         assert!(app.host_keyboard_report_all_requested());
-        app.state.mode = Mode::RenameWorkspace;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         assert!(!app.host_keyboard_report_all_requested());
     }
 
@@ -8793,7 +9043,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106u\x1b[106;1:2u\x1b[106;1:3u".to_vec());
 
@@ -8823,7 +9073,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events(
             vec![crate::raw_input::RawInputEvent::Text(
@@ -8848,7 +9098,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input("你".as_bytes().to_vec());
 
@@ -8870,7 +9120,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"A".to_vec());
 
@@ -8889,7 +9139,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106u".to_vec());
         app.route_client_input(b"j".to_vec());
@@ -8921,7 +9171,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events(
             vec![
@@ -8956,7 +9206,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.notepad.enabled = true;
         app.state.notepad.focused = true;
 
@@ -8987,7 +9237,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.notepad.enabled = true;
         app.state.notepad.focused = true;
         let note_before = app.state.notepad.body().to_string();
@@ -9020,7 +9270,7 @@ last_pane = "prefix+tab"
     }
 
     #[tokio::test]
-    async fn headless_full_frame_overlays_take_keys_before_subgroup_picker() {
+    async fn headless_subgroup_picker_takes_keys_before_full_frame_surfaces() {
         for overlay in [
             "Symphony",
             "Loop History",
@@ -9037,7 +9287,7 @@ last_pane = "prefix+tab"
             app.state.workspaces = vec![workspace];
             app.state.active = Some(0);
             app.state.selected = 0;
-            app.state.mode = Mode::Terminal;
+            app.state.set_server_mode(Mode::Terminal);
             app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
                 ws_idx: 0,
                 tab_idx: 0,
@@ -9062,15 +9312,13 @@ last_pane = "prefix+tab"
                 _ => unreachable!(),
             }
 
-            let key = if matches!(overlay, "Loop History" | "Inbox") {
-                KeyCode::Esc
-            } else {
-                KeyCode::Char('7')
-            };
-
             app.route_client_events_from(
                 42,
-                vec![raw_key(key, KeyModifiers::empty(), KeyEventKind::Press)],
+                vec![raw_key(
+                    KeyCode::Char('7'),
+                    KeyModifiers::empty(),
+                    KeyEventKind::Press,
+                )],
                 false,
             );
 
@@ -9079,25 +9327,13 @@ last_pane = "prefix+tab"
                     .sidebar_subgroup_picker
                     .as_ref()
                     .map(|picker| picker.filter.query.as_str()),
-                Some(""),
-                "{overlay} must retain input precedence over the subgroup picker"
+                Some("7"),
+                "the client subgroup picker must retain input precedence over {overlay}"
             );
             assert!(
                 pane_input.try_recv().is_err(),
-                "{overlay} must not leak keys into the focused pane"
+                "the subgroup picker must not leak keys into the focused pane behind {overlay}"
             );
-            if overlay == "Usage" {
-                assert_eq!(
-                    app.state.usage_view.as_ref().map(|view| view.range),
-                    Some(state::UsageRange::Days7)
-                );
-            }
-            if overlay == "Loop History" {
-                assert!(app.state.loop_run_history_detail.is_none());
-            }
-            if overlay == "Inbox" {
-                assert!(app.state.inbox.is_none());
-            }
         }
     }
 
@@ -9112,7 +9348,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events_from(
             42,
@@ -9154,7 +9390,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let record = crate::input::WindowsKeyRecord {
             key_down: true,
@@ -9231,7 +9467,7 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let (runtime, mut rx) =
             TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>15u", 2);
         app.terminal_runtimes.insert(terminal_id.clone(), runtime);
@@ -9302,7 +9538,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106u".to_vec());
         assert!(app.state.focus_pane_in_workspace(0, other_pane));
@@ -9342,7 +9578,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_events_from(
             1,
@@ -9406,7 +9642,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[106:74;2u\x1b[106;1:3u".to_vec());
 
@@ -9432,11 +9668,11 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[98;5u\x1b[98;5:3u".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Prefix);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
         assert!(rx.try_recv().is_err());
     }
 
@@ -9451,7 +9687,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b[13;2u".to_vec());
 
@@ -9471,7 +9707,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"ab".to_vec());
 
@@ -9492,7 +9728,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(text.as_bytes().to_vec());
 
@@ -9517,7 +9753,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(text.as_bytes().to_vec());
 
@@ -9548,11 +9784,11 @@ last_pane = "prefix+tab"
     #[test]
     fn route_client_input_advances_onboarding_modal() {
         let mut app = test_app();
-        app.state.mode = Mode::Onboarding;
+        app.state.set_server_mode(Mode::Onboarding);
 
         app.route_client_input(b"\r".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Settings);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
         assert_eq!(
             app.state.settings.section,
             state::SettingsSection::Integrations
@@ -9565,7 +9801,8 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.state.name_input = "2".into();
         app.state.name_input_replace_on_type = true;
 
@@ -9585,7 +9822,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.home = Some(home::HomeState::default());
 
         app.route_client_events(
@@ -9615,7 +9852,7 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
         assert!(app.flush_pane_settlement_events());
 
@@ -9676,7 +9913,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_object_preview = Some(state::DockObjectRef {
             surface: state::DockSurface::Linear,
             key: "SCA-1".into(),
@@ -9704,7 +9941,7 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_hook_authority(
@@ -9734,7 +9971,11 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("old")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameWorkspace;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
+        app.state.rename_target = Some(state::RenameTarget::Workspace {
+            workspace_id: app.state.workspaces[0].id.clone(),
+        });
         app.state.name_input = "new".into();
 
         app.route_client_input(b"\r".to_vec());
@@ -9753,12 +9994,16 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(state::ContextMenuState {
-            kind: state::ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[1].id.clone(),
+                ws_idx: 1,
+            },
             x: 2,
             y: 2,
-            list: state::MenuListState::new(1),
+            selected: state::ContextMenuAction::CloseWorkspace,
         });
-        app.state.mode = Mode::ContextMenu;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
 
         app.route_client_input(b"\r".to_vec());
 
@@ -9782,7 +10027,8 @@ last_pane = "prefix+tab"
     #[test]
     fn route_client_events_pastes_text_into_new_linked_worktree_modal() {
         let mut app = test_app();
-        app.state.mode = Mode::NewLinkedWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::NewLinkedWorktree);
         app.state.name_input = "generated-branch".into();
         app.state.name_input_replace_on_type = true;
         app.state.worktree_create = Some(state::WorktreeCreateState {
@@ -9816,7 +10062,7 @@ last_pane = "prefix+tab"
     }
 
     #[tokio::test]
-    async fn route_client_events_pastes_only_into_popup() {
+    async fn route_client_events_pastes_only_into_visible_popup() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("tiled");
         let focused = workspace.focused_pane_id().unwrap();
@@ -9825,7 +10071,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let (popup_runtime, mut popup_rx) = TerminalRuntime::test_with_channel(40, 12);
         app.install_test_popup_runtime(popup_runtime);
@@ -9858,19 +10104,17 @@ last_pane = "prefix+tab"
         );
         assert!(tiled_rx.try_recv().is_err());
 
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
         assert!(
-            app.handle_raw_input_event(raw_key(
+            !app.handle_raw_input_event(raw_key(
                 KeyCode::Char('y'),
                 KeyModifiers::NONE,
                 KeyEventKind::Repeat,
             ))
-            .await
+            .await,
+            "a popup behind Settings must not receive a repeated key"
         );
-        assert_eq!(
-            popup_rx.try_recv().unwrap(),
-            bytes::Bytes::from_static(b"y")
-        );
+        assert!(popup_rx.try_recv().is_err());
         assert!(tiled_rx.try_recv().is_err());
     }
 
@@ -9884,7 +10128,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let install_missing_popup = |app: &mut App| {
             let popup_terminal_id = crate::terminal::TerminalId::alloc();
             app.state.terminals.insert(
@@ -9925,7 +10169,7 @@ last_pane = "prefix+tab"
     #[tokio::test]
     async fn popup_mouse_motion_preserves_scrollback() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
         let (popup_runtime, mut popup_rx) = TerminalRuntime::test_with_channel_and_scrollback_bytes(
             40,
@@ -9972,7 +10216,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.mouse_capture = false;
         app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
@@ -10022,12 +10266,12 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::ReleaseNotes;
+        app.state.set_server_mode(Mode::ReleaseNotes);
         app.state.release_notes = Some(release_notes_state());
 
         app.route_client_input(b"\x1b".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert!(app.state.release_notes.is_none());
     }
 
@@ -10037,13 +10281,13 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
         app.state.settings.original_theme = Some(app.state.theme_name.clone());
         app.state.settings.original_palette = Some(app.state.palette.clone());
 
         app.route_client_input(b"\x1b".to_vec());
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -10100,7 +10344,7 @@ last_pane = "prefix+tab"
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         app.route_client_input(b"\x1b]".to_vec());
 

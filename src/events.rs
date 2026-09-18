@@ -19,6 +19,7 @@ pub struct ClosingBlockReport {
 
 #[derive(Debug)]
 pub struct ApiWorktreeAddRequest {
+    pub client_id: Option<u64>,
     pub id: String,
     pub operation_id: u64,
     pub checkout_key: std::path::PathBuf,
@@ -43,6 +44,7 @@ pub struct WorktreeAddResult {
 
 #[derive(Debug)]
 pub struct ApiWorktreeRemoveRequest {
+    pub client_id: Option<u64>,
     pub id: String,
     pub operation_id: u64,
     pub checkout_key: std::path::PathBuf,

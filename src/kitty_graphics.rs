@@ -230,7 +230,8 @@ pub(crate) fn encode_local_pane_graphics(
     // or the inbox is open lets a pane's image fight the overlay's text every
     // frame, which reads as flicker.
     let overlay_open = app.home.is_some() || app.inbox.is_some();
-    let visible = app.mode == Mode::Terminal && !overlay_open && cell_size.is_known();
+    let visible =
+        app.effective_interaction_mode() == Mode::Terminal && !overlay_open && cell_size.is_known();
     tracing::debug!(
         visible,
         overlay_open,
@@ -313,7 +314,7 @@ pub(crate) fn has_visible_pane_graphics(
     surface: crate::ui::TabSurfaceView<'_>,
     cell_size: HostCellSize,
 ) -> bool {
-    if app.mode != Mode::Terminal || !cell_size.is_known() {
+    if app.effective_interaction_mode() != Mode::Terminal || !cell_size.is_known() {
         return false;
     }
 
@@ -1329,7 +1330,11 @@ pub(crate) fn prepare_direct_file(
     let info = allow_placement
         .then(|| surface.pane_infos.iter().find(|info| info.id == key.0))
         .flatten()
-        .filter(|_| app.mode == Mode::Terminal && cell_size.is_known() && app.active.is_some());
+        .filter(|_| {
+            app.effective_interaction_mode() == Mode::Terminal
+                && cell_size.is_known()
+                && app.active.is_some()
+        });
     if let Some(command) = info
         .map(|info| {
             pane_graphics_host_placement(
@@ -3105,7 +3110,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
 
         let source = HostSourceKey::Terminal {

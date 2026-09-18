@@ -516,6 +516,11 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
     if unsafe { libc::time(&mut timestamp) } == -1 {
         return None;
     }
+    local_datetime_at(u64::try_from(timestamp).ok()?)
+}
+
+pub(crate) fn local_datetime_at(unix_seconds: u64) -> Option<time::PrimitiveDateTime> {
+    let timestamp = libc::time_t::try_from(unix_seconds).ok()?;
     let mut local: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_s(&mut local, &timestamp) } != 0 {
         return None;
@@ -534,6 +539,52 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
     )
     .ok()?;
     Some(time::PrimitiveDateTime::new(date, time))
+}
+
+pub(crate) fn local_time_today_unix(hour: u8, minute: u8) -> Option<u64> {
+    unsafe extern "C" {
+        fn _mktime64(local: *mut libc::tm) -> i64;
+    }
+    let mut now: libc::time_t = 0;
+    if unsafe { libc::time(&mut now) } == -1 {
+        return None;
+    }
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_s(&mut local, &now) } != 0 {
+        return None;
+    }
+    local.tm_hour = i32::from(hour);
+    local.tm_min = i32::from(minute);
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+    let deadline = unsafe { _mktime64(&mut local) };
+    u64::try_from(deadline).ok()
+}
+
+pub(crate) fn tomorrow_morning_unix() -> Option<u64> {
+    unsafe extern "C" {
+        fn _mktime64(local: *mut libc::tm) -> i64;
+    }
+
+    let mut now: libc::time_t = 0;
+    if unsafe { libc::time(&mut now) } == -1 {
+        return None;
+    }
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_s(&mut local, &now) } != 0 {
+        return None;
+    }
+    local.tm_mday = local.tm_mday.checked_add(1)?;
+    local.tm_hour = 9;
+    local.tm_min = 0;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+    // SAFETY: `local` is initialized by `localtime_s`; `_mktime64` accepts a
+    // mutable `tm` so it can normalize the next-day date and DST fields.
+    let deadline = unsafe { _mktime64(&mut local) };
+    (deadline > now)
+        .then(|| u64::try_from(deadline).ok())
+        .flatten()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

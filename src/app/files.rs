@@ -281,7 +281,7 @@ impl App {
     }
 
     pub(crate) fn handle_dock_files_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(DockSurface::Files)
             || !self.state.dock_files_focused
@@ -452,7 +452,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let root = PathBuf::from("/repo");
         app.state.dock_files_root = Some(root.clone());
         app.state.dock_file_cache.insert(
@@ -495,7 +495,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(DockSurface::Files);
         app.state.dock_files_focused = true;
@@ -617,7 +617,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(DockSurface::Files);
         app.state.dock_files_focused = true;

@@ -185,6 +185,7 @@ impl App {
                 .and_then(|ws| ws.worktree_space().cloned())
         });
         let api_request = ApiWorktreeAddRequest {
+            client_id: self.active_overlay_client_id,
             id,
             operation_id,
             checkout_key,
@@ -334,6 +335,7 @@ impl App {
             params.trust_repository,
         );
         let api_request = ApiWorktreeRemoveRequest {
+            client_id: self.active_overlay_client_id,
             id,
             operation_id,
             checkout_key,
@@ -451,6 +453,9 @@ impl App {
                     }
                 }
             };
+        if api.focus {
+            self.focus_client_on_pane();
+        }
         if !created_workspace && work_context.is_some() {
             Self::send_api_response(
                 api.respond_to,
@@ -487,7 +492,7 @@ impl App {
             self.state.worktree_create = None;
             self.state.name_input.clear();
             self.state.name_input_replace_on_type = false;
-            self.state.mode = crate::app::Mode::Terminal;
+            self.state.close_client_overlay();
         }
         self.state.mark_session_dirty();
         if created_workspace {
@@ -636,11 +641,7 @@ impl App {
             remove.workspace_id == result.workspace_id && remove.path == result.path
         }) {
             self.state.worktree_remove = None;
-            self.state.mode = if self.state.active.is_some() {
-                crate::app::Mode::Terminal
-            } else {
-                crate::app::Mode::Navigate
-            };
+            self.state.close_client_overlay();
         }
         let response = encode_success(
             api.id,
