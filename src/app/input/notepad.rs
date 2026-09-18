@@ -12,11 +12,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::state::AppState;
-use crate::ui::notepad::notepad_body_rect;
+use crate::ui::notepad::{notepad_body_rect, NotepadTabTarget};
+use crate::ui::notepad_agent::NotepadAgentAction;
 
 /// Work the notepad's input handlers cannot do themselves because it touches
 /// the filesystem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NotepadRequest {
     /// Load another note, flushing the current one first.
     Select(usize),
@@ -27,6 +28,11 @@ pub(crate) enum NotepadRequest {
     Save,
     /// Log and advance a confirmed break prompt.
     ConfirmPomodoro,
+    /// Focus the pane behind an agent-tab subagent row. `None` is a native
+    /// Claude subagent: its row focuses the pane the tab is showing.
+    FocusAgentPane(Option<String>),
+    /// Copy the full URL of an agent-tab link row.
+    CopyAgentLink(String),
 }
 
 fn rect_contains(rect: ratatui::layout::Rect, column: u16, row: u16) -> bool {
@@ -44,6 +50,11 @@ impl AppState {
     }
 
     pub(crate) fn set_notepad_focus(&mut self, focused: bool) {
+        if focused {
+            // The agent tab is read-only: taking the editor focus means going
+            // back to the active note.
+            self.notepad.agent_tab = false;
+        }
         if self.notepad.focused == focused {
             return;
         }
@@ -109,7 +120,7 @@ impl AppState {
     /// Routes a key into the note buffer while the panel is focused. Unhandled
     /// modifier combinations fall through so global shortcuts keep working.
     pub(crate) fn handle_notepad_key(&mut self, key: KeyEvent, now: std::time::Instant) -> bool {
-        if !self.notepad.enabled || !self.notepad.focused {
+        if !self.notepad.enabled || !self.notepad.focused || self.notepad.agent_tab {
             return false;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -160,28 +171,49 @@ impl AppState {
             return false;
         }
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.notepad.scroll_by(-1);
-                true
-            }
-            MouseEventKind::ScrollDown => {
-                self.notepad.scroll_by(1);
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta: isize = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    -1
+                } else {
+                    1
+                };
+                if self.notepad.agent_tab {
+                    let visible = usize::from(notepad_body_rect(panel).height).max(1);
+                    let max = self.view.notepad_agent_rows.len().saturating_sub(visible);
+                    self.notepad.agent_scroll_by(delta, max);
+                } else {
+                    self.notepad.scroll_by(delta);
+                }
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                self.set_notepad_focus(true);
-                if let Some(index) = self
+                if let Some(target) = self
                     .view
                     .notepad_tab_hit_areas
                     .iter()
                     .find(|(_, rect)| rect_contains(*rect, mouse.column, mouse.row))
-                    .map(|(index, _)| *index)
+                    .map(|(target, _)| *target)
                 {
-                    if index != self.notepad.active {
-                        self.request_notepad(NotepadRequest::Select(index));
+                    match target {
+                        NotepadTabTarget::Agent => {
+                            if self.notepad.select_agent_tab() {
+                                self.request_notepad(NotepadRequest::Save);
+                            }
+                        }
+                        NotepadTabTarget::Note(index) => {
+                            self.set_notepad_focus(true);
+                            if index != self.notepad.active {
+                                self.request_notepad(NotepadRequest::Select(index));
+                            }
+                        }
                     }
                     return true;
                 }
+                if self.notepad.agent_tab {
+                    self.handle_agent_tab_click(mouse);
+                    return true;
+                }
+                self.set_notepad_focus(true);
                 let body = notepad_body_rect(panel);
                 if rect_contains(body, mouse.column, mouse.row) {
                     self.place_notepad_caret(mouse.column, mouse.row, body);
@@ -189,6 +221,36 @@ impl AppState {
                 true
             }
             _ => true,
+        }
+    }
+
+    /// A click in the agent tab's body resolves to the row's action: fold a
+    /// section, focus a subagent's pane, or copy a link.
+    fn handle_agent_tab_click(&mut self, mouse: &MouseEvent) {
+        let body = notepad_body_rect(self.view.notepad_rect);
+        if !rect_contains(body, mouse.column, mouse.row) {
+            return;
+        }
+        let index = self
+            .notepad
+            .agent_scroll
+            .saturating_add(usize::from(mouse.row.saturating_sub(body.y)));
+        match self
+            .view
+            .notepad_agent_rows
+            .get(index)
+            .map(|row| row.action.clone())
+        {
+            Some(NotepadAgentAction::ToggleSection(section)) => {
+                self.notepad.toggle_agent_section(section);
+            }
+            Some(NotepadAgentAction::FocusSubagent(target)) => {
+                self.request_notepad(NotepadRequest::FocusAgentPane(target));
+            }
+            Some(NotepadAgentAction::CopyLink(url)) => {
+                self.request_notepad(NotepadRequest::CopyAgentLink(url));
+            }
+            Some(NotepadAgentAction::None) | None => {}
         }
     }
 
@@ -317,7 +379,43 @@ impl crate::app::App {
             NotepadRequest::Cycle { backwards } => self.cycle_notepad_file(backwards),
             NotepadRequest::Save => self.write_notepad_now(),
             NotepadRequest::ConfirmPomodoro => self.confirm_pomodoro(std::time::Instant::now()),
+            NotepadRequest::FocusAgentPane(target) => self.focus_agent_tab_pane(target),
+            NotepadRequest::CopyAgentLink(url) => {
+                if self
+                    .event_tx
+                    .try_send(crate::events::AppEvent::ClipboardWrite {
+                        content: url.into_bytes(),
+                    })
+                    .is_err()
+                {
+                    self.show_work_link_notice("could not copy work link");
+                } else {
+                    self.show_work_link_notice("copied");
+                }
+                true
+            }
         }
+    }
+
+    /// Focuses the pane an agent-tab subagent row names. A native Claude
+    /// subagent has no pane of its own, so its row re-focuses the pane the tab
+    /// is showing.
+    fn focus_agent_tab_pane(&mut self, target: Option<String>) -> bool {
+        let resolved = match target {
+            Some(id) => self.parse_current_public_pane_id(&id),
+            None => self.state.active.and_then(|ws_idx| {
+                self.state
+                    .workspaces
+                    .get(ws_idx)?
+                    .focused_pane_id()
+                    .map(|pane_id| (ws_idx, pane_id))
+            }),
+        };
+        let Some((ws_idx, pane_id)) = resolved else {
+            return false;
+        };
+        self.focus_pane_internal_via_api(ws_idx, pane_id);
+        true
     }
 }
 
@@ -466,5 +564,302 @@ mod tests {
         assert!(state.handle_pomodoro_prompt_key(escape, now));
         assert!(state.pomodoro.prompt.is_none());
         assert!(state.pomodoro.paused());
+    }
+
+    const AGENT_BASE_SECS: u64 = 1_760_000_000;
+
+    fn state_with_agent_tab() -> (AppState, crate::layout::PaneId) {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.notepad.enabled = true;
+        state.notepad.height = 18;
+        state.notepad.set_files(vec![crate::notepad::NotepadFile {
+            path: "/notes/todo.md".into(),
+            name: "todo".into(),
+        }]);
+        state.status_now_unix = Some(AGENT_BASE_SECS as i64 + 600);
+        let pane_id = state.workspaces[0].focused_pane_id().unwrap();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Working,
+            );
+        state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    goal: Some("ship MAT-160".into()),
+                    tasks: vec![crate::agent_state::AgentTask {
+                        text: "read transcript".into(),
+                        status: crate::agent_state::AgentTaskStatus::Completed,
+                    }],
+                    subagents: vec![
+                        crate::agent_state::AgentSubagent {
+                            name: "native worker".into(),
+                            status: crate::api::schema::AgentStatus::Working,
+                            last_active_at: None,
+                            pane_id: None,
+                            source: crate::agent_state::AgentSubagentSource::Observed,
+                        },
+                        crate::agent_state::AgentSubagent {
+                            name: "reported reviewer".into(),
+                            status: crate::api::schema::AgentStatus::Blocked,
+                            last_active_at: None,
+                            pane_id: Some("w1:p2".into()),
+                            source: crate::agent_state::AgentSubagentSource::Reported,
+                        },
+                    ],
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(AGENT_BASE_SECS),
+            )
+            .expect("valid report");
+        state.agent_states.observe_links(
+            pane_id,
+            ["https://github.com/owner/repo/pull/1259".to_string()],
+            crate::agent_state::AgentLinkSource::Output,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(AGENT_BASE_SECS),
+        );
+        state.notepad.select_agent_tab();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 40));
+        (state, pane_id)
+    }
+
+    fn click_at(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn click_agent_row(state: &mut AppState, index: usize) {
+        let body = notepad_body_rect(state.view.notepad_rect);
+        assert!(state.handle_notepad_mouse(&click_at(body.x, body.y + index as u16)));
+    }
+
+    #[test]
+    fn clicking_the_agent_header_selects_the_read_only_tab() {
+        let mut state = state_with_notepad();
+        state.view.notepad_rect = Rect::new(0, 10, 26, 8);
+        state.view.notepad_tab_hit_areas =
+            crate::ui::notepad::notepad_tab_hit_areas(&state, state.view.notepad_rect);
+        let agent = state
+            .view
+            .notepad_tab_hit_areas
+            .iter()
+            .find(|(target, _)| *target == NotepadTabTarget::Agent)
+            .map(|(_, rect)| *rect)
+            .expect("agent tab hit area");
+
+        assert!(state.handle_notepad_mouse(&click_at(agent.x, agent.y)));
+        assert!(state.notepad.agent_tab);
+        assert!(
+            !state.notepad.focused,
+            "a read-only tab holds no editor focus"
+        );
+        assert_eq!(
+            state.notepad_request,
+            Some(NotepadRequest::Save),
+            "the note it covered is flushed"
+        );
+    }
+
+    #[test]
+    fn clicking_a_note_tab_returns_from_the_agent_view() {
+        let (mut state, _) = state_with_agent_tab();
+        let note = state
+            .view
+            .notepad_tab_hit_areas
+            .iter()
+            .find(|(target, _)| matches!(target, NotepadTabTarget::Note(0)))
+            .map(|(_, rect)| *rect)
+            .expect("note tab hit area");
+
+        assert!(state.handle_notepad_mouse(&click_at(note.x, note.y)));
+        assert!(!state.notepad.agent_tab);
+        assert!(state.notepad.focused);
+        assert_eq!(
+            state.notepad_request, None,
+            "the same note is still loaded; nothing to reload"
+        );
+    }
+
+    #[test]
+    fn clicking_a_section_header_folds_it_for_the_session() {
+        let (mut state, _) = state_with_agent_tab();
+        let header = state
+            .view
+            .notepad_agent_rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.action,
+                    NotepadAgentAction::ToggleSection(crate::notepad::AgentSection::Tasks)
+                )
+            })
+            .expect("tasks header row");
+
+        click_agent_row(&mut state, header);
+        assert!(state
+            .notepad
+            .agent_collapsed
+            .collapsed(crate::notepad::AgentSection::Tasks));
+
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 40));
+        let texts: Vec<String> = state
+            .view
+            .notepad_agent_rows
+            .iter()
+            .map(|row| {
+                row.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let text = texts.join("\n");
+        assert!(text.contains("▸ Tasks"), "{text}");
+        assert!(!text.contains("read transcript"), "{text}");
+
+        click_agent_row(&mut state, header);
+        assert!(!state
+            .notepad
+            .agent_collapsed
+            .collapsed(crate::notepad::AgentSection::Tasks));
+    }
+
+    #[test]
+    fn clicking_a_subagent_row_asks_for_its_pane() {
+        let (mut state, _) = state_with_agent_tab();
+        let rows: Vec<usize> = state
+            .view
+            .notepad_agent_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                matches!(row.action, NotepadAgentAction::FocusSubagent(_)).then_some(index)
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+
+        click_agent_row(&mut state, rows[0]);
+        assert_eq!(
+            state.notepad_request,
+            Some(NotepadRequest::FocusAgentPane(None)),
+            "a native Claude subagent re-focuses the pane the tab shows"
+        );
+        click_agent_row(&mut state, rows[1]);
+        assert_eq!(
+            state.notepad_request,
+            Some(NotepadRequest::FocusAgentPane(Some("w1:p2".into())))
+        );
+    }
+
+    #[test]
+    fn clicking_a_link_row_asks_to_copy_the_full_url() {
+        let (mut state, _) = state_with_agent_tab();
+        let link = state
+            .view
+            .notepad_agent_rows
+            .iter()
+            .position(|row| matches!(row.action, NotepadAgentAction::CopyLink(_)))
+            .expect("link row");
+
+        click_agent_row(&mut state, link);
+        assert_eq!(
+            state.notepad_request,
+            Some(NotepadRequest::CopyAgentLink(
+                "https://github.com/owner/repo/pull/1259".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn scrolling_the_agent_tab_moves_its_own_offset_only() {
+        let (mut state, _) = state_with_agent_tab();
+        state.notepad.height = 6;
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 40));
+        assert!(state.view.notepad_agent_rows.len() > 5);
+        let panel = state.view.notepad_rect;
+
+        let down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: panel.x,
+            row: panel.y + 1,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(state.handle_notepad_mouse(&down));
+        assert_eq!(state.notepad.agent_scroll, 1);
+        assert_eq!(state.notepad.scroll, 0, "the note buffer is not scrolled");
+    }
+
+    fn app_with_two_panes() -> (
+        crate::app::App,
+        crate::layout::PaneId,
+        crate::layout::PaneId,
+    ) {
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.ensure_test_terminals();
+        (app, first, second)
+    }
+
+    #[test]
+    fn applying_a_subagent_focus_request_focuses_its_pane() {
+        let (mut app, first, second) = app_with_two_panes();
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(second));
+        let public = app.public_pane_id(0, first).expect("public pane id");
+
+        app.state.notepad_request = Some(NotepadRequest::FocusAgentPane(Some(public)));
+        assert!(app.apply_notepad_request());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(first));
+
+        // A native Claude subagent has no pane of its own: its row re-focuses
+        // the pane the tab is showing.
+        app.state.notepad_request = Some(NotepadRequest::FocusAgentPane(None));
+        assert!(app.apply_notepad_request());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(first));
+    }
+
+    #[test]
+    fn applying_a_link_copy_request_writes_the_clipboard() {
+        let (mut app, _, _) = app_with_two_panes();
+        app.state.notepad_request = Some(NotepadRequest::CopyAgentLink(
+            "https://github.com/owner/repo/pull/1259".into(),
+        ));
+        assert!(app.apply_notepad_request());
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"https://github.com/owner/repo/pull/1259")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert_eq!(
+            app.state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("copied")
+        );
     }
 }

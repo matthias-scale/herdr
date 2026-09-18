@@ -30,6 +30,7 @@ mod menus;
 mod mobile;
 mod navigator;
 pub(crate) mod notepad;
+pub(crate) mod notepad_agent;
 mod onboarding;
 mod panes;
 pub(crate) mod pomodoro;
@@ -616,6 +617,22 @@ fn compute_view_internal(
     };
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    // The agent tab's rows live on the view so a click resolves to the exact
+    // row the operator saw. Deriving them takes a snapshot of the focused
+    // pane's agent state, so it only happens while the tab is showing.
+    let notepad_agent_rows = if app.notepad.agent_tab && notepad_rect.height > 1 {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        let rows = notepad_agent::agent_rows(app, body.width);
+        let visible = usize::from(body.height).max(1);
+        app.notepad.agent_scroll = app
+            .notepad
+            .agent_scroll
+            .min(rows.len().saturating_sub(visible));
+        rows
+    } else {
+        app.notepad.agent_scroll = 0;
+        Vec::new()
+    };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
     let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
@@ -768,6 +785,7 @@ fn compute_view_internal(
         sidebar_footer_missive_hit_area,
         notepad_rect,
         notepad_tab_hit_areas,
+        notepad_agent_rows,
         pomodoro_hit_area,
         notification_hit_area,
         hyperspace_rect,
@@ -1071,6 +1089,7 @@ fn compute_mobile_view(
         sidebar_footer_missive_hit_area: Rect::default(),
         notepad_rect: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
+        notepad_agent_rows: Vec::new(),
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
         hyperspace_rect: Rect::default(),

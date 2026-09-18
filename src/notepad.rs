@@ -35,6 +35,45 @@ pub(crate) struct NotepadFile {
     pub(crate) name: String,
 }
 
+/// One collapsible section of the agent tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentSection {
+    Status,
+    Tasks,
+    Subagents,
+    Links,
+}
+
+/// Which agent-tab sections are folded. Default is nothing collapsed, and the
+/// flags live only in this session's state: they are never written to disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AgentSectionCollapse {
+    pub(crate) status: bool,
+    pub(crate) tasks: bool,
+    pub(crate) subagents: bool,
+    pub(crate) links: bool,
+}
+
+impl AgentSectionCollapse {
+    pub(crate) fn collapsed(&self, section: AgentSection) -> bool {
+        match section {
+            AgentSection::Status => self.status,
+            AgentSection::Tasks => self.tasks,
+            AgentSection::Subagents => self.subagents,
+            AgentSection::Links => self.links,
+        }
+    }
+
+    pub(crate) fn toggle(&mut self, section: AgentSection) {
+        match section {
+            AgentSection::Status => self.status = !self.status,
+            AgentSection::Tasks => self.tasks = !self.tasks,
+            AgentSection::Subagents => self.subagents = !self.subagents,
+            AgentSection::Links => self.links = !self.links,
+        }
+    }
+}
+
 /// The notepad's editable buffer and everything the panel draws from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NotepadState {
@@ -58,6 +97,14 @@ pub(crate) struct NotepadState {
     pub(crate) error: Option<String>,
     /// When the debounced write is due. Cleared once it runs.
     pub(crate) save_due: Option<Instant>,
+    /// The read-only agent tab is showing instead of a note. It never holds
+    /// the editor focus: there is no caret in a view the operator cannot type
+    /// into.
+    pub(crate) agent_tab: bool,
+    /// Folded agent-tab sections, kept for the rest of the client session.
+    pub(crate) agent_collapsed: AgentSectionCollapse,
+    /// Scroll offset of the agent-tab body, clamped by view computation.
+    pub(crate) agent_scroll: usize,
 }
 
 impl Default for NotepadState {
@@ -77,6 +124,9 @@ impl Default for NotepadState {
             diverged: false,
             error: None,
             save_due: None,
+            agent_tab: false,
+            agent_collapsed: AgentSectionCollapse::default(),
+            agent_scroll: 0,
         }
     }
 }
@@ -130,14 +180,41 @@ impl NotepadState {
     }
 
     pub(crate) fn select(&mut self, index: usize) -> bool {
-        if self.files.is_empty() || index >= self.files.len() || index == self.active {
+        if self.files.is_empty()
+            || index >= self.files.len()
+            || (index == self.active && !self.agent_tab)
+        {
             return false;
         }
         self.active = index;
+        self.agent_tab = false;
         self.cursor_line = 0;
         self.cursor_col = 0;
         self.scroll = 0;
         true
+    }
+
+    /// Shows the focused pane's agent state instead of a note. The view is
+    /// read-only, so the editor focus is released.
+    pub(crate) fn select_agent_tab(&mut self) -> bool {
+        if self.agent_tab {
+            return false;
+        }
+        self.agent_tab = true;
+        self.focused = false;
+        self.agent_scroll = 0;
+        true
+    }
+
+    pub(crate) fn toggle_agent_section(&mut self, section: AgentSection) {
+        self.agent_collapsed.toggle(section);
+    }
+
+    /// Scrolls the agent-tab body, clamped against the rows the view
+    /// computation last derived for it.
+    pub(crate) fn agent_scroll_by(&mut self, delta: isize, max: usize) {
+        let scroll = self.agent_scroll as isize + delta;
+        self.agent_scroll = (scroll.max(0) as usize).min(max);
     }
 
     pub(crate) fn cycle(&mut self, backwards: bool) -> bool {
@@ -686,6 +763,54 @@ mod tests {
         assert_eq!(state.active, 0);
         assert!(state.cycle(true));
         assert_eq!(state.active, 1);
+    }
+
+    #[test]
+    fn the_agent_tab_releases_the_editor_and_returns_to_the_same_note() {
+        let mut state = state_with("a note");
+        state.set_files(vec![NotepadFile {
+            path: PathBuf::from("/notes/todo.md"),
+            name: "todo".into(),
+        }]);
+        state.focused = true;
+
+        assert!(state.select_agent_tab());
+        assert!(state.agent_tab);
+        assert!(!state.focused);
+        assert!(!state.select_agent_tab(), "already showing");
+
+        // The note index never moved, so coming back is a view switch, not a
+        // note switch — and it still has to happen.
+        assert!(state.select(0));
+        assert!(!state.agent_tab);
+        assert_eq!(state.active, 0);
+    }
+
+    #[test]
+    fn agent_sections_default_expanded_and_toggle_individually() {
+        let mut state = state_with("");
+        for section in [
+            AgentSection::Status,
+            AgentSection::Tasks,
+            AgentSection::Subagents,
+            AgentSection::Links,
+        ] {
+            assert!(!state.agent_collapsed.collapsed(section));
+        }
+        state.toggle_agent_section(AgentSection::Tasks);
+        assert!(state.agent_collapsed.collapsed(AgentSection::Tasks));
+        assert!(!state.agent_collapsed.collapsed(AgentSection::Links));
+        state.toggle_agent_section(AgentSection::Tasks);
+        assert!(!state.agent_collapsed.collapsed(AgentSection::Tasks));
+    }
+
+    #[test]
+    fn agent_scroll_is_clamped_to_the_derived_rows() {
+        let mut state = state_with("");
+        state.agent_scroll_by(5, 3);
+        assert_eq!(state.agent_scroll, 3);
+        state.agent_scroll_by(-10, 3);
+        assert_eq!(state.agent_scroll, 0);
     }
 
     #[test]

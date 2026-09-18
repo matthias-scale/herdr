@@ -13,7 +13,7 @@ pub(crate) mod auto_nudge;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
-pub(crate) use api_helpers::read_terminal_snapshot;
+pub(crate) use api_helpers::{pane_agent_status_with_stale, read_terminal_snapshot};
 pub(crate) mod claude_subagents;
 mod command_palette;
 pub(crate) use command_palette::PaletteEntry;
@@ -1020,6 +1020,7 @@ impl App {
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
+                notepad_agent_rows: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),

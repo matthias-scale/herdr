@@ -2279,7 +2279,10 @@ pub struct ViewState {
     /// The notepad panel at the bottom of the sidebar. Empty when it is off.
     pub(crate) notepad_rect: Rect,
     /// Clickable note names in the notepad header, paired with their index.
-    pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
+    pub(crate) notepad_tab_hit_areas: Vec<(crate::ui::notepad::NotepadTabTarget, Rect)>,
+    /// The agent tab's body rows, derived in view computation so clicks
+    /// resolve to the exact row the operator saw. Empty on the note tabs.
+    pub(crate) notepad_agent_rows: Vec<crate::ui::notepad_agent::NotepadAgentRow>,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
     /// Per-machine notification toggle beside the break timer.
@@ -6262,6 +6265,7 @@ impl AppState {
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
+                notepad_agent_rows: Vec::new(),
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
