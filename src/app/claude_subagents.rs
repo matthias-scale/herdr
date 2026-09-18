@@ -597,8 +597,7 @@ impl crate::app::App {
                             == Some(observation.target.session_id.as_str())
                         && terminal.claude_transcript_path.as_ref()
                             == Some(&observation.target.path)
-                        && terminal.agent_turn_generation()
-                            == observation.target.turn_generation
+                        && terminal.agent_turn_generation() == observation.target.turn_generation
                         && self
                             .claude_subagent_trackers
                             .get(&observation.target.terminal_id)
