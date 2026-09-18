@@ -1013,6 +1013,9 @@ pub(crate) enum AgentPanelIdentity {
 pub(crate) struct AgentPanelEntry {
     pub(crate) identity: AgentPanelIdentity,
     data: std::sync::Arc<AgentPanelEntryData>,
+    /// Projection-only overlay. Keeping it outside shared row data lets group
+    /// builders mark redundancy without copying a cached remote entry.
+    pub(crate) space_label_redundant: bool,
     /// Cached fleet row backing this entry. Local panes leave this empty;
     /// remote entries carry the refresh-time projection through the same
     /// grouping pipeline without acquiring local pane identity.
@@ -1093,9 +1096,11 @@ pub(crate) struct AgentPanelEntryData {
 
 impl AgentPanelEntry {
     pub(crate) fn new(identity: AgentPanelIdentity, data: AgentPanelEntryData) -> Self {
+        let space_label_redundant = data.space_label_redundant;
         Self {
             identity,
             data: std::sync::Arc::new(data),
+            space_label_redundant,
             remote_entry: None,
             remote_show_host_identity: false,
         }
@@ -1119,8 +1124,26 @@ impl std::ops::Deref for AgentPanelEntry {
 
 impl std::ops::DerefMut for AgentPanelEntry {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        debug_assert!(
+            self.remote_entry.is_none(),
+            "cached remote row data must stay immutable during projection"
+        );
+        #[cfg(test)]
+        if self.remote_entry.is_some() && std::sync::Arc::strong_count(&self.data) > 1 {
+            REMOTE_AGENT_PANEL_DATA_COPIES.with(|copies| copies.set(copies.get() + 1));
+        }
         std::sync::Arc::make_mut(&mut self.data)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REMOTE_AGENT_PANEL_DATA_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_remote_agent_panel_data_copies() -> usize {
+    REMOTE_AGENT_PANEL_DATA_COPIES.with(|copies| copies.replace(0))
 }
 
 #[derive(Clone)]
@@ -1851,6 +1874,22 @@ fn aggregate_tab_entries(
     for entry in entries {
         let key = sidebar_entry_key(entry);
         let candidate = (entry.state, entry.seen);
+        if matches!(key, SidebarEntryKey::Remote(_)) {
+            aggregated.entry(key).or_insert_with(|| {
+                (
+                    entry.clone(),
+                    false,
+                    entry.has_agent,
+                    entry.agent.is_some(),
+                    entry.foreground_process_name.clone(),
+                    entry
+                        .usage_limited
+                        .then(|| entry.state_labels.get("usage").cloned())
+                        .flatten(),
+                )
+            });
+            continue;
+        }
         aggregated
             .entry(key)
             .and_modify(
@@ -4324,8 +4363,7 @@ pub(crate) fn sidebar_work_groups(
     }
     for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry).cloned();
-        let remote_ignores_label_query =
-            matches!(&entry.identity, AgentPanelIdentity::Remote(_));
+        let remote_ignores_label_query = matches!(&entry.identity, AgentPanelIdentity::Remote(_));
         let has_label_query = sidebar_query_has_labels(&app.sidebar_work_filter.query);
         match mode {
             SidebarGroupMode::RepoPr => {
@@ -10159,8 +10197,7 @@ pub(crate) mod tests {
             .into_iter()
             .filter_map(|row| match row {
                 SidebarRow::RemoteAgent {
-                    show_host_identity,
-                    ..
+                    show_host_identity, ..
                 } => Some(show_host_identity),
                 _ => None,
             })
@@ -10324,6 +10361,28 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             ["pane/1", "pane/2", "pane/4"]
         );
+    }
+
+    #[test]
+    fn remote_row_construction_does_not_copy_shared_projection_data() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![remote_fleet_agent("remote", "worker")],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        take_remote_agent_panel_data_copies();
+
+        let rows = sidebar_rows(&app);
+
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::RemoteAgent { .. })));
+        assert_eq!(take_remote_agent_panel_data_copies(), 0);
     }
 
     #[test]
