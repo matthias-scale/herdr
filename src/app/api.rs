@@ -2132,10 +2132,9 @@ mod tests {
             crate::api::EventHub::default(),
         );
         let mut reachable = fleet_host("office", "machine-a");
-        reachable.entries = vec![crate::fleet::FleetRow::test_run_row(
+        reachable.entries = vec![crate::fleet::FleetRow::test_agent_row(
             "office",
             "retained-task",
-            false,
         )];
         assert!(app.install_fleet_snapshot(fleet_snapshot(vec![reachable])));
 

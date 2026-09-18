@@ -111,6 +111,7 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "inbox" => NavigateAction::OpenInbox,
         "missive" => NavigateAction::OpenMissiveView,
         "symphony" => NavigateAction::OpenSymphony,
+        "runs" => NavigateAction::OpenRuns,
         "git_pull" => NavigateAction::GitPull,
         "git_commit" => NavigateAction::GitCommit,
         "git_push" => NavigateAction::GitPush,

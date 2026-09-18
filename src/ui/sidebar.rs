@@ -1,3 +1,4 @@
+mod runs;
 #[cfg(test)]
 mod tokens;
 
@@ -1612,7 +1613,11 @@ fn remote_agent_panel_entries_at(
         .filter(|host| !host.local)
         .flat_map(|host| host.entries.iter().map(move |row| (host, row)))
         .filter_map(|(host, row)| {
-            if row.source == crate::fleet::EvidenceSource::Host || row.error.is_some() {
+            if matches!(
+                row.source,
+                crate::fleet::EvidenceSource::Host | crate::fleet::EvidenceSource::RunState
+            ) || row.error.is_some()
+            {
                 return None;
             }
             let lifecycle = row.effective_remote_lifecycle(host.state, now_unix_s);
@@ -2182,6 +2187,11 @@ pub(crate) enum SidebarRow {
     /// section that disappears when empty cannot be told apart from one that is
     /// broken, so the reachable-and-empty case says so instead of vanishing.
     SymphonyEmpty,
+    /// One fleet run, or the empty placeholder for a reachable host.
+    AgentRun {
+        host: String,
+        summary: Option<std::sync::Arc<crate::agent_runs::Summary>>,
+    },
 }
 
 /// Agents waiting on a human are the only ones whose wait you can end, so they
@@ -2196,6 +2206,7 @@ pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
 /// Symphony workflows run headless on a Temporal worker, so nothing in the
 /// pane list ever shows them. The section is the only ambient surface they get.
 pub(crate) const SYMPHONY_SECTION_TITLE: &str = "Symphony";
+pub(crate) const RUNS_SECTION_TITLE: &str = "Runs";
 
 /// Shown under a reachable runner with nothing to list. It states the fact so
 /// an empty section reads as an answer rather than as a missing feature.
@@ -3225,6 +3236,7 @@ fn append_tail_sections(
     settled_entries: Vec<AgentPanelEntry>,
     expand_worktrees: bool,
 ) {
+    runs::append_rows(app, rows);
     append_symphony_rows(app, rows);
     append_settled_rows(app, rows, settled_entries, expand_worktrees);
 }
@@ -5358,7 +5370,8 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
-        | SidebarRow::SymphonyEmpty => 1,
+        | SidebarRow::SymphonyEmpty
+        | SidebarRow::AgentRun { .. } => 1,
     }
 }
 
@@ -5415,6 +5428,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         // whatever follows them; the gap before the next header is enough.
         (SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty, _)
         | (_, SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty) => 0,
+        (SidebarRow::AgentRun { .. }, _) | (_, SidebarRow::AgentRun { .. }) => 0,
     }
 }
 
@@ -5477,7 +5491,9 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         SidebarRow::SectionHeader { .. } => false,
         SidebarRow::NestedHeader { .. } => false,
         // A Symphony workflow runs on a worker, not in a workspace.
-        SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => false,
+        SidebarRow::SymphonyJob { .. }
+        | SidebarRow::SymphonyEmpty
+        | SidebarRow::AgentRun { .. } => false,
     }
 }
 
@@ -5612,7 +5628,8 @@ pub(crate) fn compute_sidebar_row_areas(
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::NestedHeader { .. }
             | SidebarRow::SymphonyJob { .. }
-            | SidebarRow::SymphonyEmpty => {}
+            | SidebarRow::SymphonyEmpty
+            | SidebarRow::AgentRun { .. } => {}
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
@@ -6179,6 +6196,10 @@ pub(crate) fn sidebar_symphony_job_at(app: &AppState, row: u16) -> Option<usize>
         .into_iter()
         .find(|job| row >= job.rect.y && row < job.rect.bottom())
         .map(|job| job.index)
+}
+
+pub(crate) fn sidebar_agent_run_at(app: &AppState, row: u16) -> Option<(String, String)> {
+    runs::target_at(app, row)
 }
 
 /// The placeholder row. Deliberately dim and dotless: it names no workflow, so
@@ -6884,7 +6905,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             }
             // Collapsed there is no room for a workflow name; the section rule
             // above already shows that a Symphony run is open.
-            SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {}
+            SidebarRow::SymphonyJob { .. }
+            | SidebarRow::SymphonyEmpty
+            | SidebarRow::AgentRun { .. } => {}
         }
     }
 
@@ -7877,6 +7900,9 @@ fn render_workspace_list(
     }
     for job in symphony_jobs {
         render_symphony_job(app, frame, &job, symphony_now);
+    }
+    for area in runs::areas(app, sidebar_area) {
+        runs::render(app, frame, &area, symphony_now);
     }
     for card in tab_cards {
         render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
@@ -9262,6 +9288,19 @@ pub(crate) mod tests {
         }
     }
 
+    fn remote_fleet_agent(host: &str, name: &str) -> crate::fleet::FleetRow {
+        crate::fleet::FleetRow::test_agent_info_row(
+            host,
+            remote_agent_info(
+                name,
+                name,
+                crate::api::schema::AgentStatus::Working,
+                false,
+                false,
+            ),
+        )
+    }
+
     fn app_with_two_remote_hosts() -> AppState {
         let snapshot = crate::fleet::Snapshot {
             polled: true,
@@ -9821,12 +9860,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|entry| entry.agent_ref.to_string())
                 .collect::<Vec<_>>(),
-            [
-                "remote-b::pane/1",
-                "remote-b::pane/2",
-                "remote-a::pane/4",
-                "remote-a::ra-windowless"
-            ]
+            ["remote-b::pane/1", "remote-b::pane/2", "remote-a::pane/4"]
         );
         assert!(entries.iter().all(|entry| matches!(
             &entry.entry.identity,
@@ -9835,7 +9869,6 @@ pub(crate) mod tests {
         assert!(!entry_is_blocked(&entries[0]));
         assert!(entry_is_blocked(&entries[1]));
         assert!(entry_is_blocked(&entries[2]));
-        assert!(entry_is_blocked(&entries[3]));
 
         let mut app = app_with_agents(&["local"]);
         app.remote_agent_panel_entries = entries.clone();
@@ -9895,7 +9928,7 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["pane/1", "pane/2", "pane/4", "ra-windowless"]
+            ["pane/1", "pane/2", "pane/4"]
         );
     }
 
@@ -10035,9 +10068,7 @@ pub(crate) mod tests {
             hosts: vec![fleet_host_snapshot(
                 "laptop",
                 false,
-                vec![crate::fleet::FleetRow::test_run_row(
-                    "laptop", "reviewer", false,
-                )],
+                vec![remote_fleet_agent("laptop", "reviewer")],
             )],
             ..crate::fleet::Snapshot::default()
         };
@@ -10057,11 +10088,7 @@ pub(crate) mod tests {
             hosts: vec![fleet_host_snapshot(
                 "localhost",
                 false,
-                vec![crate::fleet::FleetRow::test_run_row(
-                    "localhost",
-                    "reviewer",
-                    false,
-                )],
+                vec![remote_fleet_agent("localhost", "reviewer")],
             )],
             ..crate::fleet::Snapshot::default()
         };
@@ -10078,11 +10105,7 @@ pub(crate) mod tests {
             hosts: vec![fleet_host_snapshot(
                 "WorkBox",
                 false,
-                vec![crate::fleet::FleetRow::test_run_row(
-                    "WorkBox",
-                    "ReviewAgent",
-                    false,
-                )],
+                vec![remote_fleet_agent("WorkBox", "ReviewAgent")],
             )],
             ..crate::fleet::Snapshot::default()
         };
@@ -11541,11 +11564,7 @@ pub(crate) mod tests {
                         fleet_host_snapshot(
                             host,
                             false,
-                            vec![crate::fleet::FleetRow::test_run_row(
-                                host,
-                                "same-agent",
-                                false,
-                            )],
+                            vec![remote_fleet_agent(host, "same-agent")],
                         )
                     })
                     .collect(),
@@ -11585,13 +11604,7 @@ pub(crate) mod tests {
                 "remote",
                 false,
                 (0..50)
-                    .map(|index| {
-                        crate::fleet::FleetRow::test_run_row(
-                            "remote",
-                            &format!("remote-{index}"),
-                            false,
-                        )
-                    })
+                    .map(|index| remote_fleet_agent("remote", &format!("remote-{index}")))
                     .collect(),
             )],
             ..crate::fleet::Snapshot::default()
@@ -12128,6 +12141,7 @@ pub(crate) mod tests {
                 SidebarRow::SectionHeader { .. } => ('h', 0),
                 SidebarRow::NestedHeader { .. } => ('h', 0),
                 SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => ('s', 0),
+                SidebarRow::AgentRun { .. } => ('u', 0),
             })
             .collect()
     }
@@ -13488,6 +13502,7 @@ pub(crate) mod tests {
                     SidebarRow::SectionHeader { .. } => ('h', 0),
                     SidebarRow::NestedHeader { .. } => ('h', 0),
                     SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => ('s', 0),
+                    SidebarRow::AgentRun { .. } => ('u', 0),
                 })
                 .collect::<Vec<_>>(),
             vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
@@ -13528,7 +13543,8 @@ pub(crate) mod tests {
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::NestedHeader { .. }
                 | SidebarRow::SymphonyJob { .. }
-                | SidebarRow::SymphonyEmpty => None,
+                | SidebarRow::SymphonyEmpty
+                | SidebarRow::AgentRun { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(tabs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
@@ -13573,6 +13589,7 @@ pub(crate) mod tests {
                     SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {
                         ("symphony", 0, None, None)
                     }
+                    SidebarRow::AgentRun { .. } => ("run", 0, None, None),
                 })
                 .collect::<Vec<_>>()
         };
@@ -15680,6 +15697,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::NestedHeader { title, .. } => ("section", title),
                 SidebarRow::SymphonyJob { name, .. } => ("symphony", name),
                 SidebarRow::SymphonyEmpty => ("symphony", String::new()),
+                SidebarRow::AgentRun { host, .. } => ("run", host),
             })
             .collect()
     }
@@ -19205,6 +19223,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     SidebarRow::NestedHeader { title, .. } => format!("nested:{title}"),
                     SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                     SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
+                    SidebarRow::AgentRun { host, .. } => format!("run:{host}"),
                 })
                 .collect::<Vec<_>>(),
             vec![
@@ -21676,6 +21695,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::RemoteAgent { entry, .. } => format!("remote:{}", entry.agent_ref),
                 SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
+                SidebarRow::AgentRun { host, .. } => format!("run:{host}"),
             })
             .collect()
     }
