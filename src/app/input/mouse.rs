@@ -8013,6 +8013,9 @@ mod tests {
         assert!(app.state.request_submit_worktree_remove);
 
         let mut app = app_for_mouse_test();
+        // The sidebar opens this dialog from navigation; closing a client
+        // overlay returns to that server mode rather than rewriting it.
+        app.state.set_server_mode(Mode::Navigate);
         app.state
             .open_client_overlay(crate::app::state::ClientOverlay::ConfirmRemoveWorktree);
         app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {

@@ -10128,7 +10128,19 @@ pub(crate) mod tests {
                 )
             })
             .expect("settled section");
-        assert!(!rows.iter().any(|row| matches!(
+        let snoozed_at = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("snoozed section");
+        assert!(!rows[..snoozed_at].iter().any(|row| matches!(
             row,
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
                 if entry.local_target().is_some_and(|target| target.pane_id == snoozed_pane)

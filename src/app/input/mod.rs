@@ -9573,6 +9573,7 @@ navigate_workspace_down = "ctrl+j"
 
         state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         assert!(modal_paste_target_active(&state));
+        state.close_client_overlay();
 
         state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = false;
