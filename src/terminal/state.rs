@@ -301,6 +301,7 @@ pub struct ClosingReport {
     scope: ClosingReportScope,
     retired_pending_completion: bool,
     requires_legacy_session_guard: bool,
+    legacy_session_guard: Option<LegacyClosingReportGuard>,
     pub(crate) closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     pub(crate) closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     pub(crate) closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -322,6 +323,7 @@ impl Default for ClosingReport {
             scope: ClosingReportScope::default(),
             retired_pending_completion: false,
             requires_legacy_session_guard: false,
+            legacy_session_guard: None,
             closing_gates: Vec::new(),
             closing_items: Vec::new(),
             closing_decisions: Vec::new(),
@@ -420,6 +422,7 @@ impl ClosingReportHandoffState {
             },
             retired_pending_completion: self.retired_pending_completion,
             requires_legacy_session_guard: self.requires_legacy_session_guard,
+            legacy_session_guard: None,
             closing_gates: self.gates,
             closing_items: self.items,
             closing_decisions: self.decisions,
@@ -685,7 +688,6 @@ pub struct TerminalState {
     pub(super) hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
-    legacy_closing_report_guard: Option<LegacyClosingReportGuard>,
     pub(super) metadata_report_sequences: HashMap<String, u64>,
     pub(super) metadata_report_agents: HashMap<String, Agent>,
     pub(super) metadata_token_sequence_sources: std::collections::HashSet<String>,
@@ -772,7 +774,6 @@ impl TerminalState {
             hook_report_sequences: HashMap::new(),
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             stale_full_lifecycle_hook_sessions: HashMap::new(),
-            legacy_closing_report_guard: None,
             metadata_report_sequences: HashMap::new(),
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
@@ -1237,12 +1238,19 @@ impl TerminalState {
 
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
         let _ = now;
-        let requires_legacy_session_guard = self
+        let (requires_legacy_session_guard, legacy_session_guard) = self
             .closing_report
             .as_ref()
-            .is_some_and(|report| report.requires_legacy_session_guard);
+            .map(|report| {
+                (
+                    report.requires_legacy_session_guard,
+                    report.legacy_session_guard.clone(),
+                )
+            })
+            .unwrap_or_default();
         let empty = ClosingReport {
             requires_legacy_session_guard,
+            legacy_session_guard,
             ..ClosingReport::default()
         };
         let report_changed = self
@@ -1261,10 +1269,9 @@ impl TerminalState {
         now: Instant,
     ) -> bool {
         if session_replaced {
-            self.closing_report
-                .get_or_insert_default()
-                .requires_legacy_session_guard = true;
-            self.legacy_closing_report_guard = None;
+            let report = self.closing_report.get_or_insert_default();
+            report.requires_legacy_session_guard = true;
+            report.legacy_session_guard = None;
         }
         if !session_changed || !self.has_closing_report() {
             return false;
@@ -2355,6 +2362,15 @@ impl TerminalState {
         if !self.accept_hook_report(&source, seq) {
             return None;
         }
+        let starts_hook_turn = state == AgentState::Working
+            && self.unreported_turn_started_at.is_none()
+            && self.hook_authority.as_ref().is_none_or(|authority| {
+                authority.retired_at.is_some()
+                    || authority.state != AgentState::Working
+                    || authority.source != source
+                    || authority.agent_label != agent_label
+                    || (session_ref.is_some() && authority.session_ref != session_ref)
+            });
         let closing_report = crate::detect::is_closing_block_source(&source, &agent_label);
 
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
@@ -2388,6 +2404,9 @@ impl TerminalState {
             // A forced post-report rescan establishes the baseline from which
             // a later visible Working signal can prove a new turn.
             self.fallback_observed_at = None;
+        }
+        if starts_hook_turn {
+            self.agent_turn_generation = self.agent_turn_generation.wrapping_add(1);
         }
         self.replace_hook_authority(Some(HookAuthority {
             source,
@@ -3242,7 +3261,6 @@ impl TerminalState {
         if !crate::detect::is_closing_block_source(&source, &agent_label) {
             return;
         }
-        self.legacy_closing_report_guard = None;
         let Some((session_id, report_seq)) = session_id
             .zip(precursor_seq.and_then(|seq| seq.checked_add(1)))
             .filter(|(session_id, _)| {
@@ -3251,7 +3269,9 @@ impl TerminalState {
         else {
             return;
         };
-        self.legacy_closing_report_guard = Some(LegacyClosingReportGuard {
+        self.closing_report
+            .get_or_insert_default()
+            .legacy_session_guard = Some(LegacyClosingReportGuard {
             source,
             agent_label,
             session_id,
@@ -3259,19 +3279,17 @@ impl TerminalState {
         });
     }
 
-    pub(crate) fn legacy_closing_report_requires_guard(&self) -> bool {
-        self.closing_report
-            .as_ref()
-            .is_some_and(|report| report.requires_legacy_session_guard)
-    }
-
-    pub(crate) fn legacy_closing_report_session(
+    pub(crate) fn correlate_legacy_closing_report(
         &self,
         source: &str,
         agent_label: &str,
         seq: Option<u64>,
-    ) -> Option<String> {
-        self.legacy_closing_report_guard
+    ) -> Result<Option<String>, ()> {
+        let Some(report) = self.closing_report.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(session_id) = report
+            .legacy_session_guard
             .as_ref()
             .filter(|guard| {
                 guard.source == source
@@ -3280,6 +3298,44 @@ impl TerminalState {
                     && self.agent_session_id_matches_current_agent(agent_label, &guard.session_id)
             })
             .map(|guard| guard.session_id.clone())
+        {
+            return Ok(Some(session_id));
+        }
+        if report.requires_legacy_session_guard {
+            Err(())
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_closing_report_requires_guard(&self) -> bool {
+        self.closing_report
+            .as_ref()
+            .is_some_and(|report| report.requires_legacy_session_guard)
+    }
+
+    pub(crate) fn accepts_legacy_closing_metadata(
+        &self,
+        source: &str,
+        agent_label: &str,
+        seq: Option<u64>,
+    ) -> bool {
+        let Some(report) = self.closing_report.as_ref() else {
+            return true;
+        };
+        if !report.requires_legacy_session_guard {
+            return true;
+        }
+        report.scope.source.as_deref() == Some(source)
+            && report.scope.turn_seq == seq
+            && report
+                .scope
+                .session_id
+                .as_deref()
+                .is_some_and(|session_id| {
+                    self.agent_session_id_matches_current_agent(agent_label, session_id)
+                })
     }
 
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {

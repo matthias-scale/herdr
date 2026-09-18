@@ -233,11 +233,32 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             )
         ]
         self.assertIn("closing_report: Option<ClosingReport>", terminal_fields)
-        closing_fields = re.findall(r"^\s*(closing_[a-z0-9_]+)\s*:", terminal_fields, re.M)
+        field_declarations = re.findall(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z0-9_]+)\s*:\s*([^,\n]+),",
+            terminal_fields,
+            re.M,
+        )
+        closing_fields = [
+            name
+            for name, field_type in field_declarations
+            if "closing" in name.lower() or "closing" in field_type.lower()
+        ]
         self.assertEqual(
             closing_fields,
             ["closing_report"],
             "ClosingReport must own every terminal closing fact",
+        )
+        synthetic_fields = re.findall(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z0-9_]+)\s*:\s*([^,\n]+),",
+            "legacy_guard: Option<LegacyClosingReportGuard>,",
+            re.M,
+        )
+        self.assertTrue(
+            any(
+                "closing" in name.lower() or "closing" in field_type.lower()
+                for name, field_type in synthetic_fields
+            ),
+            "ownership scan must catch closing state hidden behind another prefix",
         )
         for legacy_field in (
             "closing_gates:",

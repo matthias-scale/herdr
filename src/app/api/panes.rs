@@ -1604,26 +1604,27 @@ impl App {
             .get(ws_idx)
             .and_then(|workspace| workspace.pane_state(pane_id))
             .map(|pane| pane.attached_terminal_id.clone());
-        let legacy_session_id = (params.agent_session_id.is_none())
-            .then(|| {
-                terminal_id
-                    .as_ref()
-                    .and_then(|terminal_id| self.state.terminals.get(terminal_id))
-                    .and_then(|terminal| {
-                        terminal.legacy_closing_report_session(
-                            &params.source,
-                            &agent_label,
-                            params.seq,
-                        )
-                    })
-            })
-            .flatten();
-        let legacy_guard_required = params.agent_session_id.is_none()
-            && terminal_id
+        let legacy_v2_closing_report = params.agent_session_id.is_none()
+            && params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION)
+            && crate::detect::is_closing_block_source(&params.source, &agent_label);
+        let legacy_session_id = if legacy_v2_closing_report {
+            let correlation = terminal_id
                 .as_ref()
                 .and_then(|terminal_id| self.state.terminals.get(terminal_id))
-                .is_some_and(|terminal| terminal.legacy_closing_report_requires_guard());
-        let closing_report_allowed = !legacy_guard_required || legacy_session_id.is_some();
+                .map_or(Ok(None), |terminal| {
+                    terminal.correlate_legacy_closing_report(
+                        &params.source,
+                        &agent_label,
+                        params.seq,
+                    )
+                });
+            match correlation {
+                Ok(session_id) => session_id,
+                Err(()) => return encode_success(id, ResponseResult::Ok {}),
+            }
+        } else {
+            None
+        };
         if params
             .agent_session_id
             .as_deref()
@@ -1648,8 +1649,7 @@ impl App {
                 })
                 .flatten()
         });
-        let closing_block = (closing_report_allowed
-            && params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION)
+        let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION)
             && (has_arrays || task_reported))
             .then(|| {
                 let (gates, items, decisions) = if dependencies_authoritative {
@@ -2060,16 +2060,13 @@ impl App {
             .filter(|agent| crate::detect::is_closing_block_source(&source, agent));
         let closing_block_metadata =
             applies_to_source.as_deref() == Some(source.as_str()) && closing_agent.is_some();
-        if closing_block_metadata
-            && agent_session_id.is_none()
-            && terminal.legacy_closing_report_requires_guard()
-            && closing_agent.is_none_or(|agent| {
-                terminal
-                    .legacy_closing_report_session(&source, agent, params.seq)
-                    .is_none()
-            })
-        {
-            return encode_success(id, ResponseResult::Ok {});
+        if closing_block_metadata && agent_session_id.is_none() {
+            let metadata_matches = closing_agent.is_some_and(|agent| {
+                terminal.accepts_legacy_closing_metadata(&source, agent, params.seq)
+            });
+            if !metadata_matches {
+                return encode_success(id, ResponseResult::Ok {});
+            }
         }
         if closing_block_metadata {
             if let Some(tokens) = tokens.as_mut() {
@@ -8932,28 +8929,28 @@ mod tests {
             &app.handle_pane_report_agent_session("late-gate-precursor".into(), session("old", 9)),
         )
         .unwrap();
-        assert_eq!(
-            app.state.terminals[&terminal_id].legacy_closing_report_session(
-                "herdr:codex-closing-block",
-                "codex",
-                Some(10),
-            ),
-            None
+        assert!(app.state.terminals[&terminal_id]
+            .correlate_legacy_closing_report("herdr:codex-closing-block", "codex", Some(10),)
+            .is_err());
+        let mut late_gate = report(
+            10,
+            vec![test_gate()],
+            crate::api::schema::ClosingCompletion::Incomplete,
         );
-        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
-            "late-gate".into(),
-            report(
-                10,
-                vec![test_gate()],
-                crate::api::schema::ClosingCompletion::Incomplete,
-            ),
-        ))
-        .unwrap();
+        late_gate.state = crate::api::schema::PaneAgentState::Blocked;
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("late-gate".into(), late_gate))
+                .unwrap();
         let _: SuccessResponse = serde_json::from_str(
             &app.handle_pane_report_metadata("late-contract".into(), metadata(10)),
         )
         .unwrap();
         assert!(app.pane_info(0, internal_pane_id).unwrap().gates.is_empty());
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Working,
+            "a rejected stale report cannot restore Blocked"
+        );
         assert_eq!(
             app.state.terminals[&terminal_id].closing_contract_met(),
             None
@@ -8990,6 +8987,11 @@ mod tests {
             .pane_state(internal_pane_id)
             .unwrap();
         let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Working,
+            "a rejected stale completion cannot restore Idle"
+        );
         assert_ne!(pane.agent_projection(terminal).status_key(), "done");
         assert!(pane.seen);
         assert!(pane.done_since.is_none());
@@ -8998,6 +9000,12 @@ mod tests {
             &app.handle_pane_report_agent_session("current-precursor".into(), session("new", 13)),
         )
         .unwrap();
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent_session(
+                "delayed-old-precursor".into(),
+                session("old", 15),
+            ))
+            .unwrap();
         let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
             "current-report".into(),
             report(
