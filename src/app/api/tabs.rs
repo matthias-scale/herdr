@@ -117,7 +117,9 @@ impl App {
                         .get_mut(ws_idx)
                         .and_then(|ws| ws.tabs.get_mut(tab_idx))
                     {
-                        tab.set_custom_name(label);
+                        // An API label is an explicit caller choice. Session restore
+                        // placeholders still follow the agent when they match its id.
+                        tab.set_user_custom_name(label);
                         crate::logging::tab_renamed(&workspace_id, &tab_id);
                     }
                 }
@@ -880,7 +882,7 @@ mod tests {
                 workspace_id: None,
                 cwd: None,
                 focus: false,
-                label: None,
+                label: Some("logs".into()),
                 env: Default::default(),
                 work_context: None,
             },
@@ -889,6 +891,8 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(success.result, ResponseResult::TabCreated { .. }));
         let created = &app.state.workspaces[0].tabs[1];
+        assert_eq!(created.custom_name.as_deref(), Some("logs"));
+        assert_eq!(created.name_origin, crate::workspace::TabNameOrigin::User);
         let created_terminal_id = created.terminal_id(created.root_pane).unwrap();
         let created_cwd = &app.state.terminals.get(created_terminal_id).unwrap().cwd;
         assert_eq!(

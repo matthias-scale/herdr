@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::App;
+use crate::workspace::TabNameOrigin;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TerminalTitleChanges {
@@ -9,6 +10,7 @@ pub(crate) struct TerminalTitleChanges {
 }
 
 const RESTORED_AGENT_TITLE_LABEL_LIMIT: usize = 44;
+const RESTORED_AGENT_SESSION_LABEL_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TerminalTitleSyncChange {
@@ -30,6 +32,44 @@ fn label_tracks_agent_title(label: Option<&str>, previous_title: Option<&str>) -
         .collect::<String>();
     previous_title.chars().count() > RESTORED_AGENT_TITLE_LABEL_LIMIT
         && label.trim() == restored_prefix.trim()
+}
+
+fn label_matches_agent_session_prefix(label: Option<&str>, session_id: Option<&str>) -> bool {
+    let (Some(label), Some(session_id)) = (label, session_id) else {
+        return false;
+    };
+    let label = label.trim();
+    !label.is_empty()
+        && session_id
+            .chars()
+            .take(RESTORED_AGENT_SESSION_LABEL_LIMIT)
+            .eq(label.chars())
+}
+
+fn label_is_legacy_restore_placeholder(label: Option<&str>) -> bool {
+    let Some(label) = label.map(str::trim) else {
+        return false;
+    };
+    label.len() == RESTORED_AGENT_SESSION_LABEL_LIMIT
+        && label.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn tab_label_tracks_agent_title(
+    origin: TabNameOrigin,
+    label: Option<&str>,
+    previous_title: Option<&str>,
+    session_id: Option<&str>,
+) -> bool {
+    match origin {
+        // Rescue created structural labels from the first eight UUID hex
+        // characters. Other structural names belong to layouts or worktrees.
+        TabNameOrigin::Structural => label_is_legacy_restore_placeholder(label),
+        TabNameOrigin::AgentDerived => label_tracks_agent_title(label, previous_title),
+        TabNameOrigin::User => {
+            label_tracks_agent_title(label, previous_title)
+                || label_matches_agent_session_prefix(label, session_id)
+        }
+    }
 }
 
 impl App {
@@ -133,13 +173,20 @@ impl App {
                 }
                 if agent_title_changed {
                     sync_change.chrome_changed = true;
-                    tab_updates.push((ws_idx, pane_id, previous_title, current_title));
+                    let agent_session_id = terminal.current_agent_session_id().map(str::to_string);
+                    tab_updates.push((
+                        ws_idx,
+                        pane_id,
+                        previous_title,
+                        current_title,
+                        agent_session_id,
+                    ));
                 }
                 publish.push((ws_idx, pane_id));
             }
         }
 
-        for (ws_idx, pane_id, previous_title, current_title) in tab_updates {
+        for (ws_idx, pane_id, previous_title, current_title, agent_session_id) in tab_updates {
             let Some(tab) = self.state.workspaces.get_mut(ws_idx).and_then(|workspace| {
                 let tab_idx = workspace.find_tab_index_for_pane(pane_id)?;
                 workspace.tabs.get_mut(tab_idx)
@@ -147,12 +194,12 @@ impl App {
                 continue;
             };
             if tab.layout.focused() != pane_id
-                || !matches!(
+                || !tab_label_tracks_agent_title(
                     tab.name_origin,
-                    crate::workspace::TabNameOrigin::User
-                        | crate::workspace::TabNameOrigin::AgentDerived
+                    tab.custom_name.as_deref(),
+                    previous_title.as_deref(),
+                    agent_session_id.as_deref(),
                 )
-                || !label_tracks_agent_title(tab.custom_name.as_deref(), previous_title.as_deref())
             {
                 continue;
             }
@@ -160,11 +207,11 @@ impl App {
             match current_title {
                 Some(title) => {
                     tab.custom_name = Some(title);
-                    tab.name_origin = crate::workspace::TabNameOrigin::AgentDerived;
+                    tab.name_origin = TabNameOrigin::AgentDerived;
                 }
                 None => {
                     tab.custom_name = None;
-                    tab.name_origin = crate::workspace::TabNameOrigin::Structural;
+                    tab.name_origin = TabNameOrigin::Structural;
                 }
             }
         }
@@ -367,6 +414,114 @@ mod tests {
             Some("Human pane label")
         );
         assert_eq!(app.tab_info(0, 0).unwrap().label, "Human tab label");
+    }
+
+    #[tokio::test]
+    async fn late_agent_title_replaces_persisted_structural_session_prefix() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id(
+                "a291661f-1111-2222-3333-444444444444",
+            )
+            .unwrap(),
+        });
+        let tab = &mut app.state.workspaces[0].tabs[0];
+        tab.custom_name = Some("b76ec26b".into());
+        tab.name_origin = crate::workspace::TabNameOrigin::Structural;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes(b"\x1b]0;SCA-3596 migration blocking production\x07");
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        assert!(app.sync_terminal_titles().chrome_changed);
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(
+            tab.custom_name.as_deref(),
+            Some("SCA-3596 migration blocking production")
+        );
+        assert_eq!(
+            tab.name_origin,
+            crate::workspace::TabNameOrigin::AgentDerived
+        );
+    }
+
+    #[tokio::test]
+    async fn late_agent_title_replaces_current_session_prefix_label() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id(
+                "a291661f-1111-2222-3333-444444444444",
+            )
+            .unwrap(),
+        });
+        app.state.workspaces[0].tabs[0].set_user_custom_name("a291661f".into());
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes(b"\x1b]0;SCA-3596 migration blocking production\x07");
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        assert!(app.sync_terminal_titles().chrome_changed);
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(
+            tab.custom_name.as_deref(),
+            Some("SCA-3596 migration blocking production")
+        );
+        assert_eq!(
+            tab.name_origin,
+            crate::workspace::TabNameOrigin::AgentDerived
+        );
+    }
+
+    #[tokio::test]
+    async fn late_agent_title_preserves_non_placeholder_structural_label() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state.workspaces[0].tabs[0].set_custom_name("layout-shell".into());
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes(b"\x1b]0;SCA-3596 migration blocking production\x07");
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        assert!(app.sync_terminal_titles().chrome_changed);
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(tab.custom_name.as_deref(), Some("layout-shell"));
+        assert_eq!(tab.name_origin, crate::workspace::TabNameOrigin::Structural);
     }
 
     #[test]
