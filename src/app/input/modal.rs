@@ -3572,7 +3572,7 @@ mod tests {
     }
 
     #[test]
-    fn live_snooze_removes_settle_without_rebinding_enter_to_close() {
+    fn live_snooze_removes_settle_without_rebinding_enter_to_new_tab() {
         let mut app = app_with_test_workspaces(&["main"]);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         app.state.workspaces[0].test_add_tab(Some("keep"));
@@ -3609,6 +3609,9 @@ mod tests {
             .map(|menu| app.state.context_menu_items(menu))
             .expect("open menu");
         assert!(!live_items.contains(&crate::app::state::SETTLE_ITEM));
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);

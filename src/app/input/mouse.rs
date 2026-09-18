@@ -2750,10 +2750,8 @@ impl AppState {
             return;
         }
         if !actions.contains(&menu.selected) {
-            let fallback = actions.into_iter().find(|action| !action.is_destructive());
-            if let (Some(menu), Some(fallback)) = (self.context_menu.as_mut(), fallback) {
-                menu.selected = fallback;
-            }
+            self.context_menu = None;
+            leave_modal(self);
         }
     }
 
