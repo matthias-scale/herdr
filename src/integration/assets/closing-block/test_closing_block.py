@@ -2593,6 +2593,39 @@ class BundleInstallerTests(unittest.TestCase):
         self.assertFalse(self.target.exists())
         self.assertFalse(any(self.target.parent.glob(".herdr-closing-block.stage-*")))
 
+    def test_first_install_rollback_preserves_unlocked_replacement(self):
+        installer = self._installer_module()
+        installer.shutil.rmtree(self.target)
+        legacy_source = self._bundle_source("legacy")
+        legacy_manifest = installer.bundle_manifest(legacy_source)
+        original_replace = installer.os.replace
+        replacements = 0
+
+        def pre_lock_install():
+            self.target.mkdir(parents=True, exist_ok=True)
+            for name in self.RUNTIME_FILES:
+                original_replace(legacy_source / name, self.target / name)
+
+        def fail_after_first_replacement(source, destination):
+            nonlocal replacements
+            result = original_replace(source, destination)
+            if installer.Path(destination).parent == self.target:
+                replacements += 1
+                if replacements == 1:
+                    pre_lock_install()
+                    raise OSError("injected post-replacement failure")
+            return result
+
+        with mock.patch.object(
+            installer.os, "replace", side_effect=fail_after_first_replacement
+        ), self.assertRaisesRegex(OSError, "injected post-replacement failure"):
+            installer.install_bundle(self.source, self.target, dry_run=False)
+
+        self.assertEqual(replacements, 1)
+        self.assertTrue(self.target.is_dir())
+        self.assertEqual(installer.bundle_manifest(self.target), legacy_manifest)
+        self.assertFalse(any(self.target.parent.glob(".herdr-closing-block.stage-*")))
+
     def test_dry_run_validates_without_writing_target_or_backup(self):
         installer = self._installer_module()
         before = {

@@ -120,14 +120,20 @@ def _exclusive_install_lock(target: Path):
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
+def _file_identity(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino
+
+
 def _replace_runtime_files(
-    source: Path, target: Path, written: list[Path]
+    source: Path, target: Path, written: list[tuple[Path, tuple[int, int]]]
 ) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for name in RUNTIME_FILES:
+        staged_file = source / name
         destination = target / name
-        written.append(destination)
-        os.replace(source / name, destination)
+        written.append((destination, _file_identity(staged_file)))
+        os.replace(staged_file, destination)
 
 
 def _restore_runtime_files(backup: Path, target: Path) -> None:
@@ -152,14 +158,15 @@ def _restore_runtime_files(backup: Path, target: Path) -> None:
 def _rollback_runtime_files(
     backup: Path | None,
     target: Path,
-    written: list[Path],
+    written: list[tuple[Path, tuple[int, int]]],
 ) -> None:
     if backup and backup.exists():
         _restore_runtime_files(backup, target)
         return
-    for path in written:
+    for path, identity in written:
         try:
-            path.unlink()
+            if _file_identity(path) == identity:
+                path.unlink()
         except FileNotFoundError:
             pass
     try:
@@ -211,7 +218,7 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
 
             if backup:
                 shutil.copytree(target, backup, symlinks=True)
-            written: list[Path] = []
+            written: list[tuple[Path, tuple[int, int]]] = []
             try:
                 _replace_runtime_files(stage, target, written)
             except OSError:
