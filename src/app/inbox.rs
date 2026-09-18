@@ -447,7 +447,11 @@ mod tests {
                     let in_sidebar_blocked = crate::ui::all_agent_panel_entries(&app)
                         .iter()
                         .filter(|entry| crate::ui::entry_is_blocked(entry))
-                        .any(|entry| entry.pane_id == pane_id);
+                        .any(|entry| {
+                            entry
+                                .local_target()
+                                .is_some_and(|target| target.pane_id == pane_id)
+                        });
 
                     assert_eq!(
                         in_queue, in_sidebar_blocked,

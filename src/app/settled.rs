@@ -120,13 +120,20 @@ fn derived_pane_label(state: &AppState, ws_idx: usize, pane_id: PaneId) -> Optio
 
 impl AppState {
     pub(crate) fn next_snooze_deadline_at(&self, now: Instant, now_unix: u64) -> Option<Instant> {
-        self.workspaces
+        let local = self
+            .workspaces
             .iter()
             .flat_map(|ws| ws.tabs.iter())
             .flat_map(|tab| tab.panes.values())
             .filter_map(crate::pane::PaneState::snoozed_until)
-            .map(|deadline| snooze_instant(deadline, now_unix, now))
-            .min()
+            .map(|deadline| snooze_instant(deadline, now_unix, now));
+        let remote = self
+            .remote_agent_panel_entries
+            .iter()
+            .filter_map(|entry| entry.snoozed_until)
+            .filter(|deadline| *deadline > now_unix)
+            .map(|deadline| snooze_instant(deadline, now_unix, now));
+        local.chain(remote).min()
     }
 
     pub(crate) fn snooze_pane_at(&mut self, ws_idx: usize, pane_id: PaneId, deadline: u64) -> bool {
@@ -214,6 +221,20 @@ impl AppState {
             );
         }
         !expired.is_empty()
+    }
+
+    pub(crate) fn refresh_remote_snoozes_at(&mut self, now_unix: u64) -> bool {
+        if !self
+            .remote_agent_panel_entries
+            .iter()
+            .filter_map(|entry| entry.snoozed_until)
+            .any(|deadline| deadline <= now_unix)
+        {
+            return false;
+        }
+        self.remote_agent_panel_entries =
+            crate::ui::remote_agent_panel_entries_at(&self.fleet_snapshot, now_unix);
+        true
     }
     fn settle_owned_candidates(
         &mut self,
@@ -552,6 +573,7 @@ impl App {
                 .observe_pane_detection_snapshot_at(pane_id, revision, agent, &snapshot, now);
         }
         changed |= self.state.refresh_snoozes_at(now, now_unix);
+        changed |= self.state.refresh_remote_snoozes_at(now_unix);
         changed |= self.flush_pane_snooze_events();
         changed |=
             self.state
@@ -712,6 +734,64 @@ mod tests {
             snooze_instant(u64::MAX, 1_725_000_000, now),
             now + Duration::from_secs(MAX_SNOOZE_SECONDS)
         );
+    }
+
+    #[test]
+    fn remote_snooze_deadline_reprojects_without_a_fleet_poll() {
+        let info: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "term_remote",
+            "work_context": {"ticket_ids": [], "pr_urls": []},
+            "name": "remote worker",
+            "agent": "codex",
+            "agent_status": "working",
+            "reported_at": "1970-01-01T00:03:10Z",
+            "gates": [],
+            "workspace_id": "w1",
+            "tab_id": "t1",
+            "pane_id": "p1",
+            "focused": false,
+            "state_change_seq": 7,
+            "revision": 1,
+            "snoozed_until": 200
+        }))
+        .expect("valid remote agent");
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "remote".into(),
+                target: "remote".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![crate::fleet::FleetRow::test_agent_info_row("remote", info)],
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut state = crate::app::state::AppState::test_new();
+        state.fleet_snapshot = snapshot;
+        state.remote_agent_panel_entries =
+            crate::ui::remote_agent_panel_entries_at(&state.fleet_snapshot, 199);
+        state.view_observed_unix_s = 199;
+        let now = Instant::now();
+
+        assert_eq!(
+            state.next_snooze_deadline_at(now, 199),
+            Some(now + Duration::from_secs(1))
+        );
+        assert!(crate::ui::sidebar_rows(&state)
+            .iter()
+            .all(|row| !matches!(row, crate::ui::SidebarRow::RemoteAgent { .. })));
+
+        assert!(state.refresh_remote_snoozes_at(200));
+        state.view_observed_unix_s = 200;
+        assert_eq!(state.next_snooze_deadline_at(now, 200), None);
+        assert!(crate::ui::sidebar_rows(&state)
+            .iter()
+            .any(|row| matches!(row, crate::ui::SidebarRow::RemoteAgent { .. })));
     }
 
     fn app_with_runtime(
@@ -2004,9 +2084,11 @@ mod tests {
             pane_id.raw().to_string()
         );
         assert_eq!(
-            state.remote_agent_panel_entries[0].entry.pane_id,
-            PaneId::from_raw(0),
-            "remote projection carries no local pane target"
+            state.remote_agent_panel_entries[0].entry.identity,
+            crate::ui::sidebar::AgentPanelIdentity::Remote(
+                state.remote_agent_panel_entries[0].agent_ref.clone()
+            ),
+            "remote projection carries typed remote identity, not a local pane target"
         );
 
         state.workspaces[0].tabs[0]

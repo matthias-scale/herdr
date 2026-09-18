@@ -680,6 +680,9 @@ pub struct TerminalState {
     session_name_write_target: Option<crate::work_title::SessionNameWriteTarget>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
+    /// Configured host for a remote-focus proxy. Proxy terminals are excluded
+    /// from persistence, so this is runtime metadata only.
+    pub(crate) remote_proxy_host: Option<String>,
     /// Label Herdr applied before suspending this terminal, if still owned by settlement.
     pub(crate) settled_auto_label: Option<String>,
     pub agent_name: Option<String>,
@@ -767,6 +770,7 @@ impl TerminalState {
             session_name_write_target: None,
             terminal_title: None,
             manual_label: None,
+            remote_proxy_host: None,
             settled_auto_label: None,
             agent_name: None,
             agent_name_owner: None,
