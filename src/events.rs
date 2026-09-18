@@ -159,6 +159,7 @@ pub enum AppEvent {
     AgentLinksDetected {
         pane_id: PaneId,
         output_urls: Vec<String>,
+        output_replacements: Vec<(String, String)>,
         osc8_urls: Vec<String>,
         observed_at: std::time::SystemTime,
     },

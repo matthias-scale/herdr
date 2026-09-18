@@ -478,10 +478,10 @@ impl TranscriptCursor {
                                             current.max(observed_at)
                                         }));
                                 }
-                                let tasks_changed = self.apply_todo_write(&value)
-                                    | self.apply_task_tool_calls(&value)
-                                    | self.apply_task_result(&value);
-                                if tasks_changed {
+                                let task_tool_call_observed = self.apply_todo_write(&value)
+                                    | self.apply_task_tool_calls(&value);
+                                self.apply_task_result(&value);
+                                if task_tool_call_observed {
                                     if let Some(observed_at) = observed_at {
                                         self.last_tasks_at = Some(
                                             self.last_tasks_at.map_or(observed_at, |current| {
@@ -1533,6 +1533,80 @@ mod tests {
             cursor.last_tasks_at,
             crate::agent_state::parse_rfc3339(repeated_at)
         );
+    }
+
+    #[test]
+    fn task_result_does_not_override_a_newer_reported_task() {
+        let created_at = crate::agent_state::parse_rfc3339("2026-08-14T06:18:40Z").unwrap();
+        let reported_at = crate::agent_state::parse_rfc3339("2026-08-14T06:18:41Z").unwrap();
+        let result_at = crate::agent_state::parse_rfc3339("2026-08-14T06:18:42Z").unwrap();
+        let pane_id = crate::layout::PaneId::from_raw(82);
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-14T06:18:40Z",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TaskCreate",
+                    "id": "toolu_task_create",
+                    "input": {"subject": "transcript task"}
+                }]}
+            })),
+            true,
+        );
+
+        let mut store = crate::agent_state::AgentStateStore::default();
+        store.observe_transcript(
+            pane_id,
+            Some(created_at),
+            cursor.tasks(),
+            cursor.last_tasks_at,
+            Vec::new(),
+            Vec::new(),
+        );
+        let reported_task = AgentTask {
+            text: "reported task".into(),
+            status: AgentTaskStatus::InProgress,
+        };
+        store
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    tasks: Some(vec![reported_task.clone()]),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                reported_at,
+            )
+            .expect("valid report");
+
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-14T06:18:42Z",
+                "toolUseResult": {"task": {
+                    "id": "17",
+                    "subject": "transcript task"
+                }}
+            })),
+            true,
+        );
+        store.observe_transcript(
+            pane_id,
+            Some(result_at),
+            cursor.tasks(),
+            cursor.last_tasks_at,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            store
+                .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+                .tasks,
+            vec![reported_task]
+        );
+        assert_eq!(cursor.last_tasks_at, Some(created_at));
     }
 
     #[test]

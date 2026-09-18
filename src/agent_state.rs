@@ -14,16 +14,108 @@ pub(crate) const MAX_LINKS: usize = 200;
 
 const LINK_LOOKBEHIND_BYTES: usize = 256;
 const MAX_PENDING_LINK_BYTES: usize = 2 * 1024 * 1024;
+const MAX_OPEN_SEQUENCE_BYTES: usize = 8 * 1024;
+const MAX_SCHEME_BYTES: usize = 64;
+const MAX_MARKER_TAIL_BYTES: usize = MAX_SCHEME_BYTES + 2;
+const MARKER_TAIL_WORDS: usize = MAX_MARKER_TAIL_BYTES.div_ceil(8);
 const LINK_QUIET_PERIOD: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct LinkExtractionGate {
     pending: Mutex<PendingLinkBytes>,
     active: AtomicBool,
-    marker_tail: AtomicU64,
+    marker_tail: AtomicMarkerTail,
     extractions: AtomicU64,
     #[cfg(test)]
     lock_acquisitions: AtomicU64,
+}
+
+impl Default for LinkExtractionGate {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::default(),
+            active: AtomicBool::new(false),
+            marker_tail: AtomicMarkerTail::default(),
+            extractions: AtomicU64::new(0),
+            #[cfg(test)]
+            lock_acquisitions: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AtomicMarkerTail {
+    words: [AtomicU64; MARKER_TAIL_WORDS],
+    len: AtomicU64,
+    sequence: AtomicU64,
+}
+
+impl Default for AtomicMarkerTail {
+    fn default() -> Self {
+        Self {
+            words: std::array::from_fn(|_| AtomicU64::new(0)),
+            len: AtomicU64::new(0),
+            sequence: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AtomicMarkerTail {
+    fn load(&self) -> ([u8; MAX_MARKER_TAIL_BYTES], usize) {
+        loop {
+            let sequence = self.sequence.load(Ordering::Acquire);
+            if !sequence.is_multiple_of(2) {
+                std::hint::spin_loop();
+                continue;
+            }
+            let len = (self.len.load(Ordering::Relaxed) as usize).min(MAX_MARKER_TAIL_BYTES);
+            let mut bytes = [0; MAX_MARKER_TAIL_BYTES];
+            for (word_index, word) in self.words.iter().enumerate() {
+                let unpacked = word.load(Ordering::Relaxed).to_le_bytes();
+                let start = word_index * 8;
+                let end = (start + 8).min(MAX_MARKER_TAIL_BYTES);
+                bytes[start..end].copy_from_slice(&unpacked[..end - start]);
+            }
+            if self.sequence.load(Ordering::Acquire) == sequence {
+                return (bytes, len);
+            }
+        }
+    }
+
+    fn store(&self, bytes: &[u8]) {
+        debug_assert!(bytes.len() <= MAX_MARKER_TAIL_BYTES);
+        let sequence = loop {
+            let sequence = self.sequence.load(Ordering::Acquire);
+            if !sequence.is_multiple_of(2) {
+                std::hint::spin_loop();
+                continue;
+            }
+            if self
+                .sequence
+                .compare_exchange_weak(
+                    sequence,
+                    sequence.wrapping_add(1),
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break sequence;
+            }
+        };
+        for (word_index, word) in self.words.iter().enumerate() {
+            let start = word_index * 8;
+            let end = (start + 8).min(bytes.len());
+            let mut packed = [0; 8];
+            if start < end {
+                packed[..end - start].copy_from_slice(&bytes[start..end]);
+            }
+            word.store(u64::from_le_bytes(packed), Ordering::Relaxed);
+        }
+        self.len.store(bytes.len() as u64, Ordering::Relaxed);
+        self.sequence
+            .store(sequence.wrapping_add(2), Ordering::Release);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -33,28 +125,40 @@ struct PendingLinkBytes {
     last_observed_at: Option<Instant>,
     queued_output_urls: Vec<String>,
     queued_osc8_urls: Vec<String>,
+    truncated_sequence: Option<OpenSequenceKind>,
+    published_output_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenSequenceKind {
+    Url,
+    Terminal,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExtractedAgentLinks {
     pub(crate) output_urls: Vec<String>,
     pub(crate) osc8_urls: Vec<String>,
+    pub(crate) output_replacements: Vec<(String, String)>,
 }
 
 impl LinkExtractionGate {
+    /// The pane's PTY `on_read` callback is the sole producer for a gate.
+    /// Detection may consume links concurrently through `take_links`.
     pub(crate) fn observe_chunk(&self, bytes: &[u8]) {
         self.observe_chunk_at(bytes, Instant::now());
     }
 
     fn observe_chunk_at(&self, bytes: &[u8], observed_at: Instant) {
-        let marker_tail = self.marker_tail.load(Ordering::Acquire);
+        let was_active = self.active.load(Ordering::Acquire);
+        let (marker_tail, marker_tail_len) = self.marker_tail.load();
         let colon = memchr::memchr(b':', bytes);
-        if !self.active.load(Ordering::Acquire)
+        if !was_active
             && colon.is_none()
-            && !marker_tail_can_continue(marker_tail)
+            && !marker_tail_can_continue(&marker_tail[..marker_tail_len])
         {
-            self.marker_tail
-                .store(append_marker_tail(marker_tail, bytes), Ordering::Release);
+            let (tail, tail_len) = append_marker_tail(&marker_tail[..marker_tail_len], bytes);
+            self.marker_tail.store(&tail[..tail_len]);
             return;
         }
         #[cfg(test)]
@@ -62,27 +166,26 @@ impl LinkExtractionGate {
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
-        if pending.dirty {
+        if self.active.load(Ordering::Acquire) {
             append_pending(&mut pending, bytes);
+            pending.dirty = true;
             pending.last_observed_at = Some(observed_at);
             return;
         }
 
-        let (tail, tail_len) = unpack_marker_tail(marker_tail);
-        let mut candidate = Vec::with_capacity(tail_len + bytes.len());
-        candidate.extend_from_slice(&tail[..tail_len]);
+        let (marker_tail, marker_tail_len) = self.marker_tail.load();
+        let mut candidate = Vec::with_capacity(marker_tail_len + bytes.len());
+        candidate.extend_from_slice(&marker_tail[..marker_tail_len]);
         candidate.extend_from_slice(bytes);
         if let Some(marker_start) = find_scheme_start(&candidate) {
             pending.dirty = true;
             pending.last_observed_at = Some(observed_at);
             append_pending(&mut pending, &candidate[marker_start..]);
             self.active.store(true, Ordering::Release);
-            self.marker_tail.store(0, Ordering::Release);
+            self.marker_tail.store(&[]);
         } else {
-            self.marker_tail.store(
-                pack_marker_tail(&candidate[candidate.len().saturating_sub(7)..]),
-                Ordering::Release,
-            );
+            let (tail, tail_len) = marker_tail_suffix(&candidate);
+            self.marker_tail.store(&tail[..tail_len]);
         }
     }
 
@@ -107,10 +210,23 @@ impl LinkExtractionGate {
         let quiet = pending.last_observed_at.is_some_and(|observed_at| {
             now.saturating_duration_since(observed_at) >= LINK_QUIET_PERIOD
         });
-        let mut extracted = extract_agent_links(&pending.bytes, quiet);
-        if extracted.unterminated_url {
+        let pending_extraction = extract_agent_links(&pending.bytes, false);
+        if pending_extraction.incomplete_terminal_sequence {
             return None;
         }
+        let open_url = pending_extraction.unterminated_url;
+        if open_url && !quiet {
+            return None;
+        }
+        let mut extracted = extract_agent_links(&pending.bytes, quiet);
+        let output_replacement = pending.published_output_url.as_ref().and_then(|previous| {
+            extracted
+                .links
+                .output_urls
+                .iter()
+                .find(|url| url.len() > previous.len() && url.starts_with(previous))
+                .map(|url| (previous.clone(), url.clone()))
+        });
         extracted
             .links
             .output_urls
@@ -123,10 +239,24 @@ impl LinkExtractionGate {
         extracted.links.output_urls.dedup();
         extracted.links.osc8_urls.sort_unstable();
         extracted.links.osc8_urls.dedup();
+        if let Some((previous, replacement)) = output_replacement {
+            pending.published_output_url = Some(replacement.clone());
+            extracted
+                .links
+                .output_replacements
+                .push((previous, replacement));
+        } else if open_url {
+            pending.published_output_url = extracted.tail_output_url.clone();
+        }
         pending.dirty = false;
-        self.active.store(false, Ordering::Release);
-        pending.bytes.clear();
-        pending.last_observed_at = None;
+        if !open_url {
+            let (tail, tail_len) = marker_tail_suffix(&pending.bytes);
+            self.marker_tail.store(&tail[..tail_len]);
+            self.active.store(false, Ordering::Release);
+            pending.bytes.clear();
+            pending.last_observed_at = None;
+            pending.published_output_url = None;
+        }
         drop(pending);
         self.extractions.fetch_add(1, Ordering::Relaxed);
         Some(extracted.links)
@@ -145,6 +275,19 @@ impl LinkExtractionGate {
 
 fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
     while !bytes.is_empty() {
+        if let Some(kind) = pending.truncated_sequence {
+            let Some((terminator, terminator_len)) = open_sequence_terminator(kind, bytes) else {
+                return;
+            };
+            pending
+                .bytes
+                .extend_from_slice(&bytes[terminator..terminator + terminator_len]);
+            bytes = &bytes[terminator + terminator_len..];
+            pending.truncated_sequence = None;
+            if bytes.is_empty() {
+                break;
+            }
+        }
         let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(pending.bytes.len());
         let appended = bytes.len().min(remaining);
         pending.bytes.extend_from_slice(&bytes[..appended]);
@@ -162,9 +305,47 @@ fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
             &mut pending.queued_osc8_urls,
             &mut extracted.links.osc8_urls,
         );
-        let tail_start = pending.bytes.len().saturating_sub(LINK_LOOKBEHIND_BYTES);
-        pending.bytes.drain(..tail_start);
+        let (carry, truncated_sequence) = pending_sequence_carry(&pending.bytes);
+        pending.bytes = carry;
+        pending.truncated_sequence = truncated_sequence;
     }
+}
+
+fn pending_sequence_carry(bytes: &[u8]) -> (Vec<u8>, Option<OpenSequenceKind>) {
+    let (_, _, incomplete_terminal_start) = strip_terminal_sequences(bytes);
+    let open_url_start = memchr::memchr_iter(b':', bytes)
+        .filter_map(|colon| scheme_start_at(bytes, colon))
+        .next_back()
+        .filter(|start| extract_agent_links(&bytes[*start..], false).unterminated_url);
+    let open = match (incomplete_terminal_start, open_url_start) {
+        (Some(terminal), Some(url)) if url < terminal => Some((url, OpenSequenceKind::Url)),
+        (Some(terminal), _) => Some((terminal, OpenSequenceKind::Terminal)),
+        (None, Some(url)) => Some((url, OpenSequenceKind::Url)),
+        (None, None) => None,
+    };
+    let Some((start, kind)) = open else {
+        let tail_start = bytes.len().saturating_sub(LINK_LOOKBEHIND_BYTES);
+        return (bytes[tail_start..].to_vec(), None);
+    };
+    let end = (start + MAX_OPEN_SEQUENCE_BYTES).min(bytes.len());
+    let truncated = (end < bytes.len()).then_some(kind);
+    (bytes[start..end].to_vec(), truncated)
+}
+
+fn open_sequence_terminator(kind: OpenSequenceKind, bytes: &[u8]) -> Option<(usize, usize)> {
+    match kind {
+        OpenSequenceKind::Url => bytes
+            .iter()
+            .position(|byte| is_url_terminator(*byte))
+            .map(|index| (index, 1)),
+        OpenSequenceKind::Terminal => osc_terminator(bytes),
+    }
+}
+
+fn is_url_terminator(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte.is_ascii_control()
+        || matches!(byte, b'"' | b'\'' | b'<' | b'>')
 }
 
 fn queue_links(queue: &mut Vec<String>, links: &mut Vec<String>) {
@@ -176,56 +357,61 @@ fn queue_links(queue: &mut Vec<String>, links: &mut Vec<String>) {
     }
 }
 
-fn pack_marker_tail(bytes: &[u8]) -> u64 {
-    let bytes = &bytes[bytes.len().saturating_sub(7)..];
-    let mut packed = (bytes.len() as u64) << 56;
-    for (index, byte) in bytes.iter().enumerate() {
-        packed |= u64::from(*byte) << (index * 8);
-    }
-    packed
+fn append_marker_tail(previous: &[u8], bytes: &[u8]) -> ([u8; MAX_MARKER_TAIL_BYTES], usize) {
+    let mut candidate = [0; MAX_MARKER_TAIL_BYTES * 2];
+    let candidate_len = if bytes.len() > MAX_MARKER_TAIL_BYTES {
+        let start = bytes.len() - (MAX_MARKER_TAIL_BYTES + 1);
+        candidate[..MAX_MARKER_TAIL_BYTES + 1].copy_from_slice(&bytes[start..]);
+        MAX_MARKER_TAIL_BYTES + 1
+    } else {
+        candidate[..previous.len()].copy_from_slice(previous);
+        candidate[previous.len()..previous.len() + bytes.len()].copy_from_slice(bytes);
+        previous.len() + bytes.len()
+    };
+    marker_tail_suffix(&candidate[..candidate_len])
 }
 
-fn unpack_marker_tail(packed: u64) -> ([u8; 7], usize) {
-    let len = ((packed >> 56) as usize).min(7);
-    let mut bytes = [0; 7];
-    for (index, byte) in bytes[..len].iter_mut().enumerate() {
-        *byte = ((packed >> (index * 8)) & 0xff) as u8;
+fn marker_tail_suffix(bytes: &[u8]) -> ([u8; MAX_MARKER_TAIL_BYTES], usize) {
+    let earliest = bytes.len().saturating_sub(MAX_MARKER_TAIL_BYTES);
+    for start in earliest..bytes.len() {
+        if start > 0 && is_scheme_byte(bytes[start - 1]) {
+            continue;
+        }
+        let candidate = &bytes[start..];
+        let Some((&first, rest)) = candidate.split_first() else {
+            continue;
+        };
+        if !first.is_ascii_alphabetic() {
+            continue;
+        }
+        let scheme_len = rest
+            .iter()
+            .position(|byte| !is_scheme_byte(*byte))
+            .map_or(candidate.len(), |index| index + 1);
+        if scheme_len > MAX_SCHEME_BYTES {
+            continue;
+        }
+        let remainder = &candidate[scheme_len..];
+        if remainder.is_empty() || remainder == b":" || remainder == b":/" {
+            let mut tail = [0; MAX_MARKER_TAIL_BYTES];
+            tail[..candidate.len()].copy_from_slice(candidate);
+            return (tail, candidate.len());
+        }
     }
-    (bytes, len)
+    ([0; MAX_MARKER_TAIL_BYTES], 0)
 }
 
-fn append_marker_tail(packed: u64, bytes: &[u8]) -> u64 {
-    if bytes.len() >= 7 {
-        return pack_marker_tail(&bytes[bytes.len() - 7..]);
-    }
-    let (previous, previous_len) = unpack_marker_tail(packed);
-    let keep_previous = 7_usize.saturating_sub(bytes.len());
-    let previous_start = previous_len.saturating_sub(keep_previous);
-    let kept = previous_len - previous_start;
-    let mut tail = [0; 7];
-    tail[..kept].copy_from_slice(&previous[previous_start..previous_len]);
-    tail[kept..kept + bytes.len()].copy_from_slice(bytes);
-    pack_marker_tail(&tail[..kept + bytes.len()])
+fn is_scheme_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-')
 }
 
-fn marker_tail_can_continue(packed: u64) -> bool {
-    let (tail, len) = unpack_marker_tail(packed);
-    tail[..len].ends_with(b":") || tail[..len].ends_with(b":/")
+fn marker_tail_can_continue(tail: &[u8]) -> bool {
+    tail.ends_with(b":") || tail.ends_with(b":/")
 }
 
 fn find_scheme_start(bytes: &[u8]) -> Option<usize> {
     memchr::memchr_iter(b':', bytes).find_map(|colon| {
-        if bytes.get(colon + 1..colon + 3) != Some(b"//") {
-            return None;
-        }
-        let start = bytes[..colon]
-            .iter()
-            .rposition(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'.' | b'-'))
-            .map_or(0, |index| index + 1);
-        let scheme_start = bytes
-            .get(start)
-            .is_some_and(u8::is_ascii_alphabetic)
-            .then_some(start)?;
+        let scheme_start = scheme_start_at(bytes, colon)?;
         Some(
             bytes[..scheme_start]
                 .windows(4)
@@ -233,6 +419,20 @@ fn find_scheme_start(bytes: &[u8]) -> Option<usize> {
                 .unwrap_or(scheme_start),
         )
     })
+}
+
+fn scheme_start_at(bytes: &[u8], colon: usize) -> Option<usize> {
+    if bytes.get(colon + 1..colon + 3) != Some(b"//") {
+        return None;
+    }
+    let start = bytes[..colon]
+        .iter()
+        .rposition(|byte| !is_scheme_byte(*byte))
+        .map_or(0, |index| index + 1);
+    bytes
+        .get(start)
+        .is_some_and(u8::is_ascii_alphabetic)
+        .then_some(start)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -486,6 +686,31 @@ impl AgentStateStore {
             observed_at,
         );
     }
+
+    pub(crate) fn replace_links(
+        &mut self,
+        pane_id: PaneId,
+        replacements: impl IntoIterator<Item = (String, String)>,
+        source: AgentLinkSource,
+        observed_at: SystemTime,
+    ) {
+        let pane = self.panes.entry(pane_id).or_default();
+        for (previous, replacement) in replacements {
+            let Some(domain) = url_domain(&replacement) else {
+                continue;
+            };
+            let Some(existing) = pane
+                .links
+                .iter_mut()
+                .find(|link| link.source == source && link.url == previous)
+            else {
+                continue;
+            };
+            existing.url = replacement;
+            existing.domain = domain;
+            existing.last_seen = existing.last_seen.max(observed_at);
+        }
+    }
 }
 
 fn validate_report(payload: &AgentReportPayload) -> Result<(), String> {
@@ -588,7 +813,6 @@ fn observe_transcript_links_in_pane(
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"'\x00-\x1f]+"#).expect("static URL regex")
 });
-
 pub(crate) fn extract_urls(text: &str) -> Vec<String> {
     URL_RE
         .find_iter(text)
@@ -625,21 +849,31 @@ fn trim_url_suffix(mut url: &str) -> &str {
 struct AgentLinkExtraction {
     links: ExtractedAgentLinks,
     unterminated_url: bool,
+    incomplete_terminal_sequence: bool,
+    tail_output_url: Option<String>,
 }
 
 fn extract_agent_links(bytes: &[u8], finalize_tail: bool) -> AgentLinkExtraction {
-    let (visible_bytes, mut osc8_urls) = strip_terminal_sequences(bytes);
+    let (visible_bytes, mut osc8_urls, incomplete_terminal_sequence_start) =
+        strip_terminal_sequences(bytes);
     let visible = String::from_utf8_lossy(&visible_bytes);
     let mut unterminated_url = false;
+    let mut tail_output_url = None;
     let mut output_urls = URL_RE
         .find_iter(&visible)
         .filter_map(|matched| {
-            if matched.end() == visible.len() && !finalize_tail {
-                unterminated_url = true;
-                return None;
-            }
             let url = trim_url_suffix(matched.as_str()).to_string();
-            url_domain(&url).is_some().then_some(url)
+            let valid_url = url_domain(&url).is_some();
+            if matched.end() == visible.len() {
+                unterminated_url = true;
+                if valid_url {
+                    tail_output_url = Some(url.clone());
+                }
+                if !finalize_tail {
+                    return None;
+                }
+            }
+            valid_url.then_some(url)
         })
         .collect::<Vec<_>>();
     if !finalize_tail && has_unterminated_url_candidate(&visible) {
@@ -653,8 +887,11 @@ fn extract_agent_links(bytes: &[u8], finalize_tail: bool) -> AgentLinkExtraction
         links: ExtractedAgentLinks {
             output_urls,
             osc8_urls,
+            output_replacements: Vec::new(),
         },
         unterminated_url,
+        incomplete_terminal_sequence: incomplete_terminal_sequence_start.is_some(),
+        tail_output_url,
     }
 }
 
@@ -671,9 +908,10 @@ fn has_unterminated_url_candidate(text: &str) -> bool {
     find_scheme_start(&text.as_bytes()[tail_start..]).is_some()
 }
 
-fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>) {
+fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>, Option<usize>) {
     let mut visible_bytes = Vec::with_capacity(bytes.len());
     let mut osc8_urls = Vec::new();
+    let mut incomplete_terminal_sequence_start = None;
     let mut offset = 0;
     while offset < bytes.len() {
         if bytes[offset] != b'\x1b' {
@@ -689,6 +927,7 @@ fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>) {
                     .position(|byte| (0x40..=0x7e).contains(byte))
                     .map(|relative| offset + 2 + relative + 1)
                 else {
+                    incomplete_terminal_sequence_start = Some(offset);
                     break;
                 };
                 offset = end;
@@ -697,6 +936,7 @@ fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>) {
                 let content_start = offset + 2;
                 let Some((relative_end, terminator_len)) = osc_terminator(&bytes[content_start..])
                 else {
+                    incomplete_terminal_sequence_start = Some(offset);
                     break;
                 };
                 let content_end = content_start + relative_end;
@@ -712,15 +952,19 @@ fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>) {
             }
             Some(b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/') => {
                 if offset + 2 >= bytes.len() {
+                    incomplete_terminal_sequence_start = Some(offset);
                     break;
                 }
                 offset += 3;
             }
             Some(_) => offset += 2,
-            None => break,
+            None => {
+                incomplete_terminal_sequence_start = Some(offset);
+                break;
+            }
         }
     }
-    (visible_bytes, osc8_urls)
+    (visible_bytes, osc8_urls, incomplete_terminal_sequence_start)
 }
 
 fn osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -861,6 +1105,47 @@ mod tests {
     }
 
     #[test]
+    fn long_scheme_prefixes_survive_chunk_boundaries() {
+        let colon_split = LinkExtractionGate::default();
+        colon_split.observe_chunk(b"postgresql:");
+        colon_split.observe_chunk(b"//db.example/path\n");
+        assert_eq!(
+            colon_split
+                .take_links()
+                .expect("colon-split URL")
+                .output_urls,
+            vec!["postgresql://db.example/path"]
+        );
+
+        let scheme_split = LinkExtractionGate::default();
+        scheme_split.observe_chunk(b"customscheme");
+        scheme_split.observe_chunk(b"://longscheme.example.test/path\n");
+        assert_eq!(
+            scheme_split
+                .take_links()
+                .expect("scheme-split URL")
+                .output_urls,
+            vec!["customscheme://longscheme.example.test/path"]
+        );
+
+        let mut max_scheme = "a".to_string();
+        while max_scheme.len() < MAX_SCHEME_BYTES {
+            max_scheme.push_str("1+.-");
+        }
+        max_scheme.truncate(MAX_SCHEME_BYTES);
+        let max_split = LinkExtractionGate::default();
+        max_split.observe_chunk(max_scheme.as_bytes());
+        max_split.observe_chunk(b"://maxscheme.example.test/path\n");
+        assert_eq!(
+            max_split
+                .take_links()
+                .expect("maximum-length scheme URL")
+                .output_urls,
+            vec![format!("{max_scheme}://maxscheme.example.test/path")]
+        );
+    }
+
+    #[test]
     fn unfinished_url_waits_for_terminator_before_extraction() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(b"https://split.example.test");
@@ -907,6 +1192,128 @@ mod tests {
     }
 
     #[test]
+    fn quiet_period_publication_keeps_url_open_for_later_continuation() {
+        let gate = LinkExtractionGate::default();
+        let started = Instant::now();
+        gate.observe_chunk_at(b"https://split.example.test", started);
+
+        let provisional = gate
+            .take_links_at(started + LINK_QUIET_PERIOD)
+            .expect("quiet-period publication");
+        assert_eq!(provisional.output_urls, vec!["https://split.example.test"]);
+        assert!(provisional.output_replacements.is_empty());
+
+        gate.observe_chunk_at(b"/path\n", started + Duration::from_millis(1_300));
+        let completed = gate
+            .take_links_at(started + Duration::from_millis(1_301))
+            .expect("continued URL publication");
+        assert_eq!(
+            completed.output_urls,
+            vec!["https://split.example.test/path"]
+        );
+
+        let pane_id = PaneId::from_raw(81);
+        let first_seen = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
+        let mut store = AgentStateStore::default();
+        store.observe_links(
+            pane_id,
+            provisional.output_urls,
+            AgentLinkSource::Output,
+            first_seen,
+        );
+        store.replace_links(
+            pane_id,
+            completed.output_replacements.clone(),
+            AgentLinkSource::Output,
+            first_seen + Duration::from_millis(300),
+        );
+        store.observe_links(
+            pane_id,
+            completed.output_urls,
+            AgentLinkSource::Output,
+            first_seen + Duration::from_millis(300),
+        );
+
+        let links = store.snapshot(pane_id, AgentStatus::Idle).links;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://split.example.test/path");
+        assert_eq!(links[0].first_seen, format_rfc3339(first_seen).unwrap());
+    }
+
+    #[test]
+    fn completed_url_batch_carries_trailing_scheme_into_next_chunk() {
+        let gate = LinkExtractionGate::default();
+        let started = Instant::now();
+        gate.observe_chunk_at(b"https://split.example.test", started);
+        let provisional = gate
+            .take_links_at(started + LINK_QUIET_PERIOD)
+            .expect("quiet-period publication");
+
+        gate.observe_chunk_at(
+            b"/path\npostgresql:",
+            started + Duration::from_millis(1_300),
+        );
+        let completed = gate
+            .take_links_at(started + Duration::from_millis(1_301))
+            .expect("completed URL publication");
+        assert_eq!(
+            completed.output_urls,
+            vec!["https://split.example.test/path"]
+        );
+
+        gate.observe_chunk_at(
+            b"//db.example/path\n",
+            started + Duration::from_millis(1_400),
+        );
+        let database = gate
+            .take_links_at(started + Duration::from_millis(1_401))
+            .expect("scheme continuation publication");
+        assert_eq!(database.output_urls, vec!["postgresql://db.example/path"]);
+
+        let pane_id = PaneId::from_raw(83);
+        let first_seen = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
+        let mut store = AgentStateStore::default();
+        store.observe_links(
+            pane_id,
+            provisional.output_urls,
+            AgentLinkSource::Output,
+            first_seen,
+        );
+        store.replace_links(
+            pane_id,
+            completed.output_replacements,
+            AgentLinkSource::Output,
+            first_seen + Duration::from_millis(300),
+        );
+        store.observe_links(
+            pane_id,
+            completed.output_urls,
+            AgentLinkSource::Output,
+            first_seen + Duration::from_millis(300),
+        );
+        store.observe_links(
+            pane_id,
+            database.output_urls,
+            AgentLinkSource::Output,
+            first_seen + Duration::from_millis(400),
+        );
+
+        let urls = store
+            .snapshot(pane_id, AgentStatus::Idle)
+            .links
+            .into_iter()
+            .map(|link| link.url)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            urls,
+            vec![
+                "https://split.example.test/path",
+                "postgresql://db.example/path",
+            ]
+        );
+    }
+
+    #[test]
     fn styled_url_ignores_csi_osc_and_charset_select_sequences() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(
@@ -927,6 +1334,18 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_osc8_target_resumes_when_terminator_arrives_without_colon() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"\x1b]8;;https://osc.example.test/path");
+        assert!(gate.take_links().is_none());
+
+        gate.observe_chunk(b"\x07label\x1b]8;;\x07\n");
+        let links = gate.take_links().expect("completed OSC 8 sequence");
+        assert!(links.output_urls.is_empty());
+        assert_eq!(links.osc8_urls, vec!["https://osc.example.test/path"]);
+    }
+
+    #[test]
     fn pending_buffer_cap_extracts_then_keeps_scanning_later_output() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(b"https://before-cap.example.test/path\n");
@@ -939,6 +1358,33 @@ mod tests {
             vec![
                 "https://after-cap.example.test/path",
                 "https://before-cap.example.test/path",
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_buffer_cap_keeps_unterminated_url_from_its_scheme() {
+        let gate = LinkExtractionGate::default();
+        let first = b"https://before-cap.example.test/path\n";
+        gate.observe_chunk(first);
+
+        let mut open_url = b"https://at-cap.example.test/".to_vec();
+        open_url.resize(1_024, b'a');
+        let filler_len = MAX_PENDING_LINK_BYTES - first.len() - open_url.len();
+        let mut filler = vec![b'x'; filler_len];
+        *filler.last_mut().expect("non-empty filler") = b'\n';
+        gate.observe_chunk(&filler);
+        gate.observe_chunk(&open_url);
+        gate.observe_chunk(b"/path\n");
+
+        let mut completed_url = String::from_utf8(open_url).unwrap();
+        completed_url.push_str("/path");
+        let links = gate.take_links().expect("bounded link extraction");
+        assert_eq!(
+            links.output_urls,
+            vec![
+                completed_url,
+                "https://before-cap.example.test/path".to_string(),
             ]
         );
     }

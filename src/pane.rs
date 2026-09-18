@@ -801,6 +801,7 @@ async fn publish_agent_links_if_dirty(
         .send(AppEvent::AgentLinksDetected {
             pane_id,
             output_urls: links.output_urls,
+            output_replacements: links.output_replacements,
             osc8_urls: links.osc8_urls,
             observed_at: std::time::SystemTime::now(),
         })

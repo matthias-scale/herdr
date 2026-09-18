@@ -3434,6 +3434,7 @@ impl AppState {
             AppEvent::AgentLinksDetected {
                 pane_id,
                 output_urls,
+                output_replacements,
                 osc8_urls,
                 observed_at,
             } => {
@@ -3444,6 +3445,12 @@ impl AppState {
                 {
                     return Vec::new();
                 }
+                self.agent_states.replace_links(
+                    pane_id,
+                    output_replacements,
+                    crate::agent_state::AgentLinkSource::Output,
+                    observed_at,
+                );
                 self.agent_states.observe_links(
                     pane_id,
                     output_urls,
@@ -6197,6 +6204,7 @@ mod tests {
         state.handle_app_event(AppEvent::AgentLinksDetected {
             pane_id,
             output_urls: vec!["https://late.example.test/stale".into()],
+            output_replacements: Vec::new(),
             osc8_urls: Vec::new(),
             observed_at: std::time::SystemTime::now(),
         });
@@ -6206,6 +6214,50 @@ mod tests {
             .links
             .is_empty());
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn link_event_replaces_only_the_named_provisional_url() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let first_seen =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://split.example.test".into()],
+            output_replacements: Vec::new(),
+            osc8_urls: Vec::new(),
+            observed_at: first_seen,
+        });
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://split.example.test/path".into()],
+            output_replacements: vec![(
+                "https://split.example.test".into(),
+                "https://split.example.test/path".into(),
+            )],
+            osc8_urls: Vec::new(),
+            observed_at: first_seen + std::time::Duration::from_secs(2),
+        });
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://split.example.test/path/child".into()],
+            output_replacements: Vec::new(),
+            osc8_urls: Vec::new(),
+            observed_at: first_seen + std::time::Duration::from_secs(3),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].url, "https://split.example.test/path");
+        assert_eq!(
+            links[0].first_seen,
+            crate::agent_state::format_rfc3339(first_seen).unwrap()
+        );
+        assert_eq!(links[1].url, "https://split.example.test/path/child");
     }
 
     #[test]
