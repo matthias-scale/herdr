@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use regex::Regex;
@@ -11,31 +12,151 @@ use crate::layout::PaneId;
 
 pub(crate) const MAX_LINKS: usize = 200;
 
+const MAX_SCHEME_PREFIX_BYTES: usize = 64;
+const LINK_LOOKBEHIND_BYTES: usize = 256;
+const MAX_PENDING_LINK_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Debug, Default)]
 pub(crate) struct LinkExtractionGate {
-    dirty: AtomicBool,
+    pending: Mutex<PendingLinkBytes>,
     extractions: AtomicU64,
+}
+
+#[derive(Debug)]
+struct PendingLinkBytes {
+    bytes: Vec<u8>,
+    marker_prefix: [u8; MAX_SCHEME_PREFIX_BYTES],
+    marker_prefix_len: usize,
+    lookbehind: [u8; LINK_LOOKBEHIND_BYTES],
+    lookbehind_start: usize,
+    lookbehind_len: usize,
+    dirty: bool,
+}
+
+impl Default for PendingLinkBytes {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            marker_prefix: [0; MAX_SCHEME_PREFIX_BYTES],
+            marker_prefix_len: 0,
+            lookbehind: [0; LINK_LOOKBEHIND_BYTES],
+            lookbehind_start: 0,
+            lookbehind_len: 0,
+            dirty: false,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExtractedAgentLinks {
+    pub(crate) output_urls: Vec<String>,
+    pub(crate) osc8_urls: Vec<String>,
 }
 
 impl LinkExtractionGate {
     pub(crate) fn observe_chunk(&self, bytes: &[u8]) {
-        if bytes.windows(3).any(|window| window == b"://") {
-            self.dirty.store(true, Ordering::Release);
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if pending.dirty {
+            append_bounded(&mut pending.bytes, bytes);
+        }
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            let marker_complete = marker_prefix_accepts(&pending, byte);
+            if marker_complete && !pending.dirty {
+                pending.dirty = true;
+                append_lookbehind(&mut pending);
+                append_bounded(&mut pending.bytes, &bytes[index..]);
+            }
+            advance_marker_prefix(&mut pending, byte);
+            push_lookbehind(&mut pending, byte);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn take_dirty(&self) -> bool {
-        if self.dirty.swap(false, Ordering::AcqRel) {
-            self.extractions.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
+        self.take_links().is_some()
+    }
+
+    pub(crate) fn take_links(&self) -> Option<ExtractedAgentLinks> {
+        let mut pending = self.pending.lock().ok()?;
+        if !pending.dirty {
+            return None;
         }
+        pending.dirty = false;
+        let bytes = std::mem::take(&mut pending.bytes);
+        let prefix = pending.marker_prefix;
+        let prefix_len = pending.marker_prefix_len;
+        pending.lookbehind_start = 0;
+        pending.lookbehind_len = prefix_len;
+        pending.lookbehind[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
+        drop(pending);
+        self.extractions.fetch_add(1, Ordering::Relaxed);
+        Some(extract_agent_links(&bytes))
     }
 
     #[cfg(test)]
     pub(crate) fn extraction_count(&self) -> u64 {
         self.extractions.load(Ordering::Relaxed)
+    }
+}
+
+fn append_bounded(destination: &mut Vec<u8>, bytes: &[u8]) {
+    let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(destination.len());
+    destination.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+}
+
+fn append_lookbehind(pending: &mut PendingLinkBytes) {
+    let lookbehind = pending.lookbehind;
+    let first_len = pending
+        .lookbehind_len
+        .min(LINK_LOOKBEHIND_BYTES - pending.lookbehind_start);
+    let second_len = pending.lookbehind_len - first_len;
+    append_bounded(
+        &mut pending.bytes,
+        &lookbehind[pending.lookbehind_start..pending.lookbehind_start + first_len],
+    );
+    append_bounded(&mut pending.bytes, &lookbehind[..second_len]);
+}
+
+fn push_lookbehind(pending: &mut PendingLinkBytes, byte: u8) {
+    if pending.lookbehind_len < LINK_LOOKBEHIND_BYTES {
+        let index = (pending.lookbehind_start + pending.lookbehind_len) % LINK_LOOKBEHIND_BYTES;
+        pending.lookbehind[index] = byte;
+        pending.lookbehind_len += 1;
+    } else {
+        pending.lookbehind[pending.lookbehind_start] = byte;
+        pending.lookbehind_start = (pending.lookbehind_start + 1) % LINK_LOOKBEHIND_BYTES;
+    }
+}
+
+fn marker_prefix_accepts(pending: &PendingLinkBytes, byte: u8) -> bool {
+    pending.marker_prefix_len >= 2
+        && pending.marker_prefix[pending.marker_prefix_len - 2..pending.marker_prefix_len] == *b":/"
+        && byte == b'/'
+}
+
+fn advance_marker_prefix(pending: &mut PendingLinkBytes, byte: u8) {
+    let prefix = &pending.marker_prefix[..pending.marker_prefix_len];
+    let in_scheme = !prefix.contains(&b':');
+    let accepted = if pending.marker_prefix_len == 0 {
+        byte.is_ascii_alphabetic()
+    } else if in_scheme {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-' | b':')
+    } else if prefix.ends_with(b":") {
+        byte == b'/'
+    } else {
+        false
+    };
+    if accepted && pending.marker_prefix_len < MAX_SCHEME_PREFIX_BYTES {
+        pending.marker_prefix[pending.marker_prefix_len] = byte;
+        pending.marker_prefix_len += 1;
+        return;
+    }
+    pending.marker_prefix_len = 0;
+    if byte.is_ascii_alphabetic() {
+        pending.marker_prefix[0] = byte;
+        pending.marker_prefix_len = 1;
     }
 }
 
@@ -135,7 +256,9 @@ struct PaneAgentState {
     last_working_at: Option<SystemTime>,
     last_transcript_at: Option<SystemTime>,
     reported_tasks: Vec<AgentTask>,
+    reported_tasks_at: Option<SystemTime>,
     transcript_tasks: Option<Vec<AgentTask>>,
+    transcript_tasks_at: Option<SystemTime>,
     reported_subagents: Vec<AgentSubagent>,
     observed_subagents: Vec<AgentSubagent>,
     links: Vec<StoredLink>,
@@ -172,7 +295,10 @@ impl AgentStateStore {
         pane.status_text = payload.status_text;
         pane.goal = payload.goal;
         pane.last_report_at = Some(observed_at);
-        pane.reported_tasks = payload.tasks;
+        if !payload.tasks.is_empty() {
+            pane.reported_tasks = payload.tasks;
+            pane.reported_tasks_at = Some(observed_at);
+        }
         pane.reported_subagents = payload
             .subagents
             .into_iter()
@@ -212,10 +338,11 @@ impl AgentStateStore {
             status_text: pane.status_text.clone(),
             goal: pane.goal.clone(),
             last_acted_at,
-            tasks: pane
-                .transcript_tasks
-                .clone()
-                .unwrap_or_else(|| pane.reported_tasks.clone()),
+            tasks: if pane.transcript_tasks_at > pane.reported_tasks_at {
+                pane.transcript_tasks.clone().unwrap_or_default()
+            } else {
+                pane.reported_tasks.clone()
+            },
             subagents,
             links: pane
                 .links
@@ -242,12 +369,14 @@ impl AgentStateStore {
         pane_id: PaneId,
         observed_at: Option<SystemTime>,
         tasks: Option<Vec<AgentTask>>,
+        tasks_observed_at: Option<SystemTime>,
         subagents: Vec<AgentSubagent>,
         links: Vec<ObservedAgentLink>,
     ) -> bool {
         let pane = self.panes.entry(pane_id).or_default();
         let previous_last = pane.last_transcript_at;
         let previous_tasks = pane.transcript_tasks.clone();
+        let previous_tasks_at = pane.transcript_tasks_at;
         let previous_subagents = pane.observed_subagents.clone();
         if let Some(observed_at) = observed_at {
             pane.last_transcript_at = Some(
@@ -255,13 +384,15 @@ impl AgentStateStore {
                     .map_or(observed_at, |current| current.max(observed_at)),
             );
         }
-        if let Some(tasks) = tasks {
+        if let (Some(tasks), Some(tasks_observed_at)) = (tasks, tasks_observed_at) {
             pane.transcript_tasks = Some(tasks);
+            pane.transcript_tasks_at = Some(tasks_observed_at);
         }
         pane.observed_subagents = subagents;
         let links_changed = observe_transcript_links_in_pane(pane, links);
         previous_last != pane.last_transcript_at
             || previous_tasks != pane.transcript_tasks
+            || previous_tasks_at != pane.transcript_tasks_at
             || previous_subagents != pane.observed_subagents
             || links_changed
     }
@@ -384,14 +515,93 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub(crate) fn extract_urls(text: &str) -> Vec<String> {
     URL_RE
         .find_iter(text)
-        .map(|matched| {
-            matched
-                .as_str()
-                .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}'])
-                .to_string()
-        })
+        .map(|matched| trim_url_suffix(matched.as_str()).to_string())
         .filter(|url| url_domain(url).is_some())
         .collect()
+}
+
+fn trim_url_suffix(mut url: &str) -> &str {
+    loop {
+        let Some(last) = url.chars().next_back() else {
+            return url;
+        };
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
+            url = &url[..url.len() - last.len_utf8()];
+            continue;
+        }
+        let opener = match last {
+            ')' => '(',
+            ']' => '[',
+            '}' => '{',
+            _ => return url,
+        };
+        if url.chars().filter(|character| *character == last).count()
+            > url.chars().filter(|character| *character == opener).count()
+        {
+            url = &url[..url.len() - last.len_utf8()];
+            continue;
+        }
+        return url;
+    }
+}
+
+fn extract_agent_links(bytes: &[u8]) -> ExtractedAgentLinks {
+    let mut visible_bytes = Vec::with_capacity(bytes.len());
+    let mut osc8_urls = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset..].starts_with(b"\x1b]8;") {
+            let command_start = offset + 4;
+            let Some(parameter_end) = bytes[command_start..]
+                .iter()
+                .position(|byte| *byte == b';')
+                .map(|relative| command_start + relative)
+            else {
+                visible_bytes.extend_from_slice(&bytes[offset..]);
+                break;
+            };
+            let uri_start = parameter_end + 1;
+            let Some((uri_end, command_end)) =
+                osc_terminator(&bytes[uri_start..]).map(|(relative_end, terminator_len)| {
+                    (
+                        uri_start + relative_end,
+                        uri_start + relative_end + terminator_len,
+                    )
+                })
+            else {
+                visible_bytes.extend_from_slice(&bytes[offset..]);
+                break;
+            };
+            osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
+                &bytes[uri_start..uri_end],
+            )));
+            offset = command_end;
+            continue;
+        }
+        visible_bytes.push(bytes[offset]);
+        offset += 1;
+    }
+    let mut output_urls = extract_urls(&String::from_utf8_lossy(&visible_bytes));
+    output_urls.sort_unstable();
+    output_urls.dedup();
+    osc8_urls.sort_unstable();
+    osc8_urls.dedup();
+    ExtractedAgentLinks {
+        output_urls,
+        osc8_urls,
+    }
+}
+
+fn osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
+    bytes.iter().enumerate().find_map(|(index, byte)| {
+        if *byte == b'\x07' {
+            Some((index, 1))
+        } else if *byte == b'\x1b' && bytes.get(index + 1) == Some(&b'\\') {
+            Some((index, 2))
+        } else {
+            None
+        }
+    })
 }
 
 fn url_domain(url: &str) -> Option<String> {
@@ -459,6 +669,7 @@ mod tests {
             pane_id,
             Some(base + std::time::Duration::from_secs(10)),
             None,
+            None,
             Vec::new(),
             Vec::new(),
         );
@@ -482,6 +693,28 @@ mod tests {
         gate.observe_chunk(b"visit https://example.test/path");
         assert!(gate.take_dirty());
         assert_eq!(gate.extraction_count(), 1);
+    }
+
+    #[test]
+    fn scheme_marker_split_across_chunks_triggers_link_extraction() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"https:");
+        assert!(!gate.take_dirty());
+
+        gate.observe_chunk(b"//split.example.test/path\n");
+        assert!(gate.take_dirty());
+        assert_eq!(gate.extraction_count(), 1);
+    }
+
+    #[test]
+    fn scheme_prefix_accumulates_across_three_chunks() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"ht");
+        gate.observe_chunk(b"tps:");
+        gate.observe_chunk(b"//split.example.test/path\n");
+
+        let links = gate.take_links().expect("link extraction");
+        assert_eq!(links.output_urls, vec!["https://split.example.test/path"]);
     }
 
     #[test]
@@ -536,10 +769,18 @@ mod tests {
             first_seen: first,
             last_seen: last,
         };
-        store.observe_transcript(pane_id, Some(last), None, Vec::new(), vec![link.clone()]);
+        store.observe_transcript(
+            pane_id,
+            Some(last),
+            None,
+            None,
+            Vec::new(),
+            vec![link.clone()],
+        );
         store.observe_transcript(
             pane_id,
             Some(last + std::time::Duration::from_secs(30)),
+            None,
             None,
             Vec::new(),
             vec![link],
@@ -557,6 +798,100 @@ mod tests {
         assert_eq!(
             extract_urls("open (https://example.test/path), then git://host/repo."),
             vec!["https://example.test/path", "git://host/repo"]
+        );
+    }
+
+    #[test]
+    fn url_extraction_preserves_balanced_trailing_delimiters() {
+        assert_eq!(
+            extract_urls(concat!(
+                "https://en.wikipedia.org/wiki/Function_(mathematics) ",
+                "https://example.test/unbalanced), ",
+                "https://example.test/list[item] ",
+                "https://example.test/trailing]."
+            )),
+            vec![
+                "https://en.wikipedia.org/wiki/Function_(mathematics)",
+                "https://example.test/unbalanced",
+                "https://example.test/list[item]",
+                "https://example.test/trailing",
+            ]
+        );
+    }
+
+    #[test]
+    fn newer_reported_tasks_override_older_transcript_tasks() {
+        let pane_id = PaneId::from_raw(13);
+        let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        let transcript_task = AgentTask {
+            text: "old transcript task".into(),
+            status: AgentTaskStatus::Pending,
+        };
+        let reported_task = AgentTask {
+            text: "new reported task".into(),
+            status: AgentTaskStatus::InProgress,
+        };
+        let mut store = AgentStateStore::default();
+        store.observe_transcript(
+            pane_id,
+            Some(base + std::time::Duration::from_secs(2)),
+            Some(vec![transcript_task]),
+            Some(base),
+            Vec::new(),
+            Vec::new(),
+        );
+        store
+            .report(
+                pane_id,
+                AgentReportPayload {
+                    tasks: vec![reported_task.clone()],
+                    ..AgentReportPayload::default()
+                },
+                base + std::time::Duration::from_secs(1),
+            )
+            .expect("valid report");
+
+        assert_eq!(
+            store.snapshot(pane_id, AgentStatus::Working).tasks,
+            vec![reported_task]
+        );
+    }
+
+    #[test]
+    fn newer_transcript_tasks_override_reported_tasks() {
+        let pane_id = PaneId::from_raw(14);
+        let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        let reported_task = AgentTask {
+            text: "old reported task".into(),
+            status: AgentTaskStatus::Pending,
+        };
+        let transcript_task = AgentTask {
+            text: "new transcript task".into(),
+            status: AgentTaskStatus::Completed,
+        };
+        let mut store = AgentStateStore::default();
+        store
+            .report(
+                pane_id,
+                AgentReportPayload {
+                    tasks: vec![reported_task],
+                    ..AgentReportPayload::default()
+                },
+                base,
+            )
+            .expect("valid report");
+        store.observe_transcript(
+            pane_id,
+            Some(base + std::time::Duration::from_secs(1)),
+            Some(vec![transcript_task.clone()]),
+            Some(base + std::time::Duration::from_secs(1)),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            store.snapshot(pane_id, AgentStatus::Working).tasks,
+            vec![transcript_task]
         );
     }
 
@@ -584,6 +919,7 @@ mod tests {
         store.observe_transcript(
             pane_id,
             Some(now),
+            None,
             None,
             vec![AgentSubagent {
                 name: "native worker".into(),

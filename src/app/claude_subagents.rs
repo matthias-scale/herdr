@@ -59,6 +59,7 @@ pub(crate) struct TranscriptCursor {
     pub(crate) tasks: Vec<TrackedTask>,
     pub(crate) links: Vec<TranscriptLink>,
     pub(crate) last_row_at: Option<SystemTime>,
+    pub(crate) last_tasks_at: Option<SystemTime>,
     pub(crate) caught_up_once: bool,
     pub(crate) trustworthy: bool,
 }
@@ -190,13 +191,14 @@ impl TranscriptCursor {
             .then(|| self.tasks.iter().map(|task| task.task.clone()).collect())
     }
 
-    fn apply_task_result(&mut self, value: &Value) {
+    fn apply_task_result(&mut self, value: &Value) -> bool {
+        let mut changed = false;
         if let Some(task) = value
             .get("toolUseResult")
             .and_then(|result| result.get("task"))
         {
             let Some(id) = task.get("id").and_then(Value::as_str) else {
-                return;
+                return false;
             };
             let Some(text) = task
                 .get("subject")
@@ -204,16 +206,20 @@ impl TranscriptCursor {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
             else {
-                return;
+                return false;
             };
             if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
-                existing.task.text = text.to_string();
+                if existing.task.text != text {
+                    existing.task.text = text.to_string();
+                    changed = true;
+                }
             } else if let Some(pending) = self
                 .tasks
                 .iter_mut()
                 .find(|task| task.id.starts_with(PENDING_TASK_ID_PREFIX) && task.task.text == text)
             {
                 pending.id = id.to_string();
+                changed = true;
             } else {
                 self.tasks.push(TrackedTask {
                     id: id.to_string(),
@@ -222,13 +228,14 @@ impl TranscriptCursor {
                         status: AgentTaskStatus::Pending,
                     },
                 });
+                changed = true;
             }
         }
         let Some(result) = value.get("toolUseResult") else {
-            return;
+            return changed;
         };
         let Some(id) = result.get("taskId").and_then(Value::as_str) else {
-            return;
+            return changed;
         };
         let Some(status) = result
             .get("statusChange")
@@ -236,20 +243,25 @@ impl TranscriptCursor {
             .and_then(Value::as_str)
             .and_then(parse_task_status)
         else {
-            return;
+            return changed;
         };
         if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
-            existing.task.status = status;
+            if existing.task.status != status {
+                existing.task.status = status;
+                changed = true;
+            }
         }
+        changed
     }
 
-    fn apply_task_tool_calls(&mut self, value: &Value) {
+    fn apply_task_tool_calls(&mut self, value: &Value) -> bool {
+        let mut changed = false;
         let Some(content) = value
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(Value::as_array)
         else {
-            return;
+            return false;
         };
         for item in content {
             let Some(name) = item.get("name").and_then(Value::as_str) else {
@@ -282,6 +294,7 @@ impl TranscriptCursor {
                             status: AgentTaskStatus::Pending,
                         },
                     });
+                    changed = true;
                 }
                 "TaskUpdate" => {
                     let Some(task_id) = input.get("taskId").and_then(Value::as_str) else {
@@ -296,28 +309,35 @@ impl TranscriptCursor {
                         .map(str::trim)
                         .filter(|text| !text.is_empty())
                     {
-                        task.task.text = text.to_string();
+                        if task.task.text != text {
+                            task.task.text = text.to_string();
+                            changed = true;
+                        }
                     }
                     if let Some(status) = input
                         .get("status")
                         .and_then(Value::as_str)
                         .and_then(parse_task_status)
                     {
-                        task.task.status = status;
+                        if task.task.status != status {
+                            task.task.status = status;
+                            changed = true;
+                        }
                     }
                 }
                 _ => {}
             }
         }
+        changed
     }
 
-    fn apply_todo_write(&mut self, value: &Value) {
+    fn apply_todo_write(&mut self, value: &Value) -> bool {
         let Some(content) = value
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(Value::as_array)
         else {
-            return;
+            return false;
         };
         for item in content.iter().rev() {
             if item.get("name").and_then(Value::as_str) != Some("TodoWrite") {
@@ -352,8 +372,9 @@ impl TranscriptCursor {
                     })
                 })
                 .collect();
-            break;
+            return true;
         }
+        false
     }
 
     fn observe_row_links(&mut self, value: &Value, observed_at: Option<SystemTime>) {
@@ -458,9 +479,18 @@ impl TranscriptCursor {
                                             current.max(observed_at)
                                         }));
                                 }
-                                self.apply_todo_write(&value);
-                                self.apply_task_tool_calls(&value);
-                                self.apply_task_result(&value);
+                                let tasks_changed = self.apply_todo_write(&value)
+                                    | self.apply_task_tool_calls(&value)
+                                    | self.apply_task_result(&value);
+                                if tasks_changed {
+                                    if let Some(observed_at) = observed_at {
+                                        self.last_tasks_at = Some(
+                                            self.last_tasks_at.map_or(observed_at, |current| {
+                                                current.max(observed_at)
+                                            }),
+                                        );
+                                    }
+                                }
                                 self.observe_row_links(&value, observed_at);
                                 stats.lines_parsed = stats.lines_parsed.saturating_add(1);
                             }
@@ -528,6 +558,12 @@ impl TranscriptTracker {
     pub(crate) fn last_row_at(&self) -> Option<SystemTime> {
         (self.cursor.caught_up_once && self.cursor.trustworthy)
             .then_some(self.cursor.last_row_at)
+            .flatten()
+    }
+
+    pub(crate) fn last_tasks_at(&self) -> Option<SystemTime> {
+        (self.cursor.caught_up_once && self.cursor.trustworthy)
+            .then_some(self.cursor.last_tasks_at)
             .flatten()
     }
 
@@ -896,6 +932,10 @@ impl crate::app::App {
                 .claude_subagent_trackers
                 .get(&terminal_id)
                 .and_then(TranscriptTracker::last_row_at);
+            let transcript_last_tasks_at = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .and_then(TranscriptTracker::last_tasks_at);
             let transcript_links = self
                 .claude_subagent_trackers
                 .get(&terminal_id)
@@ -965,6 +1005,7 @@ impl crate::app::App {
                     pane_id,
                     transcript_last_row_at,
                     transcript_tasks.clone(),
+                    transcript_last_tasks_at,
                     subagents,
                     transcript_links.clone(),
                 )
@@ -1416,6 +1457,41 @@ mod tests {
         assert_eq!(
             cursor.last_row_at,
             crate::agent_state::parse_rfc3339("2026-08-14T06:18:47.437Z")
+        );
+    }
+
+    #[test]
+    fn transcript_task_timestamp_ignores_later_unrelated_rows() {
+        let task_at = "2026-08-14T06:18:40.100Z";
+        let unrelated_at = "2026-08-14T06:18:41.100Z";
+        let mut bytes = line(serde_json::json!({
+            "type": "assistant",
+            "timestamp": task_at,
+            "message": {"content": [{
+                "type": "tool_use",
+                "name": "TodoWrite",
+                "input": {"todos": [{
+                    "content": "keep report precedence honest",
+                    "status": "in_progress"
+                }]}
+            }]}
+        }));
+        bytes.extend(line(serde_json::json!({
+            "type": "assistant",
+            "timestamp": unrelated_at,
+            "message": {"content": [{"type": "text", "text": "still working"}]}
+        })));
+        let mut cursor = TranscriptCursor::new();
+
+        cursor.ingest(&bytes, true);
+
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(task_at)
+        );
+        assert_eq!(
+            cursor.last_row_at,
+            crate::agent_state::parse_rfc3339(unrelated_at)
         );
     }
 
