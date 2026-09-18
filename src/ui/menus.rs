@@ -296,6 +296,7 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
 
+    let actions = app.context_menu_actions(menu);
     let items: Vec<ListItem> = app
         .context_menu_items(menu)
         .iter()
@@ -310,6 +311,7 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(" ");
-    let mut state = ListState::default().with_selected(Some(menu.list.highlighted));
+    let selected = actions.iter().position(|action| *action == menu.selected);
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, inner, &mut state);
 }

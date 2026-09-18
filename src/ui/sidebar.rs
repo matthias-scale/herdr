@@ -9114,13 +9114,18 @@ pub(crate) fn sidebar_snooze_menu_layout(
         })
         .unwrap_or_else(|| Rect::new(menu.anchor.0, menu.anchor.1, 1, 1));
     let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
+    let items = crate::app::state::sidebar_snooze_menu_items(snoozed);
+    let selected = items
+        .iter()
+        .position(|(_, action)| *action == menu.selected)
+        .unwrap_or(0);
     super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
             anchor,
-            item_count: crate::app::state::sidebar_snooze_menu_items(snoozed).len(),
-            selected: menu.selected,
+            item_count: items.len(),
+            selected,
             has_filter: false,
-            max_rows: crate::app::state::sidebar_snooze_menu_items(snoozed).len(),
+            max_rows: items.len(),
             min_width: 34,
         },
         area,
@@ -9151,8 +9156,8 @@ pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
         .enumerate()
         .skip(layout.first_visible)
         .take(layout.visible_rows)
-        .map(|(index, (label, _))| {
-            let selected = index == menu.selected;
+        .map(|(_index, (label, action))| {
+            let selected = *action == menu.selected;
             let style = if selected {
                 Style::default()
                     .fg(app.palette.text)
@@ -22431,7 +22436,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 pane_id,
             },
             anchor: (10, 3),
-            selected: 0,
+            selected: crate::app::state::SidebarSnoozeMenuAction::Preset(
+                crate::app::state::SidebarSnoozePreset::Duration(15 * 60),
+            ),
             time_draft: None,
             error: None,
         });

@@ -4108,16 +4108,21 @@ impl HeadlessServer {
                 }
                 _ => false,
             });
-        let source_mode = if source_is_full_app
-            && self
-                .clients
-                .get(&client_id)
-                .is_some_and(|client| client.sidebar_presentation.context_menu.is_some())
-        {
-            crate::app::Mode::ContextMenu
-        } else {
-            self.app.state.mode
-        };
+        let source_mode = source_is_full_app
+            .then(|| {
+                self.clients.get(&client_id).and_then(|client| {
+                    client.sidebar_presentation.modal.mode.or_else(|| {
+                        client
+                            .sidebar_presentation
+                            .modal
+                            .context_menu
+                            .as_ref()
+                            .map(|_| crate::app::Mode::ContextMenu)
+                    })
+                })
+            })
+            .flatten()
+            .unwrap_or(self.app.state.mode);
         let render_neutral_mouse_motion =
             events_are_render_neutral_mouse_motion(&events, source_mode) && !hover_motion_changes;
         if let Some(client) = self.clients.get_mut(&client_id) {
@@ -5850,8 +5855,8 @@ impl HeadlessServer {
         if client.pomodoro_presentation.owns_input() {
             retained_fallback!("pomodoro_overlay");
         }
-        if client.sidebar_presentation.context_menu.is_some() {
-            retained_fallback!("context_menu");
+        if client.sidebar_presentation.modal.is_active() {
+            retained_fallback!("client_modal");
         }
         if client.deferred_render() != DeferredRender::None {
             retained_fallback!("render_pending");
@@ -14424,6 +14429,9 @@ next_tab = ""
     #[test]
     fn attached_context_menu_keeps_mouse_motion_rendering_client_local_hover() {
         let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("menu")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
         server.app.state.mode = crate::app::Mode::Terminal;
         server.clients.insert(1, test_app_client(Some(true), 1));
         server.clients.insert(2, test_app_client(Some(true), 2));
@@ -14432,11 +14440,15 @@ next_tab = ""
             .get_mut(&2)
             .expect("second client")
             .sidebar_presentation
+            .modal
             .context_menu = Some(crate::app::state::ContextMenuState {
-            kind: crate::app::state::ContextMenuKind::Workspace { ws_idx: 0 },
+            kind: crate::app::state::ContextMenuKind::Workspace {
+                workspace_id: server.app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
             x: 4,
             y: 3,
-            list: crate::app::state::MenuListState::new(0),
+            selected: crate::app::state::ContextMenuAction::RenameWorkspace,
         });
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();

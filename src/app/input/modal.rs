@@ -6,7 +6,8 @@ use ratatui::layout::Rect;
 use crate::{
     app::{
         state::{
-            AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+            AppState, ContextMenuAction, ContextMenuKind, ContextMenuState, MenuListState, Mode,
+            NavigatorStateFilter,
         },
         App,
     },
@@ -390,9 +391,13 @@ pub(super) fn open_rename_workspace(
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ws_idx: usize,
 ) {
+    let Some(workspace_id) = state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
+        return;
+    };
     state.pending_workspace_create_cwd = None;
     state.selected = ws_idx;
     state.rename_pane_target = None;
+    state.rename_target = Some(crate::app::state::RenameTarget::Workspace { workspace_id });
     state.name_input =
         state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
@@ -405,6 +410,7 @@ pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::Pa
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = Some(cwd);
     state.rename_pane_target = None;
+    state.rename_target = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameWorkspace;
@@ -415,14 +421,24 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_target = None;
     state.rename_tab_prefill = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
+        let workspace_id = ws.id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            ws.tabs[ws.active_tab].number,
+        );
         let prefill = ws
             .active_tab_display_name_from(&state.terminals)
             .unwrap_or_else(|| (ws.active_tab + 1).to_string());
         state.rename_tab_prefill = Some(prefill.clone());
         state.name_input = prefill;
         state.name_input_replace_on_type = replace_on_type;
+        state.rename_target = Some(crate::app::state::RenameTarget::Tab {
+            workspace_id,
+            tab_id,
+        });
         state.mode = Mode::RenameTab;
     }
 }
@@ -439,6 +455,10 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = Some(pane_id);
+    state.rename_target = Some(crate::app::state::RenameTarget::Pane {
+        workspace_id: ws.id.clone(),
+        pane_id,
+    });
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
@@ -464,6 +484,7 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
@@ -539,8 +560,19 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         && !state.workspaces.is_empty()
                         && !new_name.is_empty() =>
                 {
-                    let workspace_id = state.workspaces[state.selected].id.clone();
-                    state.workspaces[state.selected].set_custom_name(new_name);
+                    let ws_idx = match state.rename_target.as_ref() {
+                        Some(crate::app::state::RenameTarget::Workspace { workspace_id }) => state
+                            .workspaces
+                            .iter()
+                            .position(|workspace| workspace.id == *workspace_id),
+                        _ => Some(state.selected),
+                    };
+                    let Some(ws_idx) = ws_idx else {
+                        cancel_rename_modal(state);
+                        return;
+                    };
+                    let workspace_id = state.workspaces[ws_idx].id.clone();
+                    state.workspaces[ws_idx].set_custom_name(new_name);
                     crate::logging::workspace_renamed(&workspace_id);
                     state.mark_session_dirty();
                 }
@@ -555,11 +587,34 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         };
                 }
                 Mode::RenameTab => {
-                    if let Some(ws_idx) = state.active {
+                    let target = state.rename_target.clone().and_then(|target| match target {
+                        crate::app::state::RenameTarget::Tab {
+                            workspace_id,
+                            tab_id,
+                        } => {
+                            let ws_idx = state
+                                .workspaces
+                                .iter()
+                                .position(|workspace| workspace.id == *workspace_id)?;
+                            let tab_idx = state.workspaces[ws_idx].tabs.iter().position(|tab| {
+                                crate::workspace::public_tab_id_for_number(
+                                    &workspace_id,
+                                    tab.number,
+                                ) == *tab_id
+                            })?;
+                            Some((ws_idx, tab_idx))
+                        }
+                        _ => None,
+                    });
+                    if let Some((ws_idx, target_tab)) = target.or_else(|| {
+                        state
+                            .active
+                            .map(|ws_idx| (ws_idx, state.workspaces[ws_idx].active_tab))
+                    }) {
                         let prefill = state.rename_tab_prefill.take();
                         if let Some(ws) = state.workspaces.get_mut(ws_idx) {
                             let workspace_id = ws.id.clone();
-                            let active_tab = ws.active_tab;
+                            let active_tab = target_tab;
                             // Compare against what the modal was opened with, not a freshly
                             // derived label: the live label can advance while the modal is open,
                             // and an unedited Enter must stay a no-op.
@@ -572,7 +627,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                                 .get(active_tab)
                                 .is_some_and(|tab| tab.is_auto_named())
                                 && new_name == current_name;
-                            if let Some(tab) = ws.active_tab_mut() {
+                            if let Some(tab) = ws.tabs.get_mut(active_tab) {
                                 if !new_name.is_empty() && !keep_auto_name {
                                     tab.set_user_custom_name(new_name);
                                     let tab_id = ws
@@ -592,7 +647,19 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                     }
                 }
                 Mode::RenamePane => {
-                    if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
+                    let target = state.rename_target.clone().and_then(|target| match target {
+                        crate::app::state::RenameTarget::Pane {
+                            workspace_id,
+                            pane_id,
+                        } => state
+                            .workspaces
+                            .iter()
+                            .position(|workspace| workspace.id == workspace_id)
+                            .map(|ws_idx| (ws_idx, pane_id)),
+                        _ => None,
+                    });
+                    if let Some((ws_idx, pane_id)) =
+                        target.or_else(|| state.active.zip(state.rename_pane_target))
                     {
                         if let Some(ws) = state.workspaces.get(ws_idx) {
                             if let Some(pane) = ws.pane_state(pane_id) {
@@ -610,6 +677,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
+            state.rename_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -623,6 +691,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
+            state.rename_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -833,10 +902,18 @@ pub(crate) fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
 pub(super) fn apply_context_menu_action(
     state: &mut AppState,
     terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
-    menu: ContextMenuState,
-    idx: usize,
+    mut menu: ContextMenuState,
+    action: ContextMenuAction,
 ) {
-    let item = state.context_menu_items(&menu).get(idx).copied();
+    if !state.rebase_context_menu_indices(&mut menu) {
+        leave_modal(state);
+        return;
+    }
+    let actions = state.context_menu_actions(&menu);
+    let item = actions
+        .iter()
+        .position(|candidate| *candidate == action)
+        .and_then(|idx| state.context_menu_items(&menu).get(idx).copied());
     let (menu_x, menu_y) = (menu.x, menu.y);
     match (menu.kind, item) {
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
@@ -871,13 +948,15 @@ pub(super) fn apply_context_menu_action(
             leave_modal(state);
         }
         (
-            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Rename"),
         ) => {
             open_rename_workspace(state, terminal_runtimes, ws_idx);
         }
         (
-            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Close" | "Close group"),
         ) => {
             state.selected = ws_idx;
@@ -1166,25 +1245,41 @@ pub(crate) fn handle_context_menu_key(
             leave_modal(state);
         }
         KeyCode::Up => {
-            if let Some(menu) = &mut state.context_menu {
-                menu.list.move_prev();
+            if let Some(menu) = state.context_menu.as_ref() {
+                let actions = state.context_menu_actions(menu);
+                let selected = actions
+                    .iter()
+                    .position(|action| *action == menu.selected)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                if let (Some(menu), Some(action)) =
+                    (state.context_menu.as_mut(), actions.get(selected).copied())
+                {
+                    menu.selected = action;
+                }
             }
         }
         KeyCode::Down => {
-            let item_count = state
-                .context_menu
-                .as_ref()
-                .map_or(0, |menu| state.context_menu_items(menu).len());
-            if let Some(menu) = &mut state.context_menu {
-                menu.list.move_next(item_count);
+            if let Some(menu) = state.context_menu.as_ref() {
+                let actions = state.context_menu_actions(menu);
+                let selected = actions
+                    .iter()
+                    .position(|action| *action == menu.selected)
+                    .unwrap_or(0)
+                    .saturating_add(1)
+                    .min(actions.len().saturating_sub(1));
+                if let (Some(menu), Some(action)) =
+                    (state.context_menu.as_mut(), actions.get(selected).copied())
+                {
+                    menu.selected = action;
+                }
             }
         }
         KeyCode::Enter => {
-            state.reconcile_context_menu_selection();
             if let Some(menu) = state.context_menu.take() {
-                let idx = menu.list.highlighted;
+                let action = menu.selected;
                 leave_modal(state);
-                apply_context_menu_action(state, terminal_runtimes, menu, idx);
+                apply_context_menu_action(state, terminal_runtimes, menu, action);
             }
         }
         _ => {}
@@ -1257,15 +1352,25 @@ impl App {
                             work_context: None,
                         },
                     );
-                } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
-                    let workspace_id = self.public_workspace_id(self.state.selected);
-                    self.runtime_workspace_rename(
-                        "tui.workspace.rename",
-                        crate::api::schema::WorkspaceRenameParams {
-                            workspace_id,
-                            label: new_name,
-                        },
-                    );
+                } else if !new_name.is_empty() {
+                    if let Some(crate::app::state::RenameTarget::Workspace { workspace_id }) =
+                        self.state.rename_target.clone()
+                    {
+                        if self
+                            .state
+                            .workspaces
+                            .iter()
+                            .any(|workspace| workspace.id == workspace_id)
+                        {
+                            self.runtime_workspace_rename(
+                                "tui.workspace.rename",
+                                crate::api::schema::WorkspaceRenameParams {
+                                    workspace_id,
+                                    label: new_name,
+                                },
+                            );
+                        }
+                    }
                 }
             }
             Mode::RenameTab if self.state.creating_new_tab => {
@@ -1288,11 +1393,21 @@ impl App {
                 );
             }
             Mode::RenameTab if !new_name.is_empty() => {
-                let Some(ws_idx) = self.state.active else {
+                let Some(crate::app::state::RenameTarget::Tab {
+                    workspace_id,
+                    tab_id,
+                }) = self.state.rename_target.clone()
+                else {
                     cancel_rename_modal(&mut self.state);
                     return;
                 };
-                let tab_idx = self.state.workspaces[ws_idx].active_tab;
+                let Some((ws_idx, tab_idx)) = self
+                    .parse_tab_id(&tab_id)
+                    .filter(|(ws_idx, _)| self.state.workspaces[*ws_idx].id == workspace_id)
+                else {
+                    cancel_rename_modal(&mut self.state);
+                    return;
+                };
                 // See `apply_rename_action`: the prefill is the baseline, not the live label.
                 let current_name = self.state.rename_tab_prefill.take().unwrap_or_else(|| {
                     self.state.workspaces[ws_idx]
@@ -1305,21 +1420,30 @@ impl App {
                     .is_some_and(|tab| tab.is_auto_named())
                     && new_name == current_name;
                 if !keep_auto_name {
-                    if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
-                        self.runtime_tab_rename(
-                            "tui.tab.rename",
-                            crate::api::schema::TabRenameParams {
-                                tab_id,
-                                label: Some(new_name),
-                            },
-                        );
-                    }
+                    self.runtime_tab_rename(
+                        "tui.tab.rename",
+                        crate::api::schema::TabRenameParams {
+                            tab_id,
+                            label: Some(new_name),
+                        },
+                    );
                 }
             }
             Mode::RenamePane => {
-                if let (Some(ws_idx), Some(pane_id)) =
-                    (self.state.active, self.state.rename_pane_target)
+                if let Some(crate::app::state::RenameTarget::Pane {
+                    workspace_id,
+                    pane_id,
+                }) = self.state.rename_target.clone()
                 {
+                    let Some(ws_idx) = self
+                        .state
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == workspace_id)
+                    else {
+                        cancel_rename_modal(&mut self.state);
+                        return;
+                    };
                     if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
                         self.runtime_pane_rename(
                             "tui.pane.rename",
@@ -1493,26 +1617,43 @@ impl App {
                 leave_modal(&mut self.state);
             }
             KeyCode::Up => {
-                if let Some(menu) = &mut self.state.context_menu {
-                    menu.list.move_prev();
+                if let Some(menu) = self.state.context_menu.as_ref() {
+                    let actions = self.state.context_menu_actions(menu);
+                    let selected = actions
+                        .iter()
+                        .position(|action| *action == menu.selected)
+                        .unwrap_or(0)
+                        .saturating_sub(1);
+                    if let (Some(menu), Some(action)) = (
+                        self.state.context_menu.as_mut(),
+                        actions.get(selected).copied(),
+                    ) {
+                        menu.selected = action;
+                    }
                 }
             }
             KeyCode::Down => {
-                let item_count = self
-                    .state
-                    .context_menu
-                    .as_ref()
-                    .map_or(0, |menu| self.state.context_menu_items(menu).len());
-                if let Some(menu) = &mut self.state.context_menu {
-                    menu.list.move_next(item_count);
+                if let Some(menu) = self.state.context_menu.as_ref() {
+                    let actions = self.state.context_menu_actions(menu);
+                    let selected = actions
+                        .iter()
+                        .position(|action| *action == menu.selected)
+                        .unwrap_or(0)
+                        .saturating_add(1)
+                        .min(actions.len().saturating_sub(1));
+                    if let (Some(menu), Some(action)) = (
+                        self.state.context_menu.as_mut(),
+                        actions.get(selected).copied(),
+                    ) {
+                        menu.selected = action;
+                    }
                 }
             }
             KeyCode::Enter => {
-                self.state.reconcile_context_menu_selection();
                 if let Some(menu) = self.state.context_menu.take() {
-                    let idx = menu.list.highlighted;
+                    let action = menu.selected;
                     leave_modal(&mut self.state);
-                    self.apply_context_menu_action_via_api(menu, idx);
+                    self.apply_context_menu_action_via_api(menu, action);
                 }
             }
             _ => {}
@@ -1550,8 +1691,20 @@ impl App {
         self.sync_toast_deadline(previous_toast);
     }
 
-    pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
-        let item = self.state.context_menu_items(&menu).get(idx).copied();
+    pub(crate) fn apply_context_menu_action_via_api(
+        &mut self,
+        mut menu: ContextMenuState,
+        action: ContextMenuAction,
+    ) {
+        if !self.state.rebase_context_menu_indices(&mut menu) {
+            leave_modal(&mut self.state);
+            return;
+        }
+        let actions = self.state.context_menu_actions(&menu);
+        let item = actions
+            .iter()
+            .position(|candidate| *candidate == action)
+            .and_then(|idx| self.state.context_menu_items(&menu).get(idx).copied());
         let (menu_x, menu_y) = (menu.x, menu.y);
         match (menu.kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
@@ -1584,12 +1737,12 @@ impl App {
                 leave_modal(&mut self.state);
             }
             (
-                ContextMenuKind::Workspace { ws_idx }
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
                 Some("Rename"),
             ) => open_rename_workspace(&mut self.state, &self.terminal_runtimes, ws_idx),
             (
-                ContextMenuKind::Workspace { ws_idx }
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
                 Some("Close" | "Close group"),
             ) => {
@@ -1958,6 +2111,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_target = None;
     state.rename_tab_prefill = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
@@ -2047,9 +2201,25 @@ mod tests {
         app
     }
 
-    fn pane_context_menu(pane_id: crate::layout::PaneId, highlighted: usize) -> ContextMenuState {
+    fn context_tab_ids(state: &AppState, ws_idx: usize, tab_idx: usize) -> (String, String) {
+        let workspace_id = state.workspaces[ws_idx].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            state.workspaces[ws_idx].tabs[tab_idx].number,
+        );
+        (workspace_id, tab_id)
+    }
+
+    fn pane_context_menu(
+        state: &AppState,
+        pane_id: crate::layout::PaneId,
+        selected: ContextMenuAction,
+    ) -> ContextMenuState {
+        let (workspace_id, tab_id) = context_tab_ids(state, 0, 0);
         ContextMenuState {
             kind: ContextMenuKind::Pane {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -2065,7 +2235,7 @@ mod tests {
             },
             x: 4,
             y: 2,
-            list: MenuListState::new(highlighted),
+            selected,
         }
     }
 
@@ -2097,6 +2267,7 @@ mod tests {
 
         let mut menu = ContextMenuState {
             kind: ContextMenuKind::GitWorkspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: true,
@@ -2104,14 +2275,15 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RenameWorkspace,
         };
         let collapse_idx = menu
             .items()
             .iter()
             .position(|item| *item == "Collapse")
             .expect("collapse item");
-        menu.list.highlighted = collapse_idx;
+        assert_eq!(menu.items()[collapse_idx], "Collapse");
+        menu.selected = ContextMenuAction::CollapseWorkspace;
         app.state.context_menu = Some(menu);
 
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
@@ -2947,6 +3119,7 @@ mod tests {
         });
         let menu = ContextMenuState {
             kind: ContextMenuKind::GitWorkspace {
+                workspace_id: state.workspaces[0].id.clone(),
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: true,
@@ -2954,11 +3127,16 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::CloseWorkspace,
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
-        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
+        apply_context_menu_action(
+            &mut state,
+            &mut terminal_runtimes,
+            menu,
+            ContextMenuAction::CloseWorkspace,
+        );
 
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
@@ -2974,8 +3152,11 @@ mod tests {
         let mut app = app_with_test_workspaces(&["main"]);
         app.state.active = Some(0);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Pane {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -2991,14 +3172,9 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::SendRightClicksToPane,
         };
-        let idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == "Send right-clicks to pane")
-            .unwrap();
-        app.apply_context_menu_action_via_api(menu, idx);
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::SendRightClicksToPane);
 
         assert!(
             app.state.workspaces[0]
@@ -3028,8 +3204,11 @@ mod tests {
             is_linked_worktree: true,
         });
         let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let (workspace_id, tab_id) = context_tab_ids(&state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Pane {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -3045,16 +3224,16 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::ClosePane,
         };
-        let idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == "Close pane")
-            .expect("close pane item");
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
-        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+        apply_context_menu_action(
+            &mut state,
+            &mut terminal_runtimes,
+            menu,
+            ContextMenuAction::ClosePane,
+        );
 
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
@@ -3113,8 +3292,11 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 1;
         app.state.mode = Mode::ContextMenu;
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
@@ -3124,15 +3306,9 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::CloseTab,
         };
-        let idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == "Close")
-            .expect("close tab item");
-
-        app.apply_context_menu_action_via_api(menu, idx);
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::CloseTab);
 
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.mode, Mode::ConfirmClose);
@@ -3141,8 +3317,12 @@ mod tests {
 
     #[test]
     fn tab_context_menu_offers_subgroup_actions_exactly_when_relevant() {
+        let state = state_with_workspaces(&["main"]);
+        let (workspace_id, tab_id) = context_tab_ids(&state, 0, 0);
         let plain = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id: workspace_id.clone(),
+                tab_id: tab_id.clone(),
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
@@ -3152,7 +3332,7 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::NewTab,
         };
         assert_eq!(
             plain.items(),
@@ -3167,6 +3347,8 @@ mod tests {
         );
         let member = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
@@ -3176,7 +3358,7 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::NewTab,
         };
         assert_eq!(
             member.items(),
@@ -3196,8 +3378,11 @@ mod tests {
     fn api_sidebar_context_menu_settles_the_exact_pane() {
         let mut app = app_with_test_workspaces(&["main"]);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
@@ -3207,15 +3392,9 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::Settle,
         };
-        let idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == crate::app::state::SETTLE_ITEM)
-            .expect("settle item");
-
-        app.apply_context_menu_action_via_api(menu, idx);
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::Settle);
 
         assert!(app.state.pane_is_settled(0, pane_id));
         assert_eq!(app.state.mode, Mode::Terminal);
@@ -3224,8 +3403,11 @@ mod tests {
     #[test]
     fn api_context_menu_move_to_subgroup_opens_the_picker_at_the_menu() {
         let mut app = app_with_test_workspaces(&["main"]);
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
@@ -3235,15 +3417,9 @@ mod tests {
             },
             x: 7,
             y: 4,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::MoveToSubgroup,
         };
-        let idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == crate::app::state::MOVE_TO_SUBGROUP_ITEM)
-            .expect("move to subgroup item");
-
-        app.apply_context_menu_action_via_api(menu, idx);
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::MoveToSubgroup);
 
         let picker = app
             .state
@@ -3258,8 +3434,11 @@ mod tests {
     fn api_context_menu_remove_from_subgroup_clears_the_assignment() {
         let mut app = app_with_test_workspaces(&["main"]);
         app.state.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let menu = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
@@ -3269,15 +3448,9 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RemoveFromSubgroup,
         };
-        let idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == crate::app::state::REMOVE_FROM_SUBGROUP_ITEM)
-            .expect("remove from subgroup item");
-
-        app.apply_context_menu_action_via_api(menu, idx);
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::RemoveFromSubgroup);
 
         assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), None);
     }
@@ -3291,8 +3464,11 @@ mod tests {
         app.state.selected = 1;
         app.state.mode = Mode::ContextMenu;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
         let mut menu = ContextMenuState {
             kind: ContextMenuKind::Pane {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -3308,14 +3484,10 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::ClosePane,
         };
-        let close_idx = menu
-            .items()
-            .iter()
-            .position(|item| *item == "Close pane")
-            .expect("close pane item");
-        menu.list.highlighted = close_idx;
+        assert!(menu.items().contains(&"Close pane"));
+        menu.selected = ContextMenuAction::ClosePane;
         app.state.context_menu = Some(menu);
 
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
@@ -3346,6 +3518,8 @@ mod tests {
         for snoozed in [false, true] {
             let tab = ContextMenuState {
                 kind: ContextMenuKind::Tab {
+                    workspace_id: "workspace".into(),
+                    tab_id: "workspace:t1".into(),
                     ws_idx: 0,
                     tab_idx: 0,
                     settle_pane_id: Some(pane_id),
@@ -3355,7 +3529,7 @@ mod tests {
                 },
                 x: 0,
                 y: 0,
-                list: MenuListState::new(0),
+                selected: ContextMenuAction::NewTab,
             };
             let items = tab.items_for_pane_state(snoozed, !snoozed);
             if snoozed {
@@ -3370,6 +3544,8 @@ mod tests {
 
             let pane = ContextMenuState {
                 kind: ContextMenuKind::Pane {
+                    workspace_id: "workspace".into(),
+                    tab_id: "workspace:t1".into(),
                     ws_idx: 0,
                     tab_idx: 0,
                     pane_id,
@@ -3385,7 +3561,7 @@ mod tests {
                 },
                 x: 0,
                 y: 0,
-                list: MenuListState::new(0),
+                selected: ContextMenuAction::RenamePane,
             };
             assert_eq!(
                 pane.items_for_pane_state(snoozed, !snoozed)
@@ -3396,13 +3572,16 @@ mod tests {
     }
 
     #[test]
-    fn live_snooze_removes_settle_and_clamps_context_menu_acceptance() {
+    fn live_snooze_removes_settle_without_rebinding_enter_to_close() {
         let mut app = app_with_test_workspaces(&["main"]);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         app.state.workspaces[0].test_add_tab(Some("keep"));
         app.state.ensure_test_terminals();
-        let mut menu = ContextMenuState {
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
+        let menu = ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 settle_pane_id: Some(pane_id),
@@ -3412,14 +3591,12 @@ mod tests {
             },
             x: 3,
             y: 2,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::Settle,
         };
-        menu.list.highlighted = app
+        assert!(app
             .state
             .context_menu_items(&menu)
-            .iter()
-            .position(|item| *item == crate::app::state::SETTLE_ITEM)
-            .expect("settle item before snooze");
+            .contains(&crate::app::state::SETTLE_ITEM));
         app.state.context_menu = Some(menu);
         app.state.mode = Mode::ContextMenu;
 
@@ -3432,22 +3609,100 @@ mod tests {
             .map(|menu| app.state.context_menu_items(menu))
             .expect("open menu");
         assert!(!live_items.contains(&crate::app::state::SETTLE_ITEM));
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let selected = app
-            .state
-            .context_menu
-            .as_ref()
-            .map(|menu| menu.list.highlighted)
-            .expect("open menu");
-        assert_eq!(live_items.get(selected), Some(&"Close"));
-
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
-        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_eq!(
-            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
-            Some("keep")
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_snooze_does_not_rebind_dropdown_enter_to_unsnooze() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.open_sidebar_snooze_menu(0, pane_id, 3, 2);
+        let selected = app
+            .state
+            .sidebar_snooze
+            .as_ref()
+            .expect("snooze dropdown")
+            .selected;
+        assert!(matches!(
+            selected,
+            crate::app::state::SidebarSnoozeMenuAction::Preset(_)
+        ));
+
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, pane_id, deadline));
+        app.handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(app.state.pane_is_snoozed(0, pane_id));
+        assert!(app.state.sidebar_snooze.is_none());
+    }
+
+    #[test]
+    fn context_menu_settle_resolves_original_workspace_after_reorder() {
+        let mut app = app_with_test_workspaces(&["first", "second"]);
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let (workspace_id, tab_id) = context_tab_ids(&app.state, 1, 0);
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                workspace_id: workspace_id.clone(),
+                tab_id,
+                ws_idx: 1,
+                tab_idx: 0,
+                settle_pane_id: Some(pane_id),
+                snooze_target: Some(pane_id),
+                starred: false,
+                has_subgroup: false,
+            },
+            x: 3,
+            y: 2,
+            selected: ContextMenuAction::Settle,
+        };
+        app.state.workspaces.swap(0, 1);
+
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::Settle);
+
+        let ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .expect("original workspace");
+        assert!(app.state.pane_is_settled(ws_idx, pane_id));
+    }
+
+    #[test]
+    fn rename_targets_survive_workspace_and_tab_reorder() {
+        let mut state = state_with_workspaces(&["first", "second"]);
+        let workspace_id = state.workspaces[1].id.clone();
+        open_rename_workspace(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            1,
         );
+        state.name_input = "renamed workspace".into();
+        state.workspaces.swap(0, 1);
+        apply_rename_action(&mut state, ModalAction::Save);
+        let workspace = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .expect("original workspace");
+        assert_eq!(workspace.custom_name.as_deref(), Some("renamed workspace"));
+
+        state.active = Some(0);
+        state.workspaces[0].test_add_tab(Some("other"));
+        let tab_number = state.workspaces[0].tabs[0].number;
+        open_rename_active_tab(&mut state, false);
+        state.name_input = "renamed tab".into();
+        assert!(state.workspaces[0].move_tab(0, 2));
+        apply_rename_action(&mut state, ModalAction::Save);
+        let tab = state.workspaces[0]
+            .tabs
+            .iter()
+            .find(|tab| tab.number == tab_number)
+            .expect("original tab");
+        assert_eq!(tab.custom_name.as_deref(), Some("renamed tab"));
     }
 
     #[test]
@@ -3461,7 +3716,7 @@ mod tests {
                 pane_id,
             },
             anchor: (0, 0),
-            selected: 0,
+            selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: Some("12:30".into()),
             error: None,
         };
@@ -3474,32 +3729,12 @@ mod tests {
             Some(deadline)
         );
 
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::Pane {
-                ws_idx: 0,
-                tab_idx: 0,
-                pane_id,
-                source_pane_id: None,
-                has_manual_label: false,
-                right_click_passthrough: false,
-                linkable_work_link: None,
-                link: None,
-                path: None,
-                open_with: Vec::new(),
-                send_text: None,
-                has_agent_targets: false,
-            },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
-        let unsnooze = app
+        let menu = pane_context_menu(&app.state, pane_id, ContextMenuAction::Unsnooze);
+        assert!(app
             .state
             .context_menu_items(&menu)
-            .iter()
-            .position(|item| *item == crate::app::state::UNSNOOZE_ITEM)
-            .expect("unsnooze item");
-        app.apply_context_menu_action_via_api(menu, unsnooze);
+            .contains(&crate::app::state::UNSNOOZE_ITEM));
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::Unsnooze);
         assert!(!app.state.pane_is_snoozed(0, pane_id));
     }
 
@@ -3513,13 +3748,11 @@ mod tests {
         let mut client_b = crate::app::state::SidebarPresentationState::default();
 
         app.state.swap_sidebar_presentation(&mut client_a);
-        let snooze_idx = app
-            .state
-            .context_menu_items(&pane_context_menu(first_pane, 0))
-            .iter()
-            .position(|item| *item == crate::app::state::SNOOZE_ITEM)
-            .expect("snooze item");
-        app.state.context_menu = Some(pane_context_menu(first_pane, snooze_idx));
+        app.state.context_menu = Some(pane_context_menu(
+            &app.state,
+            first_pane,
+            ContextMenuAction::Snooze,
+        ));
         app.state.mode = Mode::ContextMenu;
         app.state.swap_sidebar_presentation(&mut client_a);
 
@@ -3547,25 +3780,21 @@ mod tests {
         assert!(app.state.pane_is_snoozed(0, first_pane));
         assert!(!app.state.pane_is_snoozed(0, second_pane));
 
-        let unsnooze_idx = app
-            .state
-            .context_menu_items(&pane_context_menu(first_pane, 0))
-            .iter()
-            .position(|item| *item == crate::app::state::UNSNOOZE_ITEM)
-            .expect("unsnooze item");
-        app.state.context_menu = Some(pane_context_menu(first_pane, unsnooze_idx));
+        app.state.context_menu = Some(pane_context_menu(
+            &app.state,
+            first_pane,
+            ContextMenuAction::Unsnooze,
+        ));
         app.state.mode = Mode::ContextMenu;
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!app.state.pane_is_snoozed(0, first_pane));
         assert!(!app.state.pane_is_snoozed(0, second_pane));
 
-        let set_time_idx = app
-            .state
-            .context_menu_items(&pane_context_menu(first_pane, 0))
-            .iter()
-            .position(|item| *item == crate::app::state::SET_TIME_ITEM)
-            .expect("set time item");
-        app.state.context_menu = Some(pane_context_menu(first_pane, set_time_idx));
+        app.state.context_menu = Some(pane_context_menu(
+            &app.state,
+            first_pane,
+            ContextMenuAction::SetTime,
+        ));
         app.state.mode = Mode::ContextMenu;
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert_eq!(app.state.mode, Mode::Terminal);
@@ -3585,14 +3814,11 @@ mod tests {
         let (runtime, mut pane_input) =
             crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
         app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
-        let set_time_idx = app
-            .state
-            .context_menu_items(&pane_context_menu(pane_id, 0))
-            .iter()
-            .position(|item| *item == crate::app::state::SET_TIME_ITEM)
-            .expect("set time item");
-
-        app.state.context_menu = Some(pane_context_menu(pane_id, set_time_idx));
+        app.state.context_menu = Some(pane_context_menu(
+            &app.state,
+            pane_id,
+            ContextMenuAction::SetTime,
+        ));
         app.state.mode = Mode::ContextMenu;
         app.route_client_events_from(
             42,
@@ -3626,7 +3852,11 @@ mod tests {
             bytes::Bytes::from_static(b"c")
         );
 
-        app.state.context_menu = Some(pane_context_menu(pane_id, set_time_idx));
+        app.state.context_menu = Some(pane_context_menu(
+            &app.state,
+            pane_id,
+            ContextMenuAction::SetTime,
+        ));
         app.state.mode = Mode::ContextMenu;
         app.route_client_events_from(
             42,

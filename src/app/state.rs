@@ -1548,19 +1548,46 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) group_sorts: std::collections::HashMap<String, SidebarSortMode>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
-    pub(crate) snooze: Option<SidebarSnoozeUiState>,
+    /// Every transient modal owned by this attach. Shared pane/session facts
+    /// never live here; the server swaps this record into `AppState` only
+    /// while it handles or renders this client.
+    pub(crate) modal: ClientModalState,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
-    /// Right-click menu owned by this attached client. Runtime pane state stays
-    /// shared; only the menu target and selection move with the presentation.
+}
+
+/// Attach-local modal state. `AppState` keeps matching active slots because the
+/// monolithic input and rendering code still consumes them directly; the
+/// server moves every slot together through this one record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ClientModalState {
+    pub(crate) mode: Option<Mode>,
     pub(crate) context_menu: Option<ContextMenuState>,
+    pub(crate) snooze: Option<SidebarSnoozeUiState>,
+    pub(crate) rename_target: Option<RenameTarget>,
+    pub(crate) confirm_close_workspace_id: Option<String>,
+    pub(crate) name_input: String,
+    pub(crate) name_input_replace_on_type: bool,
+    pub(crate) creating_new_tab: bool,
+    pub(crate) pending_workspace_create_cwd: Option<std::path::PathBuf>,
+    pub(crate) rename_tab_prefill: Option<String>,
+}
+
+impl ClientModalState {
+    pub(crate) fn is_active(&self) -> bool {
+        self.mode.is_some()
+            || self.context_menu.is_some()
+            || self.snooze.is_some()
+            || self.rename_target.is_some()
+            || self.confirm_close_workspace_id.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SidebarSnoozeUiState {
     pub(crate) target: PaneFocusTarget,
     pub(crate) anchor: (u16, u16),
-    pub(crate) selected: usize,
+    pub(crate) selected: SidebarSnoozeMenuAction,
     pub(crate) time_draft: Option<String>,
     pub(crate) error: Option<String>,
 }
@@ -3036,15 +3063,22 @@ pub(crate) struct RemoteAgentPressState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
+        workspace_id: String,
+        /// Render-time cache only; `workspace_id` is authoritative.
         ws_idx: usize,
     },
     GitWorkspace {
+        workspace_id: String,
+        /// Render-time cache only; `workspace_id` is authoritative.
         ws_idx: usize,
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
     },
     Tab {
+        workspace_id: String,
+        tab_id: String,
+        /// Render-time caches only; stable IDs are authoritative.
         ws_idx: usize,
         tab_idx: usize,
         /// Exact local pane represented by the sidebar row. Top tab chrome
@@ -3060,6 +3094,9 @@ pub enum ContextMenuKind {
         has_subgroup: bool,
     },
     Pane {
+        workspace_id: String,
+        tab_id: String,
+        /// Render-time caches only; stable IDs are authoritative.
         ws_idx: usize,
         tab_idx: usize,
         pane_id: PaneId,
@@ -3083,6 +3120,21 @@ pub enum ContextMenuKind {
         /// Whether any agent other than this pane is running, so the menu only
         /// offers a picker that would have something to pick.
         has_agent_targets: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RenameTarget {
+    Workspace {
+        workspace_id: String,
+    },
+    Tab {
+        workspace_id: String,
+        tab_id: String,
+    },
+    Pane {
+        workspace_id: String,
+        pane_id: PaneId,
     },
 }
 
@@ -3349,42 +3401,169 @@ pub struct ContextMenuState {
     pub kind: ContextMenuKind,
     pub x: u16,
     pub y: u16,
-    pub list: MenuListState,
+    pub selected: ContextMenuAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuAction {
+    RenameWorkspace,
+    CloseWorkspace,
+    NewWorktree,
+    OpenWorktree,
+    DeleteWorktree,
+    CollapseWorkspace,
+    ExpandWorkspace,
+    NewTab,
+    RenameTab,
+    StarTab,
+    UnstarTab,
+    MoveToSubgroup,
+    RemoveFromSubgroup,
+    Snooze,
+    Unsnooze,
+    SetTime,
+    ChangeTime,
+    Settle,
+    CloseTab,
+    RenamePane,
+    WorkLink,
+    OpenLink,
+    CopyLink,
+    OpenFile(PaneOpenWith),
+    OpenFolder(PaneOpenWith),
+    SendToNewAgent,
+    SendToExistingAgent,
+    ClearPaneName,
+    SwapPane,
+    SplitRight,
+    SplitDown,
+    Zoom,
+    UseHerdrRightClick,
+    SendRightClicksToPane,
+    ClosePane,
+}
+
+impl ContextMenuAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RenameWorkspace | Self::RenameTab => "Rename",
+            Self::CloseWorkspace | Self::CloseTab => "Close",
+            Self::NewWorktree => "New worktree",
+            Self::OpenWorktree => "Open worktree...",
+            Self::DeleteWorktree => "Delete worktree checkout...",
+            Self::CollapseWorkspace => "Collapse",
+            Self::ExpandWorkspace => "Expand",
+            Self::NewTab => "New tab",
+            Self::StarTab => STAR_ITEM,
+            Self::UnstarTab => UNSTAR_ITEM,
+            Self::MoveToSubgroup => MOVE_TO_SUBGROUP_ITEM,
+            Self::RemoveFromSubgroup => REMOVE_FROM_SUBGROUP_ITEM,
+            Self::Snooze => SNOOZE_ITEM,
+            Self::Unsnooze => UNSNOOZE_ITEM,
+            Self::SetTime => SET_TIME_ITEM,
+            Self::ChangeTime => CHANGE_TIME_ITEM,
+            Self::Settle => SETTLE_ITEM,
+            Self::RenamePane => "Rename pane",
+            Self::WorkLink => "work link",
+            Self::OpenLink => OPEN_LINK_ITEM,
+            Self::CopyLink => COPY_LINK_ITEM,
+            Self::OpenFile(target) => target.file_item(),
+            Self::OpenFolder(target) => target.directory_item(),
+            Self::SendToNewAgent => SEND_TO_NEW_AGENT_ITEM,
+            Self::SendToExistingAgent => SEND_TO_EXISTING_AGENT_ITEM,
+            Self::ClearPaneName => "Clear pane name",
+            Self::SwapPane => "Swap with focused pane",
+            Self::SplitRight => "Split right",
+            Self::SplitDown => "Split down",
+            Self::Zoom => "Zoom",
+            Self::UseHerdrRightClick => "Use Herdr right-click menu",
+            Self::SendRightClicksToPane => "Send right-clicks to pane",
+            Self::ClosePane => "Close pane",
+        }
+    }
+
+    pub(crate) fn is_destructive(self) -> bool {
+        matches!(
+            self,
+            Self::CloseWorkspace
+                | Self::DeleteWorktree
+                | Self::Unsnooze
+                | Self::CloseTab
+                | Self::ClosePane
+        )
+    }
 }
 
 impl ContextMenuState {
+    pub(crate) fn label_for_action(&self, action: ContextMenuAction) -> &'static str {
+        match (action, &self.kind) {
+            (
+                ContextMenuAction::CloseWorkspace,
+                ContextMenuKind::GitWorkspace {
+                    is_linked_worktree: false,
+                    has_worktree_children: true,
+                    ..
+                },
+            ) => "Close group",
+            (
+                ContextMenuAction::WorkLink,
+                ContextMenuKind::Pane {
+                    linkable_work_link: Some(action),
+                    ..
+                },
+            ) => action.menu_item(),
+            (action, _) => action.label(),
+        }
+    }
+
     #[cfg(test)]
     pub fn items(&self) -> Vec<&'static str> {
         self.items_for_pane_state(false, true)
     }
 
-    pub(crate) fn items_for_pane_state(
+    pub(crate) fn actions_for_pane_state(
         &self,
         pane_snoozed: bool,
         pane_settleable: bool,
-    ) -> Vec<&'static str> {
+    ) -> Vec<ContextMenuAction> {
         match &self.kind {
-            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => vec![
+                ContextMenuAction::RenameWorkspace,
+                ContextMenuAction::CloseWorkspace,
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec![
+                ContextMenuAction::RenameWorkspace,
+                ContextMenuAction::CloseWorkspace,
+                ContextMenuAction::NewWorktree,
+                ContextMenuAction::OpenWorktree,
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => vec!["Rename", "Close", "Delete worktree checkout..."],
+            } => vec![
+                ContextMenuAction::RenameWorkspace,
+                ContextMenuAction::CloseWorkspace,
+                ContextMenuAction::DeleteWorktree,
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed,
                 ..
             } => vec![
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                if *collapsed { "Expand" } else { "Collapse" },
+                ContextMenuAction::RenameWorkspace,
+                ContextMenuAction::CloseWorkspace,
+                ContextMenuAction::NewWorktree,
+                ContextMenuAction::OpenWorktree,
+                if *collapsed {
+                    ContextMenuAction::ExpandWorkspace
+                } else {
+                    ContextMenuAction::CollapseWorkspace
+                },
             ],
             ContextMenuKind::Tab {
                 starred,
@@ -3394,25 +3573,29 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec![
-                    "New tab",
-                    "Rename",
-                    if *starred { UNSTAR_ITEM } else { STAR_ITEM },
-                    MOVE_TO_SUBGROUP_ITEM,
+                    ContextMenuAction::NewTab,
+                    ContextMenuAction::RenameTab,
+                    if *starred {
+                        ContextMenuAction::UnstarTab
+                    } else {
+                        ContextMenuAction::StarTab
+                    },
+                    ContextMenuAction::MoveToSubgroup,
                 ];
                 if *has_subgroup {
-                    items.push(REMOVE_FROM_SUBGROUP_ITEM);
+                    items.push(ContextMenuAction::RemoveFromSubgroup);
                 }
                 if snooze_target.is_some() {
                     if pane_snoozed {
-                        items.extend([UNSNOOZE_ITEM, CHANGE_TIME_ITEM]);
+                        items.extend([ContextMenuAction::Unsnooze, ContextMenuAction::ChangeTime]);
                     } else {
-                        items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
+                        items.extend([ContextMenuAction::Snooze, ContextMenuAction::SetTime]);
                     }
                 }
                 if settle_pane_id.is_some() && pane_settleable {
-                    items.push(SETTLE_ITEM);
+                    items.push(ContextMenuAction::Settle);
                 }
-                items.push("Close");
+                items.push(ContextMenuAction::CloseTab);
                 items
             }
             ContextMenuKind::Pane {
@@ -3427,53 +3610,71 @@ impl ContextMenuState {
                 has_agent_targets,
                 ..
             } => {
-                let mut items = vec!["Rename pane"];
+                let mut items = vec![ContextMenuAction::RenamePane];
                 if pane_snoozed {
-                    items.extend([UNSNOOZE_ITEM, CHANGE_TIME_ITEM]);
+                    items.extend([ContextMenuAction::Unsnooze, ContextMenuAction::ChangeTime]);
                 } else {
-                    items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
+                    items.extend([ContextMenuAction::Snooze, ContextMenuAction::SetTime]);
                 }
                 if let Some(action) = linkable_work_link {
-                    items.push(action.menu_item());
+                    let _ = action;
+                    items.push(ContextMenuAction::WorkLink);
                 }
                 if let Some(link) = link {
                     if crate::app::actions::safe_web_url(link).is_some() {
-                        items.push(OPEN_LINK_ITEM);
+                        items.push(ContextMenuAction::OpenLink);
                     }
-                    items.push(COPY_LINK_ITEM);
+                    items.push(ContextMenuAction::CopyLink);
                 }
                 if let Some(path) = path {
                     for target in open_with {
                         if !path.is_dir {
-                            items.push(target.file_item());
+                            items.push(ContextMenuAction::OpenFile(*target));
                         }
                         if path.directory().is_some() {
-                            items.push(target.directory_item());
+                            items.push(ContextMenuAction::OpenFolder(*target));
                         }
                     }
                 }
                 if send_text.is_some() {
-                    items.push(SEND_TO_NEW_AGENT_ITEM);
+                    items.push(ContextMenuAction::SendToNewAgent);
                     if *has_agent_targets {
-                        items.push(SEND_TO_EXISTING_AGENT_ITEM);
+                        items.push(ContextMenuAction::SendToExistingAgent);
                     }
                 }
                 if *has_manual_label {
-                    items.push("Clear pane name");
+                    items.push(ContextMenuAction::ClearPaneName);
                 }
                 if source_pane_id.is_some() {
-                    items.push("Swap with focused pane");
+                    items.push(ContextMenuAction::SwapPane);
                 }
-                items.extend(["Split right", "Split down", "Zoom"]);
+                items.extend([
+                    ContextMenuAction::SplitRight,
+                    ContextMenuAction::SplitDown,
+                    ContextMenuAction::Zoom,
+                ]);
                 items.push(if *right_click_passthrough {
-                    "Use Herdr right-click menu"
+                    ContextMenuAction::UseHerdrRightClick
                 } else {
-                    "Send right-clicks to pane"
+                    ContextMenuAction::SendRightClicksToPane
                 });
-                items.push("Close pane");
+                items.push(ContextMenuAction::ClosePane);
                 items
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn items_for_pane_state(
+        &self,
+        pane_snoozed: bool,
+        pane_settleable: bool,
+    ) -> Vec<&'static str> {
+        let actions = self.actions_for_pane_state(pane_snoozed, pane_settleable);
+        actions
+            .into_iter()
+            .map(|action| self.label_for_action(action))
+            .collect()
     }
 }
 
@@ -3734,6 +3935,9 @@ pub struct AppState {
     pub mode: Mode,
     /// Stable workspace identity captured when the close confirmation opens.
     pub(crate) confirm_close_workspace_id: Option<String>,
+    /// Stable target for an existing-object rename. Creation dialogs use their
+    /// own pending payload because no target exists yet.
+    pub(crate) rename_target: Option<RenameTarget>,
     pub should_quit: bool,
     /// In monolithic --no-session mode, detach exits the app because there is no server to detach from.
     pub detach_exits: bool,
@@ -5207,7 +5411,6 @@ impl AppState {
             &mut self.sidebar_selected_settled,
             &mut other.selected_settled,
         );
-        std::mem::swap(&mut self.sidebar_snooze, &mut other.snooze);
         std::mem::swap(
             &mut self.sidebar_settled_menu_target,
             &mut other.settled_menu_target,
@@ -5216,16 +5419,132 @@ impl AppState {
             &mut self.sidebar_settled_menu_selected,
             &mut other.settled_menu_selected,
         );
-        let app_context_menu_mode = self.mode == Mode::ContextMenu;
-        std::mem::swap(&mut self.context_menu, &mut other.context_menu);
-        if self.context_menu.is_some() {
-            self.mode = Mode::ContextMenu;
-        } else if app_context_menu_mode {
+        let app_modal_mode = matches!(
+            self.mode,
+            Mode::ContextMenu
+                | Mode::RenameWorkspace
+                | Mode::RenameTab
+                | Mode::RenamePane
+                | Mode::ConfirmClose
+        )
+        .then_some(self.mode);
+        let app_modal_active = app_modal_mode.is_some()
+            || self.context_menu.is_some()
+            || self.sidebar_snooze.is_some()
+            || self.rename_target.is_some()
+            || self.confirm_close_workspace_id.is_some();
+        let incoming_modal_active = other.modal.is_active();
+
+        std::mem::swap(&mut self.context_menu, &mut other.modal.context_menu);
+        std::mem::swap(&mut self.sidebar_snooze, &mut other.modal.snooze);
+        std::mem::swap(&mut self.rename_target, &mut other.modal.rename_target);
+        std::mem::swap(
+            &mut self.confirm_close_workspace_id,
+            &mut other.modal.confirm_close_workspace_id,
+        );
+        if app_modal_active || incoming_modal_active {
+            std::mem::swap(&mut self.name_input, &mut other.modal.name_input);
+            std::mem::swap(
+                &mut self.name_input_replace_on_type,
+                &mut other.modal.name_input_replace_on_type,
+            );
+            std::mem::swap(
+                &mut self.creating_new_tab,
+                &mut other.modal.creating_new_tab,
+            );
+            std::mem::swap(
+                &mut self.pending_workspace_create_cwd,
+                &mut other.modal.pending_workspace_create_cwd,
+            );
+            std::mem::swap(
+                &mut self.rename_tab_prefill,
+                &mut other.modal.rename_tab_prefill,
+            );
+        }
+        let incoming_mode = std::mem::replace(&mut other.modal.mode, app_modal_mode);
+        if let Some(mode) = incoming_mode {
+            self.mode = mode;
+        } else if app_modal_mode.is_some() {
             self.mode = if self.active.is_some() {
                 Mode::Terminal
             } else {
                 Mode::Navigate
             };
+        }
+    }
+
+    pub(crate) fn reconcile_client_modal_target(&mut self) {
+        let rename_target_exists = match self.rename_target.as_ref() {
+            Some(RenameTarget::Workspace { workspace_id }) => self
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == *workspace_id),
+            Some(RenameTarget::Tab {
+                workspace_id,
+                tab_id,
+            }) => self
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == *workspace_id)
+                .is_some_and(|workspace| {
+                    workspace.tabs.iter().any(|tab| {
+                        crate::workspace::public_tab_id_for_number(workspace_id, tab.number)
+                            == *tab_id
+                    })
+                }),
+            Some(RenameTarget::Pane {
+                workspace_id,
+                pane_id,
+            }) => self
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == *workspace_id)
+                .is_some_and(|workspace| workspace.pane_state(*pane_id).is_some()),
+            None => self.pending_workspace_create_cwd.is_some() || self.creating_new_tab,
+        };
+        if matches!(
+            self.mode,
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+        ) && !rename_target_exists
+        {
+            self.rename_target = None;
+            self.rename_pane_target = None;
+            self.rename_tab_prefill = None;
+            self.name_input.clear();
+            self.name_input_replace_on_type = false;
+            self.mode = if self.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+
+        if self.mode == Mode::ConfirmClose
+            && self
+                .confirm_close_workspace_id
+                .as_ref()
+                .is_none_or(|target| {
+                    !self
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == *target)
+                })
+        {
+            self.confirm_close_workspace_id = None;
+            self.mode = if self.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+
+        if self.sidebar_snooze.as_ref().is_some_and(|snooze| {
+            self.workspaces
+                .iter()
+                .find(|workspace| workspace.id == snooze.target.workspace_id)
+                .is_none_or(|workspace| workspace.pane_state(snooze.target.pane_id).is_none())
+        }) {
+            self.sidebar_snooze = None;
         }
     }
 
@@ -6287,6 +6606,7 @@ impl AppState {
             selected: 0,
             mode: Mode::Navigate,
             confirm_close_workspace_id: None,
+            rename_target: None,
             should_quit: false,
             detach_exits: false,
             detach_requested: false,
@@ -7004,7 +7324,7 @@ impl AppState {
         }
         if let Some(menu) = &self.context_menu {
             match menu.kind {
-                ContextMenuKind::Workspace { ws_idx }
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
                     assert_workspace_index(ws_idx, "context menu workspace")
                 }
@@ -7341,7 +7661,7 @@ mod tests {
         app.sidebar_snooze = Some(SidebarSnoozeUiState {
             target: target.clone(),
             anchor: (9, 3),
-            selected: 2,
+            selected: SidebarSnoozeMenuAction::SetTime,
             time_draft: Some("14:30".to_string()),
             error: Some("example".to_string()),
         });
@@ -7361,7 +7681,13 @@ mod tests {
                 snooze.time_draft.as_deref(),
                 snooze.error.as_deref(),
             )),
-            Some((&target, (9, 3), 2, Some("14:30"), Some("example")))
+            Some((
+                &target,
+                (9, 3),
+                SidebarSnoozeMenuAction::SetTime,
+                Some("14:30"),
+                Some("example")
+            ))
         );
         assert!(app.sidebar_focused);
     }
@@ -7374,12 +7700,19 @@ mod tests {
         app.selected = 0;
         app.mode = Mode::Terminal;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let workspace_id = app.workspaces[0].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            app.workspaces[0].tabs[0].number,
+        );
         let mut first_client = SidebarPresentationState::default();
         let mut second_client = SidebarPresentationState::default();
 
         app.swap_sidebar_presentation(&mut first_client);
         app.context_menu = Some(ContextMenuState {
             kind: ContextMenuKind::Tab {
+                workspace_id: workspace_id.clone(),
+                tab_id: tab_id.clone(),
                 ws_idx: 0,
                 tab_idx: 0,
                 settle_pane_id: Some(pane_id),
@@ -7389,7 +7722,7 @@ mod tests {
             },
             x: 7,
             y: 3,
-            list: MenuListState::new(4),
+            selected: ContextMenuAction::Snooze,
         });
         app.mode = Mode::ContextMenu;
         app.swap_sidebar_presentation(&mut first_client);
@@ -7405,6 +7738,8 @@ mod tests {
         assert_eq!(
             menu.kind,
             ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 settle_pane_id: Some(pane_id),
@@ -7413,7 +7748,65 @@ mod tests {
                 has_subgroup: false,
             }
         );
-        assert_eq!(menu.list.highlighted, 4);
+        assert_eq!(menu.selected, ContextMenuAction::Snooze);
+    }
+
+    #[test]
+    fn rename_and_context_menu_are_isolated_between_clients() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("client-modal")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let workspace_id = app.workspaces[0].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            app.workspaces[0].tabs[0].number,
+        );
+        let mut client_a = SidebarPresentationState::default();
+        let mut client_b = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut client_a);
+        app.mode = Mode::RenameTab;
+        app.name_input = "client a draft".into();
+        app.rename_target = Some(RenameTarget::Tab {
+            workspace_id: workspace_id.clone(),
+            tab_id: tab_id.clone(),
+        });
+        app.swap_sidebar_presentation(&mut client_a);
+
+        app.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.mode, Mode::Terminal);
+        assert!(app.rename_target.is_none());
+        assert!(app.name_input.is_empty());
+        app.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                workspace_id: workspace_id.clone(),
+                tab_id,
+                ws_idx: 0,
+                tab_idx: 0,
+                settle_pane_id: None,
+                snooze_target: None,
+                starred: false,
+                has_subgroup: false,
+            },
+            x: 2,
+            y: 2,
+            selected: ContextMenuAction::NewTab,
+        });
+        app.mode = Mode::ContextMenu;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 30));
+        assert_eq!(app.mode, Mode::ContextMenu);
+        app.swap_sidebar_presentation(&mut client_b);
+
+        app.swap_sidebar_presentation(&mut client_a);
+        assert_eq!(app.mode, Mode::RenameTab);
+        assert_eq!(app.name_input, "client a draft");
+        assert!(matches!(
+            app.rename_target,
+            Some(RenameTarget::Tab { ref workspace_id, .. }) if *workspace_id == app.workspaces[0].id
+        ));
+        assert!(app.context_menu.is_none());
     }
 
     #[test]
@@ -7824,6 +8217,8 @@ mod tests {
             .unwrap_or_default();
         ContextMenuState {
             kind: ContextMenuKind::Pane {
+                workspace_id: "workspace".into(),
+                tab_id: "workspace:t1".into(),
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id: crate::layout::PaneId::alloc(),
@@ -7839,7 +8234,7 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RenamePane,
         }
     }
 
@@ -7926,6 +8321,7 @@ mod tests {
     fn linked_worktree_context_menu_keeps_safe_close_and_explicit_remove() {
         let menu = ContextMenuState {
             kind: ContextMenuKind::GitWorkspace {
+                workspace_id: "workspace".into(),
                 ws_idx: 0,
                 is_linked_worktree: true,
                 has_worktree_children: false,
@@ -7933,7 +8329,7 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RenameWorkspace,
         };
 
         assert_eq!(
@@ -7946,6 +8342,7 @@ mod tests {
     fn git_workspace_context_menu_keeps_remove_for_managed_worktrees_only() {
         let menu = ContextMenuState {
             kind: ContextMenuKind::GitWorkspace {
+                workspace_id: "workspace".into(),
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: false,
@@ -7953,7 +8350,7 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RenameWorkspace,
         };
 
         assert_eq!(
@@ -7966,6 +8363,7 @@ mod tests {
     fn parent_worktree_context_menu_uses_repo_actions() {
         let menu = ContextMenuState {
             kind: ContextMenuKind::GitWorkspace {
+                workspace_id: "workspace".into(),
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: true,
@@ -7973,7 +8371,7 @@ mod tests {
             },
             x: 0,
             y: 0,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RenameWorkspace,
         };
 
         assert_eq!(

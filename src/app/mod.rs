@@ -1325,6 +1325,7 @@ impl App {
             session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
             confirm_close_workspace_id: None,
+            rename_target: None,
         };
 
         state.terminals = restored_terminals;
@@ -9741,6 +9742,9 @@ last_pane = "prefix+tab"
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::RenameWorkspace;
+        app.state.rename_target = Some(state::RenameTarget::Workspace {
+            workspace_id: app.state.workspaces[0].id.clone(),
+        });
         app.state.name_input = "new".into();
 
         app.route_client_input(b"\r".to_vec());
@@ -9759,10 +9763,13 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(state::ContextMenuState {
-            kind: state::ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[1].id.clone(),
+                ws_idx: 1,
+            },
             x: 2,
             y: 2,
-            list: state::MenuListState::new(1),
+            selected: state::ContextMenuAction::CloseWorkspace,
         });
         app.state.mode = Mode::ContextMenu;
 

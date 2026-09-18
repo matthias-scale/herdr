@@ -644,14 +644,22 @@ fn confirm_close_overlay_text(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> (String, String) {
+    let selected = app
+        .confirm_close_workspace_id
+        .as_ref()
+        .and_then(|workspace_id| {
+            app.workspaces
+                .iter()
+                .position(|workspace| workspace.id == *workspace_id)
+        });
     let ws_name = app
         .workspaces
-        .get(app.selected)
+        .get(selected.unwrap_or(app.selected))
         .map(|ws| ws.display_name_from(&app.terminals, terminal_runtimes))
         .unwrap_or_else(|| "?".to_string());
     let selected_space = app
         .workspaces
-        .get(app.selected)
+        .get(selected.unwrap_or(app.selected))
         .and_then(|ws| ws.worktree_space());
     let group_member_indices = selected_space
         .filter(|space| !space.is_linked_worktree)
@@ -676,7 +684,7 @@ fn confirm_close_overlay_text(
             .sum()
     } else {
         app.workspaces
-            .get(app.selected)
+            .get(selected.unwrap_or(app.selected))
             .map(|ws| ws.layout.pane_count())
             .unwrap_or(0)
     };
@@ -1107,7 +1115,7 @@ mod tests {
                 pane_id: crate::layout::PaneId::alloc(),
             },
             anchor: (0, 0),
-            selected: 0,
+            selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: Some("12:30".into()),
             error: Some("Time must be later than now".into()),
         });
@@ -1175,7 +1183,10 @@ mod tests {
     fn rename_overlay_caret_reaches_the_frame_the_server_sends() {
         let input = rename_input_rect(RENAME_AREA);
         let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        let workspace_id = app.workspaces[0].id.clone();
         app.mode = Mode::RenameWorkspace;
+        app.rename_target = Some(crate::app::state::RenameTarget::Workspace { workspace_id });
         app.name_input = "ab".into();
 
         // The widget tests above stop at the ratatui frame. This one goes through

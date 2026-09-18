@@ -5184,8 +5184,8 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
-                    MouseAction::SnoozeMenu { index } => {
-                        self.apply_sidebar_snooze_menu_action(index)
+                    MouseAction::SnoozeMenu { action } => {
+                        self.apply_sidebar_snooze_menu_action(action)
                     }
                     MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
                     MouseAction::OpenSnoozeMenu {
@@ -5280,10 +5280,10 @@ impl App {
                         self.apply_rename_mouse_action_via_api(action)
                     }
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
-                    MouseAction::ContextMenu { menu, idx } => {
+                    MouseAction::ContextMenu { menu, action } => {
                         let menu = *menu;
                         modal::leave_modal(&mut self.state);
-                        self.apply_context_menu_action_via_api(menu, idx)
+                        self.apply_context_menu_action_via_api(menu, action)
                     }
                 }
             }

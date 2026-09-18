@@ -1243,7 +1243,10 @@ impl super::super::App {
                 pane_id,
             },
             anchor: (column, row),
-            selected: 0,
+            selected: crate::app::state::sidebar_snooze_menu_items(
+                self.state.pane_is_snoozed(ws_idx, pane_id),
+            )[0]
+            .1,
             time_draft: None,
             error: None,
         });
@@ -1286,7 +1289,7 @@ impl super::super::App {
                 pane_id,
             },
             anchor,
-            selected: 0,
+            selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: Some(prefill),
             error: None,
         });
@@ -1297,7 +1300,10 @@ impl super::super::App {
         };
     }
 
-    pub(crate) fn apply_sidebar_snooze_menu_action(&mut self, index: usize) {
+    pub(crate) fn apply_sidebar_snooze_menu_action(
+        &mut self,
+        selected: crate::app::state::SidebarSnoozeMenuAction,
+    ) {
         let Some(snooze) = self.state.sidebar_snooze.as_ref() else {
             return;
         };
@@ -1314,8 +1320,9 @@ impl super::super::App {
             return;
         };
         let snoozed = self.state.pane_is_snoozed(ws_idx, target.pane_id);
-        let Some((_, action)) = crate::app::state::sidebar_snooze_menu_items(snoozed).get(index)
-        else {
+        let actions = crate::app::state::sidebar_snooze_menu_items(snoozed);
+        let Some((_, action)) = actions.iter().find(|(_, action)| *action == selected) else {
+            self.state.sidebar_snooze = None;
             return;
         };
         let Some(public_pane_id) = self.public_pane_id(ws_idx, target.pane_id) else {
@@ -1364,27 +1371,43 @@ impl super::super::App {
         };
         let item_count = crate::app::state::sidebar_snooze_menu_items(
             self.state.pane_is_snoozed(ws_idx, snooze.target.pane_id),
-        )
-        .len();
+        );
         match key.code {
             KeyCode::Esc => self.state.sidebar_snooze = None,
             KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(snooze) = self.state.sidebar_snooze.as_mut() {
-                    snooze.selected = snooze.selected.saturating_sub(1);
+                let selected = item_count
+                    .iter()
+                    .position(|(_, action)| *action == snooze.selected)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                if let (Some(snooze), Some((_, action))) =
+                    (self.state.sidebar_snooze.as_mut(), item_count.get(selected))
+                {
+                    snooze.selected = *action;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(snooze) = self.state.sidebar_snooze.as_mut() {
-                    snooze.selected = snooze.selected.saturating_add(1).min(item_count - 1);
+                let selected = item_count
+                    .iter()
+                    .position(|(_, action)| *action == snooze.selected)
+                    .unwrap_or(0)
+                    .saturating_add(1)
+                    .min(item_count.len().saturating_sub(1));
+                if let (Some(snooze), Some((_, action))) =
+                    (self.state.sidebar_snooze.as_mut(), item_count.get(selected))
+                {
+                    snooze.selected = *action;
                 }
             }
             KeyCode::Enter => {
-                let index = self
+                let action = self
                     .state
                     .sidebar_snooze
                     .as_ref()
-                    .map_or(0, |snooze| snooze.selected);
-                self.apply_sidebar_snooze_menu_action(index);
+                    .map(|snooze| snooze.selected);
+                if let Some(action) = action {
+                    self.apply_sidebar_snooze_menu_action(action);
+                }
             }
             _ => {}
         }

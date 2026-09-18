@@ -5,8 +5,8 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
+        AddActionState, AppState, ContextMenuAction, ContextMenuKind, ContextMenuState, DragState,
+        DragTarget, HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
         RemoteAgentPressState, RightClickPassthroughGesture, TabPressState, ViewLayout,
         WorkspacePressState,
     },
@@ -42,7 +42,7 @@ pub(super) enum MouseAction {
         index: usize,
     },
     SnoozeMenu {
-        index: usize,
+        action: crate::app::state::SidebarSnoozeMenuAction,
     },
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
     OpenSnoozeMenu {
@@ -100,7 +100,7 @@ pub(super) enum MouseAction {
         /// Boxed: the pane menu carries the clicked link, path and text, and
         /// that payload would otherwise set the size of every mouse action.
         menu: Box<ContextMenuState>,
-        idx: usize,
+        action: ContextMenuAction,
     },
     /// Open a Symphony job: its checkout terminal plus the dock surface bound
     /// to it. Index into the current snapshot, resolved by the app because
@@ -619,8 +619,19 @@ impl AppState {
                 .is_some_and(|snooze| snooze.time_draft.is_none())
         {
             if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
-                if let Some(snooze) = self.sidebar_snooze.as_mut() {
-                    snooze.selected = index;
+                let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
+                    let ws_idx = self
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
+                    crate::app::state::sidebar_snooze_menu_items(
+                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                    )
+                    .get(index)
+                    .map(|(_, action)| *action)
+                });
+                if let (Some(snooze), Some(action)) = (self.sidebar_snooze.as_mut(), action) {
+                    snooze.selected = action;
                 }
             }
             return None;
@@ -632,7 +643,20 @@ impl AppState {
         {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
-                    return Some(MouseAction::SnoozeMenu { index });
+                    let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
+                        let ws_idx = self
+                            .workspaces
+                            .iter()
+                            .position(|workspace| workspace.id == snooze.target.workspace_id)?;
+                        crate::app::state::sidebar_snooze_menu_items(
+                            self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                        )
+                        .get(index)
+                        .map(|(_, action)| *action)
+                    });
+                    if let Some(action) = action {
+                        return Some(MouseAction::SnoozeMenu { action });
+                    }
                 }
                 self.sidebar_snooze = None;
             }
@@ -1232,12 +1256,12 @@ impl AppState {
                 }
 
                 if self.mode == Mode::ContextMenu {
-                    let item_idx = self.context_menu_item_at(mouse.column, mouse.row);
+                    let action = self.context_menu_action_at(mouse.column, mouse.row);
                     if let Some(menu) = self.context_menu.take() {
-                        if let Some(idx) = item_idx {
+                        if let Some(action) = action {
                             return Some(MouseAction::ContextMenu {
                                 menu: Box::new(menu),
-                                idx,
+                                action,
                             });
                         } else {
                             leave_modal(self);
@@ -2202,7 +2226,9 @@ impl AppState {
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
                 let hovered = self.context_menu_item_at(mouse.column, mouse.row);
                 if let Some(menu) = &mut self.context_menu {
-                    menu.list.hover(hovered);
+                    if let Some(action) = hovered {
+                        menu.selected = action;
+                    }
                 }
             }
 
@@ -2235,8 +2261,15 @@ impl AppState {
                     let settle_pane_id =
                         settle_pane_id.filter(|pane_id| !self.pane_is_snoozed(ws_idx, *pane_id));
                     self.selected = ws_idx;
+                    let workspace_id = self.workspaces[ws_idx].id.clone();
+                    let tab_id = crate::workspace::public_tab_id_for_number(
+                        &workspace_id,
+                        self.workspaces[ws_idx].tabs[tab_idx].number,
+                    );
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab {
+                            workspace_id,
+                            tab_id,
                             ws_idx,
                             tab_idx,
                             settle_pane_id,
@@ -2250,7 +2283,7 @@ impl AppState {
                         },
                         x: mouse.column,
                         y: mouse.row,
-                        list: MenuListState::new(0),
+                        selected: ContextMenuAction::NewTab,
                     });
                     self.mode = Mode::ContextMenu;
                     return None;
@@ -2280,6 +2313,7 @@ impl AppState {
                                     .as_ref()
                                     .is_some_and(|space| !space.is_linked_worktree);
                             show_git_menu.then_some(ContextMenuKind::GitWorkspace {
+                                workspace_id: ws.id.clone(),
                                 ws_idx: idx,
                                 is_linked_worktree,
                                 has_worktree_children: group_state.is_some(),
@@ -2288,12 +2322,15 @@ impl AppState {
                                     .is_some_and(|(_, collapsed)| *collapsed),
                             })
                         })
-                        .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
+                        .unwrap_or_else(|| ContextMenuKind::Workspace {
+                            workspace_id: self.workspaces[idx].id.clone(),
+                            ws_idx: idx,
+                        });
                     self.context_menu = Some(ContextMenuState {
                         kind,
                         x: mouse.column,
                         y: mouse.row,
-                        list: MenuListState::new(0),
+                        selected: ContextMenuAction::RenameWorkspace,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -2306,8 +2343,15 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
+                    let workspace_id = self.workspaces[ws_idx].id.clone();
+                    let tab_id = crate::workspace::public_tab_id_for_number(
+                        &workspace_id,
+                        self.workspaces[ws_idx].tabs[tab_idx].number,
+                    );
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab {
+                            workspace_id,
+                            tab_id,
                             ws_idx,
                             tab_idx,
                             settle_pane_id: None,
@@ -2321,7 +2365,7 @@ impl AppState {
                         },
                         x: mouse.column,
                         y: mouse.row,
-                        list: MenuListState::new(0),
+                        selected: ContextMenuAction::NewTab,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -2396,8 +2440,15 @@ impl AppState {
                         .or_else(|| path.as_ref().map(|path| path.path.display().to_string()));
                     let has_agent_targets =
                         send_text.is_some() && self.has_agent_other_than(ws_idx, info.id);
+                    let workspace_id = self.workspaces[ws_idx].id.clone();
+                    let tab_id = crate::workspace::public_tab_id_for_number(
+                        &workspace_id,
+                        self.workspaces[ws_idx].tabs[tab_idx].number,
+                    );
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
+                            workspace_id,
+                            tab_id,
                             ws_idx,
                             tab_idx,
                             pane_id: info.id,
@@ -2413,7 +2464,7 @@ impl AppState {
                         },
                         x: mouse.column,
                         y: mouse.row,
-                        list: MenuListState::new(0),
+                        selected: ContextMenuAction::RenamePane,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -2576,44 +2627,133 @@ impl AppState {
             .is_some_and(|tab| tab.starred)
     }
 
-    pub(crate) fn context_menu_items(&self, menu: &ContextMenuState) -> Vec<&'static str> {
-        let target = match &menu.kind {
+    pub(crate) fn context_menu_target_indices(
+        &self,
+        menu: &ContextMenuState,
+    ) -> Option<(usize, Option<usize>)> {
+        let (workspace_id, tab_id) = match &menu.kind {
+            ContextMenuKind::Workspace { workspace_id, .. }
+            | ContextMenuKind::GitWorkspace { workspace_id, .. } => (workspace_id, None),
             ContextMenuKind::Tab {
-                ws_idx,
-                snooze_target: Some(pane_id),
+                workspace_id,
+                tab_id,
                 ..
             }
             | ContextMenuKind::Pane {
-                ws_idx, pane_id, ..
-            } => Some((*ws_idx, *pane_id)),
+                workspace_id,
+                tab_id,
+                ..
+            } => (workspace_id, Some(tab_id)),
+        };
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == *workspace_id)?;
+        let tab_idx = tab_id.and_then(|tab_id| {
+            self.workspaces[ws_idx].tabs.iter().position(|tab| {
+                crate::workspace::public_tab_id_for_number(workspace_id, tab.number) == *tab_id
+            })
+        });
+        if tab_id.is_some() && tab_idx.is_none() {
+            return None;
+        }
+        Some((ws_idx, tab_idx))
+    }
+
+    pub(crate) fn rebase_context_menu_indices(&self, menu: &mut ContextMenuState) -> bool {
+        let Some((ws_idx, tab_idx)) = self.context_menu_target_indices(menu) else {
+            return false;
+        };
+        match &mut menu.kind {
+            ContextMenuKind::Workspace { ws_idx: cached, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx: cached, .. } => *cached = ws_idx,
+            ContextMenuKind::Tab {
+                ws_idx: cached_ws,
+                tab_idx: cached_tab,
+                ..
+            }
+            | ContextMenuKind::Pane {
+                ws_idx: cached_ws,
+                tab_idx: cached_tab,
+                ..
+            } => {
+                let Some(tab_idx) = tab_idx else {
+                    return false;
+                };
+                *cached_ws = ws_idx;
+                *cached_tab = tab_idx;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn context_menu_actions(&self, menu: &ContextMenuState) -> Vec<ContextMenuAction> {
+        let Some((ws_idx, tab_idx)) = self.context_menu_target_indices(menu) else {
+            return Vec::new();
+        };
+        let mut live_menu = menu.clone();
+        if let (
+            Some(tab_idx),
+            ContextMenuKind::Tab {
+                starred,
+                has_subgroup,
+                ..
+            },
+        ) = (tab_idx, &mut live_menu.kind)
+        {
+            if let Some(tab) = self.workspaces[ws_idx].tabs.get(tab_idx) {
+                *starred = tab.starred;
+                *has_subgroup = tab.subgroup().is_some();
+            }
+        }
+        let target = match &menu.kind {
+            ContextMenuKind::Tab {
+                snooze_target: Some(pane_id),
+                ..
+            }
+            | ContextMenuKind::Pane { pane_id, .. } => Some((ws_idx, *pane_id)),
             _ => None,
         };
         let snoozed = target.is_some_and(|(ws_idx, pane_id)| self.pane_is_snoozed(ws_idx, pane_id));
         let settleable = match &menu.kind {
             ContextMenuKind::Tab {
-                ws_idx,
                 settle_pane_id: Some(pane_id),
                 ..
             } => self
                 .workspaces
-                .get(*ws_idx)
+                .get(ws_idx)
                 .and_then(|workspace| workspace.pane_state(*pane_id))
                 .is_some_and(|_| {
-                    !self.pane_is_settled(*ws_idx, *pane_id)
-                        && !self.pane_is_snoozed(*ws_idx, *pane_id)
+                    !self.pane_is_settled(ws_idx, *pane_id)
+                        && !self.pane_is_snoozed(ws_idx, *pane_id)
                 }),
             _ => true,
         };
-        menu.items_for_pane_state(snoozed, settleable)
+        live_menu.actions_for_pane_state(snoozed, settleable)
+    }
+
+    pub(crate) fn context_menu_items(&self, menu: &ContextMenuState) -> Vec<&'static str> {
+        self.context_menu_actions(menu)
+            .into_iter()
+            .map(|action| menu.label_for_action(action))
+            .collect()
     }
 
     pub(crate) fn reconcile_context_menu_selection(&mut self) {
-        let item_count = self
-            .context_menu
-            .as_ref()
-            .map_or(0, |menu| self.context_menu_items(menu).len());
-        if let Some(menu) = self.context_menu.as_mut() {
-            menu.list.highlighted = menu.list.highlighted.min(item_count.saturating_sub(1));
+        let Some(menu) = self.context_menu.as_ref() else {
+            return;
+        };
+        let actions = self.context_menu_actions(menu);
+        if actions.is_empty() {
+            self.context_menu = None;
+            leave_modal(self);
+            return;
+        }
+        if !actions.contains(&menu.selected) {
+            let fallback = actions.into_iter().find(|action| !action.is_destructive());
+            if let (Some(menu), Some(fallback)) = (self.context_menu.as_mut(), fallback) {
+                menu.selected = fallback;
+            }
         }
     }
 
@@ -2637,7 +2777,7 @@ impl AppState {
         crate::ui::confirm_close_popup_rect(self.view.terminal_area).unwrap_or_default()
     }
 
-    fn context_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+    fn context_menu_item_at(&self, col: u16, row: u16) -> Option<ContextMenuAction> {
         let menu_rect = self.context_menu_rect()?;
         let inner_x = menu_rect.x + 1;
         let inner_y = menu_rect.y + 1;
@@ -2653,10 +2793,18 @@ impl AppState {
             && row >= inner_y
             && row < inner_y + inner_h.min(item_count)
         {
-            Some((row - inner_y) as usize)
+            self.context_menu.as_ref().and_then(|menu| {
+                self.context_menu_actions(menu)
+                    .get((row - inner_y) as usize)
+                    .copied()
+            })
         } else {
             None
         }
+    }
+
+    fn context_menu_action_at(&self, col: u16, row: u16) -> Option<ContextMenuAction> {
+        self.context_menu_item_at(col, row)
     }
 
     pub(super) fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -3779,13 +3927,23 @@ mod tests {
     use crate::app::input::modal::handle_context_menu_key;
     use crate::{
         app::state::{
-            ContextMenuKind, ContextMenuState, InfoPanelLinkRow, MenuListState, Mode, ViewLayout,
+            ContextMenuAction, ContextMenuKind, ContextMenuState, InfoPanelLinkRow, Mode,
+            ViewLayout,
         },
         app::App,
         detect::{Agent, AgentState},
         input::TerminalKey,
         workspace::Workspace,
     };
+
+    fn context_tab_ids(app: &App, ws_idx: usize, tab_idx: usize) -> (String, String) {
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            app.state.workspaces[ws_idx].tabs[tab_idx].number,
+        );
+        (workspace_id, tab_id)
+    }
 
     /// One workspace laid out for real, so a click lands on pane content.
     fn app_with_clickable_pane() -> (App, crate::layout::PaneId, Rect) {
@@ -4121,7 +4279,12 @@ mod tests {
             .as_ref()
             .expect("snooze duration menu");
         let pane_id = menu.target.pane_id;
-        assert_eq!(menu.selected, 0);
+        assert_eq!(
+            menu.selected,
+            crate::app::state::SidebarSnoozeMenuAction::Preset(
+                crate::app::state::SidebarSnoozePreset::Duration(15 * 60)
+            )
+        );
         assert_eq!(crate::app::state::SNOOZE_MENU_ITEMS.len(), 5);
 
         let layout = crate::ui::sidebar_snooze_menu_layout(&app.state, Rect::new(0, 0, 60, 20))
@@ -5209,6 +5372,11 @@ mod tests {
         assert_eq!(
             menu.kind,
             ContextMenuKind::Tab {
+                workspace_id: app.state.workspaces[1].id.clone(),
+                tab_id: crate::workspace::public_tab_id_for_number(
+                    &app.state.workspaces[1].id,
+                    app.state.workspaces[1].tabs[0].number,
+                ),
                 ws_idx: 1,
                 tab_idx: 0,
                 starred: false,
@@ -5419,7 +5587,7 @@ mod tests {
         assert!(
             matches!(
                 menu.kind,
-                ContextMenuKind::Workspace { ws_idx: 1 }
+                ContextMenuKind::Workspace { ws_idx: 1, .. }
                     | ContextMenuKind::GitWorkspace { ws_idx: 1, .. }
             ),
             "{:?}",
@@ -7349,7 +7517,8 @@ mod tests {
             .iter()
             .position(|item| *item == "Swap with focused pane")
             .expect("swap item");
-        menu.list.highlighted = swap_idx;
+        assert_eq!(menu.items()[swap_idx], "Swap with focused pane");
+        menu.selected = ContextMenuAction::SwapPane;
 
         handle_context_menu_key(
             &mut app.state,
@@ -7553,18 +7722,28 @@ mod tests {
     #[test]
     fn hovering_context_menu_updates_highlight() {
         let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("menu")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let workspace_id = app.state.workspaces[0].id.clone();
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            kind: ContextMenuKind::Workspace {
+                workspace_id,
+                ws_idx: 0,
+            },
             x: 2,
             y: 2,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::RenameWorkspace,
         });
         app.state.mode = Mode::ContextMenu;
 
         let menu = app.state.context_menu_rect().unwrap();
         app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
 
-        assert_eq!(app.state.context_menu.unwrap().list.highlighted, 1);
+        assert_eq!(
+            app.state.context_menu.unwrap().selected,
+            ContextMenuAction::CloseWorkspace
+        );
     }
 
     #[test]
@@ -7696,7 +7875,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("old")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameWorkspace;
+        crate::app::input::modal::open_rename_workspace(&mut app.state, &app.terminal_runtimes, 0);
         app.state.name_input = "new".into();
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
@@ -7849,10 +8028,13 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[1].id.clone(),
+                ws_idx: 1,
+            },
             x: 2,
             y: 2,
-            list: MenuListState::new(1),
+            selected: ContextMenuAction::CloseWorkspace,
         });
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
@@ -7889,10 +8071,13 @@ mod tests {
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[1].id.clone(),
+                ws_idx: 1,
+            },
             x: 2,
             y: 2,
-            list: MenuListState::new(1),
+            selected: ContextMenuAction::CloseWorkspace,
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -7908,6 +8093,88 @@ mod tests {
         assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
         }));
+    }
+
+    #[test]
+    fn right_click_set_time_renders_inline_past_time_error() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("set-time")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 100, 30);
+        crate::ui::compute_view(&mut app.state, area);
+        let pane = app.state.view.pane_infos[0].clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            pane.inner_rect.x,
+            pane.inner_rect.y,
+        ));
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        let set_time_row = app
+            .state
+            .context_menu_actions(menu)
+            .iter()
+            .position(|action| *action == ContextMenuAction::SetTime)
+            .expect("Set time action");
+        let menu_rect = app.state.context_menu_rect().expect("rendered menu");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Set time"));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_rect.x + 2,
+            menu_rect.y + 1 + set_time_row as u16,
+        ));
+        let now = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+        let local_now = crate::platform::local_datetime_at(now).expect("local clock");
+        let minutes = u16::from(local_now.hour()) * 60 + u16::from(local_now.minute());
+        let past = minutes.saturating_sub(1);
+        let draft = format!("{:02}:{:02}", past / 60, past % 60);
+        app.state
+            .sidebar_snooze
+            .as_mut()
+            .and_then(|snooze| snooze.time_draft.as_mut())
+            .expect("set-time editor")
+            .clone_from(&draft);
+        crate::ui::compute_view(&mut app.state, area);
+        let inner = app.state.rename_modal_inner().expect("set-time modal");
+        let (save, _, _) = crate::ui::rename_button_rects(inner);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            save.x + 1,
+            save.y,
+        ));
+
+        assert_eq!(
+            app.state
+                .sidebar_snooze
+                .as_ref()
+                .and_then(|snooze| snooze.error.as_deref()),
+            Some("Time must be later than now")
+        );
+        terminal
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Time must be later than now"));
     }
 
     #[cfg(unix)]
@@ -7935,8 +8202,11 @@ mod tests {
         app.state.selected = 0;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let runtime_count = app.terminal_runtimes.len();
-        let mut menu = ContextMenuState {
+        let (workspace_id, tab_id) = context_tab_ids(&app, 0, 0);
+        let menu = ContextMenuState {
             kind: ContextMenuKind::Pane {
+                workspace_id,
+                tab_id,
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -7952,13 +8222,9 @@ mod tests {
             },
             x: 2,
             y: 2,
-            list: MenuListState::new(0),
+            selected: ContextMenuAction::SplitRight,
         };
-        menu.list.highlighted = menu
-            .items()
-            .iter()
-            .position(|item| *item == "Split right")
-            .expect("split-right menu item");
+        assert!(menu.items().contains(&"Split right"));
         app.state.context_menu = Some(menu);
         app.state.mode = Mode::ContextMenu;
 
@@ -8508,6 +8774,11 @@ mod tests {
         assert_eq!(
             menu.kind,
             ContextMenuKind::Tab {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                tab_id: crate::workspace::public_tab_id_for_number(
+                    &app.state.workspaces[0].id,
+                    app.state.workspaces[0].tabs[1].number,
+                ),
                 ws_idx: 0,
                 tab_idx: 1,
                 starred: false,
