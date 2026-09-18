@@ -11274,7 +11274,7 @@ pub(crate) mod tests {
         idle.state = AgentState::Idle;
         for (entry, color) in [
             (attention, app.palette.peach),
-            (blocked, app.palette.red),
+            (blocked, app.palette.blue),
             (idle, app.palette.green),
         ] {
             let agent_ref =
@@ -12515,7 +12515,7 @@ pub(crate) mod tests {
 
         entry.open_blockers = true;
         assert_ne!(compact_row_dot(&entry), "◌");
-        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(compact_row_color(&entry, &palette), palette.yellow);
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
     }
 
