@@ -444,7 +444,26 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
 }
 
 pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::PaneId) {
-    let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) else {
+    let Some(workspace_id) = state
+        .active
+        .and_then(|i| state.workspaces.get(i))
+        .map(|workspace| workspace.id.clone())
+    else {
+        return;
+    };
+    open_rename_pane_in_workspace(state, &workspace_id, pane_id);
+}
+
+fn open_rename_pane_in_workspace(
+    state: &mut AppState,
+    workspace_id: &str,
+    pane_id: crate::layout::PaneId,
+) {
+    let Some(ws) = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
         return;
     };
     let Some(pane) = ws.pane_state(pane_id) else {
@@ -456,7 +475,7 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = Some(pane_id);
     state.rename_target = Some(crate::app::state::RenameTarget::Pane {
-        workspace_id: ws.id.clone(),
+        workspace_id: workspace_id.to_string(),
         pane_id,
     });
     state.name_input = terminal
@@ -1074,8 +1093,15 @@ pub(super) fn apply_context_menu_action(
                 };
             }
         }
-        (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
-            open_rename_pane(state, pane_id);
+        (
+            ContextMenuKind::Pane {
+                workspace_id,
+                pane_id,
+                ..
+            },
+            Some("Rename pane"),
+        ) => {
+            open_rename_pane_in_workspace(state, &workspace_id, pane_id);
         }
         (
             ContextMenuKind::Pane {
@@ -1866,8 +1892,15 @@ impl App {
                     leave_modal(&mut self.state);
                 }
             }
-            (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
-                open_rename_pane(&mut self.state, pane_id);
+            (
+                ContextMenuKind::Pane {
+                    workspace_id,
+                    pane_id,
+                    ..
+                },
+                Some("Rename pane"),
+            ) => {
+                open_rename_pane_in_workspace(&mut self.state, &workspace_id, pane_id);
             }
             (
                 ContextMenuKind::Pane {
@@ -3706,6 +3739,52 @@ mod tests {
             .find(|tab| tab.number == tab_number)
             .expect("original tab");
         assert_eq!(tab.custom_name.as_deref(), Some("renamed tab"));
+    }
+
+    #[test]
+    fn pane_rename_menu_uses_its_workspace_after_focus_changes() {
+        let mut app = app_with_test_workspaces(&["first", "second"]);
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[1].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            app.state.workspaces[1].tabs[0].number,
+        );
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                workspace_id: workspace_id.clone(),
+                tab_id,
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id,
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+                linkable_work_link: None,
+                link: None,
+                path: None,
+                open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
+            },
+            x: 3,
+            y: 2,
+            selected: ContextMenuAction::RenamePane,
+        };
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        app.apply_context_menu_action_via_api(menu, ContextMenuAction::RenamePane);
+
+        assert_eq!(app.state.mode, Mode::RenamePane);
+        assert_eq!(
+            app.state.rename_target,
+            Some(crate::app::state::RenameTarget::Pane {
+                workspace_id,
+                pane_id,
+            })
+        );
     }
 
     #[test]
