@@ -654,6 +654,9 @@ fn extract_agent_links(bytes: &[u8], finalize_tail: bool) -> AgentLinkExtraction
             url_domain(&url).is_some().then_some(url)
         })
         .collect::<Vec<_>>();
+    if !finalize_tail && has_unterminated_url_candidate(&visible) {
+        unterminated_url = true;
+    }
     output_urls.sort_unstable();
     output_urls.dedup();
     osc8_urls.sort_unstable();
@@ -665,6 +668,19 @@ fn extract_agent_links(bytes: &[u8], finalize_tail: bool) -> AgentLinkExtraction
         },
         unterminated_url,
     }
+}
+
+fn has_unterminated_url_candidate(text: &str) -> bool {
+    let tail_start = text
+        .char_indices()
+        .rev()
+        .find(|(_, character)| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, '"' | '\'' | '<' | '>')
+        })
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    find_scheme_start(&text.as_bytes()[tail_start..]).is_some()
 }
 
 fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>) {
@@ -864,6 +880,26 @@ mod tests {
 
         gate.observe_chunk(b"/path\n");
         let links = gate.take_links().expect("terminated link extraction");
+        assert_eq!(links.output_urls, vec!["https://split.example.test/path"]);
+    }
+
+    #[test]
+    fn scheme_only_tail_survives_a_detection_tick_between_chunks() {
+        let gate = LinkExtractionGate::default();
+        let started = Instant::now();
+        gate.observe_chunk_at(b"https://", started);
+
+        assert!(gate
+            .take_links_at(started + Duration::from_millis(700))
+            .is_none());
+
+        gate.observe_chunk_at(
+            b"split.example.test/path\n",
+            started + Duration::from_millis(700),
+        );
+        let links = gate
+            .take_links_at(started + Duration::from_millis(701))
+            .expect("terminated link extraction");
         assert_eq!(links.output_urls, vec!["https://split.example.test/path"]);
     }
 
