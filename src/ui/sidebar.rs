@@ -22313,8 +22313,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Status);
         assert_eq!(
             sidebar_tab_order(&app),
-            vec![4, 3, 2, 1, 0],
-            "blocked first, then yellow attention, then working and idle"
+            vec![4, 2, 3, 1, 0],
+            "structured action points and blocked lifecycle precede working and idle"
         );
 
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Recent);
