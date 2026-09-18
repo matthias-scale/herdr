@@ -696,6 +696,8 @@ pub struct TerminalState {
     /// Visible work can start a turn before the next lifecycle hook fires.
     /// This timestamp owns that gap and its watchdog budget.
     unreported_turn_started_at: Option<Instant>,
+    /// Runtime identity for background observations sampled during one agent turn.
+    agent_turn_generation: u64,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
     agent_activity_owner: Option<AgentActivityOwner>,
@@ -768,6 +770,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             blocked_since: None,
             unreported_turn_started_at: None,
+            agent_turn_generation: 0,
             agent_active_since: None,
             agent_last_active_at: None,
             agent_activity_owner: None,
@@ -2148,6 +2151,9 @@ impl TerminalState {
         self.supervisor_stale = false;
         self.stale_resolution = None;
         self.unreported_turn_started_at = starts_turn.then_some(now);
+        if starts_turn {
+            self.agent_turn_generation = self.agent_turn_generation.wrapping_add(1);
+        }
         if closing_report_is_older {
             self.clear_closing_task_report(now);
         }
@@ -2397,6 +2403,10 @@ impl TerminalState {
                 .as_ref()
                 .map(|authority| authority.reported_at)
         })
+    }
+
+    pub(crate) fn agent_turn_generation(&self) -> u64 {
+        self.agent_turn_generation
     }
 
     /// True while the pane only reads as working because sub-process evidence
