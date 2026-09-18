@@ -287,7 +287,7 @@ struct ClosingReportScope {
     turn_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyClosingReportGuard {
     source: String,
     agent_label: String,
@@ -371,6 +371,8 @@ struct ClosingReportHandoffState {
     retired_pending_completion: bool,
     #[serde(default)]
     requires_legacy_session_guard: bool,
+    #[serde(default)]
+    legacy_session_guard: Option<LegacyClosingReportGuard>,
     gates: Vec<crate::api::schema::ClosingBlockItem>,
     items: Vec<crate::api::schema::ClosingBlockItem>,
     decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -395,6 +397,7 @@ impl ClosingReportHandoffState {
             scope_turn_seq: report.scope.turn_seq,
             retired_pending_completion: report.retired_pending_completion,
             requires_legacy_session_guard: report.requires_legacy_session_guard,
+            legacy_session_guard: report.legacy_session_guard.clone(),
             gates: report.closing_gates.clone(),
             items: report.closing_items.clone(),
             decisions: report.closing_decisions.clone(),
@@ -422,7 +425,7 @@ impl ClosingReportHandoffState {
             },
             retired_pending_completion: self.retired_pending_completion,
             requires_legacy_session_guard: self.requires_legacy_session_guard,
-            legacy_session_guard: None,
+            legacy_session_guard: self.legacy_session_guard,
             closing_gates: self.gates,
             closing_items: self.items,
             closing_decisions: self.decisions,
@@ -5631,6 +5634,77 @@ mod tests {
         );
         assert_eq!(restored.state, AgentState::Unknown);
         assert!(restored.hook_authority.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_legacy_guard_for_v2_report_and_done_projection() {
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        let session_id = "claude-session";
+        source.set_hook_authority_with_session_ref(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some(crate::agent_resume::AgentSessionRef::id(session_id).unwrap()),
+            Some(10),
+        );
+        source.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the release".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        source.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            captured_at,
+        );
+        source.record_legacy_closing_report_precursor(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            Some(session_id.into()),
+            Some(10),
+        );
+        source
+            .closing_report
+            .as_mut()
+            .expect("closing report")
+            .requires_legacy_session_guard = true;
+
+        let encoded = serde_json::to_string(
+            &source
+                .terminal_agent_handoff_state(captured_at)
+                .expect("guarded report should create handoff state"),
+        )
+        .unwrap();
+        let decoded: TerminalAgentHandoffState = serde_json::from_str(&encoded).unwrap();
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
+
+        assert_eq!(restored.closing_gates.len(), 1);
+        assert!(restored.closing_task_complete());
+        assert_eq!(
+            restored.correlate_legacy_closing_report(
+                "herdr:claude-closing-block",
+                "claude",
+                Some(11),
+            ),
+            Ok(Some(session_id.into()))
+        );
     }
 
     #[test]
