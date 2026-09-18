@@ -10057,7 +10057,7 @@ last_pane = "prefix+tab"
     }
 
     #[tokio::test]
-    async fn route_client_events_pastes_only_into_popup() {
+    async fn route_client_events_pastes_only_into_visible_popup() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("tiled");
         let focused = workspace.focused_pane_id().unwrap();
@@ -10101,17 +10101,15 @@ last_pane = "prefix+tab"
 
         app.state.set_server_mode(Mode::Settings);
         assert!(
-            app.handle_raw_input_event(raw_key(
+            !app.handle_raw_input_event(raw_key(
                 KeyCode::Char('y'),
                 KeyModifiers::NONE,
                 KeyEventKind::Repeat,
             ))
-            .await
+            .await,
+            "a popup behind Settings must not receive a repeated key"
         );
-        assert_eq!(
-            popup_rx.try_recv().unwrap(),
-            bytes::Bytes::from_static(b"y")
-        );
+        assert!(popup_rx.try_recv().is_err());
         assert!(tiled_rx.try_recv().is_err());
     }
 
