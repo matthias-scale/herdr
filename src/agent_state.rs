@@ -19,6 +19,7 @@ const MAX_SCHEME_BYTES: usize = 64;
 const MAX_MARKER_TAIL_BYTES: usize = MAX_SCHEME_BYTES + 2;
 const MARKER_TAIL_WORDS: usize = MAX_MARKER_TAIL_BYTES.div_ceil(8);
 const LINK_QUIET_PERIOD: Duration = Duration::from_secs(1);
+static NEXT_OUTPUT_LINK_OCCURRENCE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub(crate) struct LinkExtractionGate {
@@ -126,20 +127,36 @@ struct PendingLinkBytes {
     queued_output_urls: Vec<String>,
     queued_osc8_urls: Vec<String>,
     truncated_sequence: Option<OpenSequenceKind>,
-    published_output_url: Option<String>,
+    published_output: Option<PublishedOutputLink>,
+}
+
+#[derive(Debug)]
+struct PublishedOutputLink {
+    occurrence_id: u64,
+    url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenSequenceKind {
     Url,
-    Terminal,
+    Csi,
+    Osc,
+    OscEscape,
+    Escape,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExtractedAgentLinks {
     pub(crate) output_urls: Vec<String>,
     pub(crate) osc8_urls: Vec<String>,
-    pub(crate) output_replacements: Vec<(String, String)>,
+    pub(crate) output_updates: Vec<OutputLinkUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLinkUpdate {
+    pub(crate) occurrence_id: u64,
+    pub(crate) previous_url: Option<String>,
+    pub(crate) url: String,
 }
 
 impl LinkExtractionGate {
@@ -207,6 +224,9 @@ impl LinkExtractionGate {
         if !pending.dirty {
             return None;
         }
+        if pending.truncated_sequence.is_some() {
+            return None;
+        }
         let quiet = pending.last_observed_at.is_some_and(|observed_at| {
             now.saturating_duration_since(observed_at) >= LINK_QUIET_PERIOD
         });
@@ -219,13 +239,17 @@ impl LinkExtractionGate {
             return None;
         }
         let mut extracted = extract_agent_links(&pending.bytes, quiet);
-        let output_replacement = pending.published_output_url.as_ref().and_then(|previous| {
+        let output_update = pending.published_output.as_ref().and_then(|published| {
             extracted
                 .links
                 .output_urls
                 .iter()
-                .find(|url| url.len() > previous.len() && url.starts_with(previous))
-                .map(|url| (previous.clone(), url.clone()))
+                .find(|url| url.starts_with(&published.url))
+                .map(|url| OutputLinkUpdate {
+                    occurrence_id: published.occurrence_id,
+                    previous_url: Some(published.url.clone()),
+                    url: url.clone(),
+                })
         });
         extracted
             .links
@@ -239,14 +263,24 @@ impl LinkExtractionGate {
         extracted.links.output_urls.dedup();
         extracted.links.osc8_urls.sort_unstable();
         extracted.links.osc8_urls.dedup();
-        if let Some((previous, replacement)) = output_replacement {
-            pending.published_output_url = Some(replacement.clone());
-            extracted
-                .links
-                .output_replacements
-                .push((previous, replacement));
+        if let Some(update) = output_update {
+            if let Some(published) = &mut pending.published_output {
+                published.url.clone_from(&update.url);
+            }
+            extracted.links.output_updates.push(update);
         } else if open_url {
-            pending.published_output_url = extracted.tail_output_url.clone();
+            if let Some(url) = extracted.tail_output_url.clone() {
+                let occurrence_id = NEXT_OUTPUT_LINK_OCCURRENCE_ID.fetch_add(1, Ordering::Relaxed);
+                pending.published_output = Some(PublishedOutputLink {
+                    occurrence_id,
+                    url: url.clone(),
+                });
+                extracted.links.output_updates.push(OutputLinkUpdate {
+                    occurrence_id,
+                    previous_url: None,
+                    url,
+                });
+            }
         }
         pending.dirty = false;
         if !open_url {
@@ -255,7 +289,7 @@ impl LinkExtractionGate {
             self.active.store(false, Ordering::Release);
             pending.bytes.clear();
             pending.last_observed_at = None;
-            pending.published_output_url = None;
+            pending.published_output = None;
         }
         drop(pending);
         self.extractions.fetch_add(1, Ordering::Relaxed);
@@ -275,13 +309,25 @@ impl LinkExtractionGate {
 
 fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
     while !bytes.is_empty() {
-        if let Some(kind) = pending.truncated_sequence {
-            let Some((terminator, terminator_len)) = open_sequence_terminator(kind, bytes) else {
+        if let Some(mut kind) = pending.truncated_sequence {
+            let split_st = kind == OpenSequenceKind::OscEscape && bytes.first() == Some(&b'\\');
+            if kind == OpenSequenceKind::OscEscape && !split_st {
+                kind = OpenSequenceKind::Osc;
+            }
+            let terminator = split_st
+                .then_some((0, 1))
+                .or_else(|| open_sequence_terminator(kind, bytes));
+            let Some((terminator, terminator_len)) = terminator else {
+                if kind == OpenSequenceKind::Osc && bytes.last() == Some(&b'\x1b') {
+                    pending.truncated_sequence = Some(OpenSequenceKind::OscEscape);
+                }
                 return;
             };
-            pending
-                .bytes
-                .extend_from_slice(&bytes[terminator..terminator + terminator_len]);
+            if kind == OpenSequenceKind::Url {
+                pending
+                    .bytes
+                    .extend_from_slice(&bytes[terminator..terminator + terminator_len]);
+            }
             bytes = &bytes[terminator + terminator_len..];
             pending.truncated_sequence = None;
             if bytes.is_empty() {
@@ -293,6 +339,7 @@ fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
         pending.bytes.extend_from_slice(&bytes[..appended]);
         bytes = &bytes[appended..];
         if bytes.is_empty() {
+            discard_overlong_terminal_sequence(pending);
             break;
         }
 
@@ -311,15 +358,37 @@ fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
     }
 }
 
+fn discard_overlong_terminal_sequence(pending: &mut PendingLinkBytes) {
+    let (_, _, Some((start, kind))) = strip_terminal_sequences(&pending.bytes) else {
+        return;
+    };
+    if kind == OpenSequenceKind::Escape
+        || pending.bytes.len().saturating_sub(start) <= MAX_OPEN_SEQUENCE_BYTES
+    {
+        return;
+    }
+    let mut extracted = extract_agent_links(&pending.bytes[..start], false);
+    queue_links(
+        &mut pending.queued_output_urls,
+        &mut extracted.links.output_urls,
+    );
+    queue_links(
+        &mut pending.queued_osc8_urls,
+        &mut extracted.links.osc8_urls,
+    );
+    pending.bytes.clear();
+    pending.truncated_sequence = Some(kind);
+}
+
 fn pending_sequence_carry(bytes: &[u8]) -> (Vec<u8>, Option<OpenSequenceKind>) {
-    let (_, _, incomplete_terminal_start) = strip_terminal_sequences(bytes);
+    let (_, _, incomplete_terminal) = strip_terminal_sequences(bytes);
     let open_url_start = memchr::memchr_iter(b':', bytes)
         .filter_map(|colon| scheme_start_at(bytes, colon))
         .next_back()
         .filter(|start| extract_agent_links(&bytes[*start..], false).unterminated_url);
-    let open = match (incomplete_terminal_start, open_url_start) {
-        (Some(terminal), Some(url)) if url < terminal => Some((url, OpenSequenceKind::Url)),
-        (Some(terminal), _) => Some((terminal, OpenSequenceKind::Terminal)),
+    let open = match (incomplete_terminal, open_url_start) {
+        (Some((terminal, _)), Some(url)) if url < terminal => Some((url, OpenSequenceKind::Url)),
+        (Some(terminal), _) => Some(terminal),
         (None, Some(url)) => Some((url, OpenSequenceKind::Url)),
         (None, None) => None,
     };
@@ -328,8 +397,13 @@ fn pending_sequence_carry(bytes: &[u8]) -> (Vec<u8>, Option<OpenSequenceKind>) {
         return (bytes[tail_start..].to_vec(), None);
     };
     let end = (start + MAX_OPEN_SEQUENCE_BYTES).min(bytes.len());
-    let truncated = (end < bytes.len()).then_some(kind);
-    (bytes[start..end].to_vec(), truncated)
+    if end < bytes.len() {
+        let carry = (kind == OpenSequenceKind::Url)
+            .then(|| bytes[start..end].to_vec())
+            .unwrap_or_default();
+        return (carry, Some(kind));
+    }
+    (bytes[start..end].to_vec(), None)
 }
 
 fn open_sequence_terminator(kind: OpenSequenceKind, bytes: &[u8]) -> Option<(usize, usize)> {
@@ -338,7 +412,13 @@ fn open_sequence_terminator(kind: OpenSequenceKind, bytes: &[u8]) -> Option<(usi
             .iter()
             .position(|byte| is_url_terminator(*byte))
             .map(|index| (index, 1)),
-        OpenSequenceKind::Terminal => osc_terminator(bytes),
+        OpenSequenceKind::Csi => bytes
+            .iter()
+            .position(|byte| (0x40..=0x7e).contains(byte))
+            .map(|index| (index, 1)),
+        OpenSequenceKind::Osc => osc_terminator(bytes),
+        OpenSequenceKind::OscEscape => (bytes.first() == Some(&b'\\')).then_some((0, 1)),
+        OpenSequenceKind::Escape => (!bytes.is_empty()).then_some((0, 1)),
     }
 }
 
@@ -541,6 +621,7 @@ struct PaneAgentState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredLink {
+    occurrence_id: Option<u64>,
     url: String,
     domain: String,
     first_seen: SystemTime,
@@ -687,29 +768,49 @@ impl AgentStateStore {
         );
     }
 
-    pub(crate) fn replace_links(
+    pub(crate) fn observe_output_links(
         &mut self,
         pane_id: PaneId,
-        replacements: impl IntoIterator<Item = (String, String)>,
-        source: AgentLinkSource,
+        urls: Vec<String>,
+        updates: Vec<OutputLinkUpdate>,
         observed_at: SystemTime,
     ) {
         let pane = self.panes.entry(pane_id).or_default();
-        for (previous, replacement) in replacements {
-            let Some(domain) = url_domain(&replacement) else {
+        let mut identified_urls = Vec::with_capacity(updates.len());
+        for update in updates {
+            let Some(domain) = url_domain(&update.url) else {
                 continue;
             };
-            let Some(existing) = pane
+            if let Some(existing) = pane
                 .links
                 .iter_mut()
-                .find(|link| link.source == source && link.url == previous)
-            else {
-                continue;
-            };
-            existing.url = replacement;
-            existing.domain = domain;
-            existing.last_seen = existing.last_seen.max(observed_at);
+                .find(|link| link.occurrence_id == Some(update.occurrence_id))
+            {
+                let applies = update
+                    .previous_url
+                    .as_deref()
+                    .is_none_or(|previous| previous == existing.url || update.url == existing.url);
+                if applies {
+                    existing.url.clone_from(&update.url);
+                    existing.domain = domain;
+                    existing.last_seen = existing.last_seen.max(observed_at);
+                }
+            } else {
+                pane.links.push(StoredLink {
+                    occurrence_id: Some(update.occurrence_id),
+                    url: update.url.clone(),
+                    domain,
+                    first_seen: observed_at,
+                    last_seen: observed_at,
+                    source: AgentLinkSource::Output,
+                });
+            }
+            identified_urls.push(update.url);
         }
+        let unidentified = urls
+            .into_iter()
+            .filter(|url| !identified_urls.iter().any(|identified| identified == url));
+        let _ = observe_links_in_pane(pane, unidentified, AgentLinkSource::Output, observed_at);
     }
 }
 
@@ -767,6 +868,7 @@ fn observe_links_in_pane(
             continue;
         }
         pane.links.push(StoredLink {
+            occurrence_id: None,
             url,
             domain,
             first_seen: observed_at,
@@ -796,6 +898,7 @@ fn observe_transcript_links_in_pane(
             continue;
         }
         pane.links.push(StoredLink {
+            occurrence_id: None,
             url: link.url,
             domain,
             first_seen: link.first_seen,
@@ -887,7 +990,7 @@ fn extract_agent_links(bytes: &[u8], finalize_tail: bool) -> AgentLinkExtraction
         links: ExtractedAgentLinks {
             output_urls,
             osc8_urls,
-            output_replacements: Vec::new(),
+            output_updates: Vec::new(),
         },
         unterminated_url,
         incomplete_terminal_sequence: incomplete_terminal_sequence_start.is_some(),
@@ -908,7 +1011,9 @@ fn has_unterminated_url_candidate(text: &str) -> bool {
     find_scheme_start(&text.as_bytes()[tail_start..]).is_some()
 }
 
-fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>, Option<usize>) {
+fn strip_terminal_sequences(
+    bytes: &[u8],
+) -> (Vec<u8>, Vec<String>, Option<(usize, OpenSequenceKind)>) {
     let mut visible_bytes = Vec::with_capacity(bytes.len());
     let mut osc8_urls = Vec::new();
     let mut incomplete_terminal_sequence_start = None;
@@ -927,7 +1032,7 @@ fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>, Option<usize
                     .position(|byte| (0x40..=0x7e).contains(byte))
                     .map(|relative| offset + 2 + relative + 1)
                 else {
-                    incomplete_terminal_sequence_start = Some(offset);
+                    incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Csi));
                     break;
                 };
                 offset = end;
@@ -936,30 +1041,32 @@ fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>, Option<usize
                 let content_start = offset + 2;
                 let Some((relative_end, terminator_len)) = osc_terminator(&bytes[content_start..])
                 else {
-                    incomplete_terminal_sequence_start = Some(offset);
+                    incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Osc));
                     break;
                 };
                 let content_end = content_start + relative_end;
                 let content = &bytes[content_start..content_end];
-                if let Some(osc8) = content.strip_prefix(b"8;") {
-                    if let Some(parameter_end) = osc8.iter().position(|byte| *byte == b';') {
-                        osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
-                            &osc8[parameter_end + 1..],
-                        )));
+                if content_end - offset <= MAX_OPEN_SEQUENCE_BYTES {
+                    if let Some(osc8) = content.strip_prefix(b"8;") {
+                        if let Some(parameter_end) = osc8.iter().position(|byte| *byte == b';') {
+                            osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
+                                &osc8[parameter_end + 1..],
+                            )));
+                        }
                     }
                 }
                 offset = content_end + terminator_len;
             }
             Some(b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/') => {
                 if offset + 2 >= bytes.len() {
-                    incomplete_terminal_sequence_start = Some(offset);
+                    incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Escape));
                     break;
                 }
                 offset += 3;
             }
             Some(_) => offset += 2,
             None => {
-                incomplete_terminal_sequence_start = Some(offset);
+                incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Escape));
                 break;
             }
         }
@@ -1201,7 +1308,8 @@ mod tests {
             .take_links_at(started + LINK_QUIET_PERIOD)
             .expect("quiet-period publication");
         assert_eq!(provisional.output_urls, vec!["https://split.example.test"]);
-        assert!(provisional.output_replacements.is_empty());
+        assert_eq!(provisional.output_updates.len(), 1);
+        assert!(provisional.output_updates[0].previous_url.is_none());
 
         gate.observe_chunk_at(b"/path\n", started + Duration::from_millis(1_300));
         let completed = gate
@@ -1215,22 +1323,16 @@ mod tests {
         let pane_id = PaneId::from_raw(81);
         let first_seen = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
         let mut store = AgentStateStore::default();
-        store.observe_links(
+        store.observe_output_links(
             pane_id,
             provisional.output_urls,
-            AgentLinkSource::Output,
+            provisional.output_updates,
             first_seen,
         );
-        store.replace_links(
-            pane_id,
-            completed.output_replacements.clone(),
-            AgentLinkSource::Output,
-            first_seen + Duration::from_millis(300),
-        );
-        store.observe_links(
+        store.observe_output_links(
             pane_id,
             completed.output_urls,
-            AgentLinkSource::Output,
+            completed.output_updates,
             first_seen + Duration::from_millis(300),
         );
 
@@ -1273,22 +1375,16 @@ mod tests {
         let pane_id = PaneId::from_raw(83);
         let first_seen = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
         let mut store = AgentStateStore::default();
-        store.observe_links(
+        store.observe_output_links(
             pane_id,
             provisional.output_urls,
-            AgentLinkSource::Output,
+            provisional.output_updates,
             first_seen,
         );
-        store.replace_links(
-            pane_id,
-            completed.output_replacements,
-            AgentLinkSource::Output,
-            first_seen + Duration::from_millis(300),
-        );
-        store.observe_links(
+        store.observe_output_links(
             pane_id,
             completed.output_urls,
-            AgentLinkSource::Output,
+            completed.output_updates,
             first_seen + Duration::from_millis(300),
         );
         store.observe_links(
@@ -1387,6 +1483,63 @@ mod tests {
                 "https://before-cap.example.test/path".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn overlong_csi_recovers_at_csi_terminator_and_keeps_later_url() {
+        let gate = LinkExtractionGate::default();
+        let first = b"https://before-csi.example.test/path\n";
+        gate.observe_chunk(first);
+
+        let csi_len = MAX_OPEN_SEQUENCE_BYTES + 1_024;
+        let filler_len = MAX_PENDING_LINK_BYTES - first.len() - csi_len;
+        let mut chunk = vec![b'x'; filler_len];
+        *chunk.last_mut().expect("non-empty filler") = b'\n';
+        chunk.extend_from_slice(b"\x1b[");
+        chunk.resize(chunk.len() + csi_len - 2, b'1');
+        gate.observe_chunk(&chunk);
+        gate.observe_chunk(b"1");
+        assert!(gate.take_links().is_none());
+        gate.observe_chunk(b"m\nhttps://after-csi.example.test/path\n");
+
+        let links = gate.take_links().expect("link extraction after long CSI");
+        assert_eq!(
+            links.output_urls,
+            vec![
+                "https://after-csi.example.test/path",
+                "https://before-csi.example.test/path",
+            ]
+        );
+        assert!(links.osc8_urls.is_empty());
+    }
+
+    #[test]
+    fn overlong_osc8_target_is_dropped_before_later_plain_url() {
+        let gate = LinkExtractionGate::default();
+        let first = b"https://before-osc.example.test/path\n";
+        gate.observe_chunk(first);
+
+        let osc_len = MAX_OPEN_SEQUENCE_BYTES + 1_024;
+        let filler_len = MAX_PENDING_LINK_BYTES - first.len() - osc_len;
+        let mut chunk = vec![b'x'; filler_len];
+        *chunk.last_mut().expect("non-empty filler") = b'\n';
+        let mut control = b"\x1b]8;;https://too-long.example.test/".to_vec();
+        control.resize(osc_len, b'a');
+        chunk.extend_from_slice(&control);
+        gate.observe_chunk(&chunk);
+        gate.observe_chunk(b"\x1b");
+        assert!(gate.take_links().is_none());
+        gate.observe_chunk(b"\\\nhttps://after-osc.example.test/path\n");
+
+        let links = gate.take_links().expect("link extraction after long OSC 8");
+        assert_eq!(
+            links.output_urls,
+            vec![
+                "https://after-osc.example.test/path",
+                "https://before-osc.example.test/path",
+            ]
+        );
+        assert!(links.osc8_urls.is_empty());
     }
 
     #[test]

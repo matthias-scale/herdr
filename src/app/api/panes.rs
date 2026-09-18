@@ -4368,7 +4368,7 @@ mod tests {
             .handle_app_event(crate::events::AppEvent::AgentLinksDetected {
                 pane_id,
                 output_urls: vec!["https://late.example.test/stale".into()],
-                output_replacements: Vec::new(),
+                output_updates: Vec::new(),
                 osc8_urls: Vec::new(),
                 observed_at: std::time::SystemTime::now(),
             });
