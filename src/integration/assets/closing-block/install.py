@@ -106,6 +106,13 @@ def _restore_runtime_files(backup: Path, target: Path) -> None:
         shutil.rmtree(restore, ignore_errors=True)
 
 
+def _rollback_runtime_files(backup: Path | None, target: Path) -> None:
+    if backup and backup.exists():
+        _restore_runtime_files(backup, target)
+    elif target.exists():
+        shutil.rmtree(target)
+
+
 def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
     source_dir = Path(source_dir).resolve()
     target = Path(target).expanduser().absolute()
@@ -138,15 +145,13 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
         try:
             _replace_runtime_files(stage, target)
         except OSError:
-            if backup and backup.exists():
-                _restore_runtime_files(backup, target)
+            _rollback_runtime_files(backup, target)
             raise
 
         try:
             _verify_bundle(target, expected)
         except (BundleValidationError, OSError):
-            if backup and backup.exists():
-                _restore_runtime_files(backup, target)
+            _rollback_runtime_files(backup, target)
             raise
         return result
     finally:

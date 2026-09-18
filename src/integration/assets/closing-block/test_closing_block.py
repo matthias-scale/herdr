@@ -2597,6 +2597,30 @@ class BundleInstallerTests(unittest.TestCase):
         self.assertEqual((self.target / "closing_block.py").read_bytes(), before)
         self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
 
+    def test_failed_first_install_removes_the_partial_target(self):
+        installer = self._installer_module()
+        installer.shutil.rmtree(self.target)
+        original_replace = installer.os.replace
+        replacements = 0
+
+        def fail_second_replacement(source, destination):
+            nonlocal replacements
+            if installer.Path(destination).parent == self.target:
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("injected replacement failure")
+            return original_replace(source, destination)
+
+        with mock.patch.object(
+            installer.os, "replace", side_effect=fail_second_replacement
+        ):
+            with self.assertRaisesRegex(OSError, "injected replacement failure"):
+                installer.install_bundle(self.source, self.target, dry_run=False)
+
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
+        self.assertEqual(list(self.target.parent.glob(".herdr-closing-block.stage-*")), [])
+
 
 class QuestionGateHookTests(unittest.TestCase):
     """`AskUserQuestion` opens a gate mid-turn, where no `Stop` ever fires."""
