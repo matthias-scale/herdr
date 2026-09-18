@@ -13366,9 +13366,9 @@ pub(crate) mod tests {
             .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers, "the gate stays latched");
-        assert_eq!(entry.state, AgentState::Idle);
+        assert_eq!(entry.state, AgentState::Blocked);
         assert!(entry_is_blocked(&entry));
-        assert!(gate_overrides_label(&entry));
+        assert!(!gate_overrides_label(&entry));
         assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
     }
 
