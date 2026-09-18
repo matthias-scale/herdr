@@ -7943,6 +7943,9 @@ mod tests {
         assert!(app.state.request_submit_worktree_open);
 
         let mut app = app_for_mouse_test();
+        // The sidebar opens this dialog from navigation; closing a client
+        // overlay returns to that server mode rather than rewriting it.
+        app.state.set_server_mode(Mode::Navigate);
         app.state
             .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(sample_worktree_open_state());
@@ -7957,6 +7960,10 @@ mod tests {
         ));
 
         assert!(app.state.worktree_open.is_none());
+        assert_eq!(
+            app.state.client_overlay,
+            crate::app::state::ClientOverlay::None
+        );
         assert_eq!(app.state.server_mode(), Mode::Navigate);
     }
 
