@@ -20,6 +20,7 @@ use crate::{
     config::{StatusIndicatorStyle, ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
     platform::status_metrics::StatusMetrics,
+    terminal::TerminalRuntimeRegistry,
 };
 
 /// Full-width, right-aligned top status row.
@@ -692,12 +693,12 @@ fn status_segments(
 
     // A focused pane attached to a fleet host names its machine ahead of the
     // local one: the local hostname stays next to CPU/MEM, which it still
-    // labels. Same source the sidebar uses for `remote_host`, resolved here at
-    // view-computation time from the pane's cached launch argv. The remote
-    // segment shares the device's elide rank and sits earlier in the row, so
-    // the first-minimum tie-break sheds it first: a surviving remote name must
-    // never end up labeling local metrics.
-    if let Some(host) = focused_remote_host(app) {
+    // labels. View computation resolves attached panes and remote-focus
+    // proxies before either status layout pass reaches this function. The
+    // remote segment shares the device's elide rank and sits earlier in the
+    // row, so the first-minimum tie-break sheds it first: a surviving remote
+    // name must never end up labeling local metrics.
+    if let Some(host) = app.view.focused_remote_host.as_deref() {
         out.push(Segment {
             text: format!(" \u{2192} {host} "),
             style: Style::default().fg(p.teal),
@@ -738,15 +739,27 @@ pub(crate) fn memory_percent(
     Some((used / total * 100.0).round().clamp(0.0, 100.0) as u8)
 }
 
-/// The fleet host the focused pane is attached to, when it is. Same lookup the
-/// sidebar uses for its `remote_host`: the pane's cached launch argv read back
-/// against the last fleet snapshot. Pure map lookups over state the view
-/// already owns, so it is safe on the view-computation path.
-fn focused_remote_host(app: &AppState) -> Option<&str> {
+/// Resolve the focused pane's remote host once for the current view. Proxy
+/// panes use their cached configured host; attached panes use the same
+/// launch-argv lookup as the sidebar.
+pub(crate) fn resolve_focused_remote_host(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Option<String> {
     let workspace = app.workspaces.get(app.active?)?;
     let terminal_id = workspace.terminal_id(workspace.focused_pane_id()?)?;
-    let argv = app.terminals.get(terminal_id)?.launch_argv.as_deref()?;
-    crate::fleet::attached_host_name(&app.fleet_snapshot, argv)
+    let terminal = app.terminals.get(terminal_id)?;
+    if terminal_runtimes
+        .get(terminal_id)
+        .is_some_and(crate::terminal::TerminalRuntime::is_remote_proxy)
+    {
+        return terminal.remote_proxy_host.clone();
+    }
+    terminal
+        .launch_argv
+        .as_deref()
+        .and_then(|argv| crate::fleet::attached_host_name(&app.fleet_snapshot, argv))
+        .map(str::to_owned)
 }
 
 fn metric_segment(label: &str, percent: Option<u8>, expanded: bool, p: &Palette) -> Segment {
@@ -1699,6 +1712,8 @@ mod tests {
             metrics: crate::platform::status_metrics::status_metrics_fixture(),
             sampled_at: std::time::Instant::now(),
         });
+        app.view.focused_remote_host =
+            resolve_focused_remote_host(&app, &TerminalRuntimeRegistry::new());
         app
     }
 
@@ -1720,7 +1735,12 @@ mod tests {
 
     #[test]
     fn attached_focused_pane_names_the_remote_host_before_the_local_one() {
-        let app = app_with_focused_attached_pane();
+        let mut app = app_with_focused_attached_pane();
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 120, 20),
+        );
 
         let rendered = render_status_row(&app, 120);
 
@@ -1745,11 +1765,78 @@ mod tests {
             metrics: crate::platform::status_metrics::status_metrics_fixture(),
             sampled_at: std::time::Instant::now(),
         });
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 120, 20),
+        );
 
         let rendered = render_status_row(&app, 120);
 
+        assert_eq!(app.view.focused_remote_host, None);
         assert!(rendered.contains("testhost"), "{rendered}");
         assert!(!rendered.contains('\u{2192}'), "{rendered}");
+    }
+
+    #[test]
+    fn focused_remote_proxy_names_its_cached_host() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: crate::platform::status_metrics::status_metrics_fixture(),
+            sampled_at: std::time::Instant::now(),
+        });
+        let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .remote_proxy_host = Some("buildbox".into());
+        let (runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            pane_id,
+            24,
+            120,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &runtimes,
+            Rect::new(0, 0, 120, 20),
+        );
+        let rendered = render_status_row(&app, 120);
+
+        assert_eq!(app.view.focused_remote_host.as_deref(), Some("buildbox"));
+        assert!(rendered.contains("\u{2192} buildbox"), "{rendered}");
+    }
+
+    #[test]
+    fn render_fallback_only_reads_the_resolved_remote_host() {
+        let mut app = app_with_focused_attached_pane();
+        let terminal_id = app.workspaces[0]
+            .terminal_id(app.workspaces[0].focused_pane_id().expect("focused pane"))
+            .expect("focused terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .launch_argv = None;
+        app.fleet_snapshot = crate::fleet::Snapshot::default();
+
+        let rendered = render_status_row(&app, 120);
+
+        assert!(rendered.contains("\u{2192} workbox"), "{rendered}");
     }
 
     #[test]

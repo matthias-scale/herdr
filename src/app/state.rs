@@ -2368,6 +2368,9 @@ pub struct ViewState {
     /// The status row's right-aligned segments, fitted once per frame so the
     /// title and the links can be laid out beside what will actually be drawn.
     pub(crate) status_segments: Vec<crate::ui::status::Segment>,
+    /// Remote host of the focused pane, resolved once during view computation.
+    /// Status layout and render only read this projection.
+    pub(crate) focused_remote_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6324,6 +6327,7 @@ impl AppState {
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
                 status_segments: Vec::new(),
+                focused_remote_host: None,
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
