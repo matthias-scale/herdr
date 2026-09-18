@@ -12301,7 +12301,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn red_gate_dot_and_dimmed_subagent_count_share_the_row() {
+    fn blue_working_dot_and_active_subagent_count_share_the_row() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("blocked review".into());
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -12334,16 +12334,16 @@ pub(crate) mod tests {
                 .unwrap();
             let card = compute_tab_card_areas(&app, area)[0].clone();
             let buffer = terminal.backend().buffer();
-            let gate_x = (card.rect.x..card.rect.x + card.rect.width)
+            let working_x = (card.rect.x..card.rect.x + card.rect.width)
                 .find(|x| {
                     let cell = &buffer[(*x, card.rect.y)];
-                    cell.symbol() == "○" && cell.fg == app.palette.red
+                    cell.symbol() == "●" && cell.fg == app.palette.blue
                 })
-                .unwrap_or_else(|| panic!("width {width} omitted red gate dot"));
-            let gate_style = buffer[(gate_x, card.rect.y)].style();
+                .unwrap_or_else(|| panic!("width {width} omitted blue working dot"));
+            let working_style = buffer[(working_x, card.rect.y)].style();
             let rendered = row_text(buffer, card.rect.y, card.rect.width);
             assert!(rendered.contains("pi+3"), "width {width}: {rendered:?}");
-            assert!(!gate_style.add_modifier.contains(Modifier::DIM));
+            assert!(!working_style.add_modifier.contains(Modifier::DIM));
         }
     }
 
