@@ -1547,6 +1547,49 @@ impl TerminalState {
         true
     }
 
+    pub(crate) fn set_active_subagents_with_projection_at(
+        &mut self,
+        count: Option<u32>,
+        seen: bool,
+        now: Instant,
+    ) -> (bool, Option<TerminalStateMutation>) {
+        let completion_waiting_on_worker = self
+            .verified_active_subagents()
+            .is_some_and(|count| count > 0)
+            && self.closing_task_complete();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.sidebar_projection(seen).0;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let changed = self.set_active_subagents(count);
+        if !changed {
+            return (false, None);
+        }
+        let state = self.sidebar_projection(seen).0;
+        let completed_after_last_worker = completion_waiting_on_worker
+            && self.verified_active_subagents() == Some(0)
+            && previous_state == AgentState::Working
+            && state == AgentState::Idle;
+        let effective_state_change = completed_after_last_worker.then(|| EffectiveStateChange {
+            previous_agent_label,
+            previous_known_agent,
+            previous_state,
+            previous_presentation,
+            agent_label: self.effective_agent_label().map(str::to_string),
+            known_agent: self.effective_known_agent(),
+            state,
+            presentation: self.effective_presentation_for_state_at(state, now),
+        });
+        (
+            true,
+            Some(TerminalStateMutation {
+                effective_state_change,
+                sidebar_projection_changed: true,
+                ..TerminalStateMutation::default()
+            }),
+        )
+    }
+
     pub(crate) fn set_claude_subagent_observations(
         &mut self,
         observations: Option<Vec<crate::app::claude_subagents::ClaudeSubagentObservation>>,
