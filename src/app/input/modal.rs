@@ -2478,6 +2478,7 @@ mod tests {
     #[test]
     fn rename_modal_keyboard_and_mouse_share_actions() {
         let mut state = state_with_workspaces(&["test"]);
+        state.set_server_mode(Mode::Terminal);
         state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "hello".into();
 
@@ -2531,6 +2532,7 @@ mod tests {
     #[test]
     fn rename_cancel_returns_to_terminal_when_workspace_is_active() {
         let mut state = state_with_workspaces(&["test"]);
+        state.set_server_mode(Mode::Terminal);
         state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         state.name_input = "test".into();
 
