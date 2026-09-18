@@ -647,6 +647,7 @@ pub struct TerminalState {
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     closing_report: Option<ClosingReport>,
+    closing_report_retired_pending_completion: bool,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     /// Runtime-only Claude JSONL source. Never persisted or exposed through the
     /// API; the accepted session id remains the resume identity.
@@ -736,6 +737,7 @@ impl TerminalState {
             work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             closing_report: Some(ClosingReport::default()),
+            closing_report_retired_pending_completion: false,
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             claude_transcript_path: None,
@@ -790,12 +792,20 @@ impl TerminalState {
         agent: Agent,
         now: Instant,
     ) -> TerminalStateMutation {
-        let starts_acquisition = !self
-            .should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
+        let finished_report_matches_agent = self.finished_closing_report()
+            && self.hook_authority.as_ref().is_some_and(|authority| {
+                crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+            });
+        let starts_acquisition = !finished_report_matches_agent
+            && !self.should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
             && !self.detected_state_observed_before_release_suppression(Some(agent), now);
         let mutation = self.set_detected_state_with_screen_signals_at(
             Some(agent),
-            AgentState::Unknown,
+            if finished_report_matches_agent {
+                AgentState::Idle
+            } else {
+                AgentState::Unknown
+            },
             false,
             false,
             false,
@@ -811,7 +821,9 @@ impl TerminalState {
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
         let reached_idle = self.agent_process_acquisition_pending && self.state == AgentState::Idle;
-        let suppress_completion = reached_idle && self.recent_agent_process_exit.is_none();
+        let suppress_completion = reached_idle
+            && self.recent_agent_process_exit.is_none()
+            && !self.closing_task_complete();
         if reached_idle {
             self.agent_process_acquisition_pending = false;
         }
@@ -1098,11 +1110,20 @@ impl TerminalState {
         })
     }
 
-    fn closing_task_complete(&self) -> bool {
+    pub(crate) fn closing_task_complete(&self) -> bool {
         self.closing_report.as_ref().is_some_and(|report| {
             report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
                 || report.closing_contract_met == Some(true)
         })
+    }
+
+    pub(crate) fn take_retired_closing_report_completion(&mut self) -> bool {
+        let completed =
+            self.closing_report_retired_pending_completion && self.closing_task_complete();
+        if completed {
+            self.closing_report_retired_pending_completion = false;
+        }
+        completed
     }
 
     fn closing_task_projection(
@@ -1188,6 +1209,7 @@ impl TerminalState {
 
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
         let _ = now;
+        self.closing_report_retired_pending_completion = false;
         let empty = ClosingReport::default();
         let report_changed = self
             .closing_report
@@ -1228,6 +1250,7 @@ impl TerminalState {
         }
         let changed = self.clear_closing_task_report(now);
         if changed {
+            self.closing_report_retired_pending_completion = true;
             self.revision = self.revision.wrapping_add(1);
         }
         changed
@@ -4009,6 +4032,21 @@ impl TerminalState {
             state,
             presentation,
         }
+    }
+
+    pub(crate) fn recompute_effective_state_from_current_at(
+        &mut self,
+        now: Instant,
+    ) -> EffectiveStateChange {
+        let current = self.unchanged_effective_state_change_at(now);
+        self.recompute_effective_state(
+            current.agent_label.clone(),
+            current.known_agent,
+            current.state,
+            current.presentation.clone(),
+            now,
+        )
+        .unwrap_or(current)
     }
 
     pub fn full_lifecycle_hook_authority_active(&self) -> bool {

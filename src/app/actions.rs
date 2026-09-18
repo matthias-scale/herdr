@@ -3279,11 +3279,13 @@ impl AppState {
                 accepted = mutation.is_some();
                 let mut mutation = mutation?;
                 if let Some(closing_block) = closing_block {
+                    let task_was_complete = terminal.closing_task_complete();
+                    let task_had_external_wait = terminal.closing_external_wait().is_some();
                     let merge_malformed_blockers = matches!(
                         closing_block.parse_status,
                         Some(crate::api::schema::ClosingParseStatus::Malformed)
                     ) && !closing_block.dependencies_authoritative;
-                    let before = mutation
+                    let mut before = mutation
                         .effective_state_change
                         .clone()
                         .unwrap_or_else(|| terminal.unchanged_effective_state_change_at(now));
@@ -3321,7 +3323,19 @@ impl AppState {
                     } else {
                         (false, false)
                     };
-                    let after = terminal.unchanged_effective_state_change_at(now);
+                    let completed_after_retirement =
+                        !task_was_complete && terminal.take_retired_closing_report_completion();
+                    let after = if completed_after_retirement || !task_had_external_wait {
+                        terminal.recompute_effective_state_from_current_at(now)
+                    } else {
+                        terminal.unchanged_effective_state_change_at(now)
+                    };
+                    if completed_after_retirement
+                        && before.previous_state == after.state
+                        && after.state == AgentState::Idle
+                    {
+                        before.previous_state = AgentState::Working;
+                    }
                     mutation.effective_state_change = Some(EffectiveStateChange {
                         previous_agent_label: before.previous_agent_label,
                         previous_known_agent: before.previous_known_agent,
@@ -6919,6 +6933,101 @@ mod tests {
         assert!(finished[0].previous_waiting_on_agents);
         assert!(!finished[0].waiting_on_agents);
         assert_eq!(finished[0].state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn current_closing_report_completion_survives_previous_session_retirement() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.active = None;
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            usage_limited: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+
+        let session = |id: &str, seq: u64, start: &str| AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:codex".into(),
+            agent_label: "codex".into(),
+            seq: Some(seq),
+            session_ref: crate::agent_resume::AgentSessionRef::id(id),
+            claude_transcript_path: None,
+            session_name_write_target: None,
+            session_name_target_evaluated: false,
+            session_start_source: Some(start.into()),
+        };
+
+        let report = |session: &str, state, seq, completion| AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:codex-closing-block".into(),
+            agent_label: "codex".into(),
+            state,
+            message: None,
+            seq: Some(seq),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                agents: Some(0),
+                completion: Some(completion),
+                external_wait: None,
+                parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+                workers_unknown: Some(false),
+                dependencies_authoritative: true,
+                session_id: Some(session.into()),
+            })),
+        };
+
+        state.handle_app_event(session("old-session", 1, "startup"));
+        state.handle_app_event(report(
+            "old-session",
+            AgentState::Working,
+            1,
+            crate::api::schema::ClosingCompletion::Incomplete,
+        ));
+        let retirement = state.handle_app_event(session("new-session", 2, "clear"));
+        assert!(retirement[0].session_replaced);
+        assert!(retirement[0].suppress_completion);
+        let update = state
+            .handle_app_event(report(
+                "new-session",
+                AgentState::Idle,
+                2,
+                crate::api::schema::ClosingCompletion::Complete,
+            ))
+            .pop()
+            .expect("current-session completion update");
+
+        assert!(!update.suppress_completion);
+        let pane = &state.workspaces[0].panes[&pane_id];
+        assert!(!pane.seen);
+        assert!(pane.done_since.is_some());
+
+        let terminal_id = pane.attached_terminal_id.clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = None;
+        state.handle_app_event(AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: Agent::Codex,
+            observed_at: Instant::now(),
+        });
+
+        let pane = &state.workspaces[0].panes[&pane_id];
+        assert!(!pane.seen);
+        assert!(pane.done_since.is_some());
     }
 
     #[test]
