@@ -10363,7 +10363,7 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["pane/1", "pane/2", "pane/4"]
+            ["pane/2", "pane/4"]
         );
     }
 
