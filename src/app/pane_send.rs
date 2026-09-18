@@ -412,6 +412,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn send_to_new_agent_preserves_shared_mode() {
         let (mut app, _) = app_with_agents(1);
+        app.state.launch_profiles =
+            crate::app::launch_profiles::resolve(&[crate::config::LaunchProfileConfig {
+                id: "claude".into(),
+                agent: "claude".into(),
+                command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+                ..Default::default()
+            }]);
         app.state.set_server_mode(Mode::Settings);
         let tabs_before = app.state.workspaces[0].tabs.len();
 
