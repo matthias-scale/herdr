@@ -1551,17 +1551,99 @@ pub(crate) struct SidebarPresentationState {
     /// Every transient modal owned by this attach. Shared pane/session facts
     /// never live here; the server swaps this record into `AppState` only
     /// while it handles or renders this client.
-    pub(crate) modal: ClientModalState,
-    pub(crate) settled_menu_target: Option<PaneFocusTarget>,
-    pub(crate) settled_menu_selected: usize,
+    pub(crate) overlay: ClientOverlayState,
 }
 
-/// Attach-local modal state. `AppState` keeps matching active slots because the
-/// monolithic input and rendering code still consumes them directly; the
+/// The client-owned overlay tag. Converting from `Mode` is exhaustive so a new
+/// mode cannot silently keep server-global ownership.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ClientOverlay {
+    #[default]
+    None,
+    Onboarding,
+    ReleaseNotes,
+    ProductAnnouncement,
+    RenameWorkspace,
+    RenameTab,
+    RenamePane,
+    NewLinkedWorktree,
+    OpenExistingWorktree,
+    ConfirmRemoveWorktree,
+    ConfirmClose,
+    ContextMenu,
+    GitMenu,
+    AddAction,
+    Settings,
+    GlobalMenu,
+    KeybindHelp,
+    Navigator,
+    CommandPalette,
+    WorkLinkPicker,
+    AgentPicker,
+}
+
+impl ClientOverlay {
+    pub(crate) fn from_mode(mode: Mode) -> Self {
+        match mode {
+            Mode::Onboarding => Self::Onboarding,
+            Mode::ReleaseNotes => Self::ReleaseNotes,
+            Mode::ProductAnnouncement => Self::ProductAnnouncement,
+            Mode::Navigate | Mode::Prefix | Mode::Copy | Mode::Terminal | Mode::Resize => {
+                Self::None
+            }
+            Mode::RenameWorkspace => Self::RenameWorkspace,
+            Mode::RenameTab => Self::RenameTab,
+            Mode::RenamePane => Self::RenamePane,
+            Mode::NewLinkedWorktree => Self::NewLinkedWorktree,
+            Mode::OpenExistingWorktree => Self::OpenExistingWorktree,
+            Mode::ConfirmRemoveWorktree => Self::ConfirmRemoveWorktree,
+            Mode::ConfirmClose => Self::ConfirmClose,
+            Mode::ContextMenu => Self::ContextMenu,
+            Mode::GitMenu => Self::GitMenu,
+            Mode::AddAction => Self::AddAction,
+            Mode::Settings => Self::Settings,
+            Mode::GlobalMenu => Self::GlobalMenu,
+            Mode::KeybindHelp => Self::KeybindHelp,
+            Mode::Navigator => Self::Navigator,
+            Mode::CommandPalette => Self::CommandPalette,
+            Mode::WorkLinkPicker => Self::WorkLinkPicker,
+            Mode::AgentPicker => Self::AgentPicker,
+        }
+    }
+
+    pub(crate) fn mode(self) -> Option<Mode> {
+        match self {
+            Self::None => None,
+            Self::Onboarding => Some(Mode::Onboarding),
+            Self::ReleaseNotes => Some(Mode::ReleaseNotes),
+            Self::ProductAnnouncement => Some(Mode::ProductAnnouncement),
+            Self::RenameWorkspace => Some(Mode::RenameWorkspace),
+            Self::RenameTab => Some(Mode::RenameTab),
+            Self::RenamePane => Some(Mode::RenamePane),
+            Self::NewLinkedWorktree => Some(Mode::NewLinkedWorktree),
+            Self::OpenExistingWorktree => Some(Mode::OpenExistingWorktree),
+            Self::ConfirmRemoveWorktree => Some(Mode::ConfirmRemoveWorktree),
+            Self::ConfirmClose => Some(Mode::ConfirmClose),
+            Self::ContextMenu => Some(Mode::ContextMenu),
+            Self::GitMenu => Some(Mode::GitMenu),
+            Self::AddAction => Some(Mode::AddAction),
+            Self::Settings => Some(Mode::Settings),
+            Self::GlobalMenu => Some(Mode::GlobalMenu),
+            Self::KeybindHelp => Some(Mode::KeybindHelp),
+            Self::Navigator => Some(Mode::Navigator),
+            Self::CommandPalette => Some(Mode::CommandPalette),
+            Self::WorkLinkPicker => Some(Mode::WorkLinkPicker),
+            Self::AgentPicker => Some(Mode::AgentPicker),
+        }
+    }
+}
+
+/// Attach-local overlay state. `AppState` keeps matching active slots because
+/// the monolithic input and rendering code still consumes them directly; the
 /// server moves every slot together through this one record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ClientModalState {
-    pub(crate) mode: Option<Mode>,
+pub(crate) struct ClientOverlayState {
+    pub(crate) kind: ClientOverlay,
     pub(crate) context_menu: Option<ContextMenuState>,
     pub(crate) snooze: Option<SidebarSnoozeUiState>,
     pub(crate) rename_target: Option<RenameTarget>,
@@ -1571,15 +1653,20 @@ pub(crate) struct ClientModalState {
     pub(crate) creating_new_tab: bool,
     pub(crate) pending_workspace_create_cwd: Option<std::path::PathBuf>,
     pub(crate) rename_tab_prefill: Option<String>,
+    pub(crate) worktree_create: Option<WorktreeCreateState>,
+    pub(crate) worktree_open: Option<WorktreeOpenState>,
+    pub(crate) worktree_remove: Option<WorktreeRemoveState>,
+    pub(crate) settled_menu_target: Option<PaneFocusTarget>,
+    pub(crate) settled_menu_selected: usize,
+    pub(crate) settled_menu_delete_armed: bool,
 }
 
-impl ClientModalState {
+impl ClientOverlayState {
     pub(crate) fn is_active(&self) -> bool {
-        self.mode.is_some()
-            || self.context_menu.is_some()
+        self.kind != ClientOverlay::None
             || self.snooze.is_some()
-            || self.rename_target.is_some()
-            || self.confirm_close_workspace_id.is_some()
+            || self.settled_menu_target.is_some()
+            || self.settled_menu_delete_armed
     }
 }
 
@@ -3480,17 +3567,6 @@ impl ContextMenuAction {
             Self::SendRightClicksToPane => "Send right-clicks to pane",
             Self::ClosePane => "Close pane",
         }
-    }
-
-    pub(crate) fn is_destructive(self) -> bool {
-        matches!(
-            self,
-            Self::CloseWorkspace
-                | Self::DeleteWorktree
-                | Self::Unsnooze
-                | Self::CloseTab
-                | Self::ClosePane
-        )
     }
 }
 
@@ -5411,60 +5487,57 @@ impl AppState {
             &mut self.sidebar_selected_settled,
             &mut other.selected_settled,
         );
+        let app_overlay = ClientOverlay::from_mode(self.mode);
+
+        std::mem::swap(&mut self.context_menu, &mut other.overlay.context_menu);
+        std::mem::swap(&mut self.sidebar_snooze, &mut other.overlay.snooze);
+        std::mem::swap(&mut self.rename_target, &mut other.overlay.rename_target);
+        std::mem::swap(
+            &mut self.confirm_close_workspace_id,
+            &mut other.overlay.confirm_close_workspace_id,
+        );
+        std::mem::swap(
+            &mut self.worktree_create,
+            &mut other.overlay.worktree_create,
+        );
+        std::mem::swap(&mut self.worktree_open, &mut other.overlay.worktree_open);
+        std::mem::swap(
+            &mut self.worktree_remove,
+            &mut other.overlay.worktree_remove,
+        );
         std::mem::swap(
             &mut self.sidebar_settled_menu_target,
-            &mut other.settled_menu_target,
+            &mut other.overlay.settled_menu_target,
         );
         std::mem::swap(
             &mut self.sidebar_settled_menu_selected,
-            &mut other.settled_menu_selected,
+            &mut other.overlay.settled_menu_selected,
         );
-        let app_modal_mode = matches!(
-            self.mode,
-            Mode::ContextMenu
-                | Mode::RenameWorkspace
-                | Mode::RenameTab
-                | Mode::RenamePane
-                | Mode::ConfirmClose
-        )
-        .then_some(self.mode);
-        let app_modal_active = app_modal_mode.is_some()
-            || self.context_menu.is_some()
-            || self.sidebar_snooze.is_some()
-            || self.rename_target.is_some()
-            || self.confirm_close_workspace_id.is_some();
-        let incoming_modal_active = other.modal.is_active();
-
-        std::mem::swap(&mut self.context_menu, &mut other.modal.context_menu);
-        std::mem::swap(&mut self.sidebar_snooze, &mut other.modal.snooze);
-        std::mem::swap(&mut self.rename_target, &mut other.modal.rename_target);
         std::mem::swap(
-            &mut self.confirm_close_workspace_id,
-            &mut other.modal.confirm_close_workspace_id,
+            &mut self.sidebar_settled_menu_delete_armed,
+            &mut other.overlay.settled_menu_delete_armed,
         );
-        if app_modal_active || incoming_modal_active {
-            std::mem::swap(&mut self.name_input, &mut other.modal.name_input);
-            std::mem::swap(
-                &mut self.name_input_replace_on_type,
-                &mut other.modal.name_input_replace_on_type,
-            );
-            std::mem::swap(
-                &mut self.creating_new_tab,
-                &mut other.modal.creating_new_tab,
-            );
-            std::mem::swap(
-                &mut self.pending_workspace_create_cwd,
-                &mut other.modal.pending_workspace_create_cwd,
-            );
-            std::mem::swap(
-                &mut self.rename_tab_prefill,
-                &mut other.modal.rename_tab_prefill,
-            );
-        }
-        let incoming_mode = std::mem::replace(&mut other.modal.mode, app_modal_mode);
+        std::mem::swap(&mut self.name_input, &mut other.overlay.name_input);
+        std::mem::swap(
+            &mut self.name_input_replace_on_type,
+            &mut other.overlay.name_input_replace_on_type,
+        );
+        std::mem::swap(
+            &mut self.creating_new_tab,
+            &mut other.overlay.creating_new_tab,
+        );
+        std::mem::swap(
+            &mut self.pending_workspace_create_cwd,
+            &mut other.overlay.pending_workspace_create_cwd,
+        );
+        std::mem::swap(
+            &mut self.rename_tab_prefill,
+            &mut other.overlay.rename_tab_prefill,
+        );
+        let incoming_mode = std::mem::replace(&mut other.overlay.kind, app_overlay).mode();
         if let Some(mode) = incoming_mode {
             self.mode = mode;
-        } else if app_modal_mode.is_some() {
+        } else if app_overlay != ClientOverlay::None {
             self.mode = if self.active.is_some() {
                 Mode::Terminal
             } else {
@@ -7807,6 +7880,100 @@ mod tests {
             Some(RenameTarget::Tab { ref workspace_id, .. }) if *workspace_id == app.workspaces[0].id
         ));
         assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn worktree_dialog_survives_another_clients_rename_and_render() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("client-overlay")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let workspace_id = app.workspaces[0].id.clone();
+        let mut client_a = SidebarPresentationState::default();
+        let mut client_b = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut client_b);
+        app.mode = Mode::NewLinkedWorktree;
+        app.name_input = "feature/client-b-draft".into();
+        app.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id: workspace_id.clone(),
+            source_checkout_path: "/repo/herdr".into(),
+            source_existing_membership: None,
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "herdr".into(),
+            repo_name: "herdr".into(),
+            branch: "feature/client-b-draft".into(),
+            checkout_path: "/worktrees/client-b-draft".into(),
+            error: None,
+            creating: false,
+        });
+        app.swap_sidebar_presentation(&mut client_b);
+
+        app.swap_sidebar_presentation(&mut client_a);
+        assert_eq!(app.mode, Mode::Terminal);
+        assert!(app.worktree_create.is_none());
+        app.mode = Mode::RenameWorkspace;
+        app.rename_target = Some(RenameTarget::Workspace {
+            workspace_id: workspace_id.clone(),
+        });
+        app.name_input = "client a rename".into();
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 30));
+        assert_eq!(app.mode, Mode::RenameWorkspace);
+        app.swap_sidebar_presentation(&mut client_a);
+
+        app.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.mode, Mode::NewLinkedWorktree);
+        assert_eq!(app.name_input, "feature/client-b-draft");
+        let draft = app
+            .worktree_create
+            .as_ref()
+            .expect("client B worktree draft");
+        assert_eq!(draft.branch, "feature/client-b-draft");
+        assert_eq!(draft.source_workspace_id, workspace_id);
+    }
+
+    #[test]
+    fn confirm_close_and_settled_delete_arm_are_isolated_between_clients() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("client-overlay")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let workspace_id = app.workspaces[0].id.clone();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let target = PaneFocusTarget {
+            workspace_id: workspace_id.clone(),
+            pane_id,
+        };
+        let mut client_a = SidebarPresentationState::default();
+        let mut client_b = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut client_a);
+        app.mode = Mode::ConfirmClose;
+        app.confirm_close_workspace_id = Some(workspace_id.clone());
+        app.sidebar_settled_menu_target = Some(target.clone());
+        app.sidebar_settled_menu_selected = 3;
+        app.sidebar_settled_menu_delete_armed = true;
+        app.swap_sidebar_presentation(&mut client_a);
+
+        app.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.mode, Mode::Terminal);
+        assert!(app.confirm_close_workspace_id.is_none());
+        assert!(app.sidebar_settled_menu_target.is_none());
+        assert!(!app.sidebar_settled_menu_delete_armed);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 30));
+        app.swap_sidebar_presentation(&mut client_b);
+
+        app.swap_sidebar_presentation(&mut client_a);
+        assert_eq!(app.mode, Mode::ConfirmClose);
+        assert_eq!(
+            app.confirm_close_workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+        assert_eq!(app.sidebar_settled_menu_target, Some(target));
+        assert_eq!(app.sidebar_settled_menu_selected, 3);
+        assert!(app.sidebar_settled_menu_delete_armed);
     }
 
     #[test]
