@@ -814,6 +814,7 @@ fn compute_view_internal(
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
+        focused_remote_host: None,
         scratchpad_link_rows: if !app.dock_collapsed
             && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
         {
@@ -860,6 +861,7 @@ fn compute_view_internal(
     // edge, so they are laid out only once this frame's sidebar is on the view.
     // The row is fitted once here: the status segments, the title, and the
     // links share one layout pass, and render draws what this stored.
+    app.view.focused_remote_host = status::resolve_focused_remote_host(app, terminal_runtimes);
     if status_bar_is_renderable(app, area) {
         app.view.status_buttons = status::status_buttons(app, status_bar_rect);
         app.view.status_segments = status::fitted_status_segments(app, status_bar_rect);
@@ -1108,6 +1110,7 @@ fn compute_mobile_view(
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
+        focused_remote_host: None,
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,

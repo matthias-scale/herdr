@@ -1085,6 +1085,7 @@ impl App {
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
                 status_segments: Vec::new(),
+                focused_remote_host: None,
             },
             drag: None,
             workspace_presses: HashMap::new(),
