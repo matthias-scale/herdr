@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -81,10 +82,12 @@ def _validate_target(target: Path) -> None:
         raise BundleValidationError(f"install target is not a directory: {target}")
 
 
-def _replace_runtime_files(source: Path, target: Path) -> None:
+def _replace_runtime_files(source: Path, target: Path, written: list[Path]) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for name in RUNTIME_FILES:
-        os.replace(source / name, target / name)
+        destination = target / name
+        os.replace(source / name, destination)
+        written.append(destination)
 
 
 def _restore_runtime_files(backup: Path, target: Path) -> None:
@@ -106,11 +109,24 @@ def _restore_runtime_files(backup: Path, target: Path) -> None:
         shutil.rmtree(restore, ignore_errors=True)
 
 
-def _rollback_runtime_files(backup: Path | None, target: Path) -> None:
+def _rollback_runtime_files(
+    backup: Path | None, target: Path, written: list[Path]
+) -> None:
     if backup and backup.exists():
         _restore_runtime_files(backup, target)
-    elif target.exists():
-        shutil.rmtree(target)
+        return
+    for path in written:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        target.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+            raise
 
 
 def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
@@ -142,16 +158,17 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
 
         if backup:
             shutil.copytree(target, backup, symlinks=True)
+        written: list[Path] = []
         try:
-            _replace_runtime_files(stage, target)
+            _replace_runtime_files(stage, target, written)
         except OSError:
-            _rollback_runtime_files(backup, target)
+            _rollback_runtime_files(backup, target, written)
             raise
 
         try:
             _verify_bundle(target, expected)
         except (BundleValidationError, OSError):
-            _rollback_runtime_files(backup, target)
+            _rollback_runtime_files(backup, target, written)
             raise
         return result
     finally:
