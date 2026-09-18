@@ -739,7 +739,7 @@ impl crate::app::App {
             .remote_focus_operations
             .operation_state(&started.operation_id)
             .expect("operation state exists after begin");
-        let channels = match self.create_remote_proxy_pane(operation_state) {
+        let channels = match self.create_remote_proxy_pane(&agent_ref.host, operation_state) {
             Ok((pane_id, terminal_id, public_pane_id, channels)) => {
                 started.proxy_pane_id = public_pane_id.clone();
                 self.remote_focus_operations.attach_proxy(
@@ -781,6 +781,7 @@ impl crate::app::App {
     /// the remote control lease.
     fn create_remote_proxy_pane(
         &mut self,
+        remote_host: &str,
         operation_state: std::sync::Arc<crate::remote::RemoteFocusOperationState>,
     ) -> Result<(PaneId, TerminalId, String, RemoteProxyChannels), ErrorBody> {
         let workspace_count = self.state.workspaces.len();
@@ -815,6 +816,7 @@ impl crate::app::App {
         // identity claim. Keep the tab visibly provisional instead of
         // allowing chrome to fall back to an unlabeled numeric tab.
         terminal.manual_label = Some(REMOTE_PROXY_PENDING_LABEL.to_owned());
+        terminal.remote_proxy_host = Some(remote_host.to_owned());
         self.state.terminals.insert(terminal_id.clone(), terminal);
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         let workspace = &mut self.state.workspaces[ws_idx];
@@ -1133,6 +1135,7 @@ mod tests {
             terminal.manual_label.as_deref() == Some(REMOTE_PROXY_PENDING_LABEL),
             "the connecting proxy must show a provisional label"
         );
+        assert_eq!(terminal.remote_proxy_host.as_deref(), Some("buildbox"));
         assert!(!terminal
             .manual_label
             .as_deref()
