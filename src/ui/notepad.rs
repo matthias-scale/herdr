@@ -18,6 +18,13 @@ use super::text::{display_width_u16, truncate_end};
 use crate::app::state::Palette;
 use crate::app::AppState;
 
+/// A clickable header segment: a note by index, or the read-only agent tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotepadTabTarget {
+    Note(usize),
+    Agent,
+}
+
 /// Rows the workspace list keeps for itself before the notepad may claim any.
 const MIN_LIST_ROWS_BESIDE_NOTEPAD: u16 = 6;
 /// Header row plus at least one body row.
@@ -64,10 +71,10 @@ pub(crate) fn notepad_body_rect(panel: Rect) -> Rect {
     )
 }
 
-/// Clickable name segments in the header, one per note, left to right. Only the
-/// names that fit are returned, so a click can never resolve to a note the
-/// operator cannot see.
-pub(crate) fn notepad_tab_hit_areas(app: &AppState, panel: Rect) -> Vec<(usize, Rect)> {
+/// Clickable name segments in the header, one per note, left to right, then
+/// the agent tab after its divider. Only the names that fit are returned, so a
+/// click can never resolve to a tab the operator cannot see.
+pub(crate) fn notepad_tab_hit_areas(app: &AppState, panel: Rect) -> Vec<(NotepadTabTarget, Rect)> {
     if panel.width == 0 || panel.height == 0 {
         return Vec::new();
     }
@@ -79,8 +86,25 @@ pub(crate) fn notepad_tab_hit_areas(app: &AppState, panel: Rect) -> Vec<(usize, 
         if width == 0 || x.saturating_add(width) > right {
             break;
         }
-        areas.push((index, Rect::new(x, panel.y, width, 1)));
+        areas.push((
+            NotepadTabTarget::Note(index),
+            Rect::new(x, panel.y, width, 1),
+        ));
         x = x.saturating_add(width).saturating_add(1);
+    }
+    if app.notepad.files.is_empty() {
+        x = x
+            .saturating_add(display_width_u16("no notes"))
+            .saturating_add(1);
+    }
+    // The agent label follows a "│ " divider, two columns wide.
+    let label_width = display_width_u16(super::notepad_agent::TAB_LABEL);
+    let label_x = x.saturating_add(2);
+    if label_x.saturating_add(label_width) <= right {
+        areas.push((
+            NotepadTabTarget::Agent,
+            Rect::new(label_x, panel.y, label_width, 1),
+        ));
     }
     areas
 }
@@ -123,6 +147,20 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
             "no notes",
             Style::default().fg(palette.overlay0),
         ));
+        used = used.saturating_add(display_width_u16("no notes"));
+    }
+    // The agent tab trails the note names, divided by a pipe.
+    let agent_width = display_width_u16(super::notepad_agent::TAB_LABEL);
+    if used.saturating_add(2).saturating_add(agent_width) <= width {
+        spans.push(Span::styled("│", Style::default().fg(palette.surface_dim)));
+        spans.push(Span::raw(" "));
+        let style = if app.notepad.agent_tab {
+            Style::default().fg(palette.text)
+        } else {
+            Style::default().fg(palette.overlay0)
+        };
+        spans.push(Span::styled(super::notepad_agent::TAB_LABEL, style));
+        used = used.saturating_add(2).saturating_add(agent_width);
     }
     // Unsaved and diverged are the two facts the operator cannot recover by
     // looking at the body, so they get the remaining space.
@@ -163,6 +201,10 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
 
     let body = notepad_body_rect(panel);
     if body.height == 0 {
+        return;
+    }
+    if app.notepad.agent_tab {
+        super::notepad_agent::render_agent_body(app, frame, body);
         return;
     }
     if let Some(error) = &app.notepad.error {
@@ -208,7 +250,7 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
 /// not hold it. The caret carries the IME composition preview, so it has to be
 /// a real host cursor rather than a highlighted cell.
 pub(crate) fn notepad_caret_position(app: &AppState, panel: Rect) -> Option<(u16, u16)> {
-    if !app.notepad.focused || app.notepad.error.is_some() {
+    if !app.notepad.focused || app.notepad.agent_tab || app.notepad.error.is_some() {
         return None;
     }
     let body = notepad_body_rect(panel);
@@ -299,8 +341,32 @@ mod tests {
         ]);
         let areas = notepad_tab_hit_areas(&app, Rect::new(0, 10, 14, 8));
         assert_eq!(areas.len(), 2);
-        assert_eq!(areas[0].1, Rect::new(2, 10, 4, 1));
-        assert_eq!(areas[1].1, Rect::new(7, 10, 5, 1));
+        assert_eq!(
+            areas[0],
+            (NotepadTabTarget::Note(0), Rect::new(2, 10, 4, 1))
+        );
+        assert_eq!(
+            areas[1],
+            (NotepadTabTarget::Note(1), Rect::new(7, 10, 5, 1))
+        );
+        // "│ agent" needs seven more columns than the fourteen available.
+    }
+
+    #[test]
+    fn the_agent_tab_follows_the_last_note_with_a_divider() {
+        let mut app = state();
+        app.notepad.set_files(vec![crate::notepad::NotepadFile {
+            path: "/notes/todo.md".into(),
+            name: "todo".into(),
+        }]);
+        let areas = notepad_tab_hit_areas(&app, Rect::new(0, 10, 26, 8));
+        assert_eq!(
+            areas,
+            vec![
+                (NotepadTabTarget::Note(0), Rect::new(2, 10, 4, 1)),
+                (NotepadTabTarget::Agent, Rect::new(9, 10, 5, 1)),
+            ]
+        );
     }
 }
 
@@ -345,7 +411,14 @@ mod render_tests {
         assert!(sidebar.width > 0, "the wide layout keeps a sidebar");
         assert_eq!(app.view.notepad_rect.height, 6);
         assert_eq!(app.view.notepad_rect.bottom(), sidebar.bottom() - 1);
-        assert_eq!(app.view.notepad_tab_hit_areas.len(), 2);
+        assert_eq!(app.view.notepad_tab_hit_areas.len(), 3);
+        assert_eq!(
+            app.view
+                .notepad_tab_hit_areas
+                .last()
+                .map(|(target, _)| *target),
+            Some(NotepadTabTarget::Agent)
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
         terminal

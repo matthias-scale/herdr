@@ -501,7 +501,15 @@ pub(crate) fn visible_hyperlinks(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<((u16, u16), String, String)> {
-    crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, app_state.view.tab_surface())
+    let mut links = crate::ui::tab_surface_hyperlinks(
+        app_state,
+        terminal_runtimes,
+        app_state.view.tab_surface(),
+    );
+    // The notepad's agent tab carries its link labels as OSC 8 hyperlinks too,
+    // so a short label still exposes the full URL to the outer terminal.
+    links.extend(crate::ui::notepad_agent::hyperlink_cells(app_state));
+    links
 }
 
 pub(crate) fn focused_terminal_cursor(
