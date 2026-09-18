@@ -132,6 +132,13 @@ pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
 }
 
 pub(crate) fn entry_attention_rank(entry: &AgentPanelEntry) -> u8 {
+    if !entry_is_blocked(entry) {
+        return if entry_attention_tier(entry) == AttentionTier::Attention {
+            1
+        } else {
+            0
+        };
+    }
     match entry_attention_tier(entry) {
         AttentionTier::None => 0,
         AttentionTier::Attention => 1,
@@ -159,7 +166,7 @@ pub(crate) fn entry_needs_human_attention(entry: &AgentPanelEntry) -> bool {
 }
 
 pub(crate) fn entry_has_red_dot(entry: &AgentPanelEntry) -> bool {
-    entry_attention_tier(entry) == AttentionTier::Blocked
+    entry_is_blocked(entry)
 }
 
 /// A working pane keeps its blue lifecycle label while a human gate is latched.
@@ -502,10 +509,11 @@ fn compact_row_widths(
 }
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
-    match entry_attention_tier(entry) {
-        AttentionTier::Blocked => return p.red,
-        AttentionTier::Attention => return p.peach,
-        AttentionTier::None => {}
+    if entry_is_blocked(entry) {
+        return p.red;
+    }
+    if entry_attention_tier(entry) == AttentionTier::Attention {
+        return p.peach;
     }
     // A session that declared a contract and reported it met is the one kind of
     // done you can act on without reading the pane: close it. That earns its own
@@ -2271,11 +2279,14 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
 /// Status buckets for the Status group sort: whoever waits on a human first,
 /// then active work, then everything finished or idle.
 fn sidebar_sort_status_rank(entry: &AgentPanelEntry) -> u8 {
-    match entry_attention_tier(entry) {
-        AttentionTier::Blocked => 0,
-        AttentionTier::Attention => 1,
-        AttentionTier::None if entry.state == AgentState::Working => 2,
-        AttentionTier::None => 3,
+    if entry_is_blocked(entry) {
+        0
+    } else if entry_attention_tier(entry) == AttentionTier::Attention {
+        1
+    } else if entry.state == AgentState::Working {
+        2
+    } else {
+        3
     }
 }
 
@@ -5995,7 +6006,7 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     let attention = entry_attention_tier(entry);
     let key = if entry.usage_limited {
         "usage"
-    } else if attention == AttentionTier::Blocked {
+    } else if entry_is_blocked(entry) {
         "blocked"
     } else if attention == AttentionTier::Attention {
         return "Needs attention".to_string();
