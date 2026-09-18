@@ -5217,6 +5217,10 @@ impl App {
                         self.state.clear_home();
                         self.open_symphony_workflow_at(index);
                     }
+                    MouseAction::OpenAgentRunLog { host, run_id } => {
+                        self.state.clear_home();
+                        self.open_agent_run_log(&host, &run_id);
+                    }
                     MouseAction::OpenFleetHost { name, focus_agent } => {
                         self.state.clear_home();
                         self.open_fleet_host_focused(&name, focus_agent.as_deref());

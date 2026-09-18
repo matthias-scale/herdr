@@ -79,6 +79,7 @@ Workspaces and session:
 | Toggle sidebar | `prefix+shift+b` |
 | Open loop run history | `prefix+ctrl+h` |
 | Open read-only Symphony dashboard | `prefix+shift+s` |
+| Show fleet Runs section | `prefix+alt+r` |
 | Open work projections | `prefix+ctrl+w` |
 | Open Linear tickets | `prefix+ctrl+t` |
 
@@ -87,6 +88,8 @@ Workspaces and session:
 The loop run-history view lists receipt-backed runs across all loops with outcome, gates, human touches, and duration. It refreshes when the receipt file changes. Press Esc or `prefix+ctrl+h` again to close it.
 
 The Symphony dashboard polls open Temporal workflows and shows name, phase, named wait, and age. Enter opens an interactive Herdr window in the matching checkout with workflow, ticket, pull request, and receipt context; the dashboard cannot signal, cancel, or merge workflows.
+
+The Runs section groups active `ra-launch` and `ra-wrap` runs by configured fleet machine. It also shows stale records and a three-row recent-finished tail per host. Click a run to follow its `out.log` in a terminal tab.
 
 The work view projects the repo-wide index as pull requests grouped by repository, with a separate trailing `no ticket` group. Use Left and Right to rotate projections, Up and Down to move, `f` to filter by repository, and Enter to focus the selected pull request's owning pane.
 

@@ -1052,6 +1052,8 @@ pub struct KeysConfig {
     pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
     pub symphony: BindingConfig,
+    /// Expand and focus the read-only fleet Runs section. Default: "prefix+alt+r"
+    pub runs: BindingConfig,
     /// Open the work projection view. Default: "prefix+ctrl+w"
     pub work: BindingConfig,
     /// Open the historical provider usage view. Default: "prefix+ctrl+y"
@@ -1288,6 +1290,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     symphony: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    runs: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     work: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<BindingConfig>,
@@ -1440,6 +1444,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_pomodoro);
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
+        apply_field!(runs);
         apply_field!(work);
         apply_field!(usage);
         apply_field!(tickets);
@@ -1599,6 +1604,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_pomodoro, keybinds.toggle_pomodoro);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
+        copy_effective_action_field!(runs, keybinds.runs);
         copy_effective_action_field!(work, keybinds.work);
         copy_effective_action_field!(usage, keybinds.usage);
         copy_effective_action_field!(tickets, keybinds.tickets);
@@ -1927,6 +1933,8 @@ pub struct FleetConfig {
     /// A non-terminal run heartbeat older than this has unknown liveness.
     /// Default: 1800000 milliseconds (30 minutes).
     pub heartbeat_stale_ms: u64,
+    /// Optional configured host whose localhost Temporal service backs Symphony.
+    pub symphony_host: Option<String>,
     /// Configured local and SSH hosts. Empty by default.
     pub hosts: Vec<FleetHostConfig>,
 }
@@ -1938,6 +1946,7 @@ impl Default for FleetConfig {
             refresh_interval_ms: 15_000,
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
+            symphony_host: None,
             hosts: Vec::new(),
         }
     }
@@ -2137,6 +2146,7 @@ impl Default for KeysConfig {
             toggle_pomodoro: BindingConfig::one("ctrl+alt+b"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
+            runs: BindingConfig::one("prefix+alt+r"),
             work: BindingConfig::one("prefix+ctrl+w"),
             usage: BindingConfig::one("prefix+ctrl+y"),
             tickets: BindingConfig::one("prefix+ctrl+t"),
@@ -2562,6 +2572,7 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
 [remote.fleet]
 self_name = "laptop"
 refresh_interval_ms = 30000
+symphony_host = "workbox"
 
 [[remote.fleet.hosts]]
 name = "workbox"
@@ -2572,6 +2583,10 @@ session = "agents"
         .expect("fleet config");
         assert_eq!(config.remote.fleet.self_name.as_deref(), Some("laptop"));
         assert_eq!(config.remote.fleet.refresh_interval_ms, 30_000);
+        assert_eq!(
+            config.remote.fleet.symphony_host.as_deref(),
+            Some("workbox")
+        );
         assert_eq!(
             config.remote.fleet.hosts[0].session.as_deref(),
             Some("agents")

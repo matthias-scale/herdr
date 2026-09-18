@@ -63,6 +63,15 @@ pub(crate) fn output_with_deadline_limited(
     output_with_deadline_inner(command, deadline, Some(max_output_bytes), None)
 }
 
+pub(crate) fn output_with_stdin_and_deadline_limited(
+    command: Command,
+    stdin: Vec<u8>,
+    deadline: Instant,
+    max_output_bytes: usize,
+) -> io::Result<Output> {
+    output_with_deadline_inner(command, deadline, Some(max_output_bytes), Some(stdin))
+}
+
 fn output_with_deadline_inner(
     mut command: Command,
     deadline: Instant,
