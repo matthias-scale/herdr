@@ -1560,9 +1560,6 @@ pub(crate) struct SidebarPresentationState {
 pub(crate) enum ClientOverlay {
     #[default]
     None,
-    Onboarding,
-    ReleaseNotes,
-    ProductAnnouncement,
     RenameWorkspace,
     RenameTab,
     RenamePane,
@@ -1571,26 +1568,28 @@ pub(crate) enum ClientOverlay {
     ConfirmRemoveWorktree,
     ConfirmClose,
     ContextMenu,
-    GitMenu,
-    AddAction,
-    Settings,
-    GlobalMenu,
-    KeybindHelp,
-    Navigator,
-    CommandPalette,
-    WorkLinkPicker,
-    AgentPicker,
 }
 
 impl ClientOverlay {
     pub(crate) fn from_mode(mode: Mode) -> Self {
         match mode {
-            Mode::Onboarding => Self::Onboarding,
-            Mode::ReleaseNotes => Self::ReleaseNotes,
-            Mode::ProductAnnouncement => Self::ProductAnnouncement,
-            Mode::Navigate | Mode::Prefix | Mode::Copy | Mode::Terminal | Mode::Resize => {
-                Self::None
-            }
+            Mode::Onboarding
+            | Mode::ReleaseNotes
+            | Mode::ProductAnnouncement
+            | Mode::Navigate
+            | Mode::Prefix
+            | Mode::Copy
+            | Mode::Terminal
+            | Mode::Resize
+            | Mode::GitMenu
+            | Mode::AddAction
+            | Mode::Settings
+            | Mode::GlobalMenu
+            | Mode::KeybindHelp
+            | Mode::Navigator
+            | Mode::CommandPalette
+            | Mode::WorkLinkPicker
+            | Mode::AgentPicker => Self::None,
             Mode::RenameWorkspace => Self::RenameWorkspace,
             Mode::RenameTab => Self::RenameTab,
             Mode::RenamePane => Self::RenamePane,
@@ -1599,24 +1598,12 @@ impl ClientOverlay {
             Mode::ConfirmRemoveWorktree => Self::ConfirmRemoveWorktree,
             Mode::ConfirmClose => Self::ConfirmClose,
             Mode::ContextMenu => Self::ContextMenu,
-            Mode::GitMenu => Self::GitMenu,
-            Mode::AddAction => Self::AddAction,
-            Mode::Settings => Self::Settings,
-            Mode::GlobalMenu => Self::GlobalMenu,
-            Mode::KeybindHelp => Self::KeybindHelp,
-            Mode::Navigator => Self::Navigator,
-            Mode::CommandPalette => Self::CommandPalette,
-            Mode::WorkLinkPicker => Self::WorkLinkPicker,
-            Mode::AgentPicker => Self::AgentPicker,
         }
     }
 
     pub(crate) fn mode(self) -> Option<Mode> {
         match self {
             Self::None => None,
-            Self::Onboarding => Some(Mode::Onboarding),
-            Self::ReleaseNotes => Some(Mode::ReleaseNotes),
-            Self::ProductAnnouncement => Some(Mode::ProductAnnouncement),
             Self::RenameWorkspace => Some(Mode::RenameWorkspace),
             Self::RenameTab => Some(Mode::RenameTab),
             Self::RenamePane => Some(Mode::RenamePane),
@@ -1625,15 +1612,6 @@ impl ClientOverlay {
             Self::ConfirmRemoveWorktree => Some(Mode::ConfirmRemoveWorktree),
             Self::ConfirmClose => Some(Mode::ConfirmClose),
             Self::ContextMenu => Some(Mode::ContextMenu),
-            Self::GitMenu => Some(Mode::GitMenu),
-            Self::AddAction => Some(Mode::AddAction),
-            Self::Settings => Some(Mode::Settings),
-            Self::GlobalMenu => Some(Mode::GlobalMenu),
-            Self::KeybindHelp => Some(Mode::KeybindHelp),
-            Self::Navigator => Some(Mode::Navigator),
-            Self::CommandPalette => Some(Mode::CommandPalette),
-            Self::WorkLinkPicker => Some(Mode::WorkLinkPicker),
-            Self::AgentPicker => Some(Mode::AgentPicker),
         }
     }
 }
