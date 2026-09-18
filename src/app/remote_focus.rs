@@ -113,6 +113,7 @@ pub(crate) struct RemoteFocusOperation {
     /// A later detailed failure replaces it.
     error_is_placeholder: bool,
     created_at: Instant,
+    operation_sequence: u64,
     completed_at: Option<Instant>,
 }
 
@@ -204,7 +205,7 @@ impl RemoteFocusOperations {
             }
         }
 
-        let operation_id = self.next_operation_id();
+        let (operation_id, operation_sequence) = self.next_operation_id();
         let proxy_pane_id = format!("remote-focus-proxy-{operation_id}");
         self.operations.insert(
             operation_id.clone(),
@@ -219,6 +220,7 @@ impl RemoteFocusOperations {
                 first_frame_processed: false,
                 error_is_placeholder: false,
                 created_at: now,
+                operation_sequence,
                 completed_at: None,
             },
         );
@@ -384,15 +386,16 @@ impl RemoteFocusOperations {
                         operation.state,
                         RemoteFocusState::Connecting | RemoteFocusState::Active
                     )
+                    && !operation.operation_state.is_terminal()
             })
             .filter_map(|(operation_id, operation)| {
                 let pane_id = operation.proxy.as_ref().map(|(pane_id, _)| *pane_id)?;
                 pane_exists(pane_id).then_some((operation_id, operation, pane_id))
             })
-            .max_by(|(left_id, left, _), (right_id, right, _)| {
+            .max_by(|(_, left, _), (_, right, _)| {
                 left.created_at
                     .cmp(&right.created_at)
-                    .then_with(|| left_id.cmp(right_id))
+                    .then_with(|| left.operation_sequence.cmp(&right.operation_sequence))
             })
             .map(|(_, _, pane_id)| pane_id)
     }
@@ -451,13 +454,13 @@ impl RemoteFocusOperations {
         self.operations.len()
     }
 
-    fn next_operation_id(&mut self) -> String {
+    fn next_operation_id(&mut self) -> (String, u64) {
         loop {
             let number = self.next_operation_id;
             self.next_operation_id = self.next_operation_id.saturating_add(1);
             let operation_id = format!("remote-focus-{number}");
             if !self.operations.contains_key(&operation_id) {
-                return operation_id;
+                return (operation_id, number);
             }
         }
     }
@@ -1921,6 +1924,94 @@ mod tests {
         assert_eq!(
             operations.proxy_pane_for_agent(&source, |pane_id| pane_id == live_pane),
             Some(live_pane)
+        );
+    }
+
+    #[test]
+    fn proxy_reuse_skips_a_terminated_but_unreconciled_operation() {
+        let now = Instant::now();
+        let source = agent_ref();
+        let mut operations = RemoteFocusOperations::default();
+
+        let live = operations
+            .begin(source.clone(), now)
+            .expect("live operation starts");
+        let live_pane = PaneId::from_raw(104);
+        operations.attach_proxy(
+            &live.operation_id,
+            live_pane,
+            TerminalId::alloc(),
+            "live-proxy".into(),
+        );
+
+        let terminated = operations
+            .begin(source.clone(), now + Duration::from_secs(1))
+            .expect("terminated operation starts");
+        let terminated_pane = PaneId::from_raw(105);
+        operations.attach_proxy(
+            &terminated.operation_id,
+            terminated_pane,
+            TerminalId::alloc(),
+            "terminated-proxy".into(),
+        );
+        let operation_state = operations
+            .operation_state(&terminated.operation_id)
+            .expect("terminated operation state");
+        assert!(operation_state.terminate(), "transport marks the loss");
+
+        assert_eq!(
+            operations.proxy_pane_for_agent(&source, |pane_id| {
+                pane_id == live_pane || pane_id == terminated_pane
+            }),
+            Some(live_pane)
+        );
+        assert_eq!(
+            operations
+                .operations
+                .get(&terminated.operation_id)
+                .expect("terminated operation remains retained")
+                .state,
+            RemoteFocusState::Connecting,
+            "the app record is still unreconciled while reuse checks transport state"
+        );
+    }
+
+    #[test]
+    fn proxy_reuse_prefers_newest_operation_when_created_at_ties() {
+        let now = Instant::now();
+        let source = agent_ref();
+        let mut operations = RemoteFocusOperations::default();
+        let mut selected = None;
+
+        for operation_number in 1..=10 {
+            let operation = operations
+                .begin(source.clone(), now)
+                .expect("operation starts");
+            if operation_number == 9 {
+                let pane_id = PaneId::from_raw(106);
+                operations.attach_proxy(
+                    &operation.operation_id,
+                    pane_id,
+                    TerminalId::alloc(),
+                    "older-proxy".into(),
+                );
+            } else if operation_number == 10 {
+                let pane_id = PaneId::from_raw(107);
+                operations.attach_proxy(
+                    &operation.operation_id,
+                    pane_id,
+                    TerminalId::alloc(),
+                    "newer-proxy".into(),
+                );
+                selected = Some(pane_id);
+            }
+        }
+
+        assert_eq!(
+            operations.proxy_pane_for_agent(&source, |pane_id| {
+                pane_id == PaneId::from_raw(106) || pane_id == PaneId::from_raw(107)
+            }),
+            selected
         );
     }
 
