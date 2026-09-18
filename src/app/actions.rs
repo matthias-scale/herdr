@@ -3279,6 +3279,10 @@ impl AppState {
                 accepted = mutation.is_some();
                 let mut mutation = mutation?;
                 if let Some(closing_block) = closing_block {
+                    let merge_malformed_blockers = matches!(
+                        closing_block.parse_status,
+                        Some(crate::api::schema::ClosingParseStatus::Malformed)
+                    ) && !closing_block.dependencies_authoritative;
                     let before = mutation
                         .effective_state_change
                         .clone()
@@ -3295,21 +3299,28 @@ impl AppState {
                         closing_block.workers_unknown,
                         now,
                     );
-                    let (payload_changed, agents_changed) =
-                        if closing_block.dependencies_authoritative {
-                            (
-                                terminal.apply_closing_block_payload(
-                                    closing_block.gates,
-                                    closing_block.items,
-                                    closing_block.decisions,
-                                ),
-                                terminal
-                                    .apply_closing_report_subagents_at(closing_block.agents, now)
-                                    .is_some(),
-                            )
-                        } else {
-                            (false, false)
-                        };
+                    let (payload_changed, agents_changed) = if closing_block
+                        .dependencies_authoritative
+                    {
+                        (
+                            terminal.apply_closing_block_payload(
+                                closing_block.gates,
+                                closing_block.items,
+                                closing_block.decisions,
+                            ),
+                            terminal
+                                .apply_closing_report_subagents_at(closing_block.agents, now)
+                                .is_some(),
+                        )
+                    } else if merge_malformed_blockers {
+                        (
+                            terminal
+                                .merge_closing_blockers(closing_block.gates, closing_block.items),
+                            false,
+                        )
+                    } else {
+                        (false, false)
+                    };
                     let after = terminal.unchanged_effective_state_change_at(now);
                     mutation.effective_state_change = Some(EffectiveStateChange {
                         previous_agent_label: before.previous_agent_label,

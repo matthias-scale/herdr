@@ -166,6 +166,35 @@ def mirror_path(pane_id: str) -> str:
     return os.path.join(d, f"{pane_id.replace(':', '_')}.json")
 
 
+def _blocking_item_identity(item: dict[str, Any]) -> tuple:
+    return (
+        str(item.get("label") or "").strip().lower(),
+        str(item.get("text") or "").strip(),
+        item.get("pr"),
+        item.get("ticket"),
+        item.get("url"),
+    )
+
+
+def _merge_blocking_items(prior: Any, current: Any) -> list[dict[str, Any]]:
+    merged = [item for item in prior or [] if isinstance(item, dict)]
+    identities = {_blocking_item_identity(item) for item in merged}
+    for item in current or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("label") or "").strip().lower() not in {
+            "gate",
+            "answer",
+            "verify",
+        }:
+            continue
+        identity = _blocking_item_identity(item)
+        if identity not in identities:
+            merged.append(item)
+            identities.add(identity)
+    return merged
+
+
 def write_mirror(pane_id: str, payload: dict) -> str | None:
     """Atomic write -- a torn status file is worse than a stale one."""
     path = mirror_path(pane_id)
@@ -195,7 +224,7 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                 and prior.get("session_id") == payload.get("session_id")
             )
             parse_status = payload.get("parse_status")
-            if same_session and parse_status in {"missing", "malformed"}:
+            if same_session and parse_status == "missing":
                 for key in (
                     "blocking",
                     "agents",
@@ -208,6 +237,36 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                 ):
                     if key in prior:
                         mirror_payload[key] = prior[key]
+            elif same_session and parse_status == "malformed":
+                for key in (
+                    "agents",
+                    "decisions",
+                    "agent_names",
+                    "external_wait",
+                    "workers_unknown",
+                ):
+                    if key in prior:
+                        mirror_payload[key] = prior[key]
+                merged_gates = _merge_blocking_items(
+                    prior.get("gates"), payload.get("gates")
+                )
+                merged_items = _merge_blocking_items(
+                    prior.get("items"), payload.get("items")
+                )
+                if merged_gates or "gates" in prior or "gates" in payload:
+                    mirror_payload["gates"] = merged_gates
+                if merged_items or "items" in prior or "items" in payload:
+                    mirror_payload["items"] = merged_items
+                recognized_blocking = len(merged_gates) + sum(
+                    str(item.get("label") or "").strip().lower()
+                    in {"answer", "verify"}
+                    for item in merged_items
+                )
+                mirror_payload["blocking"] = max(
+                    int(prior.get("blocking") or 0),
+                    int(payload.get("blocking") or 0),
+                    recognized_blocking,
+                )
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(mirror_payload, fh)
@@ -344,6 +403,11 @@ def report(
         payload["items"] = item_objects
         payload["decisions"] = decision_objects
         payload["agent_names"] = agent_names
+    elif parse_status == "malformed":
+        if gate_objects:
+            payload["gates"] = gate_objects
+        if action_points:
+            payload["items"] = action_points
     if reported_agents is not None:
         payload["agents"] = reported_agents
     if title:
@@ -384,6 +448,11 @@ def report(
         agent_params["gates"] = gate_objects
         agent_params["items"] = item_objects
         agent_params["decisions"] = decision_objects
+    elif parse_status == "malformed":
+        if gate_objects:
+            agent_params["gates"] = gate_objects
+        if action_points:
+            agent_params["items"] = action_points
     if reported_agents is not None:
         agent_params["agents"] = reported_agents
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:

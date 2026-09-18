@@ -432,6 +432,34 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "https://github.com/scalable-so/scalablev2/pull/3401",
         )
 
+    def test_malformed_url_first_answer_reaches_the_report_rpc(self):
+        block = closing_block.parse(MOVE_AND_RESIZE_CAP)
+
+        with self._isolated(), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=block.blocking,
+                agents=block.agents_running,
+                gates=block.wire_gates(),
+                items=block.wire_items(),
+                decisions=block.wire_decisions(),
+                completion=block.completion,
+                parse_status=block.parse_status,
+                pane_id="w1:p-malformed-answer",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        report_params = rpc.call_args_list[1].args[3]
+        self.assertEqual(outcome["payload"]["parse_status"], "malformed")
+        self.assertEqual(report_params["parse_status"], "malformed")
+        self.assertEqual(
+            [(item["label"], item["blocking"]) for item in report_params["items"]],
+            [("Answer", True)],
+        )
+        self.assertNotIn("gates", report_params)
+        self.assertNotIn("decisions", report_params)
+        self.assertNotIn("agents", report_params)
+
     def test_bold_plain_and_url_first_labels_have_identical_decision_state(self):
         presentations = (
             "1. **Answer** — Choose the placement strategy.\n",
@@ -1547,10 +1575,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
 
         self.assertEqual(outcome["payload"]["state"], "unknown")
-        for key in ("agents", "agent_names", "gates", "items", "decisions"):
+        self.assertEqual(outcome["payload"]["gates"][0]["text"], "partial")
+        for key in ("agents", "agent_names", "items", "decisions"):
             self.assertNotIn(key, outcome["payload"])
         report_params = rpc.call_args_list[1].args[3]
-        for key in ("agents", "gates", "items", "decisions"):
+        self.assertEqual(report_params["gates"][0]["text"], "partial")
+        for key in ("agents", "items", "decisions"):
             self.assertNotIn(key, report_params)
         tokens = rpc.call_args_list[2].args[3]["tokens"]
         for key in (
@@ -1562,6 +1592,14 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "closing_workers_unknown",
         ):
             self.assertNotIn(key, tokens)
+
+        merge_base_state = {"gates": ["pending gate"], "agents": 2}
+        if all(key in report_params for key in ("gates", "items", "decisions")):
+            merge_base_state = {
+                "gates": report_params["gates"],
+                "agents": report_params.get("agents"),
+            }
+        self.assertEqual(merge_base_state, {"gates": ["pending gate"], "agents": 2})
 
     def test_report_does_not_honor_legacy_nonblocking_item_flags(self):
         with self._isolated():
@@ -1632,10 +1670,10 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
             herdr_status.report(
                 agent="claude",
-                blocking=0,
+                blocking=1,
                 agents=0,
                 gates=[],
-                items=[],
+                items=[{"label": "Answer", "text": "Choose lane B"}],
                 decisions=[],
                 completion="incomplete",
                 parse_status="malformed",
@@ -1648,6 +1686,8 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 mirrored = herdr_status.json.load(fh)
 
         self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate A"])
+        self.assertEqual([item["text"] for item in mirrored["items"]], ["Choose lane B"])
+        self.assertEqual(mirrored["blocking"], 2)
         self.assertEqual(mirrored["agents"], 2)
         self.assertFalse(mirrored["workers_unknown"])
         self.assertEqual(mirrored["parse_status"], "malformed")

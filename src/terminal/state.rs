@@ -838,6 +838,56 @@ impl TerminalState {
         true
     }
 
+    pub(crate) fn merge_closing_blockers(
+        &mut self,
+        gates: Vec<crate::api::schema::ClosingBlockItem>,
+        items: Vec<crate::api::schema::ClosingBlockItem>,
+    ) -> bool {
+        fn same_identity(
+            left: &crate::api::schema::ClosingBlockItem,
+            right: &crate::api::schema::ClosingBlockItem,
+        ) -> bool {
+            left.label.trim().eq_ignore_ascii_case(right.label.trim())
+                && left.text.trim() == right.text.trim()
+                && left.pr == right.pr
+                && left.ticket == right.ticket
+                && left.url == right.url
+        }
+
+        let report = self.closing_report.get_or_insert_default();
+        let mut changed = false;
+        for gate in gates
+            .into_iter()
+            .filter(crate::api::schema::ClosingBlockItem::requires_human_input)
+        {
+            if !report
+                .closing_gates
+                .iter()
+                .any(|existing| same_identity(existing, &gate))
+            {
+                report.closing_gates.push(gate);
+                changed = true;
+            }
+        }
+        for item in items
+            .into_iter()
+            .filter(crate::api::schema::ClosingBlockItem::requires_human_input)
+        {
+            if !report
+                .closing_items
+                .iter()
+                .any(|existing| same_identity(existing, &item))
+            {
+                report.closing_items.push(item);
+                changed = true;
+            }
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
+    }
+
     pub(crate) fn apply_closing_report_subagents_at(
         &mut self,
         agents: Option<u32>,

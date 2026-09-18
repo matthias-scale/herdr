@@ -1583,8 +1583,16 @@ impl App {
             || external_wait.is_some()
             || parse_status.is_some()
             || workers_unknown.is_some();
-        let arrays = params.gates.zip(params.items).zip(params.decisions);
-        let has_arrays = arrays.is_some();
+        let gates = params.gates;
+        let items = params.items;
+        let decisions = params.decisions;
+        let has_complete_arrays = gates.is_some() && items.is_some() && decisions.is_some();
+        let has_malformed_blockers = matches!(
+            parse_status,
+            Some(crate::api::schema::ClosingParseStatus::Malformed)
+        ) && (gates.as_ref().is_some_and(|gates| !gates.is_empty())
+            || items.as_ref().is_some_and(|items| !items.is_empty()));
+        let has_arrays = has_complete_arrays || has_malformed_blockers;
         let report_wait = if dependencies_authoritative {
             params.wait.or_else(|| reported_external_wait.clone())
         } else {
@@ -1623,9 +1631,19 @@ impl App {
         let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION)
             && (has_arrays || task_reported))
             .then(|| {
-                let (gates, items, decisions) = arrays
-                    .map(|((gates, items), decisions)| (gates, items, decisions))
-                    .unwrap_or_default();
+                let (gates, items, decisions) = if dependencies_authoritative {
+                    gates
+                        .zip(items)
+                        .zip(decisions)
+                        .map(|((gates, items), decisions)| (gates, items, decisions))
+                        .unwrap_or_default()
+                } else {
+                    (
+                        gates.unwrap_or_default(),
+                        items.unwrap_or_default(),
+                        Vec::new(),
+                    )
+                };
                 Box::new(crate::events::ClosingBlockReport {
                     gates,
                     items,
@@ -6564,9 +6582,13 @@ mod tests {
         let _: SuccessResponse =
             serde_json::from_str(&app.handle_pane_report_agent("valid".into(), valid)).unwrap();
 
+        let mut newly_recognized_answer = answer.clone();
+        newly_recognized_answer.n = 2;
+        newly_recognized_answer.text = "Choose the placement lane".into();
         let mut malformed = closing_block_report(&pane_id, 2, Vec::new());
-        malformed.items = Some(Vec::new());
-        malformed.decisions = Some(Vec::new());
+        malformed.gates = None;
+        malformed.items = Some(vec![newly_recognized_answer.clone()]);
+        malformed.decisions = None;
         malformed.agents = Some(0);
         malformed.state = crate::api::schema::PaneAgentState::Unknown;
         malformed.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
@@ -6578,7 +6600,10 @@ mod tests {
 
         let terminal = &app.state.terminals[&terminal_id];
         assert_eq!(terminal.closing_gates, vec![gate]);
-        assert_eq!(terminal.closing_items, vec![answer]);
+        assert_eq!(
+            terminal.closing_items,
+            vec![answer, newly_recognized_answer]
+        );
         assert_eq!(terminal.closing_decisions, vec![decision]);
         assert_eq!(terminal.effective_active_subagents(), Some(2));
         assert_eq!(
