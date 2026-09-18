@@ -325,29 +325,18 @@ impl App {
                 if self.handle_dock_chooser_key(&key) {
                     return None;
                 }
-                match owner {
-                    DockInputOwner::Home => {
-                        self.handle_dock_home_key(&key);
-                    }
-                    DockInputOwner::PullRequest => {
-                        self.handle_dock_pr_key(&key);
-                    }
-                    DockInputOwner::Linear => {
-                        self.handle_dock_linear_key(&key);
-                    }
-                    DockInputOwner::Diff => {
-                        self.handle_dock_diff_key(&key);
-                    }
-                    DockInputOwner::Files => {
-                        self.handle_dock_files_key(&key);
-                    }
-                    DockInputOwner::Agents => {
-                        self.handle_dock_agents_key(&key);
-                    }
-                    DockInputOwner::Hosts => {
-                        self.handle_dock_hosts_key(&key);
-                    }
-                    DockInputOwner::Chooser | DockInputOwner::Editor => {}
+                let consumed = match owner {
+                    DockInputOwner::Home => self.handle_dock_home_key(&key),
+                    DockInputOwner::PullRequest => self.handle_dock_pr_key(&key),
+                    DockInputOwner::Linear => self.handle_dock_linear_key(&key),
+                    DockInputOwner::Diff => self.handle_dock_diff_key(&key),
+                    DockInputOwner::Files => self.handle_dock_files_key(&key),
+                    DockInputOwner::Agents => self.handle_dock_agents_key(&key),
+                    DockInputOwner::Hosts => self.handle_dock_hosts_key(&key),
+                    DockInputOwner::Chooser | DockInputOwner::Editor => false,
+                };
+                if !consumed {
+                    return self.handle_terminal_key(key).await;
                 }
             }
             InputOwner::Sidebar => {
@@ -4487,7 +4476,7 @@ impl App {
         if self.paste_into_input_owner(owner, text) {
             return;
         }
-        if owner != InputOwner::Pane {
+        if !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 
@@ -4572,7 +4561,7 @@ impl App {
         if self.paste_into_input_owner(owner, &text) {
             return;
         }
-        if owner != InputOwner::Pane {
+        if !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 
@@ -4629,7 +4618,7 @@ impl App {
             }
             return;
         }
-        if self.paste_into_input_owner(owner, &text) || owner != InputOwner::Pane {
+        if self.paste_into_input_owner(owner, &text) || !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 

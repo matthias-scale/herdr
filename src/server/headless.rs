@@ -15561,7 +15561,7 @@ next_tab = ""
     }
 
     #[tokio::test]
-    async fn raw_headless_dock_navigation_intercepts_arrow_but_forwards_bare_letter() {
+    async fn raw_headless_dock_navigation_intercepts_arrows_but_forwards_pane_input() {
         let mut server = test_headless_server();
         server.app.state.workspaces = [10_u64, 20]
             .into_iter()
@@ -15632,6 +15632,24 @@ next_tab = ""
                 .try_recv()
                 .expect("bare letter reaches focused pane"),
             Bytes::from_static(b"j")
+        );
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![
+                crate::protocol::ClientInputEvent::TextCommit("λ".into()),
+                crate::protocol::ClientInputEvent::Paste {
+                    text: "bulk".into(),
+                },
+            ],
+        }));
+        assert_eq!(
+            input_rx.try_recv().expect("committed text reaches pane"),
+            Bytes::from_static("λ".as_bytes())
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("paste reaches pane"),
+            Bytes::from_static(b"bulk")
         );
     }
 

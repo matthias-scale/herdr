@@ -3168,12 +3168,23 @@ impl App {
                                 );
                                 continue;
                             }
-                            let terminal_owner = matches!(
-                                owner,
-                                state::InputOwner::Popup
-                                    | state::InputOwner::Pane
-                                    | state::InputOwner::Dock(state::DockInputOwner::Editor)
-                            );
+                            if let state::InputOwner::Dock(dock_owner) = owner {
+                                if dock_owner != state::DockInputOwner::Editor
+                                    && self.handle_dock_key_for_owner_headless(dock_owner, &key)
+                                {
+                                    self.input_leases.insert_consumed(
+                                        lease_key,
+                                        input::ConsumedInputLease::SuppressRepeats,
+                                    );
+                                    continue;
+                                }
+                            }
+                            let terminal_owner = owner.forwards_unhandled_input_to_pane()
+                                || matches!(
+                                    owner,
+                                    state::InputOwner::Popup
+                                        | state::InputOwner::Dock(state::DockInputOwner::Editor)
+                                );
                             let initial_context = terminal_owner
                                 .then(|| self.terminal_input_context())
                                 .flatten();
@@ -3211,12 +3222,12 @@ impl App {
                             );
                         }
                         crossterm::event::KeyEventKind::Repeat => {
-                            let current_context = matches!(
-                                owner,
-                                state::InputOwner::Popup
-                                    | state::InputOwner::Pane
-                                    | state::InputOwner::Dock(state::DockInputOwner::Editor)
-                            )
+                            let current_context = (owner.forwards_unhandled_input_to_pane()
+                                || matches!(
+                                    owner,
+                                    state::InputOwner::Popup
+                                        | state::InputOwner::Dock(state::DockInputOwner::Editor)
+                                ))
                             .then(|| self.terminal_input_context())
                             .flatten();
                             let plan = self.input_leases.plan_repeat(
@@ -3287,7 +3298,7 @@ impl App {
                             let _ = runtime.try_send_paste(text);
                         }
                     } else if self.paste_into_input_owner(owner, &text) {
-                    } else if owner == state::InputOwner::Pane {
+                    } else if owner.forwards_unhandled_input_to_pane() {
                         if let Some(ws_idx) = self.state.active {
                             let focused = self
                                 .state
@@ -3507,33 +3518,7 @@ impl App {
                 self.intercept_notepad_key_with_prompt_visibility(&key, false);
             }
             state::InputOwner::Dock(owner) => {
-                if self.handle_dock_chooser_key_headless(&key) {
-                    return;
-                }
-                match owner {
-                    state::DockInputOwner::Home => {
-                        self.handle_dock_home_key_headless(&key);
-                    }
-                    state::DockInputOwner::PullRequest => {
-                        self.handle_dock_pr_key_headless(&key);
-                    }
-                    state::DockInputOwner::Linear => {
-                        self.handle_dock_linear_key_headless(&key);
-                    }
-                    state::DockInputOwner::Diff => {
-                        self.handle_dock_diff_key_headless(&key);
-                    }
-                    state::DockInputOwner::Files => {
-                        self.handle_dock_files_key(&key);
-                    }
-                    state::DockInputOwner::Agents => {
-                        self.handle_dock_agents_key(&key);
-                    }
-                    state::DockInputOwner::Hosts => {
-                        self.handle_dock_hosts_key(&key);
-                    }
-                    state::DockInputOwner::Editor | state::DockInputOwner::Chooser => {}
-                }
+                self.handle_dock_key_for_owner_headless(owner, &key);
             }
             state::InputOwner::Sidebar => {
                 if self.state.handle_sidebar_search_key(key_event) {
@@ -3555,6 +3540,26 @@ impl App {
                 }
             }
             state::InputOwner::None => {}
+        }
+    }
+
+    fn handle_dock_key_for_owner_headless(
+        &mut self,
+        owner: state::DockInputOwner,
+        key: &crate::input::TerminalKey,
+    ) -> bool {
+        if self.handle_dock_chooser_key_headless(key) {
+            return true;
+        }
+        match owner {
+            state::DockInputOwner::Home => self.handle_dock_home_key_headless(key),
+            state::DockInputOwner::PullRequest => self.handle_dock_pr_key_headless(key),
+            state::DockInputOwner::Linear => self.handle_dock_linear_key_headless(key),
+            state::DockInputOwner::Diff => self.handle_dock_diff_key_headless(key),
+            state::DockInputOwner::Files => self.handle_dock_files_key(key),
+            state::DockInputOwner::Agents => self.handle_dock_agents_key(key),
+            state::DockInputOwner::Hosts => self.handle_dock_hosts_key(key),
+            state::DockInputOwner::Editor | state::DockInputOwner::Chooser => false,
         }
     }
 }

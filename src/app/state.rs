@@ -1710,6 +1710,19 @@ pub(crate) enum InputOwner {
     None,
 }
 
+impl InputOwner {
+    /// Dock navigation owns its shortcuts but leaves unrelated typing with the
+    /// pane visible behind it. The editor dock routes to its own PTY instead.
+    pub(crate) fn forwards_unhandled_input_to_pane(self) -> bool {
+        match self {
+            Self::Pane => true,
+            Self::Dock(DockInputOwner::Editor) => false,
+            Self::Dock(_) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModeOwner {
     Server,

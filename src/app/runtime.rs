@@ -313,14 +313,14 @@ impl App {
                 }
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
-                        let terminal_owner = matches!(
-                            owner,
-                            super::state::InputOwner::Popup
-                                | super::state::InputOwner::Pane
-                                | super::state::InputOwner::Dock(
-                                    super::state::DockInputOwner::Editor
-                                )
-                        );
+                        let terminal_owner = owner.forwards_unhandled_input_to_pane()
+                            || matches!(
+                                owner,
+                                super::state::InputOwner::Popup
+                                    | super::state::InputOwner::Dock(
+                                        super::state::DockInputOwner::Editor
+                                    )
+                            );
                         let initial_context = terminal_owner
                             .then(|| self.terminal_input_context())
                             .flatten();
@@ -342,14 +342,14 @@ impl App {
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
-                        let current_context = matches!(
-                            owner,
-                            super::state::InputOwner::Popup
-                                | super::state::InputOwner::Pane
-                                | super::state::InputOwner::Dock(
-                                    super::state::DockInputOwner::Editor
-                                )
-                        )
+                        let current_context = (owner.forwards_unhandled_input_to_pane()
+                            || matches!(
+                                owner,
+                                super::state::InputOwner::Popup
+                                    | super::state::InputOwner::Dock(
+                                        super::state::DockInputOwner::Editor
+                                    )
+                            ))
                         .then(|| self.terminal_input_context())
                         .flatten();
                         let plan = self.input_leases.plan_repeat(
