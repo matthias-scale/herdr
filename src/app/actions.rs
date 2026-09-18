@@ -1863,6 +1863,7 @@ impl AppState {
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
             self.local_agent_panel_identities.remove(&pane_id);
+            self.agent_states.remove(pane_id);
         }
     }
 
@@ -3438,6 +3439,34 @@ impl AppState {
                 .apply_pane_process_state(pane_id, holds_shell, stale_resolution, observed_at)
                 .into_iter()
                 .collect(),
+            AppEvent::AgentLinksDetected {
+                pane_id,
+                output_urls,
+                output_updates,
+                osc8_urls,
+                observed_at,
+            } => {
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.pane_state(pane_id).is_some())
+                {
+                    return Vec::new();
+                }
+                self.agent_states.observe_output_links(
+                    pane_id,
+                    output_urls,
+                    output_updates,
+                    observed_at,
+                );
+                self.agent_states.observe_links(
+                    pane_id,
+                    osc8_urls,
+                    crate::agent_state::AgentLinkSource::Osc8,
+                    observed_at,
+                );
+                Vec::new()
+            }
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -3821,6 +3850,10 @@ impl AppState {
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
+        if change.previous_state != AgentState::Working && change.state == AgentState::Working {
+            self.agent_states
+                .observe_working(pane_id, std::time::SystemTime::now());
+        }
         let fresh_attention = {
             let pane = self.workspaces[ws_idx].pane_state(pane_id)?;
             let terminal = self.terminals.get(&terminal_id)?;
@@ -6163,12 +6196,145 @@ mod tests {
     fn pane_died_last_pane_removes_workspace() {
         let mut state = app_with_workspaces(&["a", "b"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    goal: Some("remove on process death".into()),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                std::time::SystemTime::now(),
+            )
+            .expect("valid report");
 
         state.handle_pane_died(pane_id);
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].custom_name.as_deref(), Some("b"));
+        assert!(state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .goal
+            .is_none());
+
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://late.example.test/stale".into()],
+            output_updates: Vec::new(),
+            osc8_urls: Vec::new(),
+            observed_at: std::time::SystemTime::now(),
+        });
+        assert!(state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .links
+            .is_empty());
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn link_event_replaces_only_the_named_provisional_url() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let first_seen =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://split.example.test".into()],
+            output_updates: vec![crate::agent_state::OutputLinkUpdate {
+                occurrence_id: 1,
+                previous_url: None,
+                url: "https://split.example.test".into(),
+            }],
+            osc8_urls: Vec::new(),
+            observed_at: first_seen,
+        });
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://split.example.test/path".into()],
+            output_updates: vec![crate::agent_state::OutputLinkUpdate {
+                occurrence_id: 1,
+                previous_url: Some("https://split.example.test".into()),
+                url: "https://split.example.test/path".into(),
+            }],
+            osc8_urls: Vec::new(),
+            observed_at: first_seen + std::time::Duration::from_secs(2),
+        });
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://split.example.test/path/child".into()],
+            output_updates: Vec::new(),
+            osc8_urls: Vec::new(),
+            observed_at: first_seen + std::time::Duration::from_secs(3),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].url, "https://split.example.test/path");
+        assert_eq!(
+            links[0].first_seen,
+            crate::agent_state::format_rfc3339(first_seen).unwrap()
+        );
+        assert_eq!(links[1].url, "https://split.example.test/path/child");
+    }
+
+    #[test]
+    fn link_replacement_does_not_replace_an_older_identical_url() {
+        let mut state = app_with_workspaces(&["duplicate links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let started =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        for (offset, output_urls, output_updates) in [
+            (0, vec!["https://split.example.test".into()], Vec::new()),
+            (
+                1,
+                vec!["https://split.example.test".into()],
+                vec![crate::agent_state::OutputLinkUpdate {
+                    occurrence_id: 2,
+                    previous_url: None,
+                    url: "https://split.example.test".into(),
+                }],
+            ),
+            (
+                2,
+                vec!["https://split.example.test/path".into()],
+                vec![crate::agent_state::OutputLinkUpdate {
+                    occurrence_id: 2,
+                    previous_url: Some("https://split.example.test".into()),
+                    url: "https://split.example.test/path".into(),
+                }],
+            ),
+        ] {
+            state.handle_app_event(AppEvent::AgentLinksDetected {
+                pane_id,
+                output_urls,
+                output_updates,
+                osc8_urls: Vec::new(),
+                observed_at: started + std::time::Duration::from_secs(offset),
+            });
+        }
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].url, "https://split.example.test");
+        assert_eq!(
+            links[0].first_seen,
+            crate::agent_state::format_rfc3339(started).unwrap()
+        );
+        assert_eq!(links[0].first_seen, links[0].last_seen);
+        assert_eq!(links[1].url, "https://split.example.test/path");
+        assert_eq!(
+            links[1].first_seen,
+            crate::agent_state::format_rfc3339(started + std::time::Duration::from_secs(1))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6281,6 +6447,14 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+        assert!(
+            state
+                .agent_states
+                .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+                .last_acted_at
+                .is_some(),
+            "transition into working records agent activity"
+        );
     }
 
     #[test]

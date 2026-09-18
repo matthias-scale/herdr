@@ -934,6 +934,7 @@ impl App {
                 config.session.settle_done_after_minutes.saturating_mul(60),
             ),
             terminals: std::collections::HashMap::new(),
+            agent_states: crate::agent_state::AgentStateStore::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),

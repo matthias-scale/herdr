@@ -57,6 +57,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
 mod activity_age;
 mod agent_resume;
 mod agent_runs;
+mod agent_state;
 mod api;
 mod app;
 mod build_info;

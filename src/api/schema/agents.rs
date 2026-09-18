@@ -5,6 +5,20 @@ use serde::{Deserialize, Serialize};
 use super::common::{AgentStatus, ReadFormat, ReadSource};
 use super::panes::{ClosingBlockDecision, ClosingBlockItem};
 
+pub use crate::agent_state::{AgentReportPayload, AgentStateSnapshot};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentStateParams {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentReportParams {
+    pub target: String,
+    #[serde(flatten)]
+    pub report: AgentReportPayload,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentReadParams {
     pub target: String,
