@@ -3836,6 +3836,10 @@ impl AppState {
             if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
                 self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
             }
+            if let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) {
+                pane.seen = true;
+                pane.done_since = None;
+            }
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
@@ -3853,7 +3857,10 @@ impl AppState {
             );
         }
         let suppress_completion = change.state == AgentState::Idle
-            && (suppress_completion || managed_launch_pending || suppress_acquisition_completion);
+            && (suppress_completion
+                || mutation.session_replaced
+                || managed_launch_pending
+                || suppress_acquisition_completion);
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {

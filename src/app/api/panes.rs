@@ -8636,6 +8636,67 @@ mod tests {
     }
 
     #[test]
+    fn clear_retires_the_previous_sessions_closing_report() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Working);
+
+        let response = app.handle_pane_report_agent_session(
+            "old-session".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(1),
+                agent_session_id: Some("session-old".into()),
+                agent_session_path: None,
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let mut old_report = closing_block_report(&pane_id, 2, vec![test_gate()]);
+        old_report.agent_session_id = Some("session-old".into());
+        old_report.completion = Some(crate::api::schema::ClosingCompletion::Complete);
+        let response = app.handle_pane_report_agent("old-report".into(), old_report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.pane_info(0, internal_pane_id).unwrap().gates.len(), 1);
+
+        let response = app.handle_pane_report_agent_session(
+            "new-session".into(),
+            PaneReportAgentSessionParams {
+                pane_id,
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(3),
+                agent_session_id: Some("session-new".into()),
+                agent_session_path: None,
+                session_start_source: Some("clear".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let pane = app.pane_info(0, internal_pane_id).unwrap();
+        assert!(pane.gates.is_empty());
+        assert!(pane.items.is_empty());
+        assert_eq!(
+            pane.agent_status,
+            crate::api::schema::AgentStatus::Working,
+            "the old report cannot leave the new session Blocked or Done"
+        );
+        assert!(!pane.tokens.contains_key("closing_completion"));
+    }
+
+    #[test]
     fn claude_session_report_retains_only_validated_runtime_transcript_path() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
