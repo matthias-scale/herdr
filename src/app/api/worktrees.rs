@@ -1237,6 +1237,7 @@ mod tests {
         app.handle_api_worktree_add_finished(WorktreeAddResult {
             path: checkout.clone(),
             api_request: Some(ApiWorktreeAddRequest {
+                client_id: None,
                 id: "req".into(),
                 operation_id: 9,
                 checkout_key,
@@ -2294,6 +2295,7 @@ mod tests {
             worktree: Some(Box::new(worktree_snapshot)),
             forced: false,
             api_request: Some(ApiWorktreeRemoveRequest {
+                client_id: None,
                 id: "req".into(),
                 operation_id: 7,
                 checkout_key: crate::worktree::canonical_or_original(&checkout),
@@ -2355,6 +2357,7 @@ mod tests {
             worktree: Some(Box::new(worktree_snapshot)),
             forced: true,
             api_request: Some(ApiWorktreeRemoveRequest {
+                client_id: None,
                 id: "req".into(),
                 operation_id: 7,
                 checkout_key: crate::worktree::canonical_or_original(&checkout),

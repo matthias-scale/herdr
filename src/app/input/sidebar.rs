@@ -1227,13 +1227,8 @@ impl super::super::App {
         column: u16,
         row: u16,
     ) {
-        if self.state.pane_is_settled(ws_idx, pane_id)
-            || self
-                .state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|workspace| workspace.pane_state(pane_id))
-                .is_none()
+        if !self.state.pane_is_snoozed(ws_idx, pane_id)
+            && !self.state.pane_can_snooze(ws_idx, pane_id)
         {
             return;
         }
@@ -1250,14 +1245,14 @@ impl super::super::App {
             time_draft: None,
             error: None,
         });
-        self.state.mode = if self.state.active.is_some() {
-            crate::app::Mode::Terminal
-        } else {
-            crate::app::Mode::Navigate
-        };
     }
 
     pub(crate) fn open_snooze_time_input(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+        if !self.state.pane_is_snoozed(ws_idx, pane_id)
+            && !self.state.pane_can_snooze(ws_idx, pane_id)
+        {
+            return;
+        }
         let Some(workspace) = self.state.workspaces.get(ws_idx) else {
             return;
         };
@@ -1293,11 +1288,6 @@ impl super::super::App {
             time_draft: Some(prefill),
             error: None,
         });
-        self.state.mode = if self.state.active.is_some() {
-            crate::app::Mode::Terminal
-        } else {
-            crate::app::Mode::Navigate
-        };
     }
 
     pub(crate) fn apply_sidebar_snooze_menu_action(
@@ -1417,7 +1407,7 @@ impl super::super::App {
     pub(crate) fn handle_sidebar_session_action_key(&mut self, key: KeyEvent) -> bool {
         if !self.state.sidebar_focused
             || !matches!(
-                self.state.mode,
+                self.state.input_mode(),
                 crate::app::Mode::Terminal | crate::app::Mode::Navigate
             )
             || !key.modifiers.is_empty()
@@ -2389,6 +2379,40 @@ mod tests {
         }
         assert!(app.state.sidebar_snooze.is_none());
         assert!(!app.state.pane_is_settled(0, local_pane));
+    }
+
+    #[test]
+    fn failed_remote_selection_does_not_block_another_clients_session_shortcuts() {
+        let mut app = sidebar_order_app(false);
+        let local_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let mut client_a = crate::app::state::SidebarPresentationState::default();
+        let mut client_b = crate::app::state::SidebarPresentationState::default();
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        app.state.sidebar_focused = true;
+        app.state.sidebar_selected_remote_agent = Some(
+            crate::api::schema::AgentRef::new("offline", "failed-attach")
+                .expect("valid remote reference"),
+        );
+        app.state.swap_sidebar_presentation(&mut client_a);
+
+        app.state.swap_sidebar_presentation(&mut client_b);
+        app.state.sidebar_focused = true;
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        )));
+        assert!(app.state.sidebar_snooze.is_some());
+        app.state.sidebar_snooze = None;
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+        assert!(app.state.pane_is_settled(0, local_pane));
+        app.state.swap_sidebar_presentation(&mut client_b);
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        assert!(app.state.sidebar_selected_remote_agent.is_some());
     }
 
     #[test]

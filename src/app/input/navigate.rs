@@ -1158,7 +1158,7 @@ impl App {
             return false;
         };
         self.runtime_pane_close("tui.pane.close", pane_id);
-        self.state.mode == Mode::ConfirmClose
+        self.state.client_overlay == crate::app::state::ClientOverlay::ConfirmClose
     }
 
     pub(crate) fn zoom_focused_pane_via_api(&mut self) {
@@ -5503,7 +5503,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::RenameWorkspace);
+        assert_eq!(state.input_mode(), Mode::RenameWorkspace);
         assert_eq!(state.name_input, "test");
     }
 
@@ -5527,7 +5527,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::RenameWorkspace);
+        assert_eq!(state.input_mode(), Mode::RenameWorkspace);
         assert_eq!(state.name_input, "__herdr_projects__");
         assert_eq!(state.workspaces[0].display_name(), "__herdr_original__");
     }
@@ -5547,7 +5547,7 @@ mod tests {
             ActionContext::Prefix,
         );
 
-        assert_eq!(state.mode, Mode::RenameWorkspace);
+        assert_eq!(state.input_mode(), Mode::RenameWorkspace);
         assert_eq!(state.selected, 1);
         assert_eq!(state.name_input, "issue");
     }
@@ -5626,7 +5626,7 @@ mod tests {
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
         assert_eq!(app.state.name_input, suggested_name);
         assert!(app.state.name_input_replace_on_type);
         assert_eq!(app.state.pending_workspace_create_cwd.as_ref(), Some(&cwd));
@@ -5670,7 +5670,10 @@ mod tests {
 
         app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.client_overlay,
+            crate::app::state::ClientOverlay::None
+        );
         assert!(
             app.state.workspaces[0].tabs[0].custom_name.is_none(),
             "an unedited Enter must not pin the stale prefill as a user name"
@@ -5709,7 +5712,10 @@ mod tests {
 
         assert_eq!(app.state.workspaces.len(), 1);
         assert!(app.state.pending_workspace_create_cwd.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.client_overlay,
+            crate::app::state::ClientOverlay::None
+        );
     }
 
     #[test]
@@ -6638,7 +6644,7 @@ command = "printf literal > '{}'"
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('W'), KeyModifiers::empty()));
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
     }
 
     #[tokio::test]
@@ -6708,7 +6714,7 @@ command = "printf literal > '{}'"
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('P'), KeyModifiers::empty()));
 
-        assert_eq!(app.state.mode, Mode::RenamePane);
+        assert_eq!(app.state.input_mode(), Mode::RenamePane);
     }
 
     #[test]
@@ -6994,7 +7000,7 @@ navigate_pane_down = "ctrl+j"
         execute_navigate_action(&mut state, NavigateAction::ClosePane);
 
         assert_eq!(state.selected, 0);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.input_mode(), Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
     }
 
@@ -7010,7 +7016,7 @@ navigate_pane_down = "ctrl+j"
         app.execute_tui_navigate_action(NavigateAction::CloseTab, ActionContext::Navigate);
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
     }
 
@@ -7026,7 +7032,7 @@ navigate_pane_down = "ctrl+j"
         app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Navigate);
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
     }
 
@@ -7306,7 +7312,7 @@ navigate_pane_down = "ctrl+j"
 
         execute_navigate_action(&mut state, NavigateAction::NewTab);
 
-        assert_eq!(state.mode, Mode::RenameTab);
+        assert_eq!(state.input_mode(), Mode::RenameTab);
         assert!(state.creating_new_tab);
         assert_eq!(state.name_input, "2");
         assert!(state.name_input_replace_on_type);

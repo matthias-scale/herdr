@@ -5,10 +5,10 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AddActionState, AppState, ContextMenuAction, ContextMenuKind, ContextMenuState, DragState,
-        DragTarget, HomeHitTarget, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
-        RemoteAgentPressState, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AddActionState, AppState, ClientOverlay, ContextMenuAction, ContextMenuKind,
+        ContextMenuState, DragState, DragTarget, HomeHitTarget, MenuListState, Mode,
+        PaneMenuWorkLink, PaneMenuWorkLinkAction, RemoteAgentPressState,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -155,7 +155,7 @@ impl AppState {
         mouse: MouseEvent,
     ) {
         self.forwarded_pane_input = None;
-        if self.mode != Mode::Terminal
+        if self.input_mode() != Mode::Terminal
             || self.symphony_detail.is_some()
             || self.inbox.is_some()
             || self.work_view.is_some()
@@ -223,7 +223,7 @@ impl AppState {
             self.hyperspace.toggle_paused(std::time::Instant::now());
             return None;
         }
-        if self.mode == Mode::Onboarding {
+        if self.input_mode() == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
         }
@@ -278,7 +278,7 @@ impl AppState {
             }
             return None;
         }
-        if self.mode == Mode::AddAction {
+        if self.input_mode() == Mode::AddAction {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if rect_contains(self.view.add_action_close_hit_area, mouse.column, mouse.row)
                     || rect_contains(
@@ -393,21 +393,21 @@ impl AppState {
             return None;
         }
 
-        if self.mode == Mode::Terminal
+        if self.input_mode() == Mode::Terminal
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return Some(MouseAction::FocusToastTarget);
         }
 
-        if self.mode == Mode::Terminal
+        if self.input_mode() == Mode::Terminal
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
         {
             return None;
         }
 
-        if self.mode == Mode::Settings {
+        if self.input_mode() == Mode::Settings {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
         }
 
@@ -421,7 +421,10 @@ impl AppState {
         }
         let group_menu_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
-            && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
+            && matches!(
+                self.input_mode(),
+                Mode::Terminal | Mode::Navigate | Mode::Resize
+            );
         let new_thread_anchor = crate::ui::sidebar_header_new_thread_rect(self.view.sidebar_rect);
         let new_menu_anchor = crate::ui::sidebar_header_new_menu_rect(self.view.sidebar_rect);
         let search_anchor = crate::ui::sidebar_header_search_rect(self.view.sidebar_rect);
@@ -765,7 +768,7 @@ impl AppState {
         let launcher_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(
-                self.mode,
+                self.input_mode(),
                 Mode::Terminal
                     | Mode::Navigate
                     | Mode::Resize
@@ -779,7 +782,7 @@ impl AppState {
             && mouse.row >= launcher.y
             && mouse.row < launcher.y + launcher.height;
 
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.mode == Mode::GlobalMenu {
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.input_mode() == Mode::GlobalMenu {
             let actions = global_menu_actions(self);
             let hovered = self
                 .global_menu_item_at(mouse.column, mouse.row)
@@ -789,7 +792,7 @@ impl AppState {
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && launcher_hit {
-            if self.mode == Mode::GlobalMenu {
+            if self.input_mode() == Mode::GlobalMenu {
                 leave_modal(self);
             } else {
                 open_global_menu(self);
@@ -797,7 +800,7 @@ impl AppState {
             return None;
         }
 
-        if self.mode == Mode::GlobalMenu {
+        if self.input_mode() == Mode::GlobalMenu {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(action) = self.global_menu_item_at(mouse.column, mouse.row) {
                     apply_global_menu_action(self, action);
@@ -814,7 +817,7 @@ impl AppState {
                 mouse.column,
                 mouse.row,
             )
-            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+            && matches!(self.input_mode(), Mode::Terminal | Mode::Navigate)
         {
             if self.repo_editor_available() {
                 self.request_open_repo_editor = true;
@@ -829,7 +832,7 @@ impl AppState {
                 mouse.column,
                 mouse.row,
             )
-            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+            && matches!(self.input_mode(), Mode::Terminal | Mode::Navigate)
         {
             self.add_action = Some(AddActionState::default());
             self.mode = Mode::AddAction;
@@ -837,7 +840,7 @@ impl AppState {
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+            && matches!(self.input_mode(), Mode::Terminal | Mode::Navigate)
         {
             if let Some(index) = self
                 .view
@@ -856,16 +859,16 @@ impl AppState {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.on_git_menu_button(mouse.column, mouse.row)
         {
-            if self.mode == Mode::GitMenu {
+            if self.input_mode() == Mode::GitMenu {
                 self.mode = Mode::Terminal;
-            } else if matches!(self.mode, Mode::Terminal | Mode::Navigate) {
+            } else if matches!(self.input_mode(), Mode::Terminal | Mode::Navigate) {
                 self.git_menu = MenuListState::new(0);
                 self.mode = Mode::GitMenu;
             }
             return None;
         }
 
-        if self.mode == Mode::GitMenu {
+        if self.input_mode() == Mode::GitMenu {
             let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(self);
             match mouse.kind {
                 MouseEventKind::Moved => {
@@ -897,7 +900,7 @@ impl AppState {
             return None;
         }
 
-        if self.mode == Mode::KeybindHelp {
+        if self.input_mode() == Mode::KeybindHelp {
             return None;
         }
 
@@ -930,7 +933,7 @@ impl AppState {
         }
 
         if in_sidebar
-            && self.mode == Mode::Terminal
+            && self.input_mode() == Mode::Terminal
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             if let Some(action) = self
@@ -956,7 +959,7 @@ impl AppState {
             }
         }
 
-        if self.mode == Mode::OpenExistingWorktree {
+        if self.input_mode() == Mode::OpenExistingWorktree {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     if let Some(open) = &mut self.worktree_open {
@@ -975,7 +978,7 @@ impl AppState {
         }
 
         if matches!(
-            self.mode,
+            self.input_mode(),
             Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
         ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
@@ -1066,7 +1069,7 @@ impl AppState {
                 self.selection_autoscroll = None;
                 self.clear_chrome_press(source_id);
 
-                if self.mode == Mode::ConfirmClose {
+                if self.input_mode() == Mode::ConfirmClose {
                     let popup = self.confirm_close_rect();
                     let inner = Rect::new(
                         popup.x + 1,
@@ -1092,7 +1095,7 @@ impl AppState {
                     return None;
                 }
 
-                if self.mode == Mode::NewLinkedWorktree {
+                if self.input_mode() == Mode::NewLinkedWorktree {
                     if let Some(inner) =
                         crate::ui::new_linked_worktree_inner_rect(self.screen_rect())
                     {
@@ -1125,7 +1128,7 @@ impl AppState {
                     return None;
                 }
 
-                if self.mode == Mode::OpenExistingWorktree {
+                if self.input_mode() == Mode::OpenExistingWorktree {
                     if let Some(open) = self.worktree_open.as_ref() {
                         if let Some(inner) = crate::ui::open_existing_worktree_inner_rect(
                             self.screen_rect(),
@@ -1188,7 +1191,7 @@ impl AppState {
                     return None;
                 }
 
-                if self.mode == Mode::ConfirmRemoveWorktree {
+                if self.input_mode() == Mode::ConfirmRemoveWorktree {
                     if let Some(popup) = crate::ui::remove_worktree_popup_rect(self.screen_rect()) {
                         let inner = Rect::new(
                             popup.x + 1,
@@ -1233,7 +1236,7 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|snooze| snooze.time_draft.is_some())
                     || matches!(
-                        self.mode,
+                        self.input_mode(),
                         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
                     )
                 {
@@ -1255,7 +1258,7 @@ impl AppState {
                     return Some(MouseAction::RenameModal(action));
                 }
 
-                if self.mode == Mode::ContextMenu {
+                if self.input_mode() == Mode::ContextMenu {
                     let action = self.context_menu_action_at(mouse.column, mouse.row);
                     if let Some(menu) = self.context_menu.take() {
                         if let Some(action) = action {
@@ -1572,7 +1575,7 @@ impl AppState {
                                 );
                             }
                         }
-                        if self.mode != Mode::Terminal {
+                        if self.input_mode() != Mode::Terminal {
                             self.mode = Mode::Terminal;
                         }
                         return None;
@@ -1789,7 +1792,7 @@ impl AppState {
                         return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
-                    if self.mode != Mode::Terminal {
+                    if self.input_mode() != Mode::Terminal {
                         self.mode = Mode::Terminal;
                     }
                     // Clicking pane content aims the keyboard at the shell, and
@@ -1826,7 +1829,7 @@ impl AppState {
                         && mouse.row < p.rect.y + p.rect.height
                 }) {
                     let id = info.id;
-                    if self.mode != Mode::Terminal {
+                    if self.input_mode() != Mode::Terminal {
                         self.mode = Mode::Terminal;
                     }
                     self.release_surface_focus_to_pane();
@@ -2155,7 +2158,7 @@ impl AppState {
             }
 
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
-                if self.mode == Mode::Terminal && !in_sidebar && !in_dock =>
+                if self.input_mode() == Mode::Terminal && !in_sidebar && !in_dock =>
             {
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
@@ -2223,7 +2226,7 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
+            MouseEventKind::Moved if self.input_mode() == Mode::ContextMenu => {
                 let hovered = self.context_menu_item_at(mouse.column, mouse.row);
                 if let Some(menu) = &mut self.context_menu {
                     if let Some(action) = hovered {
@@ -2232,7 +2235,9 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Moved if self.mode == Mode::Terminal && !in_sidebar && !in_dock => {
+            MouseEventKind::Moved
+                if self.input_mode() == Mode::Terminal && !in_sidebar && !in_dock =>
+            {
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     let _ = self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
                 }
@@ -2285,7 +2290,7 @@ impl AppState {
                         y: mouse.row,
                         selected: ContextMenuAction::NewTab,
                     });
-                    self.mode = Mode::ContextMenu;
+                    self.open_client_overlay(ClientOverlay::ContextMenu);
                     return None;
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
@@ -2332,7 +2337,7 @@ impl AppState {
                         y: mouse.row,
                         selected: ContextMenuAction::RenameWorkspace,
                     });
-                    self.mode = Mode::ContextMenu;
+                    self.open_client_overlay(ClientOverlay::ContextMenu);
                 }
             }
 
@@ -2367,7 +2372,7 @@ impl AppState {
                         y: mouse.row,
                         selected: ContextMenuAction::NewTab,
                     });
-                    self.mode = Mode::ContextMenu;
+                    self.open_client_overlay(ClientOverlay::ContextMenu);
                 }
             }
 
@@ -2466,7 +2471,7 @@ impl AppState {
                         y: mouse.row,
                         selected: ContextMenuAction::RenamePane,
                     });
-                    self.mode = Mode::ContextMenu;
+                    self.open_client_overlay(ClientOverlay::ContextMenu);
                 }
             }
 
@@ -2477,7 +2482,7 @@ impl AppState {
     }
 
     fn handle_mobile_mouse(&mut self, mouse: MouseEvent) -> MobileMouseResult {
-        if self.mode == Mode::Navigate {
+        if self.input_mode() == Mode::Navigate {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     self.scroll_mobile_switcher_at(mouse.column, mouse.row, -1);
@@ -2494,8 +2499,8 @@ impl AppState {
             return MobileMouseResult::Ignored;
         }
 
-        if self.mode != Mode::Navigate {
-            if !matches!(self.mode, Mode::Terminal | Mode::Resize) {
+        if self.input_mode() != Mode::Navigate {
+            if !matches!(self.input_mode(), Mode::Terminal | Mode::Resize) {
                 return MobileMouseResult::Ignored;
             }
             if rect_contains(self.view.mobile_menu_hit_area, mouse.column, mouse.row) {
@@ -2715,6 +2720,8 @@ impl AppState {
             _ => None,
         };
         let snoozed = target.is_some_and(|(ws_idx, pane_id)| self.pane_is_snoozed(ws_idx, pane_id));
+        let snoozeable =
+            target.is_some_and(|(ws_idx, pane_id)| self.pane_can_snooze(ws_idx, pane_id));
         let settleable = match &menu.kind {
             ContextMenuKind::Tab {
                 settle_pane_id: Some(pane_id),
@@ -2729,7 +2736,7 @@ impl AppState {
                 }),
             _ => true,
         };
-        live_menu.actions_for_pane_state(snoozed, settleable)
+        live_menu.actions_for_pane_state(snoozed, settleable, snoozeable)
     }
 
     pub(crate) fn context_menu_items(&self, menu: &ContextMenuState) -> Vec<&'static str> {
@@ -2823,7 +2830,7 @@ impl AppState {
     fn mode_bar_covers_tab_row(&self, col: u16, row: u16) -> bool {
         self.tab_bar_position == crate::config::TabBarPositionConfig::Bottom
             && matches!(
-                self.mode,
+                self.input_mode(),
                 Mode::Navigate | Mode::Prefix | Mode::Copy | Mode::Resize
             )
             && self.on_tab_bar(col, row)
@@ -3535,7 +3542,7 @@ impl AppState {
             }
         }
 
-        if self.mode != Mode::Terminal
+        if self.input_mode() != Mode::Terminal
             || in_sidebar
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
         {
@@ -5383,7 +5390,7 @@ mod tests {
                 snooze_target: Some(target.pane_id),
             }
         );
-        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
         assert!(
             menu.items().contains(&crate::app::state::STAR_ITEM),
             "an unstarred session offers Star, got {:?}",
@@ -5412,6 +5419,7 @@ mod tests {
 
         for pane_id in [active_pane, snoozed_pane] {
             app.state.mode = Mode::Terminal;
+            app.state.close_client_overlay();
             app.state.context_menu = None;
             let rect = crate::ui::compute_tab_card_areas(&app.state, sidebar)
                 .into_iter()
@@ -5444,6 +5452,7 @@ mod tests {
             ));
 
             app.state.mode = Mode::Terminal;
+            app.state.close_client_overlay();
             app.state.context_menu = None;
             app.state.handle_mouse(
                 &mut app.terminal_runtimes,
@@ -7099,7 +7108,7 @@ mod tests {
             info.inner_rect.y + 3,
         ));
 
-        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
     }
 
@@ -7458,7 +7467,7 @@ mod tests {
             )
         });
 
-        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
         assert!(app.state.right_click_passthrough.is_none());
         assert!(input_rx.try_recv().is_err());
@@ -7627,7 +7636,7 @@ mod tests {
             ..mouse(MouseEventKind::Down(MouseButton::Right), col, row)
         });
 
-        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
         assert!(app.state.right_click_passthrough.is_none());
         assert!(input_rx.try_recv().is_err());
@@ -7682,7 +7691,7 @@ mod tests {
             )
         });
 
-        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
         assert!(app.state.context_menu.is_some());
         assert!(app.state.right_click_passthrough.is_none());
         assert!(input_rx.try_recv().is_err());
@@ -8040,7 +8049,7 @@ mod tests {
             &mut app.terminal_runtimes,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.selected, 1);
 
         let popup = app.state.confirm_close_rect();
@@ -8097,6 +8106,7 @@ mod tests {
     fn right_click_set_time_renders_inline_past_time_error() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("set-time")];
+        app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -8785,7 +8795,7 @@ mod tests {
                 snooze_target: None,
             }
         );
-        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert_eq!(app.state.input_mode(), Mode::ContextMenu);
     }
 
     #[test]
@@ -8868,10 +8878,11 @@ mod tests {
         ));
 
         let menu_state = app.state.context_menu.as_ref().expect("pane context menu");
-        let close_idx = menu_state
-            .items()
+        let close_idx = app
+            .state
+            .context_menu_actions(menu_state)
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| *item == ContextMenuAction::ClosePane)
             .expect("close pane menu item");
         let menu = app
             .state
@@ -8921,10 +8932,11 @@ mod tests {
         ));
 
         let menu_state = app.state.context_menu.as_ref().expect("pane context menu");
-        let close_idx = menu_state
-            .items()
+        let close_idx = app
+            .state
+            .context_menu_actions(menu_state)
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| *item == ContextMenuAction::ClosePane)
             .expect("close pane menu item");
         let menu = app
             .state
@@ -8937,7 +8949,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
     }
@@ -9300,7 +9312,7 @@ mod tests {
             viewport.y + 1,
         ));
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(app.state.name_input_replace_on_type);
         assert_eq!(app.state.workspaces.len(), 1);
@@ -9330,7 +9342,7 @@ mod tests {
             menu.list_rect.y,
         ));
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(app.state.name_input_replace_on_type);
         assert_eq!(app.state.workspaces.len(), 1);
@@ -9793,7 +9805,7 @@ mod tests {
             new_tab_row,
         ));
 
-        assert_eq!(app.state.mode, Mode::RenameTab);
+        assert_eq!(app.state.input_mode(), Mode::RenameTab);
         assert!(app.state.creating_new_tab);
     }
 

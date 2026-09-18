@@ -1284,7 +1284,7 @@ fn render_with_runtime_registry_inner(
     {
         render_rename_overlay(app, frame, frame.area());
     } else {
-        match app.mode {
+        match app.input_mode() {
             Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
             Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
             Mode::ProductAnnouncement => {

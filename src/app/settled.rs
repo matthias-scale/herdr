@@ -260,6 +260,21 @@ impl AppState {
             .is_some_and(|pane| pane.snoozed_until().is_some())
     }
 
+    pub(crate) fn pane_can_snooze(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        if self.pane_is_settled(ws_idx, pane_id) {
+            return false;
+        }
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.pane_state(pane_id))
+            .and_then(|pane| {
+                self.terminals
+                    .get(&pane.attached_terminal_id)
+                    .map(|terminal| !pane.agent_projection(terminal).needs_human_attention())
+            })
+            .unwrap_or(false)
+    }
+
     pub(crate) fn pane_is_settled_anywhere(&self, pane_id: PaneId) -> bool {
         self.workspaces.iter().any(|workspace| {
             workspace

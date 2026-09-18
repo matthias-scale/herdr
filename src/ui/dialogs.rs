@@ -82,7 +82,7 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
         .sidebar_snooze
         .as_ref()
         .filter(|snooze| snooze.time_draft.is_some());
-    let title = match app.mode {
+    let title = match app.input_mode() {
         _ if snooze.is_some() => "set snooze time",
         Mode::RenameWorkspace if app.pending_workspace_create_cwd.is_some() => "new workspace",
         Mode::RenameWorkspace => "rename workspace",

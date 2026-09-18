@@ -147,6 +147,9 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    /// Attached client whose overlay is currently swapped into `state`.
+    /// Deferred worktree operations copy this id into their completion event.
+    pub(crate) active_overlay_client_id: Option<u64>,
     pub(crate) pane_graphics: pane_graphics::Runtime,
     pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
     pub(crate) direct_graphics_available: bool,
@@ -941,6 +944,7 @@ impl App {
             active,
             previous_pane_focus: None,
             selected,
+            client_overlay: state::ClientOverlay::None,
             mode,
             should_quit: false,
             detach_exits: no_session,
@@ -1383,6 +1387,7 @@ impl App {
             last_api_notification_at: None,
             missing_terminal_notification_backend_warned: std::cell::Cell::new(false),
             state,
+            active_overlay_client_id: None,
             pane_graphics: pane_graphics::Runtime::default(),
             pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
             direct_graphics_available: false,
@@ -1794,7 +1799,7 @@ impl App {
         // always fires on exit, so a mid-interaction flag toggle can't strand the host on ASCII.
         let active = match (
             previous_mode.wants_ascii_input(),
-            self.state.mode.wants_ascii_input(),
+            self.state.input_mode().wants_ascii_input(),
         ) {
             (false, true) if self.state.switch_ascii_input_source_in_prefix => true,
             (true, false) => false,
@@ -1812,7 +1817,7 @@ impl App {
         &mut self,
         event: crate::events::AppEvent,
     ) -> bool {
-        let previous_mode = self.state.mode;
+        let previous_mode = self.state.input_mode();
         let changed = self.handle_internal_event_with_render_impact(event);
         self.sync_prefix_input_source(previous_mode);
         changed
@@ -2858,7 +2863,7 @@ impl App {
             None
         } else if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
-        } else if self.state.mode == Mode::Terminal {
+        } else if self.state.input_mode() == Mode::Terminal {
             Some(TerminalInputContext::Pane)
         } else {
             None
@@ -3081,7 +3086,7 @@ impl App {
                 *pomodoro_presentation,
                 std::time::Instant::now(),
             );
-            let previous_mode = self.state.mode;
+            let previous_mode = self.state.input_mode();
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
@@ -3327,7 +3332,7 @@ impl App {
                         || self.route_text_to_sidebar_subgroup_picker(&text)
                         || self.try_route_text_to_home(&text)
                     {
-                    } else if self.state.mode != Mode::Terminal
+                    } else if self.state.input_mode() != Mode::Terminal
                         || self.state.notepad.focused
                         || self
                             .state
@@ -3466,7 +3471,7 @@ impl App {
             return;
         }
 
-        match self.state.mode {
+        match self.state.input_mode() {
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }
@@ -5015,7 +5020,7 @@ mod tests {
 
         app.begin_tui_workspace_create("test.workspace.create");
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
+        assert_eq!(app.state.input_mode(), Mode::RenameWorkspace);
         assert!(app.state.pending_workspace_create_cwd.is_some());
         assert!(!app.ensure_default_workspace());
         assert!(app.state.workspaces.is_empty());
@@ -7801,7 +7806,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["error"]["code"], "confirmation_required");
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.workspaces.len(), 2);
     }

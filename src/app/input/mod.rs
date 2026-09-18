@@ -329,12 +329,13 @@ impl App {
             return None;
         }
 
-        match self.state.mode {
+        let input_mode = self.state.input_mode();
+        match input_mode {
             Mode::Terminal => return self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
             Mode::Navigate => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
-            _ => match self.state.mode {
+            _ => match input_mode {
                 Mode::Onboarding => self.handle_onboarding_key(key_event),
                 Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
@@ -376,7 +377,7 @@ impl App {
     /// Keys of the surface chooser: the card-grid shortcuts of an empty dock,
     /// the open `+` menu, and the one keypress that restores a maximised dock.
     fn handle_dock_chooser_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal || self.state.dock_collapsed {
+        if self.state.input_mode() != Mode::Terminal || self.state.dock_collapsed {
             return false;
         }
         let event = key.as_key_event();
@@ -443,7 +444,7 @@ impl App {
     }
 
     fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Home)
             || !self.state.dock_home_focused
@@ -533,7 +534,7 @@ impl App {
     }
 
     fn handle_dock_diff_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Diff)
             || !self.state.dock_diff_focused
@@ -571,7 +572,7 @@ impl App {
     }
 
     fn handle_dock_agents_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Agents)
             || !self.state.dock_agents_focused
@@ -601,7 +602,7 @@ impl App {
     }
 
     fn handle_dock_hosts_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Hosts)
             || !self.state.dock_hosts_focused
@@ -3651,7 +3652,7 @@ impl App {
                 .is_some_and(|object| object.surface == crate::app::DockSurface::Pr);
         let dock_hosted =
             !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || !(previewed || dock_hosted)
             || !self.state.dock_pr_focused
         {
@@ -3980,7 +3981,7 @@ impl App {
                 .is_some_and(|object| object.surface == crate::app::DockSurface::Linear);
         let dock_hosted = !self.state.dock_collapsed
             && self.state.dock_tab == Some(crate::app::DockSurface::Linear);
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || !(previewed || dock_hosted)
             || !self.state.dock_linear_focused
         {
@@ -4439,7 +4440,7 @@ impl App {
         if self.try_route_text_to_home(text) {
             return;
         }
-        if self.state.mode != Mode::Terminal || self.state.notepad.focused {
+        if self.state.input_mode() != Mode::Terminal || self.state.notepad.focused {
             self.paste_into_active_text_input(text);
             return;
         }
@@ -4516,7 +4517,7 @@ impl App {
         if self.try_route_text_to_home(&text) {
             return;
         }
-        if self.state.mode != Mode::Terminal {
+        if self.state.input_mode() != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
         }
@@ -4581,7 +4582,7 @@ impl App {
         if self.try_route_text_to_home(&text) {
             return;
         }
-        if self.state.mode != Mode::Terminal {
+        if self.state.input_mode() != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
         }
@@ -4654,7 +4655,7 @@ impl App {
                 return true;
             }
         }
-        match self.state.mode {
+        match self.state.input_mode() {
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
                 true
@@ -4954,7 +4955,7 @@ impl App {
             return;
         }
 
-        if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
+        if matches!(self.state.input_mode(), Mode::Terminal | Mode::Navigate)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             let notifications = self.state.view.notification_hit_area;
@@ -5448,7 +5449,7 @@ impl App {
     }
 
     fn focus_pane_before_mouse_press(&mut self, mouse: MouseEvent) {
-        if !matches!(self.state.mode, Mode::Terminal | Mode::Resize)
+        if !matches!(self.state.input_mode(), Mode::Terminal | Mode::Resize)
             || !matches!(
                 mouse.kind,
                 MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
@@ -5501,7 +5502,7 @@ impl App {
         mouse: MouseEvent,
         open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
     ) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.input_mode() != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
         {
@@ -5620,7 +5621,7 @@ impl App {
             return None;
         }
 
-        if self.state.mode != Mode::Terminal {
+        if self.state.input_mode() != Mode::Terminal {
             self.last_pane_click = None;
             return None;
         }
@@ -5739,7 +5740,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     {
         return true;
     }
-    match state.mode {
+    match state.input_mode() {
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
             true
         }

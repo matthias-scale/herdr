@@ -17,7 +17,7 @@ use crate::workspace::{TabPrioAction, WorkspaceGitStatus};
 use super::api_helpers::pane_agent_status;
 use super::state::{
     navigator_display_index_of_row, navigator_display_lines, navigator_first_row_at_or_after,
-    text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
+    text_matches_query, AgentNotificationDelivery, AppState, ClientOverlay, Mode, NavigatorRow,
     NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
     ToastNotification, ToastTarget, ViewLayout,
 };
@@ -2262,7 +2262,7 @@ impl AppState {
         };
         self.selected = ws_idx;
         self.confirm_close_workspace_id = Some(workspace_id);
-        self.mode = Mode::ConfirmClose;
+        self.open_client_overlay(ClientOverlay::ConfirmClose);
         true
     }
 
@@ -7826,7 +7826,7 @@ mod tests {
         let deferred = state.close_pane();
 
         assert!(deferred);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.input_mode(), Mode::ConfirmClose);
         assert_eq!(state.selected, 0);
         assert_eq!(state.workspaces.len(), 2);
     }
@@ -7856,7 +7856,7 @@ mod tests {
         let deferred = state.close_tab();
 
         assert!(deferred);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.input_mode(), Mode::ConfirmClose);
         assert_eq!(state.selected, 0);
         assert_eq!(state.workspaces.len(), 2);
     }

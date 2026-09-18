@@ -6,8 +6,8 @@ use ratatui::layout::Rect;
 use crate::{
     app::{
         state::{
-            AppState, ContextMenuAction, ContextMenuKind, ContextMenuState, MenuListState, Mode,
-            NavigatorStateFilter,
+            AppState, ClientOverlay, ContextMenuAction, ContextMenuKind, ContextMenuState,
+            MenuListState, Mode, NavigatorStateFilter,
         },
         App,
     },
@@ -401,7 +401,7 @@ pub(super) fn open_rename_workspace(
     state.name_input =
         state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
-    state.mode = Mode::RenameWorkspace;
+    state.open_client_overlay(ClientOverlay::RenameWorkspace);
 }
 
 pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
@@ -413,7 +413,7 @@ pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::Pa
     state.rename_target = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
-    state.mode = Mode::RenameWorkspace;
+    state.open_client_overlay(ClientOverlay::RenameWorkspace);
 }
 
 pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
@@ -439,7 +439,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
             workspace_id,
             tab_id,
         });
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(ClientOverlay::RenameTab);
     }
 }
 
@@ -482,7 +482,7 @@ fn open_rename_pane_in_workspace(
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
     state.name_input_replace_on_type = terminal.and_then(|t| t.manual_label.as_ref()).is_none();
-    state.mode = Mode::RenamePane;
+    state.open_client_overlay(ClientOverlay::RenamePane);
 }
 
 fn workspace_create_label(input: &str, suggested_name: &str) -> Option<String> {
@@ -506,11 +506,13 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.rename_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
-    state.mode = Mode::RenameTab;
+    state.open_client_overlay(ClientOverlay::RenameTab);
 }
 
 pub(super) fn leave_modal(state: &mut AppState) {
-    if state.active.is_some() {
+    if state.client_overlay != ClientOverlay::None {
+        state.close_client_overlay();
+    } else if state.active.is_some() {
         state.mode = Mode::Terminal;
     } else {
         state.mode = Mode::Navigate;
@@ -573,7 +575,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             } else {
                 state.name_input.trim().to_string()
             };
-            match state.mode {
+            match state.input_mode() {
                 Mode::RenameWorkspace
                     if state.pending_workspace_create_cwd.is_none()
                         && !state.workspaces.is_empty()
@@ -896,16 +898,12 @@ pub(super) fn confirm_close_accept(state: &mut AppState) {
         state.selected = ws_idx;
         state.close_selected_workspace();
     }
-    if state.workspaces.is_empty() {
-        state.mode = Mode::Navigate;
-    } else {
-        state.mode = Mode::Terminal;
-    }
+    state.close_client_overlay();
 }
 
 pub(super) fn confirm_close_cancel(state: &mut AppState) {
     state.confirm_close_workspace_id = None;
-    state.mode = Mode::Navigate;
+    state.close_client_overlay();
 }
 
 #[cfg(test)]
@@ -1363,7 +1361,7 @@ impl App {
             self.state.name_input.trim().to_string()
         };
 
-        match self.state.mode {
+        match self.state.input_mode() {
             Mode::RenameWorkspace => {
                 if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
                     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
@@ -1585,11 +1583,7 @@ impl App {
         if let Some(ws_idx) = self.state.take_confirmed_workspace_close_index() {
             self.close_workspace_idx_with_group_via_api(ws_idx);
         }
-        self.state.mode = if self.state.active.is_some() {
-            Mode::Terminal
-        } else {
-            Mode::Navigate
-        };
+        self.state.close_client_overlay();
     }
 
     pub(crate) fn handle_resize_key_via_api(&mut self, raw_key: TerminalKey) {
@@ -1777,7 +1771,7 @@ impl App {
                     open_confirm_close(&mut self.state);
                 } else {
                     self.close_workspace_idx_with_group_via_api(ws_idx);
-                    self.state.mode = Mode::Navigate;
+                    self.state.close_client_overlay();
                 }
             }
             (
@@ -1954,7 +1948,7 @@ impl App {
                 if linked > 0 {
                     self.show_work_linked_toast(&action, ws_idx, linked);
                 }
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -1963,7 +1957,7 @@ impl App {
                 Some(crate::app::state::COPY_LINK_ITEM),
             ) => {
                 self.state.request_clipboard_write = Some(link.into_bytes());
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -1972,7 +1966,7 @@ impl App {
                 Some(crate::app::state::OPEN_LINK_ITEM),
             ) => {
                 self.open_pane_link(link);
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -1982,7 +1976,7 @@ impl App {
                 },
                 Some(crate::app::state::SEND_TO_NEW_AGENT_ITEM),
             ) => {
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
                 if let Err(error) = self.send_text_to_new_agent(ws_idx, &text) {
                     self.show_work_link_notice(&error);
                 }
@@ -1996,7 +1990,7 @@ impl App {
                 },
                 Some(crate::app::state::SEND_TO_EXISTING_AGENT_ITEM),
             ) => {
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
                 self.send_text_to_chosen_agent(ws_idx, pane_id, text);
             }
             (
@@ -2022,7 +2016,7 @@ impl App {
                     return;
                 };
                 self.open_pane_path_with(target, &path, directory);
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2039,7 +2033,7 @@ impl App {
                         },
                     );
                 }
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2060,7 +2054,7 @@ impl App {
                         },
                     );
                 }
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2087,7 +2081,7 @@ impl App {
                     );
                     self.focus_pane_internal_via_api(ws_idx, source_pane_id);
                 }
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2097,7 +2091,7 @@ impl App {
             ) => {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
                 self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Right);
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2107,7 +2101,7 @@ impl App {
             ) => {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
                 self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Down);
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2117,7 +2111,7 @@ impl App {
             ) => {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
                 self.zoom_focused_pane_via_api();
-                self.state.mode = Mode::Terminal;
+                self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Pane {
@@ -2127,11 +2121,7 @@ impl App {
             ) => {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
                 if !self.close_focused_pane_via_api_requires_confirmation() {
-                    self.state.mode = if self.state.active.is_some() {
-                        Mode::Terminal
-                    } else {
-                        Mode::Navigate
-                    };
+                    self.state.close_client_overlay();
                 }
             }
             _ => leave_modal(&mut self.state),
@@ -2231,6 +2221,11 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
+        app.state.mode = if app.state.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
         app
     }
 
@@ -2942,7 +2937,7 @@ mod tests {
 
         open_rename_active_tab(&mut state, true);
 
-        assert_eq!(state.mode, Mode::RenameTab);
+        assert_eq!(state.input_mode(), Mode::RenameTab);
         assert_eq!(state.name_input, "2");
         assert!(state.name_input_replace_on_type);
     }
@@ -2957,7 +2952,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
         assert!(!state.creating_new_tab);
         assert!(!state.request_new_tab);
         assert!(state.requested_new_tab_name.is_none());
@@ -2976,7 +2971,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
         assert!(!state.creating_new_tab);
         assert!(state.request_new_tab);
         assert_eq!(state.requested_new_tab_name.as_deref(), Some("logs"));
@@ -2992,7 +2987,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
         assert!(!state.creating_new_tab);
         assert!(state.request_new_tab);
         assert!(state.requested_new_tab_name.is_none());
@@ -3056,7 +3051,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
         assert!(
             state.workspaces[0].tabs[0].custom_name.is_none(),
             "an unedited Enter must not pin the stale prefill as a user name"
@@ -3076,7 +3071,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
         assert!(state.workspaces[0].tabs[1].custom_name.is_none());
         assert_eq!(
             state.workspaces[0]
@@ -3128,7 +3123,7 @@ mod tests {
         assert_eq!(state.request_remove_linked_worktree, None);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "main");
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
     }
 
     #[test]
@@ -3172,12 +3167,12 @@ mod tests {
         );
 
         assert_eq!(state.selected, 0);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.input_mode(), Mode::ConfirmClose);
 
         confirm_close_accept(&mut state);
 
         assert!(state.workspaces.is_empty());
-        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.client_overlay, ClientOverlay::None);
     }
 
     #[test]
@@ -3269,7 +3264,7 @@ mod tests {
         );
 
         assert_eq!(state.selected, 0);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.input_mode(), Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
     }
 
@@ -3284,7 +3279,7 @@ mod tests {
         app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert!(app.state.workspaces.is_empty());
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.client_overlay, ClientOverlay::None);
         assert_eq!(app.event_hub.events_after(0).len(), 2);
     }
 
@@ -3298,7 +3293,7 @@ mod tests {
 
         app.focus_workspace_idx_via_api(2);
         assert_eq!(app.state.selected, 2);
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
 
         app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
@@ -3344,7 +3339,7 @@ mod tests {
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::CloseTab);
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
     }
 
@@ -3526,7 +3521,7 @@ mod tests {
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.input_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
     }
@@ -3564,7 +3559,7 @@ mod tests {
                 y: 0,
                 selected: ContextMenuAction::NewTab,
             };
-            let items = tab.items_for_pane_state(snoozed, !snoozed);
+            let items = tab.items_for_pane_state(snoozed, !snoozed, true);
             if snoozed {
                 assert!(items.contains(&crate::app::state::UNSNOOZE_ITEM));
                 assert!(items.contains(&crate::app::state::CHANGE_TIME_ITEM));
@@ -3597,7 +3592,7 @@ mod tests {
                 selected: ContextMenuAction::RenamePane,
             };
             assert_eq!(
-                pane.items_for_pane_state(snoozed, !snoozed)
+                pane.items_for_pane_state(snoozed, !snoozed, true)
                     .contains(&crate::app::state::UNSNOOZE_ITEM),
                 snoozed
             );
@@ -3777,7 +3772,7 @@ mod tests {
 
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::RenamePane);
 
-        assert_eq!(app.state.mode, Mode::RenamePane);
+        assert_eq!(app.state.input_mode(), Mode::RenamePane);
         assert_eq!(
             app.state.rename_target,
             Some(crate::app::state::RenameTarget::Pane {
@@ -3835,7 +3830,7 @@ mod tests {
             first_pane,
             ContextMenuAction::Snooze,
         ));
-        app.state.mode = Mode::ContextMenu;
+        app.state.open_client_overlay(ClientOverlay::ContextMenu);
         app.state.swap_sidebar_presentation(&mut client_a);
 
         app.state.swap_sidebar_presentation(&mut client_b);
@@ -3867,7 +3862,7 @@ mod tests {
             first_pane,
             ContextMenuAction::Unsnooze,
         ));
-        app.state.mode = Mode::ContextMenu;
+        app.state.open_client_overlay(ClientOverlay::ContextMenu);
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!app.state.pane_is_snoozed(0, first_pane));
         assert!(!app.state.pane_is_snoozed(0, second_pane));
@@ -3877,9 +3872,9 @@ mod tests {
             first_pane,
             ContextMenuAction::SetTime,
         ));
-        app.state.mode = Mode::ContextMenu;
+        app.state.open_client_overlay(ClientOverlay::ContextMenu);
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.client_overlay, ClientOverlay::None);
         assert_eq!(
             app.state
                 .sidebar_snooze
@@ -3887,6 +3882,48 @@ mod tests {
                 .map(|snooze| snooze.target.pane_id),
             Some(first_pane)
         );
+    }
+
+    #[test]
+    fn context_menu_hides_snooze_for_settled_and_attention_gated_panes() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        let menu = pane_context_menu(&app.state, pane_id, ContextMenuAction::Snooze);
+
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane")
+            .settled_at = Some(1);
+        let settled_actions = app.state.context_menu_actions(&menu);
+        assert!(!settled_actions.contains(&ContextMenuAction::Snooze));
+        assert!(!settled_actions.contains(&ContextMenuAction::SetTime));
+
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane")
+            .settled_at = None;
+        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Resolve the active gate".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let gated_actions = app.state.context_menu_actions(&menu);
+        assert!(!gated_actions.contains(&ContextMenuAction::Snooze));
+        assert!(!gated_actions.contains(&ContextMenuAction::SetTime));
     }
 
     #[tokio::test]

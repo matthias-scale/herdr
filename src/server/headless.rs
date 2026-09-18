@@ -1164,17 +1164,7 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_new_tab");
         }
 
-        if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
-            self.app.open_new_linked_worktree_dialog(ws_idx);
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
-        }
-
-        if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
-            self.app.open_existing_worktree_dialog(ws_idx);
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
-        }
+        needs_render |= self.handle_client_overlay_deferred_requests();
 
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
             let response = self.headless_workspace_create(
@@ -1194,33 +1184,6 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_workspace_cwd");
         }
 
-        if let Some(ws_idx) = self.app.state.request_remove_linked_worktree.take() {
-            self.app.open_remove_linked_worktree_confirmation(ws_idx);
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
-        }
-
-        if self.app.state.request_submit_worktree_create {
-            self.app.state.request_submit_worktree_create = false;
-            self.app.submit_worktree_create_via_api();
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
-        }
-
-        if self.app.state.request_submit_worktree_open {
-            self.app.state.request_submit_worktree_open = false;
-            self.app.submit_worktree_open_via_api();
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
-        }
-
-        if self.app.state.request_submit_worktree_remove {
-            self.app.state.request_submit_worktree_remove = false;
-            self.app.submit_worktree_remove_via_api();
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
-        }
-
         if self.app.state.request_reload_config {
             self.app.state.request_reload_config = false;
             self.reload_server_config(true);
@@ -1229,6 +1192,44 @@ impl HeadlessServer {
         }
 
         needs_render
+    }
+
+    fn handle_client_overlay_deferred_requests(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
+            self.app.open_new_linked_worktree_dialog(ws_idx);
+            changed = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+        }
+        if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
+            self.app.open_existing_worktree_dialog(ws_idx);
+            changed = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+        }
+        if let Some(ws_idx) = self.app.state.request_remove_linked_worktree.take() {
+            self.app.open_remove_linked_worktree_confirmation(ws_idx);
+            changed = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+        }
+        if self.app.state.request_submit_worktree_create {
+            self.app.state.request_submit_worktree_create = false;
+            self.app.submit_worktree_create_via_api();
+            changed = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+        }
+        if self.app.state.request_submit_worktree_open {
+            self.app.state.request_submit_worktree_open = false;
+            self.app.submit_worktree_open_via_api();
+            changed = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+        }
+        if self.app.state.request_submit_worktree_remove {
+            self.app.state.request_submit_worktree_remove = false;
+            self.app.submit_worktree_remove_via_api();
+            changed = true;
+            crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+        }
+        changed
     }
 
     fn headless_workspace_create(
@@ -3254,6 +3255,20 @@ impl HeadlessServer {
     ///
     /// Returns true if the event changed visual state (requiring a re-render).
     fn handle_internal_event_with_forwarding(&mut self, ev: AppEvent) -> bool {
+        let overlay_owner = match &ev {
+            AppEvent::WorktreeAddFinished(result) => result
+                .api_request
+                .as_ref()
+                .and_then(|request| request.client_id),
+            AppEvent::WorktreeRemoveFinished(result) => result
+                .api_request
+                .as_ref()
+                .and_then(|request| request.client_id),
+            _ => None,
+        };
+        if let Some(client_id) = overlay_owner {
+            return self.handle_client_owned_worktree_event(client_id, ev);
+        }
         match &ev {
             #[cfg(unix)]
             AppEvent::RemoteControlGatePoisoned { pane_id } => {
@@ -3621,6 +3636,26 @@ impl HeadlessServer {
             }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
+    }
+
+    fn handle_client_owned_worktree_event(&mut self, client_id: u64, ev: AppEvent) -> bool {
+        let Some(mut presentation) = self
+            .clients
+            .get_mut(&client_id)
+            .map(|client| std::mem::take(&mut client.sidebar_presentation))
+        else {
+            return self.app.handle_internal_event_with_render_impact(ev);
+        };
+        self.app.state.swap_sidebar_presentation(&mut presentation);
+        self.app.active_overlay_client_id = Some(client_id);
+        let changed = self.app.handle_internal_event_with_render_impact(ev);
+        self.app.active_overlay_client_id = None;
+        self.app.state.swap_sidebar_presentation(&mut presentation);
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.sidebar_presentation = presentation;
+            client.request_repaint();
+        }
+        changed
     }
 
     fn refresh_client_loop_history_details(&mut self) {
@@ -4211,7 +4246,12 @@ impl HeadlessServer {
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
         }
+        self.app.active_overlay_client_id = source_is_full_app.then_some(client_id);
         pomodoro_changed |= self.route_full_app_human_events(client_id, events, false);
+        if source_is_full_app {
+            pomodoro_changed |= self.handle_client_overlay_deferred_requests();
+        }
+        self.app.active_overlay_client_id = None;
         if pomodoro_changed {
             // A modal dismissal is a presentation change even for a plain
             // mouse move, which is otherwise intentionally render-neutral.
@@ -7291,6 +7331,131 @@ mod tests {
             server_event_rx,
             server_event_tx,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worktree_submit_and_completion_stay_with_owning_client() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("source")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        let source_workspace_id = server.app.state.workspaces[0].id.clone();
+        let source_path = std::env::temp_dir().join(format!(
+            "hh-worktree-owner-source-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let worktree_root = std::env::temp_dir().join(format!(
+            "hh-worktree-owner-root-{}",
+            crate::config::test_unique_suffix()
+        ));
+        server.app.state.worktree_directory = worktree_root.clone();
+        server.app.state.workspaces[0].worktree_space =
+            Some(crate::workspace::WorktreeSpaceMembership {
+                key: "repo-key".into(),
+                label: "herdr".into(),
+                repo_root: source_path.clone(),
+                checkout_path: source_path.clone(),
+                is_linked_worktree: false,
+            });
+
+        for client_id in [1, 2] {
+            let (writer, _control_rx, _render_rx) = test_client_writer();
+            server.clients.insert(
+                client_id,
+                ClientConnection::new(
+                    (100, 30),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    client_id,
+                    RenderEncoding::SemanticFrame,
+                    Some(writer),
+                ),
+            );
+        }
+
+        let client_one_path =
+            crate::worktree::default_checkout_path(&worktree_root, "herdr", "owner/client-one");
+        let client_two_path =
+            crate::worktree::default_checkout_path(&worktree_root, "herdr", "owner/client-two");
+        for (client_id, branch, checkout_path) in [
+            (1, "owner/client-one", client_one_path.clone()),
+            (2, "owner/client-two", client_two_path.clone()),
+        ] {
+            let presentation = &mut server
+                .clients
+                .get_mut(&client_id)
+                .expect("client")
+                .sidebar_presentation;
+            presentation.overlay.kind = crate::app::state::ClientOverlay::NewLinkedWorktree;
+            presentation.overlay.name_input = branch.into();
+            presentation.overlay.worktree_create = Some(crate::app::state::WorktreeCreateState {
+                source_workspace_id: source_workspace_id.clone(),
+                source_checkout_path: source_path.clone(),
+                source_existing_membership: server.app.state.workspaces[0].worktree_space.clone(),
+                source_repo_root: source_path.clone(),
+                repo_key: "repo-key".into(),
+                repo_name: "herdr".into(),
+                branch: branch.into(),
+                checkout_path,
+                error: None,
+                creating: false,
+            });
+        }
+
+        let enter = crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Enter,
+            KeyModifiers::empty(),
+        ));
+        assert!(server.handle_client_input_events(1, vec![enter]));
+        assert!(server.clients[&1]
+            .sidebar_presentation
+            .overlay
+            .worktree_create
+            .as_ref()
+            .is_some_and(|draft| draft.creating));
+        assert!(server.clients[&2]
+            .sidebar_presentation
+            .overlay
+            .worktree_create
+            .as_ref()
+            .is_some_and(|draft| !draft.creating && draft.error.is_none()));
+
+        let completion = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+            .await
+            .expect("worktree completion timeout")
+            .expect("worktree completion event");
+        let AppEvent::WorktreeAddFinished(result) = &completion else {
+            panic!("unexpected completion: {completion:?}");
+        };
+        assert_eq!(
+            result
+                .api_request
+                .as_ref()
+                .and_then(|request| request.client_id),
+            Some(1)
+        );
+        assert!(server.handle_internal_event_with_forwarding(completion));
+
+        let client_one = server.clients[&1]
+            .sidebar_presentation
+            .overlay
+            .worktree_create
+            .as_ref()
+            .expect("client one draft");
+        assert!(!client_one.creating);
+        assert!(client_one.error.is_some());
+        let client_two = server.clients[&2]
+            .sidebar_presentation
+            .overlay
+            .worktree_create
+            .as_ref()
+            .expect("client two draft");
+        assert!(!client_two.creating);
+        assert!(client_two.error.is_none());
+
+        shutdown_test_runtimes(&mut server);
+        let _ = std::fs::remove_dir_all(worktree_root);
     }
 
     struct RecordingRemoteFocusTransport {
