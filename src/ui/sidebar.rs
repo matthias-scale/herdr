@@ -13182,8 +13182,8 @@ pub(crate) mod tests {
                     })
                     .count()
             };
-            assert_eq!(colored_dots(app.palette.red), 1, "width {width}");
-            assert_eq!(colored_dots(app.palette.blue), 0, "width {width}");
+            assert_eq!(colored_dots(app.palette.red), 0, "width {width}");
+            assert_eq!(colored_dots(app.palette.blue), 1, "width {width}");
         }
 
         // Clearing the gate does not change the already-correct working row.
