@@ -150,6 +150,10 @@ pub struct App {
     /// Attached client whose overlay is currently swapped into `state`.
     /// Deferred worktree operations copy this id into their completion event.
     pub(crate) active_overlay_client_id: Option<u64>,
+    /// A focus completion selected the current client's pane. The headless
+    /// server drains this after the mutation so external API focus can be
+    /// projected into each attached client's presentation.
+    pub(crate) pending_client_pane_focus: bool,
     pub(crate) pane_graphics: pane_graphics::Runtime,
     pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
     pub(crate) direct_graphics_available: bool,
@@ -836,6 +840,7 @@ impl App {
             .collect(),
             sidebar_group_mode,
             sidebar_focused: false,
+            client_focus_intent: state::ClientFocusIntent::FollowShared,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: sidebar_group_mode.view_index(),
             sidebar_work_filter,
@@ -1390,6 +1395,7 @@ impl App {
             missing_terminal_notification_backend_warned: std::cell::Cell::new(false),
             state,
             active_overlay_client_id: None,
+            pending_client_pane_focus: false,
             pane_graphics: pane_graphics::Runtime::default(),
             pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
             direct_graphics_available: false,
@@ -1826,6 +1832,17 @@ impl App {
             self.sync_prefix_input_source(previous_mode);
         }
         changed
+    }
+
+    /// Complete a creation or focus transition for the current presentation
+    /// without changing the server-owned mode used by other attached clients.
+    pub(crate) fn focus_client_on_pane(&mut self) {
+        self.state.focus_client_on_pane();
+        self.pending_client_pane_focus = true;
+    }
+
+    pub(crate) fn take_pending_client_pane_focus(&mut self) -> bool {
+        std::mem::take(&mut self.pending_client_pane_focus)
     }
 
     pub(crate) fn handle_internal_event_with_prefix_sync(
@@ -2864,13 +2881,6 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
-    fn headless_overlay_precedes_subgroup_picker(&self) -> bool {
-        self.state.loop_run_history_detail.is_some()
-            || self.state.usage_view.is_some()
-            || self.state.inbox.is_some()
-            || self.try_route_paste_to_overlay()
-    }
-
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         // Full-frame overlays bypass ordinary pane context. The inbox routes keys
         // to a selected pane, while Symphony and home consume them themselves.
@@ -3108,6 +3118,9 @@ impl App {
                 std::time::Instant::now(),
             );
             let previous_mode = self.state.effective_interaction_mode();
+            let owner = self
+                .state
+                .input_owner_with_pomodoro(pomodoro_presentation.prompt.is_some());
             match event {
                 crate::raw_input::RawInputEvent::Key(key) => {
                     self.state.clear_hovered_control();
@@ -3134,7 +3147,7 @@ impl App {
                         crossterm::event::KeyEventKind::Press => {
                             // A due break reminder still outranks every other
                             // input surface visible beneath it.
-                            if pomodoro_presentation.prompt.is_some()
+                            if owner == state::InputOwner::Pomodoro
                                 && self.intercept_notepad_key_with_prompt_visibility(&key, true)
                             {
                                 pomodoro_changed = true;
@@ -3144,66 +3157,29 @@ impl App {
                                 );
                                 continue;
                             }
-                            if !self.state.client_overlay_owns_input() {
-                                // Popup input is routed below by its terminal context.
-                                // Otherwise the floating subgroup picker owns keys
-                                // before a stale notepad or sidebar focus can take them.
-                                if self.state.popup_pane.is_none()
-                                    && !self.headless_overlay_precedes_subgroup_picker()
-                                    && self
-                                        .state
-                                        .handle_sidebar_subgroup_picker_key(key.as_key_event())
-                                {
-                                    self.input_leases.insert_consumed(
-                                        lease_key,
-                                        input::ConsumedInputLease::SuppressRepeats,
-                                    );
-                                    continue;
-                                }
-                                if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
-                                    pomodoro_changed = true;
-                                    self.input_leases.insert_consumed(
-                                        lease_key,
-                                        input::ConsumedInputLease::SuppressRepeats,
-                                    );
-                                    continue;
-                                }
-                                if self.handle_dock_surface_menu_key(&key) {
-                                    self.input_leases.insert_consumed(
-                                        lease_key,
-                                        input::ConsumedInputLease::SuppressRepeats,
-                                    );
-                                    continue;
-                                }
-                                // Home is a launch overlay, and `terminal_input_context`
-                                // reports no pane context while it is open. Settle home
-                                // first: a key it has no use for closes it and then
-                                // travels on as if home had never been there.
-                                if self.state.home.is_some()
-                                    && self.handle_home_key_headless(key.as_key_event())
-                                {
-                                    continue;
-                                }
-                                if self.handle_dock_home_key_headless(&key)
-                                    || self.handle_dock_diff_key_headless(&key)
-                                    || self.handle_dock_files_key(&key)
-                                    || self.handle_dock_pr_key_headless(&key)
-                                    || self.handle_dock_linear_key_headless(&key)
-                                    || self.handle_dock_chooser_key_headless(&key)
-                                    || (self.state.popup_pane.is_none()
-                                        && self.state.dock_object_preview.is_some())
-                                {
-                                    self.input_leases.insert_consumed(
-                                        lease_key,
-                                        input::ConsumedInputLease::SuppressRepeats,
-                                    );
-                                    continue;
-                                }
+                            if self.paste_clipboard_shortcut_for_input_owner(
+                                owner,
+                                &key.as_key_event(),
+                                crate::platform::read_clipboard_text,
+                            ) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
                             }
-                            let initial_context = self.terminal_input_context();
+                            let terminal_owner = matches!(
+                                owner,
+                                state::InputOwner::Popup
+                                    | state::InputOwner::Pane
+                                    | state::InputOwner::Dock(state::DockInputOwner::Editor)
+                            );
+                            let initial_context = terminal_owner
+                                .then(|| self.terminal_input_context())
+                                .flatten();
                             let proxy_input_gate_closed =
-                                self.focused_remote_proxy_input_gate_closed();
-                            let target = if initial_context.is_some() {
+                                terminal_owner && self.focused_remote_proxy_input_gate_closed();
+                            let target = if terminal_owner && initial_context.is_some() {
                                 self.handle_terminal_key_headless_from_with_hook(
                                     source_id,
                                     key.clone(),
@@ -3211,10 +3187,12 @@ impl App {
                                     controlled_owners,
                                 )
                             } else {
-                                self.handle_non_terminal_key_headless(key.clone());
+                                self.handle_non_terminal_key_headless(owner, key.clone());
                                 None
                             };
-                            let resulting_context = self.terminal_input_context();
+                            let resulting_context = terminal_owner
+                                .then(|| self.terminal_input_context())
+                                .flatten();
                             let plan = self.input_leases.complete_press_with_reprocess(
                                 lease_key,
                                 &key,
@@ -3233,7 +3211,14 @@ impl App {
                             );
                         }
                         crossterm::event::KeyEventKind::Repeat => {
-                            let current_context = self.terminal_input_context();
+                            let current_context = matches!(
+                                owner,
+                                state::InputOwner::Popup
+                                    | state::InputOwner::Pane
+                                    | state::InputOwner::Dock(state::DockInputOwner::Editor)
+                            )
+                            .then(|| self.terminal_input_context())
+                            .flatten();
                             let plan = self.input_leases.plan_repeat(
                                 lease_key,
                                 &key,
@@ -3271,62 +3256,38 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
-                    self.handle_text_commit_headless_with_hook(
+                    self.handle_text_commit_headless_for_owner_with_hook(
+                        owner,
                         text.as_str(),
                         before_terminal_input,
                         controlled_owners,
                     );
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                    if pomodoro_presentation.prompt.is_some()
-                        || self.state.popup_pane.is_some()
-                        || self.state.mouse_capture
-                    {
-                        if pomodoro_presentation.prompt.is_some() {
-                            pomodoro_changed = true;
-                        }
-                        self.handle_mouse_event_headless_with_pomodoro_presentation(
-                            source_id,
-                            mouse,
-                            *pomodoro_presentation,
-                        );
-                    } else {
-                        if pomodoro_presentation.prompt.is_some() {
-                            pomodoro_changed = true;
-                        }
-                        self.state
-                            .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
-                        if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                            if !self.state.pane_is_settled_anywhere(pane_id) {
-                                self.retire_blocked_hook_authority_for_pane(
-                                    pane_id,
-                                    std::time::Instant::now(),
-                                );
-                            }
-                        }
+                    if owner == state::InputOwner::Pomodoro {
+                        pomodoro_changed = true;
                     }
+                    self.handle_mouse_for_input_owner(
+                        source_id,
+                        mouse,
+                        *pomodoro_presentation,
+                        owner,
+                    );
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
-                    if pomodoro_presentation.prompt.is_some() {
+                    if owner == state::InputOwner::Pomodoro {
                         pomodoro_changed = true;
                         continue;
                     }
                     self.state.clear_hovered_control();
-                    if self.try_route_paste_to_overlay()
-                        || self.try_route_paste_to_popup(&text)
-                        || self.route_text_to_sidebar_subgroup_picker(&text)
-                        || self.try_route_text_to_home(&text)
-                    {
-                    } else if self.state.effective_interaction_mode() != Mode::Terminal
-                        || self.state.notepad.focused
-                        || self
-                            .state
-                            .sidebar_snooze
-                            .as_ref()
-                            .is_some_and(|snooze| snooze.time_draft.is_some())
-                    {
-                        self.paste_into_active_text_input(&text);
-                    } else {
+                    if owner == state::InputOwner::Popup {
+                        self.try_route_paste_to_popup(&text);
+                    } else if owner == state::InputOwner::Dock(state::DockInputOwner::Editor) {
+                        if let Some(runtime) = self.dock_editor_runtime() {
+                            let _ = runtime.try_send_paste(text);
+                        }
+                    } else if self.paste_into_input_owner(owner, &text) {
+                    } else if owner == state::InputOwner::Pane {
                         if let Some(ws_idx) = self.state.active {
                             let focused = self
                                 .state
@@ -3428,116 +3389,170 @@ impl App {
     ///
     /// Uses the standalone handler functions that work on `&mut AppState`
     /// since the server doesn't have the async context of the monolithic App.
-    fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
-        let key_event = key.as_key_event();
-        if self.handle_symphony_key(key_event) {
-            return;
-        }
-        if self.handle_loop_run_history_key(key_event) {
-            return;
-        }
-        if self.handle_usage_view_key(key_event) {
-            return;
-        }
-        if self.handle_work_view_key(key_event) {
-            return;
-        }
-        // Home was already settled in `route_client_events_from`, before the
-        // pane-context decision that sends a key down this path at all.
-        if self.handle_inbox_key_headless(key_event) {
-            return;
-        }
-        if input::modal_paste_target_active(&self.state)
-            && input::is_modal_paste_shortcut(&key_event)
-        {
-            if let Some(text) = crate::platform::read_clipboard_text() {
-                self.paste_into_active_text_input(&text);
-            }
-            return;
-        }
-
-        match self.state.effective_interaction_mode() {
-            Mode::Prefix => {
-                self.handle_prefix_key(key);
-            }
-            Mode::Navigate => {
-                self.handle_navigate_key(key);
-            }
-            Mode::Copy => {
-                self.handle_copy_mode_key(key);
-            }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                self.handle_rename_key_via_api(key_event);
-            }
-            Mode::NewLinkedWorktree => {
-                self.handle_worktree_create_key(key_event);
-            }
-            Mode::OpenExistingWorktree => {
-                self.handle_worktree_open_key(key_event);
-            }
-            Mode::ConfirmRemoveWorktree => {
-                self.handle_worktree_remove_key(key_event);
-            }
-            Mode::Resize => {
-                self.handle_resize_key_via_api(key);
-            }
-            Mode::ConfirmClose => {
-                self.handle_confirm_close_key_via_api(key_event);
-            }
-            Mode::ContextMenu => {
-                self.handle_context_menu_key_via_api(key_event);
-            }
-            Mode::GitMenu => {
-                input::handle_git_menu_key(&mut self.state, key_event);
-            }
-            Mode::AddAction => {
-                self.handle_add_action_key(key_event);
-            }
-            Mode::KeybindHelp => {
-                input::handle_keybind_help_key(&mut self.state, key);
-            }
-            Mode::GlobalMenu => {
-                input::handle_global_menu_key(&mut self.state, key_event);
-            }
-            Mode::Onboarding => {
-                self.handle_onboarding_key(key_event);
-            }
-            Mode::ReleaseNotes => {
-                self.handle_release_notes_key(key_event);
-            }
-            Mode::ProductAnnouncement => {
-                self.handle_product_announcement_key(key_event);
-            }
-            Mode::Settings => {
-                self.handle_settings_key(key_event);
-            }
-            Mode::Navigator => {
-                input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
-            }
-            Mode::CommandPalette => self.handle_command_palette_key(key_event),
-            Mode::WorkLinkPicker => {
-                self.handle_work_link_picker_key(key_event);
-            }
-            Mode::AgentPicker => {
-                self.handle_agent_picker_key(key_event);
-            }
-            Mode::Terminal => {
-                // Should not be called in terminal mode.
-            }
-        }
-    }
-
-    fn handle_mouse_event_headless_with_pomodoro_presentation(
+    fn handle_non_terminal_key_headless(
         &mut self,
-        source_id: InputSourceId,
-        mouse: crossterm::event::MouseEvent,
-        presentation: crate::ui::pomodoro::InputPresentation,
+        owner: state::InputOwner,
+        key: crate::input::TerminalKey,
     ) {
-        self.handle_mouse_from_input_source_with_pomodoro_presentation(
-            source_id,
-            mouse,
-            presentation,
-        );
+        let key_event = key.as_key_event();
+        match owner {
+            state::InputOwner::Pomodoro | state::InputOwner::Popup | state::InputOwner::Pane => {}
+            state::InputOwner::Client(owner) => match owner {
+                state::ClientInputOwner::Overlay(overlay) => {
+                    self.handle_client_overlay_key(overlay, key_event);
+                }
+                state::ClientInputOwner::SnoozeMenu => {
+                    self.handle_sidebar_snooze_menu_key(key_event);
+                }
+                state::ClientInputOwner::SnoozeTime => {
+                    self.handle_sidebar_snooze_time_key(key_event);
+                }
+                state::ClientInputOwner::SettledMenu
+                | state::ClientInputOwner::SettledDeleteConfirm => {
+                    self.handle_sidebar_settled_key(key_event);
+                }
+                state::ClientInputOwner::AgentPicker => self.handle_agent_picker_key(key_event),
+                state::ClientInputOwner::SidebarGroupMenu => {
+                    self.state.handle_sidebar_group_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarFilterMenu => {
+                    self.state.handle_sidebar_filter_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarNewMenu => {
+                    self.state.handle_sidebar_new_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarNewThread => {
+                    self.state.handle_sidebar_new_thread_key(key_event);
+                }
+                state::ClientInputOwner::SidebarProjectMenu => {
+                    self.state.handle_sidebar_project_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarObjectMenu => {
+                    self.handle_sidebar_object_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarSortMenu => {
+                    self.state.handle_sidebar_sort_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarSubgroupPicker => {
+                    self.state.handle_sidebar_subgroup_picker_key(key_event);
+                }
+                state::ClientInputOwner::PrActionConfirmation => {
+                    self.handle_pr_action_confirmation_key(key_event);
+                }
+                state::ClientInputOwner::DockSurfaceMenu => {
+                    self.handle_dock_surface_menu_key(&key);
+                }
+            },
+            state::InputOwner::AddProject
+            | state::InputOwner::Surface(state::SurfaceInputOwner::Home) => {
+                self.handle_home_key_headless(key_event);
+            }
+            state::InputOwner::Server(owner) => match owner {
+                state::ServerInputOwner::Onboarding => self.handle_onboarding_key(key_event),
+                state::ServerInputOwner::ReleaseNotes => self.handle_release_notes_key(key_event),
+                state::ServerInputOwner::ProductAnnouncement => {
+                    self.handle_product_announcement_key(key_event)
+                }
+                state::ServerInputOwner::Navigate => self.handle_navigate_key(key),
+                state::ServerInputOwner::Prefix => self.handle_prefix_key(key),
+                state::ServerInputOwner::Copy => self.handle_copy_mode_key(key),
+                state::ServerInputOwner::Resize => self.handle_resize_key_via_api(key),
+                state::ServerInputOwner::GitMenu => {
+                    input::handle_git_menu_key(&mut self.state, key_event)
+                }
+                state::ServerInputOwner::AddAction => self.handle_add_action_key(key_event),
+                state::ServerInputOwner::Settings => self.handle_settings_key(key_event),
+                state::ServerInputOwner::GlobalMenu => {
+                    input::handle_global_menu_key(&mut self.state, key_event)
+                }
+                state::ServerInputOwner::KeybindHelp => {
+                    input::handle_keybind_help_key(&mut self.state, key)
+                }
+                state::ServerInputOwner::Navigator => {
+                    input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
+                }
+                state::ServerInputOwner::CommandPalette => {
+                    self.handle_command_palette_key(key_event)
+                }
+                state::ServerInputOwner::WorkLinkPicker => {
+                    self.handle_work_link_picker_key(key_event)
+                }
+            },
+            state::InputOwner::Surface(state::SurfaceInputOwner::Symphony) => {
+                self.handle_symphony_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::LoopRunHistory) => {
+                self.handle_loop_run_history_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::Usage) => {
+                self.handle_usage_view_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::Work) => {
+                self.handle_work_view_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::DockObjectPreview) => {
+                if key_event.code == crossterm::event::KeyCode::Esc
+                    && key_event.modifiers.is_empty()
+                {
+                    self.state.dock_object_preview = None;
+                    self.state.dock_pr_focused = false;
+                    self.state.dock_linear_focused = false;
+                }
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::Inbox) => {
+                self.handle_inbox_key_headless(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::EditorPreview) => {}
+            state::InputOwner::Notepad => {
+                self.intercept_notepad_key_with_prompt_visibility(&key, false);
+            }
+            state::InputOwner::Dock(owner) => {
+                if self.handle_dock_chooser_key_headless(&key) {
+                    return;
+                }
+                match owner {
+                    state::DockInputOwner::Home => {
+                        self.handle_dock_home_key_headless(&key);
+                    }
+                    state::DockInputOwner::PullRequest => {
+                        self.handle_dock_pr_key_headless(&key);
+                    }
+                    state::DockInputOwner::Linear => {
+                        self.handle_dock_linear_key_headless(&key);
+                    }
+                    state::DockInputOwner::Diff => {
+                        self.handle_dock_diff_key_headless(&key);
+                    }
+                    state::DockInputOwner::Files => {
+                        self.handle_dock_files_key(&key);
+                    }
+                    state::DockInputOwner::Agents => {
+                        self.handle_dock_agents_key(&key);
+                    }
+                    state::DockInputOwner::Hosts => {
+                        self.handle_dock_hosts_key(&key);
+                    }
+                    state::DockInputOwner::Editor | state::DockInputOwner::Chooser => {}
+                }
+            }
+            state::InputOwner::Sidebar => {
+                if self.state.handle_sidebar_search_key(key_event) {
+                    return;
+                }
+                match self.state.handle_sidebar_work_group_key(key_event) {
+                    input::SidebarWorkGroupKeyAction::Ignored => {}
+                    input::SidebarWorkGroupKeyAction::Consumed => return,
+                    input::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                        self.dispatch_sidebar_work_group_plan(*plan);
+                        return;
+                    }
+                }
+                if !self.handle_sidebar_session_action_key(key_event) {
+                    self.handle_sidebar_settled_key(key_event);
+                }
+            }
+            state::InputOwner::None => {}
+        }
     }
 }
 

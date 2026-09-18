@@ -6,9 +6,10 @@ use tracing::warn;
 use crate::{
     app::state::{
         AddActionState, AppState, ClientOverlay, ContextMenuAction, ContextMenuKind,
-        ContextMenuState, DragState, DragTarget, HomeHitTarget, MenuListState, Mode,
+        ContextMenuState, DragState, DragTarget, HomeHitTarget, InputOwner, MenuListState, Mode,
         PaneMenuWorkLink, PaneMenuWorkLinkAction, RemoteAgentPressState,
-        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
+        RightClickPassthroughGesture, ServerInputOwner, SurfaceInputOwner, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -149,6 +150,7 @@ enum MobileMouseResult {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub(crate) fn handle_pane_mouse_only(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
@@ -166,7 +168,6 @@ impl AppState {
         let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
             return;
         };
-
         match mouse.kind {
             MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
@@ -183,11 +184,23 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn handle_mouse(
         &mut self,
         terminal_runtimes: &mut TerminalRuntimeRegistry,
         source_id: crate::app::InputSourceId,
         mouse: MouseEvent,
+    ) -> Option<MouseAction> {
+        let owner = self.input_owner();
+        self.handle_mouse_for_owner(terminal_runtimes, source_id, mouse, owner)
+    }
+
+    pub(super) fn handle_mouse_for_owner(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        source_id: crate::app::InputSourceId,
+        mouse: MouseEvent,
+        owner: InputOwner,
     ) -> Option<MouseAction> {
         self.forwarded_pane_input = None;
         if matches!(
@@ -199,12 +212,14 @@ impl AppState {
         ) {
             self.remote_agent_presses.remove(&source_id);
         }
-        if !self.client_overlay_owns_input() && self.handle_notepad_mouse(&mouse) {
+        if owner == InputOwner::Notepad && self.handle_notepad_mouse(&mouse) {
             return None;
         }
-        if !self.client_overlay_owns_input()
-            && rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row)
-        {
+        let base_owner = matches!(
+            owner,
+            InputOwner::Dock(_) | InputOwner::Sidebar | InputOwner::Pane | InputOwner::None
+        );
+        if base_owner && rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row) {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.toggle_pomodoro(std::time::Instant::now());
@@ -219,18 +234,18 @@ impl AppState {
                 _ => {}
             }
         }
-        if !self.client_overlay_owns_input()
+        if base_owner
             && rect_contains(self.view.hyperspace_pause_hit_area, mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             self.hyperspace.toggle_paused(std::time::Instant::now());
             return None;
         }
-        if self.effective_interaction_mode() == Mode::Onboarding {
+        if owner == InputOwner::Server(ServerInputOwner::Onboarding) {
             self.handle_onboarding_mouse(mouse);
             return None;
         }
-        if self.add_project_active() {
+        if owner == InputOwner::AddProject {
             if matches!(
                 mouse.kind,
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -281,7 +296,7 @@ impl AppState {
             }
             return None;
         }
-        if self.effective_interaction_mode() == Mode::AddAction {
+        if owner == InputOwner::Server(ServerInputOwner::AddAction) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if rect_contains(self.view.add_action_close_hit_area, mouse.column, mouse.row)
                     || rect_contains(
@@ -324,7 +339,7 @@ impl AppState {
         // otherwise a click that misses a row reaches the pane hidden behind it
         // and silently moves focus. The status bar sits outside this rect, so
         // its buttons — including the home button — keep working.
-        if self.home.is_some()
+        if owner == InputOwner::Surface(SurfaceInputOwner::Home)
             && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
         {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -396,21 +411,21 @@ impl AppState {
             return None;
         }
 
-        if self.effective_interaction_mode() == Mode::Terminal
+        if owner == InputOwner::Pane
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return Some(MouseAction::FocusToastTarget);
         }
 
-        if self.effective_interaction_mode() == Mode::Terminal
+        if owner == InputOwner::Pane
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
         {
             return None;
         }
 
-        if self.effective_interaction_mode() == Mode::Settings {
+        if owner == InputOwner::Server(ServerInputOwner::Settings) {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
         }
 
@@ -3504,7 +3519,7 @@ impl AppState {
 
         self.focus_pane_in_workspace(ws_idx, target.pane_id);
         self.toast = None;
-        self.settle_terminal_mode_after_focus();
+        self.focus_client_on_pane();
     }
 
     pub(crate) fn scroll_pane_up(

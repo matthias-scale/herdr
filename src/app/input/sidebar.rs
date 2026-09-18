@@ -1853,8 +1853,9 @@ impl super::super::App {
                 else {
                     return;
                 };
-                self.focus_pane_internal_via_api(ws_idx, target.pane_id);
-                self.close_focused_pane_via_api_requires_confirmation();
+                if let Some(pane_id) = self.public_pane_id(ws_idx, target.pane_id) {
+                    self.runtime_pane_close("tui.sidebar.settled.delete", pane_id);
+                }
             }
         }
         self.flush_pane_settlement_events();
@@ -3174,6 +3175,7 @@ mod tests {
     fn settled_menu_resume_clears_settled_at() {
         let mut app = app_for_mouse_test();
         let target = settled_target(&mut app);
+        app.state.set_server_mode(Mode::Settings);
         app.state.sidebar_settled_menu_target = Some(target.clone());
 
         app.apply_sidebar_settled_menu_action(0);
@@ -3184,6 +3186,7 @@ mod tests {
             app.state.workspaces[0].focused_pane_id(),
             Some(target.pane_id)
         );
+        assert_eq!(app.state.server_mode(), Mode::Settings);
     }
 
     #[test]

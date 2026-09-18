@@ -153,6 +153,9 @@ impl App {
                 Err(err) => return encode_error(id, "worktree_open_failed", err.to_string()),
             }
         };
+        if params.focus {
+            self.focus_client_on_pane();
+        }
         if created_workspace {
             self.bind_workspace_root_work_context(ws_idx, work_context);
         }

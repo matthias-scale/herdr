@@ -782,13 +782,6 @@ impl AppState {
         }
     }
 
-    pub(crate) fn settle_terminal_mode_after_focus(&mut self) {
-        if self.client_overlay == crate::app::state::ClientOverlay::None {
-            self.set_server_mode(Mode::Terminal);
-            self.sync_copy_mode_with_focus();
-        }
-    }
-
     pub(crate) fn sync_copy_mode_search_geometry(&mut self) {
         let geometry = self.copy_mode.as_ref().and_then(|copy_mode| {
             self.view

@@ -63,6 +63,9 @@ impl App {
             work_context,
         ) {
             Ok(index) => {
+                if params.focus {
+                    self.focus_client_on_pane();
+                }
                 if let Some(label) = params.label {
                     if let Some(workspace) = self.state.workspaces.get_mut(index) {
                         workspace.set_custom_name(label);
@@ -88,6 +91,7 @@ impl App {
             return workspace_not_found(id, &target.workspace_id);
         }
         self.state.switch_workspace(index);
+        self.focus_client_on_pane();
 
         encode_success(
             id,

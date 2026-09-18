@@ -1516,6 +1516,7 @@ impl SidebarSortMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarPresentationState {
     pub(crate) focused: bool,
+    pub(crate) focus_intent: ClientFocusIntent,
     pub(crate) expanded_workspace_ids: std::collections::HashSet<String>,
     pub(crate) known_workspace_ids: std::collections::HashSet<String>,
     /// Workspace this attach last scrolled into view. Focus changes routed
@@ -1587,6 +1588,128 @@ impl ClientOverlay {
     }
 }
 
+/// The client-local presentation state that owns the next input event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClientInputOwner {
+    Overlay(ClientOverlay),
+    SnoozeMenu,
+    SnoozeTime,
+    SettledMenu,
+    SettledDeleteConfirm,
+    AgentPicker,
+    SidebarGroupMenu,
+    SidebarFilterMenu,
+    SidebarNewMenu,
+    SidebarNewThread,
+    SidebarProjectMenu,
+    SidebarObjectMenu,
+    SidebarSortMenu,
+    SidebarSubgroupPicker,
+    PrActionConfirmation,
+    DockSurfaceMenu,
+}
+
+/// Client-local choice between the shared interaction surface and the focused
+/// pane. Focus completions set this instead of rewriting the server-owned mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ClientFocusIntent {
+    #[default]
+    FollowShared,
+    Pane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerInputOwner {
+    Onboarding,
+    ReleaseNotes,
+    ProductAnnouncement,
+    Navigate,
+    Prefix,
+    Copy,
+    Resize,
+    GitMenu,
+    AddAction,
+    Settings,
+    GlobalMenu,
+    KeybindHelp,
+    Navigator,
+    CommandPalette,
+    WorkLinkPicker,
+}
+
+impl ServerInputOwner {
+    fn from_mode(mode: Mode) -> Option<Self> {
+        match mode {
+            Mode::Onboarding => Some(Self::Onboarding),
+            Mode::ReleaseNotes => Some(Self::ReleaseNotes),
+            Mode::ProductAnnouncement => Some(Self::ProductAnnouncement),
+            Mode::Navigate => Some(Self::Navigate),
+            Mode::Prefix => Some(Self::Prefix),
+            Mode::Copy => Some(Self::Copy),
+            Mode::Resize => Some(Self::Resize),
+            Mode::GitMenu => Some(Self::GitMenu),
+            Mode::AddAction => Some(Self::AddAction),
+            Mode::Settings => Some(Self::Settings),
+            Mode::GlobalMenu => Some(Self::GlobalMenu),
+            Mode::KeybindHelp => Some(Self::KeybindHelp),
+            Mode::Navigator => Some(Self::Navigator),
+            Mode::CommandPalette => Some(Self::CommandPalette),
+            Mode::WorkLinkPicker => Some(Self::WorkLinkPicker),
+            Mode::Terminal
+            | Mode::RenameWorkspace
+            | Mode::RenameTab
+            | Mode::RenamePane
+            | Mode::NewLinkedWorktree
+            | Mode::OpenExistingWorktree
+            | Mode::ConfirmRemoveWorktree
+            | Mode::ConfirmClose
+            | Mode::ContextMenu => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SurfaceInputOwner {
+    Symphony,
+    LoopRunHistory,
+    Usage,
+    Work,
+    EditorPreview,
+    DockObjectPreview,
+    Home,
+    Inbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockInputOwner {
+    Home,
+    PullRequest,
+    Linear,
+    Diff,
+    Files,
+    Agents,
+    Hosts,
+    Editor,
+    Chooser,
+}
+
+/// The one resolved owner for input and cursor routing. Keep this exhaustive:
+/// adding a new interactive presentation requires choosing its precedence here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputOwner {
+    Pomodoro,
+    Client(ClientInputOwner),
+    AddProject,
+    Server(ServerInputOwner),
+    Popup,
+    Surface(SurfaceInputOwner),
+    Notepad,
+    Dock(DockInputOwner),
+    Sidebar,
+    Pane,
+    None,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModeOwner {
     Server,
@@ -1614,6 +1737,7 @@ pub(crate) struct ClientOverlayState {
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
     pub(crate) settled_menu_delete_armed: bool,
+    pub(crate) agent_picker: Option<AgentPickerState>,
 }
 
 impl ClientOverlayState {
@@ -1622,6 +1746,7 @@ impl ClientOverlayState {
             || self.snooze.is_some()
             || self.settled_menu_target.is_some()
             || self.settled_menu_delete_armed
+            || self.agent_picker.is_some()
     }
 }
 
@@ -1794,6 +1919,11 @@ pub(crate) struct DockPresentationState {
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_action_menu: Option<crate::ui::ticket_actions::TicketActionMenuState>,
     pub(crate) ticket_comment_draft: Option<String>,
+    /// Comment composer and write authority belong to the client that staged
+    /// them. Shared work-item facts stay in the work index.
+    pub(crate) comment_draft: Option<String>,
+    pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
+    pub(crate) write_notice: Option<String>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -1862,6 +1992,9 @@ impl Default for DockPresentationState {
             ticket_start_menu: None,
             ticket_action_menu: None,
             ticket_comment_draft: None,
+            comment_draft: None,
+            pending_write: None,
+            write_notice: None,
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -2538,7 +2671,6 @@ pub(crate) struct AgentPickerCandidate {
 pub(crate) struct AgentPickerState {
     pub candidates: Vec<AgentPickerCandidate>,
     pub text: String,
-    pub return_mode: Mode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2574,7 +2706,6 @@ pub enum Mode {
     Navigator,
     CommandPalette,
     WorkLinkPicker,
-    AgentPicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2649,8 +2780,7 @@ impl Mode {
             | Self::KeybindHelp
             | Self::Navigator
             | Self::CommandPalette
-            | Self::WorkLinkPicker
-            | Self::AgentPicker => ModeOwner::Server,
+            | Self::WorkLinkPicker => ModeOwner::Server,
         }
     }
 
@@ -2691,7 +2821,6 @@ impl Mode {
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
                 | Mode::WorkLinkPicker
-                | Mode::AgentPicker
         )
     }
 }
@@ -4104,6 +4233,7 @@ pub struct AppState {
     /// a click that lands in the sidebar without handing the keyboard to a
     /// pane, cleared by every path that focuses a pane.
     pub(crate) sidebar_focused: bool,
+    pub(crate) client_focus_intent: ClientFocusIntent,
     pub(crate) sidebar_group_menu_open: bool,
     pub(crate) sidebar_group_menu_selected: usize,
     pub(crate) sidebar_work_filter: SidebarWorkFilter,
@@ -4128,7 +4258,7 @@ pub struct AppState {
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
     /// Downward action menu for a Linear, GitHub, or Missive sidebar object.
-    /// This is client-local presentation; writes remain in `dock_pending_write`.
+    /// This and the write it may stage are client-local presentation.
     pub(crate) sidebar_object_menu: Option<SidebarObjectMenuState>,
     /// Downward sort dropdown for one sidebar group. Client-local presentation;
     /// the choices themselves live in `sidebar_group_sorts`.
@@ -5434,6 +5564,7 @@ impl AppState {
 
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
         std::mem::swap(&mut self.sidebar_focused, &mut other.focused);
+        std::mem::swap(&mut self.client_focus_intent, &mut other.focus_intent);
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
             &mut other.expanded_workspace_ids,
@@ -5538,6 +5669,7 @@ impl AppState {
             &mut self.sidebar_settled_menu_delete_armed,
             &mut other.overlay.settled_menu_delete_armed,
         );
+        std::mem::swap(&mut self.agent_picker, &mut other.overlay.agent_picker);
         std::mem::swap(&mut self.name_input, &mut other.overlay.name_input);
         std::mem::swap(
             &mut self.name_input_replace_on_type,
@@ -5563,16 +5695,147 @@ impl AppState {
 
     pub(crate) fn set_server_mode(&mut self, mode: Mode) {
         self.server_interaction = ServerInteractionState::new(mode);
+        self.client_focus_intent = ClientFocusIntent::FollowShared;
     }
 
     pub(crate) fn effective_interaction_mode(&self) -> Mode {
         self.client_overlay
             .mode()
-            .unwrap_or(self.server_interaction.mode)
+            .unwrap_or_else(|| match self.client_focus_intent {
+                ClientFocusIntent::FollowShared => self.server_interaction.mode,
+                ClientFocusIntent::Pane => Mode::Terminal,
+            })
     }
 
-    pub(crate) fn client_overlay_owns_input(&self) -> bool {
-        self.client_overlay != ClientOverlay::None
+    pub(crate) fn focus_client_on_pane(&mut self) {
+        self.client_focus_intent = ClientFocusIntent::Pane;
+        self.release_surface_focus_to_pane();
+    }
+
+    pub(crate) fn input_owner(&self) -> InputOwner {
+        if self.sidebar_settled_menu_delete_armed {
+            return InputOwner::Client(ClientInputOwner::SettledDeleteConfirm);
+        }
+        if self.sidebar_settled_menu_target.is_some() {
+            return InputOwner::Client(ClientInputOwner::SettledMenu);
+        }
+        if self
+            .sidebar_snooze
+            .as_ref()
+            .is_some_and(|snooze| snooze.time_draft.is_some())
+        {
+            return InputOwner::Client(ClientInputOwner::SnoozeTime);
+        }
+        if self.sidebar_snooze.is_some() {
+            return InputOwner::Client(ClientInputOwner::SnoozeMenu);
+        }
+        if self.client_overlay != ClientOverlay::None {
+            return InputOwner::Client(ClientInputOwner::Overlay(self.client_overlay));
+        }
+        if self.agent_picker.is_some() {
+            return InputOwner::Client(ClientInputOwner::AgentPicker);
+        }
+        if self.sidebar_subgroup_picker.is_some() {
+            return InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker);
+        }
+        if self.sidebar_sort_menu.is_some() {
+            return InputOwner::Client(ClientInputOwner::SidebarSortMenu);
+        }
+        if self.sidebar_object_menu.is_some() {
+            return InputOwner::Client(ClientInputOwner::SidebarObjectMenu);
+        }
+        if self.sidebar_project_menu.is_some() {
+            return InputOwner::Client(ClientInputOwner::SidebarProjectMenu);
+        }
+        if self.sidebar_new_thread.is_some() {
+            return InputOwner::Client(ClientInputOwner::SidebarNewThread);
+        }
+        if self.sidebar_new_menu.is_some() {
+            return InputOwner::Client(ClientInputOwner::SidebarNewMenu);
+        }
+        if self.sidebar_filter_menu_open {
+            return InputOwner::Client(ClientInputOwner::SidebarFilterMenu);
+        }
+        if self.sidebar_group_menu_open {
+            return InputOwner::Client(ClientInputOwner::SidebarGroupMenu);
+        }
+        if self.pr_action_confirmation.is_some() {
+            return InputOwner::Client(ClientInputOwner::PrActionConfirmation);
+        }
+        if self.dock_surface_menu.is_some() {
+            return InputOwner::Client(ClientInputOwner::DockSurfaceMenu);
+        }
+        if self.client_focus_intent == ClientFocusIntent::Pane {
+            return InputOwner::Pane;
+        }
+        if self.add_project_active() {
+            return InputOwner::AddProject;
+        }
+        if let Some(owner) = ServerInputOwner::from_mode(self.server_mode()) {
+            return InputOwner::Server(owner);
+        }
+        if self.popup_pane.is_some() {
+            return InputOwner::Popup;
+        }
+        if self.notepad.focused {
+            return InputOwner::Notepad;
+        }
+        match self.terminal_area_surface() {
+            TerminalAreaSurface::EditorPreview => {
+                return InputOwner::Surface(SurfaceInputOwner::EditorPreview)
+            }
+            TerminalAreaSurface::Symphony(_) => {
+                return InputOwner::Surface(SurfaceInputOwner::Symphony)
+            }
+            TerminalAreaSurface::LoopRunHistory(_) => {
+                return InputOwner::Surface(SurfaceInputOwner::LoopRunHistory)
+            }
+            TerminalAreaSurface::Usage => return InputOwner::Surface(SurfaceInputOwner::Usage),
+            TerminalAreaSurface::Work => return InputOwner::Surface(SurfaceInputOwner::Work),
+            TerminalAreaSurface::DockObjectPreview => {
+                return InputOwner::Surface(SurfaceInputOwner::DockObjectPreview)
+            }
+            TerminalAreaSurface::Home => return InputOwner::Surface(SurfaceInputOwner::Home),
+            TerminalAreaSurface::Inbox(_) => return InputOwner::Surface(SurfaceInputOwner::Inbox),
+            TerminalAreaSurface::Tab => {}
+            TerminalAreaSurface::Empty => return InputOwner::None,
+        }
+        let dock_owner = if self.dock_editor_focused {
+            Some(DockInputOwner::Editor)
+        } else if self.dock_home_focused {
+            Some(DockInputOwner::Home)
+        } else if self.dock_pr_focused {
+            Some(DockInputOwner::PullRequest)
+        } else if self.dock_linear_focused {
+            Some(DockInputOwner::Linear)
+        } else if self.dock_diff_focused {
+            Some(DockInputOwner::Diff)
+        } else if self.dock_files_focused {
+            Some(DockInputOwner::Files)
+        } else if self.dock_agents_focused {
+            Some(DockInputOwner::Agents)
+        } else if self.dock_hosts_focused {
+            Some(DockInputOwner::Hosts)
+        } else if self.dock_chooser_focused {
+            Some(DockInputOwner::Chooser)
+        } else {
+            None
+        };
+        if let Some(owner) = dock_owner {
+            return InputOwner::Dock(owner);
+        }
+        if self.sidebar_focused {
+            return InputOwner::Sidebar;
+        }
+        InputOwner::Pane
+    }
+
+    pub(crate) fn input_owner_with_pomodoro(&self, prompt_visible: bool) -> InputOwner {
+        if prompt_visible {
+            InputOwner::Pomodoro
+        } else {
+            self.input_owner()
+        }
     }
 
     pub(crate) fn open_client_overlay(&mut self, overlay: ClientOverlay) {
@@ -6249,6 +6512,9 @@ impl AppState {
             &mut self.dock_ticket_comment_draft,
             &mut other.ticket_comment_draft,
         );
+        std::mem::swap(&mut self.dock_comment_draft, &mut other.comment_draft);
+        std::mem::swap(&mut self.dock_pending_write, &mut other.pending_write);
+        std::mem::swap(&mut self.dock_write_notice, &mut other.write_notice);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(&mut self.dock_symphony, &mut other.symphony);
         std::mem::swap(
@@ -6767,6 +7033,7 @@ impl AppState {
             collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
+            client_focus_intent: ClientFocusIntent::FollowShared,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: 0,
             sidebar_work_filter: SidebarWorkFilter::default(),
@@ -7537,6 +7804,109 @@ mod tests {
         state.inbox = Some(crate::app::inbox::InboxState::default());
     }
 
+    fn show_popup(state: &mut AppState) {
+        state.popup_pane = Some(PopupPaneState {
+            pane_id: PaneId::alloc(),
+            terminal_id: crate::terminal::TerminalId::alloc(),
+            width: None,
+            height: None,
+        });
+    }
+
+    fn show_dock_menu(state: &mut AppState) {
+        state.dock_surface_menu = Some(DockSurfaceMenu { selected: 0 });
+    }
+
+    fn show_add_project(state: &mut AppState) {
+        let mut home = crate::app::home::HomeState::default();
+        home.add_project = Some(crate::app::home::AddProjectState::starting_at(
+            &std::env::temp_dir(),
+        ));
+        state.home = Some(home);
+    }
+
+    fn show_navigator_picker(state: &mut AppState) {
+        state.set_server_mode(Mode::Navigator);
+    }
+
+    fn show_work_link_picker(state: &mut AppState) {
+        state.set_server_mode(Mode::WorkLinkPicker);
+    }
+
+    fn install_client_input_owner(state: &mut AppState, owner: ClientInputOwner) {
+        let target = PaneFocusTarget {
+            workspace_id: "workspace:test".into(),
+            pane_id: PaneId::alloc(),
+        };
+        match owner {
+            ClientInputOwner::Overlay(overlay) => state.open_client_overlay(overlay),
+            ClientInputOwner::SnoozeMenu | ClientInputOwner::SnoozeTime => {
+                state.sidebar_snooze = Some(SidebarSnoozeUiState {
+                    target,
+                    anchor: (1, 1),
+                    selected: SidebarSnoozeMenuAction::SetTime,
+                    time_draft: (owner == ClientInputOwner::SnoozeTime).then(String::new),
+                    error: None,
+                });
+            }
+            ClientInputOwner::SettledMenu | ClientInputOwner::SettledDeleteConfirm => {
+                state.sidebar_settled_menu_target = Some(target);
+                state.sidebar_settled_menu_delete_armed =
+                    owner == ClientInputOwner::SettledDeleteConfirm;
+            }
+            ClientInputOwner::AgentPicker => {
+                state.agent_picker = Some(AgentPickerState {
+                    candidates: Vec::new(),
+                    text: String::new(),
+                });
+            }
+            ClientInputOwner::SidebarGroupMenu => state.sidebar_group_menu_open = true,
+            ClientInputOwner::SidebarFilterMenu => state.sidebar_filter_menu_open = true,
+            ClientInputOwner::SidebarNewMenu => {
+                state.sidebar_new_menu = Some(SidebarNewMenuState::default());
+            }
+            ClientInputOwner::SidebarNewThread => {
+                state.sidebar_new_thread = Some(SidebarNewThreadState::default());
+            }
+            ClientInputOwner::SidebarProjectMenu => {
+                state.sidebar_project_menu = Some(SidebarProjectMenuState::default());
+            }
+            ClientInputOwner::SidebarObjectMenu => {
+                state.sidebar_object_menu = Some(SidebarObjectMenuState {
+                    target: "SCA-1".into(),
+                    anchor_row: None,
+                    page: SidebarObjectMenuPage::Actions,
+                    selected: 0,
+                });
+            }
+            ClientInputOwner::SidebarSortMenu => {
+                state.sidebar_sort_menu = Some(SidebarSortMenuState {
+                    target: "repo:test".into(),
+                    current: SidebarSortMode::Default,
+                    anchor: (1, 1),
+                    selected: 0,
+                });
+            }
+            ClientInputOwner::SidebarSubgroupPicker => {
+                state.sidebar_subgroup_picker = Some(SidebarSubgroupPickerState::default());
+            }
+            ClientInputOwner::PrActionConfirmation => {
+                state.pr_action_confirmation = Some(PrActionConfirmation {
+                    key: WorkItemKey {
+                        repo: "owner/repo".into(),
+                        pr_number: Some(1),
+                        pr_url: None,
+                        ticket_id: None,
+                    },
+                    action: crate::ui::work_list_detail::PrActionKind::MarkReady,
+                });
+            }
+            ClientInputOwner::DockSurfaceMenu => {
+                state.dock_surface_menu = Some(DockSurfaceMenu { selected: 0 });
+            }
+        }
+    }
+
     fn replacing_surface_setups() -> [SurfaceSetup; 8] {
         [
             ("editor preview", show_editor_preview),
@@ -7577,6 +7947,88 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn every_client_input_owner_wins_every_competing_surface() {
+        let competitors: [SurfaceSetup; 10] = [
+            ("popup", show_popup),
+            ("symphony", show_symphony),
+            ("work", show_work),
+            ("usage", show_usage),
+            ("dock menu", show_dock_menu),
+            ("dock preview", show_dock_object_preview),
+            ("home", show_home),
+            ("add project", show_add_project),
+            ("navigator picker", show_navigator_picker),
+            ("work-link picker", show_work_link_picker),
+        ];
+        let client_owners = [
+            ClientInputOwner::Overlay(ClientOverlay::RenameWorkspace),
+            ClientInputOwner::Overlay(ClientOverlay::RenameTab),
+            ClientInputOwner::Overlay(ClientOverlay::RenamePane),
+            ClientInputOwner::Overlay(ClientOverlay::NewLinkedWorktree),
+            ClientInputOwner::Overlay(ClientOverlay::OpenExistingWorktree),
+            ClientInputOwner::Overlay(ClientOverlay::ConfirmRemoveWorktree),
+            ClientInputOwner::Overlay(ClientOverlay::ConfirmClose),
+            ClientInputOwner::Overlay(ClientOverlay::ContextMenu),
+            ClientInputOwner::SnoozeMenu,
+            ClientInputOwner::SnoozeTime,
+            ClientInputOwner::SettledMenu,
+            ClientInputOwner::SettledDeleteConfirm,
+            ClientInputOwner::AgentPicker,
+            ClientInputOwner::SidebarGroupMenu,
+            ClientInputOwner::SidebarFilterMenu,
+            ClientInputOwner::SidebarNewMenu,
+            ClientInputOwner::SidebarNewThread,
+            ClientInputOwner::SidebarProjectMenu,
+            ClientInputOwner::SidebarObjectMenu,
+            ClientInputOwner::SidebarSortMenu,
+            ClientInputOwner::SidebarSubgroupPicker,
+            ClientInputOwner::PrActionConfirmation,
+            ClientInputOwner::DockSurfaceMenu,
+        ];
+
+        for client_owner in client_owners {
+            for (competitor, setup) in competitors {
+                let mut state = AppState::test_new();
+                state.set_server_mode(Mode::Terminal);
+                setup(&mut state);
+                install_client_input_owner(&mut state, client_owner);
+                assert_eq!(
+                    state.input_owner(),
+                    InputOwner::Client(client_owner),
+                    "{client_owner:?} must win {competitor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn client_pane_focus_intent_wins_shared_mode_and_swaps_per_client() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("pane")];
+        state.active = Some(0);
+        state.set_server_mode(Mode::Settings);
+        let mut client_a = SidebarPresentationState::default();
+        let mut client_b = SidebarPresentationState::default();
+
+        state.swap_sidebar_presentation(&mut client_a);
+        state.focus_client_on_pane();
+        assert_eq!(state.input_owner(), InputOwner::Pane);
+        assert_eq!(state.server_mode(), Mode::Settings);
+        state.swap_sidebar_presentation(&mut client_a);
+
+        state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(
+            state.input_owner(),
+            InputOwner::Server(ServerInputOwner::Settings)
+        );
+        state.swap_sidebar_presentation(&mut client_b);
+
+        state.swap_sidebar_presentation(&mut client_a);
+        assert_eq!(state.input_owner(), InputOwner::Pane);
+        state.swap_sidebar_presentation(&mut client_a);
     }
 
     #[test]

@@ -20,12 +20,7 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 
 impl App {
     pub(super) fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if self.state.client_overlay_owns_input() {
-            return false;
-        }
-        if self.state.server_mode() == Mode::WorkLinkPicker
-            || self.state.server_mode() == Mode::AgentPicker
-        {
+        if self.state.server_mode() == Mode::WorkLinkPicker {
             return true;
         }
 

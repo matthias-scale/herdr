@@ -182,7 +182,7 @@ impl App {
         lease_key: super::input::InputLeaseKey,
         key: crate::input::TerminalKey,
         plan: super::input::RepeatPlan,
-        pomodoro_prompt_visible: bool,
+        owner: super::state::InputOwner,
     ) -> bool {
         match plan {
             super::input::RepeatPlan::Forwarded(target) => {
@@ -220,12 +220,7 @@ impl App {
                     ) {
                         break;
                     }
-                    if let Some(target) = self
-                        .handle_key_with_pomodoro_prompt_visibility(
-                            key.clone(),
-                            pomodoro_prompt_visible,
-                        )
-                        .await
+                    if let Some(target) = self.handle_key_for_input_owner(key.clone(), owner).await
                     {
                         if tracked {
                             self.input_leases.insert_forwarded(
@@ -293,6 +288,9 @@ impl App {
             return true;
         }
         let previous_mode = self.state.effective_interaction_mode();
+        let owner = self
+            .state
+            .input_owner_with_pomodoro(pomodoro_presentation.prompt.is_some());
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let lease_key = super::input::InputLeaseKey::new(super::LOCAL_INPUT_SOURCE, &key);
@@ -315,15 +313,23 @@ impl App {
                 }
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
-                        let initial_context = self.terminal_input_context();
-                        let proxy_input_gate_closed = self.focused_remote_proxy_input_gate_closed();
-                        let target = self
-                            .handle_key_with_pomodoro_prompt_visibility(
-                                key.clone(),
-                                pomodoro_presentation.prompt.is_some(),
-                            )
-                            .await;
-                        let resulting_context = self.terminal_input_context();
+                        let terminal_owner = matches!(
+                            owner,
+                            super::state::InputOwner::Popup
+                                | super::state::InputOwner::Pane
+                                | super::state::InputOwner::Dock(
+                                    super::state::DockInputOwner::Editor
+                                )
+                        );
+                        let initial_context = terminal_owner
+                            .then(|| self.terminal_input_context())
+                            .flatten();
+                        let proxy_input_gate_closed =
+                            terminal_owner && self.focused_remote_proxy_input_gate_closed();
+                        let target = self.handle_key_for_input_owner(key.clone(), owner).await;
+                        let resulting_context = terminal_owner
+                            .then(|| self.terminal_input_context())
+                            .flatten();
                         let plan = self.input_leases.complete_press_with_reprocess(
                             lease_key,
                             &key,
@@ -332,29 +338,26 @@ impl App {
                             target,
                             !proxy_input_gate_closed,
                         );
-                        self.execute_repeat_plan(
-                            lease_key,
-                            key,
-                            plan,
-                            pomodoro_presentation.prompt.is_some(),
-                        )
-                        .await;
+                        self.execute_repeat_plan(lease_key, key, plan, owner).await;
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
-                        let current_context = self.terminal_input_context();
+                        let current_context = matches!(
+                            owner,
+                            super::state::InputOwner::Popup
+                                | super::state::InputOwner::Pane
+                                | super::state::InputOwner::Dock(
+                                    super::state::DockInputOwner::Editor
+                                )
+                        )
+                        .then(|| self.terminal_input_context())
+                        .flatten();
                         let plan = self.input_leases.plan_repeat(
                             lease_key,
                             &key,
                             current_context.as_ref(),
                         );
-                        self.execute_repeat_plan(
-                            lease_key,
-                            key,
-                            plan,
-                            pomodoro_presentation.prompt.is_some(),
-                        )
-                        .await
+                        self.execute_repeat_plan(lease_key, key, plan, owner).await
                     }
                     crossterm::event::KeyEventKind::Release => {
                         if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
@@ -370,39 +373,25 @@ impl App {
                 if pomodoro_presentation.prompt.is_some() {
                     return true;
                 }
-                self.handle_text_commit(text.into_string()).await;
+                self.handle_text_commit_for_input_owner(owner, text.into_string())
+                    .await;
                 true
             }
             crate::raw_input::RawInputEvent::Paste(text) => {
                 if pomodoro_presentation.prompt.is_some() {
                     return true;
                 }
-                self.handle_paste(text).await;
+                self.handle_paste_for_input_owner(owner, text).await;
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
                 let previous_hover = self.state.hovered_control;
-                if pomodoro_presentation.prompt.is_some()
-                    || self.state.popup_pane.is_some()
-                    || self.state.mouse_capture
-                {
-                    self.handle_mouse_from_input_source_with_pomodoro_presentation(
-                        super::LOCAL_INPUT_SOURCE,
-                        mouse,
-                        pomodoro_presentation,
-                    );
-                } else {
-                    self.state
-                        .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
-                    if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                        if !self.state.pane_is_settled_anywhere(pane_id) {
-                            self.retire_blocked_hook_authority_for_pane(
-                                pane_id,
-                                std::time::Instant::now(),
-                            );
-                        }
-                    }
-                }
+                self.handle_mouse_for_input_owner(
+                    super::LOCAL_INPUT_SOURCE,
+                    mouse,
+                    pomodoro_presentation,
+                    owner,
+                );
                 !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
                     || self
                         .state

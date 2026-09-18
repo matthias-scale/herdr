@@ -453,6 +453,9 @@ impl App {
                     }
                 }
             };
+        if api.focus {
+            self.focus_client_on_pane();
+        }
         if !created_workspace && work_context.is_some() {
             Self::send_api_response(
                 api.respond_to,

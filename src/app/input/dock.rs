@@ -13,7 +13,7 @@ impl App {
     /// The open surface menu owns every key so the focused surface cannot
     /// receive input until the menu closes.
     pub(crate) fn handle_dock_surface_menu_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.client_overlay_owns_input() || self.state.dock_surface_menu.is_none() {
+        if self.state.dock_surface_menu.is_none() {
             return false;
         }
 

@@ -116,7 +116,6 @@ use self::sidebar::{
     render_sidebar_snooze_menu, render_sidebar_sort_menu, render_sidebar_subgroup_picker,
 };
 #[cfg(test)]
-#[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
     config_diagnostic_marker_rect, copy_feedback_rect, render_config_diagnostic,
@@ -194,7 +193,9 @@ pub(crate) use self::{
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::{Palette, ViewLayout};
+use crate::app::state::{
+    ClientInputOwner, ClientOverlay, InputOwner, Palette, ServerInputOwner, ViewLayout,
+};
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -1161,7 +1162,16 @@ pub fn render_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
-    render_with_runtime_registry_inner(app, terminal_runtimes, frame, None);
+    render_with_runtime_registry_for_owner(app, terminal_runtimes, frame, app.input_owner());
+}
+
+pub(crate) fn render_with_runtime_registry_for_owner(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    input_owner: InputOwner,
+) {
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner, None);
 }
 
 pub(crate) fn render_with_runtime_registry_and_handles(
@@ -1171,10 +1181,30 @@ pub(crate) fn render_with_runtime_registry_and_handles(
     render_notify: &Arc<Notify>,
     render_dirty: &Arc<RenderSignal>,
 ) {
+    let input_owner = app.input_owner();
+    render_with_runtime_registry_and_handles_for_owner(
+        app,
+        terminal_runtimes,
+        frame,
+        render_notify,
+        render_dirty,
+        input_owner,
+    );
+}
+
+pub(crate) fn render_with_runtime_registry_and_handles_for_owner(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    render_notify: &Arc<Notify>,
+    render_dirty: &Arc<RenderSignal>,
+    input_owner: InputOwner,
+) {
     render_with_runtime_registry_inner(
         app,
         terminal_runtimes,
         frame,
+        input_owner,
         Some((render_notify, render_dirty)),
     );
 }
@@ -1183,6 +1213,7 @@ fn render_with_runtime_registry_inner(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
+    input_owner: InputOwner,
     render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
@@ -1271,72 +1302,101 @@ fn render_with_runtime_registry_inner(
         terminal_area
     };
 
-    if app
-        .sidebar_snooze
-        .as_ref()
-        .is_some_and(|snooze| snooze.time_draft.is_some())
-    {
-        render_rename_overlay(app, frame, frame.area());
-    } else {
-        match app.effective_interaction_mode() {
-            Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
-            Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
-            Mode::ProductAnnouncement => {
-                render_product_announcement_overlay(app, frame, frame.area())
+    match input_owner {
+        InputOwner::Client(ClientInputOwner::Overlay(overlay)) => match overlay {
+            ClientOverlay::RenameWorkspace
+            | ClientOverlay::RenameTab
+            | ClientOverlay::RenamePane => render_rename_overlay(app, frame, frame.area()),
+            ClientOverlay::NewLinkedWorktree => {
+                render_new_linked_worktree_overlay(app, frame, frame.area())
             }
-            Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-                render_mobile_panel(app, terminal_runtimes, frame, frame.area())
-            }
-            Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
-            Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
-            Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
-            Mode::Resize => render_resize_overlay(app, frame, mode_bar_area),
-            Mode::ConfirmClose => {
-                render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
-            }
-            Mode::ContextMenu => {
-                render_context_menu(app, frame);
-            }
-            Mode::GitMenu => render_git_menu(app, frame),
-            Mode::AddAction => render_add_action_overlay(app, frame),
-            Mode::Settings => render_settings_overlay(app, frame, frame.area()),
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                render_rename_overlay(app, frame, frame.area())
-            }
-            Mode::NewLinkedWorktree => render_new_linked_worktree_overlay(app, frame, frame.area()),
-            Mode::OpenExistingWorktree => {
+            ClientOverlay::OpenExistingWorktree => {
                 render_open_existing_worktree_overlay(app, frame, frame.area())
             }
-            Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
-            Mode::GlobalMenu => render_global_launcher_menu(app, frame),
-            Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
-            Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
-            Mode::CommandPalette => render_command_palette(app, frame),
-            Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
-            Mode::AgentPicker => render_agent_picker(app, frame, frame.area()),
-            Mode::Terminal => {}
+            ClientOverlay::ConfirmRemoveWorktree => {
+                render_remove_worktree_overlay(app, frame, frame.area())
+            }
+            ClientOverlay::ConfirmClose => {
+                render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
+            }
+            ClientOverlay::ContextMenu => render_context_menu(app, frame),
+            ClientOverlay::None => {}
+        },
+        InputOwner::Client(ClientInputOwner::SnoozeMenu) => render_sidebar_snooze_menu(app, frame),
+        InputOwner::Client(ClientInputOwner::SnoozeTime) => {
+            render_rename_overlay(app, frame, frame.area())
         }
+        InputOwner::Client(
+            ClientInputOwner::SettledMenu | ClientInputOwner::SettledDeleteConfirm,
+        ) => render_sidebar_settled_menu(app, frame),
+        InputOwner::Client(ClientInputOwner::AgentPicker) => {
+            render_agent_picker(app, frame, frame.area())
+        }
+        InputOwner::Client(ClientInputOwner::SidebarGroupMenu) => {
+            render_sidebar_group_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarFilterMenu) => {
+            render_sidebar_filter_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarNewMenu) => render_sidebar_new_menu(app, frame),
+        InputOwner::Client(ClientInputOwner::SidebarNewThread) => {
+            render_sidebar_new_thread(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarProjectMenu) => {
+            render_sidebar_project_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarObjectMenu) => {
+            render_sidebar_object_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarSortMenu) => {
+            render_sidebar_sort_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker) => {
+            render_sidebar_subgroup_picker(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::PrActionConfirmation) => {
+            pr_actions::render_confirmation(app, frame, frame.area())
+        }
+        // The dock owns this menu and renders it as part of `render_dock`.
+        InputOwner::Client(ClientInputOwner::DockSurfaceMenu) => {}
+        InputOwner::AddProject => render_add_project_overlay(app, frame),
+        InputOwner::Server(owner) => match owner {
+            ServerInputOwner::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
+            ServerInputOwner::ReleaseNotes => {
+                render_release_notes_overlay(app, frame, frame.area())
+            }
+            ServerInputOwner::ProductAnnouncement => {
+                render_product_announcement_overlay(app, frame, frame.area())
+            }
+            ServerInputOwner::Navigate if app.view.layout == ViewLayout::Mobile => {
+                render_mobile_panel(app, terminal_runtimes, frame, frame.area())
+            }
+            ServerInputOwner::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::Resize => render_resize_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::GitMenu => render_git_menu(app, frame),
+            ServerInputOwner::AddAction => render_add_action_overlay(app, frame),
+            ServerInputOwner::Settings => render_settings_overlay(app, frame, frame.area()),
+            ServerInputOwner::GlobalMenu => render_global_launcher_menu(app, frame),
+            ServerInputOwner::KeybindHelp => render_keybind_help_overlay(app, frame),
+            ServerInputOwner::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+            ServerInputOwner::CommandPalette => render_command_palette(app, frame),
+            ServerInputOwner::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
+        },
+        InputOwner::Pomodoro
+        | InputOwner::Popup
+        | InputOwner::Surface(_)
+        | InputOwner::Notepad
+        | InputOwner::Dock(_)
+        | InputOwner::Sidebar
+        | InputOwner::Pane
+        | InputOwner::None => {}
     }
-    if app
-        .home
-        .as_ref()
-        .is_some_and(|home| home.add_project.is_some())
-    {
-        render_add_project_overlay(app, frame);
-    }
-    render_sidebar_group_menu(app, frame);
-    render_sidebar_filter_menu(app, frame);
-    render_sidebar_new_menu(app, frame);
-    render_sidebar_new_thread(app, frame);
-    render_sidebar_project_menu(app, frame);
-    render_sidebar_snooze_menu(app, frame);
-    render_sidebar_settled_menu(app, frame);
-    render_sidebar_object_menu(app, frame);
-    render_sidebar_sort_menu(app, frame);
-    render_sidebar_subgroup_picker(app, frame);
-    pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
-    notepad::render_notepad_caret(app, frame);
+    if input_owner == InputOwner::Notepad {
+        notepad::render_notepad_caret(app, frame);
+    }
     // Last, and over everything: a due break reminder outranks whatever the
     // operator was looking at, which is the point of it.
     pomodoro::render_overlay(app, frame, frame.area());

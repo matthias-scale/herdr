@@ -1275,7 +1275,7 @@ impl App {
         };
         self.focus_pane_internal_via_api(ws_idx, target.pane_id);
         self.state.toast = None;
-        self.state.set_server_mode(Mode::Terminal);
+        self.focus_client_on_pane();
     }
 
     fn focused_pane_target(&self) -> Option<(usize, crate::layout::PaneId)> {

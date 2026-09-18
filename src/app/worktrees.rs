@@ -7,7 +7,7 @@ use super::{
         ClientOverlay, WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState,
         WorktreeRemoveState,
     },
-    App, Mode,
+    App,
 };
 use crate::events::{AppEvent, WorktreeAddResult, WorktreeRemoveResult};
 
@@ -481,6 +481,7 @@ impl App {
             );
             self.state.switch_workspace(ws_idx);
             self.state.close_client_overlay();
+            self.focus_client_on_pane();
             self.emit_worktree_opened_for_workspace(ws_idx, true);
             return;
         }
@@ -947,6 +948,7 @@ impl App {
                     );
                     self.state.switch_workspace(ws_idx);
                     self.state.close_client_overlay();
+                    self.focus_client_on_pane();
                     if let Some(worktree) = self.worktree_info_for_workspace(ws_idx) {
                         self.emit_worktree_created_event(ws_idx, worktree);
                     }
@@ -1052,7 +1054,7 @@ impl App {
                     result_path.clone(),
                 ) {
                     self.state.clear_home();
-                    self.state.set_server_mode(Mode::Terminal);
+                    self.focus_client_on_pane();
                 } else {
                     self.finish_home_worktree_hooks(plan, create, result_path, true);
                 }
@@ -1122,7 +1124,7 @@ impl App {
                     }
                 }
                 self.state.clear_home();
-                self.state.set_server_mode(Mode::Terminal);
+                self.focus_client_on_pane();
             }
             Err(error) => {
                 let message = format!("created worktree but failed to launch agent: {error}");
@@ -1278,6 +1280,7 @@ fn immediate_api_error_message(response: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Mode;
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1469,6 +1472,7 @@ mod tests {
         let mut app = app_for_worktree_tests();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("existing")];
         app.state.ensure_test_terminals();
+        app.state.set_server_mode(Mode::Settings);
         let workspace_id = app.state.workspaces[0].id.clone();
         let checkout_path = std::env::temp_dir();
         set_pending_home_worktree_dispatch(
@@ -1486,7 +1490,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
         assert!(app.state.home.is_none());
-        assert_eq!(app.state.server_mode(), Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
         shutdown_test_runtimes(&mut app);
     }
 
@@ -1712,6 +1716,10 @@ mod tests {
         app.state.workspaces[1].identity_cwd = "/repo/herdr-issue".into();
         app.state.active = Some(0);
         app.state.selected = 0;
+        app.state.set_server_mode(Mode::Settings);
+        let mut client_a = crate::app::state::SidebarPresentationState::default();
+        let mut client_b = crate::app::state::SidebarPresentationState::default();
+        app.state.swap_sidebar_presentation(&mut client_a);
         app.state.worktree_open = Some(WorktreeOpenState {
             source_workspace_id: app.state.workspaces[0].id.clone(),
             source_existing_membership: None,
@@ -1732,6 +1740,7 @@ mod tests {
         });
 
         app.open_selected_existing_worktree();
+        app.state.swap_sidebar_presentation(&mut client_a);
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
@@ -1744,6 +1753,17 @@ mod tests {
             std::path::PathBuf::from("/repo/herdr-issue")
         );
         assert!(target_membership.is_linked_worktree);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+        assert_eq!(
+            client_a.focus_intent,
+            crate::app::state::ClientFocusIntent::Pane
+        );
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(
+            app.state.input_owner(),
+            crate::app::state::InputOwner::Server(crate::app::state::ServerInputOwner::Settings)
+        );
+        app.state.swap_sidebar_presentation(&mut client_b);
     }
 
     #[tokio::test]
@@ -2322,6 +2342,10 @@ mod tests {
         ];
         let source_workspace_id = app.state.workspaces[0].id.clone();
         app.state.workspaces[1].identity_cwd = checkout.clone();
+        app.state.set_server_mode(Mode::Settings);
+        let mut client_a = crate::app::state::SidebarPresentationState::default();
+        let mut client_b = crate::app::state::SidebarPresentationState::default();
+        app.state.swap_sidebar_presentation(&mut client_a);
         app.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id,
             source_checkout_path: "/repo/herdr".into(),
@@ -2340,8 +2364,20 @@ mod tests {
             api_request: None,
             result: Ok(()),
         });
+        app.state.swap_sidebar_presentation(&mut client_a);
 
         assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+        assert_eq!(
+            client_a.focus_intent,
+            crate::app::state::ClientFocusIntent::Pane
+        );
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(
+            app.state.input_owner(),
+            crate::app::state::InputOwner::Server(crate::app::state::ServerInputOwner::Settings)
+        );
+        app.state.swap_sidebar_presentation(&mut client_b);
         let kinds = event_kinds(&event_hub);
         assert!(!kinds.contains(&crate::api::schema::EventKind::WorkspaceCreated));
         assert_eq!(
