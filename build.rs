@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -88,7 +89,7 @@ fn main() {
     let lib_dir = vendored_dir.join("zig-out/lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     if target.contains("apple-darwin") {
-        let static_lib = lib_dir.join("libghostty-vt.a");
+        let static_lib = rearchive_macos_static_lib(&lib_dir.join("libghostty-vt.a"));
         println!("cargo:rustc-link-arg={}", static_lib.display());
     } else if target.contains("windows-msvc") {
         println!("cargo:rustc-link-lib=static=ghostty-vt-static");
@@ -96,6 +97,96 @@ fn main() {
         println!("cargo:rustc-link-lib=static=ghostty-vt");
     }
 }
+
+fn rearchive_macos_static_lib(source: &Path) -> PathBuf {
+    // Zig 0.15 writes Darwin archives whose Mach-O members are not always
+    // 8-byte aligned. Newer Apple linkers reject them, so rebuild the archive
+    // from its objects with the platform libtool before passing it to rustc.
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let work_dir = out_dir.join("libghostty-vt-archive");
+    if work_dir.exists() {
+        fs::remove_dir_all(&work_dir).expect("failed to clear libghostty-vt archive work dir");
+    }
+    fs::create_dir_all(&work_dir).expect("failed to create libghostty-vt archive work dir");
+
+    let members = archive_members(source);
+    assert!(
+        !members.is_empty(),
+        "vendored libghostty-vt archive has no object members"
+    );
+    for member in &members {
+        assert_eq!(
+            Path::new(member).file_name(),
+            Some(OsStr::new(member)),
+            "unsupported path in libghostty-vt archive: {member}"
+        );
+
+        let status = Command::new("ar")
+            .arg("x")
+            .arg(source)
+            .arg(member)
+            .current_dir(&work_dir)
+            .status()
+            .expect("failed to extract vendored libghostty-vt archive");
+        assert!(
+            status.success(),
+            "failed to extract archive member {member}"
+        );
+        make_archive_member_readable(&work_dir.join(member));
+    }
+
+    let aligned = out_dir.join("libghostty-vt-aligned.a");
+    if aligned.exists() {
+        fs::remove_file(&aligned).expect("failed to remove stale libghostty-vt archive");
+    }
+    let status = Command::new("libtool")
+        .arg("-static")
+        .arg("-o")
+        .arg(&aligned)
+        .args(members.iter().map(|member| work_dir.join(member)))
+        .status()
+        .expect("failed to run libtool for vendored libghostty-vt archive");
+    assert!(
+        status.success(),
+        "libtool failed to rebuild vendored libghostty-vt archive: {status}"
+    );
+    assert_eq!(
+        archive_members(&aligned),
+        members,
+        "libtool changed the vendored libghostty-vt archive members"
+    );
+    aligned
+}
+
+fn archive_members(archive: &Path) -> Vec<String> {
+    let output = Command::new("ar")
+        .arg("t")
+        .arg(archive)
+        .output()
+        .expect("failed to list vendored libghostty-vt archive");
+    assert!(
+        output.status.success(),
+        "failed to list vendored libghostty-vt archive: {}",
+        output.status
+    );
+    String::from_utf8(output.stdout)
+        .expect("libghostty-vt archive member names are not UTF-8")
+        .lines()
+        .filter(|member| !member.starts_with("__.SYMDEF"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(unix)]
+fn make_archive_member_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+        .expect("failed to make libghostty-vt archive member readable");
+}
+
+#[cfg(not(unix))]
+fn make_archive_member_readable(_path: &Path) {}
 
 // ---------------------------------------------------------------------------
 // Fork-local (matthias-scale). Keep last so upstream syncs conflict on one

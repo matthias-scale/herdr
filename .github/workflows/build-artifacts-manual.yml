@@ -133,10 +133,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-15
+            os: macos-latest
             name: herdr-macos-x86_64
           - target: aarch64-apple-darwin
-            os: macos-15
+            os: macos-latest
             name: herdr-macos-aarch64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
