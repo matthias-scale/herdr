@@ -2612,7 +2612,8 @@ fn compact_sidebar_rows_inner(
             terminal_runtimes,
         );
         append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-        mark_ambiguous_remote_titles(app, &mut rows);
+        let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
+        mark_ambiguous_remote_titles(&mut rows, row_width);
         return rows;
     }
     match app.sidebar_group_mode {
@@ -2626,16 +2627,43 @@ fn compact_sidebar_rows_inner(
         }
     }
     append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
-    mark_ambiguous_remote_titles(app, &mut rows);
+    let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
+    mark_ambiguous_remote_titles(&mut rows, row_width);
     rows
 }
 
-fn mark_ambiguous_remote_titles(app: &AppState, rows: &mut [SidebarRow]) {
-    let width = usize::from(if app.view.sidebar_rect.width == 0 {
-        app.sidebar_width
+fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -> usize {
+    if mobile {
+        let viewport = super::mobile::mobile_switcher_areas(app).viewport;
+        let width = viewport.width.saturating_sub(1);
+        return usize::from(if width == 0 {
+            app.sidebar_width.saturating_sub(1)
+        } else {
+            width
+        });
+    }
+
+    let area = if app.view.sidebar_rect.width == 0 {
+        Rect::new(0, 0, app.sidebar_width, app.view.sidebar_rect.height)
     } else {
-        app.view.sidebar_rect.width
+        app.view.sidebar_rect
+    };
+    if app.sidebar_collapsed {
+        return usize::from(collapsed_sidebar_sections(area).0.width);
+    }
+
+    let list = workspace_list_rect_for_app(app, area);
+    let body_height = list.height.saturating_sub(WORKSPACE_SECTION_HEADER_ROWS);
+    let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
+        height
+            .saturating_add(sidebar_row_height(app, row, body_height))
+            .saturating_add(sidebar_row_gap(app, rows, index))
     });
+    let has_scrollbar = body_height > 0 && content_height > body_height;
+    usize::from(list.width.saturating_sub(u16::from(has_scrollbar)))
+}
+
+fn mark_ambiguous_remote_titles(rows: &mut [SidebarRow], width: usize) {
     let rendered_title = |row: &SidebarRow| -> Option<String> {
         let (title, provider, depth) = match row {
             SidebarRow::Agent { entry, depth } => (
@@ -10019,6 +10047,120 @@ pub(crate) mod tests {
         assert_eq!(remote_rows.len(), 2);
         assert_ne!(remote_rows[0].0.render_title, remote_rows[1].0.render_title);
         assert!(remote_rows.iter().all(|(_, show_host)| *show_host));
+    }
+
+    #[test]
+    fn remote_ambiguity_uses_desktop_row_width_after_separator_and_scrollbar() {
+        let mut entries = vec![
+            crate::fleet::FleetRow::test_agent_info_row(
+                "alpha-machine",
+                remote_agent_info(
+                    "pane/1",
+                    "abcdefghijklmnA",
+                    crate::api::schema::AgentStatus::Working,
+                    false,
+                    false,
+                ),
+            ),
+            crate::fleet::FleetRow::test_agent_info_row(
+                "alpha-machine",
+                remote_agent_info(
+                    "pane/2",
+                    "abcdefghijklmnB",
+                    crate::api::schema::AgentStatus::Working,
+                    false,
+                    false,
+                ),
+            ),
+        ];
+        entries.extend((3..=10).map(|index| {
+            crate::fleet::FleetRow::test_agent_info_row(
+                "alpha-machine",
+                remote_agent_info(
+                    &format!("pane/{index}"),
+                    &format!("filler-{index}"),
+                    crate::api::schema::AgentStatus::Working,
+                    false,
+                    false,
+                ),
+            )
+        }));
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot("alpha-machine", false, entries)],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.sidebar_width = 26;
+        app.view.sidebar_rect = Rect::new(0, 0, 26, 8);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+
+        let rows = sidebar_rows(&app);
+        let ws_area = workspace_list_rect_for_app(&app, app.view.sidebar_rect);
+        assert!(workspace_list_scrollbar_rect(&app, ws_area).is_some());
+        let collision_rows = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::RemoteAgent {
+                    entry,
+                    show_host_identity,
+                    ..
+                } if matches!(entry.agent_ref.agent.as_str(), "pane/1" | "pane/2") => {
+                    Some(*show_host_identity)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(collision_rows, vec![true, true]);
+    }
+
+    #[test]
+    fn remote_ambiguity_uses_mobile_switcher_row_width() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "alpha-machine",
+                false,
+                vec![
+                    crate::fleet::FleetRow::test_agent_info_row(
+                        "alpha-machine",
+                        remote_agent_info(
+                            "pane/1",
+                            "abcdefghijklmnA",
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    ),
+                    crate::fleet::FleetRow::test_agent_info_row(
+                        "alpha-machine",
+                        remote_agent_info(
+                            "pane/2",
+                            "abcdefghijklmnB",
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    ),
+                ],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        app.view.mobile_header_rect = Rect::new(0, 0, 20, 2);
+        app.view.terminal_area = Rect::new(0, 2, 20, 16);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+
+        let collision_rows = mobile_sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::RemoteAgent {
+                    show_host_identity,
+                    ..
+                } => Some(show_host_identity),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(collision_rows, vec![true, true]);
     }
 
     #[test]
