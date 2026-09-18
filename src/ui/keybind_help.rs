@@ -194,6 +194,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.show_scratchpad), "show scratchpad"),
         help_entry(keybind_label(&kb.toggle_info_panel), "toggle info panel"),
         help_entry(keybind_label(&kb.symphony), "open Symphony dashboard"),
+        help_entry(keybind_label(&kb.runs), "show fleet Runs section"),
         help_entry(keybind_label(&kb.work), "open work projection view"),
         help_entry(keybind_label(&kb.usage), "open usage view"),
         help_entry(keybind_label(&kb.tickets), "open Linear tickets"),

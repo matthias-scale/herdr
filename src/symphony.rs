@@ -78,6 +78,32 @@ struct TemporalCli {
     namespace: String,
 }
 
+struct RemoteTemporalCli {
+    target: String,
+    timeout: Duration,
+}
+
+impl TemporalCommand for RemoteTemporalCli {
+    fn run_json(&self, args: &[String], timeout: Duration) -> Result<serde_json::Value, String> {
+        let mut remote_args = args.to_vec();
+        if let Some(address) = remote_args
+            .windows(2)
+            .position(|pair| pair[0] == "--address")
+            .map(|index| index + 1)
+        {
+            remote_args[address] = "127.0.0.1:7233".to_string();
+        }
+        let command = std::iter::once("temporal".to_string())
+            .chain(remote_args.iter().map(|arg| crate::fleet::shell_quote(arg)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let output =
+            crate::fleet::run_ssh_with_timeout(&self.target, &command, timeout.min(self.timeout))?;
+        serde_json::from_slice(&output)
+            .map_err(|error| format!("invalid remote Temporal CLI JSON: {error}"))
+    }
+}
+
 impl Default for TemporalCli {
     fn default() -> Self {
         Self {
@@ -506,12 +532,22 @@ fn read_pr_context(path: &Path) -> Option<String> {
     })
 }
 
-pub(crate) fn start_poller(event_tx: tokio::sync::mpsc::Sender<AppEvent>) {
+pub(crate) fn start_poller(
+    fleet: crate::fleet::FleetPollerHandle,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
+) {
     if cfg!(test) {
         return;
     }
     std::thread::spawn(move || loop {
-        let snapshot = poll();
+        let snapshot = match fleet.symphony_target() {
+            Ok((Some(host), timeout)) => poll_with(&RemoteTemporalCli {
+                target: host.target,
+                timeout,
+            }),
+            Ok((None, _)) => poll(),
+            Err(error) => Snapshot::unavailable(error),
+        };
         match event_tx.try_send(AppEvent::SymphonyWorkflowsRefreshed { snapshot }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,

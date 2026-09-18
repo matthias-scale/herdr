@@ -1,26 +1,31 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::api::client::{ApiClient, ConnectionTarget};
 use crate::api::schema::{AgentInfo, AgentStatus, EmptyParams, Method, Request, ResponseResult};
 use crate::config::{FleetConfig, FleetHostConfig};
 
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
+const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
+// ub2 currently carries about 1,000 retained runs. Inspect enough entries to
+// select its newest records while keeping malformed or unbounded stores capped.
+const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
+const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
-    Vec<Result<RunState, String>>,
+    Vec<Result<crate::agent_runs::Observation, String>>,
     HostRuntime,
 );
 
@@ -187,6 +192,13 @@ pub(crate) fn select_hosts(
             ));
         }
     }
+    if let Some(host) = fleet.symphony_host.as_deref() {
+        if !names.contains(host) {
+            return Err(format!(
+                "remote.fleet.symphony_host names unknown host: {host}"
+            ));
+        }
+    }
 
     if let Some(selected) = selected {
         let unknown = selected.difference(&names).cloned().collect::<Vec<_>>();
@@ -332,11 +344,32 @@ fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot
 }
 
 fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
-    if fleet.hosts.is_empty() {
-        return snapshot_from_evidence(&[], fleet, Vec::new(), SystemTime::now());
+    let mut polling_fleet = fleet.clone();
+    let self_name = polling_fleet.resolved_self_name();
+    // Skip the synthetic local host when a configured host already carries the
+    // resolved self name; select_hosts hard-errors on duplicate names.
+    let implicit_local = !polling_fleet.hosts.iter().any(|host| host.local)
+        && !polling_fleet
+            .hosts
+            .iter()
+            .any(|host| host.name == self_name);
+    if implicit_local {
+        polling_fleet.hosts.insert(
+            0,
+            FleetHostConfig {
+                name: self_name.clone(),
+                local: true,
+                ..FleetHostConfig::default()
+            },
+        );
     }
-    match select_hosts(fleet, None) {
-        Ok(hosts) => collect_snapshot(&hosts, fleet),
+    match select_hosts(&polling_fleet, None) {
+        Ok(hosts) => collect_snapshot_with_implicit_local(
+            &SystemHostReader,
+            &hosts,
+            &polling_fleet,
+            implicit_local.then(|| polling_fleet.resolved_self_name()),
+        ),
         Err(error) => {
             let refreshed_at = SystemTime::now();
             Snapshot {
@@ -347,8 +380,12 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                     .ok()
                     .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
                 config_generation: 0,
-                configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
-                hosts: fleet
+                configured_hosts: polling_fleet
+                    .hosts
+                    .iter()
+                    .map(|host| host.name.clone())
+                    .collect(),
+                hosts: polling_fleet
                     .hosts
                     .iter()
                     .map(|host| HostSnapshot {
@@ -537,14 +574,49 @@ impl FleetPollerConfig {
     }
 
     pub(crate) fn host(&self, name: &str) -> Option<FleetHostConfig> {
-        self.state
+        let state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(host) = state
             .fleet
             .hosts
             .iter()
             .find(|host| host.name == name)
             .cloned()
+        {
+            return Some(host);
+        }
+        (!state.fleet.hosts.iter().any(|host| host.local)
+            && state.fleet.resolved_self_name() == name)
+            .then(|| FleetHostConfig {
+                name: name.to_string(),
+                local: true,
+                ..FleetHostConfig::default()
+            })
+    }
+
+    pub(crate) fn symphony_target(&self) -> Result<(Option<FleetHostConfig>, Duration), String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let timeout =
+            Duration::from_millis(state.fleet.timeout_ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS));
+        let Some(name) = state.fleet.symphony_host.as_deref() else {
+            return Ok((None, timeout));
+        };
+        let host = state
+            .fleet
+            .hosts
+            .iter()
+            .find(|host| host.name == name)
+            .cloned()
+            .ok_or_else(|| format!("Symphony host {name} is not configured"))?;
+        if !host.local && (host.target.trim().is_empty() || host.target.starts_with('-')) {
+            return Err(format!("Symphony host {name} has no valid SSH target"));
+        }
+        Ok(((!host.local).then_some(host), timeout))
     }
 
     fn snapshot(&self) -> FleetPollerState {
@@ -597,7 +669,7 @@ pub(crate) fn start_poller(
 struct HostEvidence {
     host: FleetHostConfig,
     agents: Result<Vec<AgentInfo>, String>,
-    runs: Vec<Result<RunState, String>>,
+    runs: Vec<Result<crate::agent_runs::Observation, String>>,
     runtime: HostRuntime,
 }
 
@@ -614,6 +686,15 @@ fn collect_snapshot_with(
     hosts: &[FleetHostConfig],
     fleet: &FleetConfig,
 ) -> Snapshot {
+    collect_snapshot_with_implicit_local(reader, hosts, fleet, None)
+}
+
+fn collect_snapshot_with_implicit_local(
+    reader: &impl HostReader,
+    hosts: &[FleetHostConfig],
+    fleet: &FleetConfig,
+    implicit_local_name: Option<String>,
+) -> Snapshot {
     let timeout = Duration::from_millis(fleet.timeout_ms);
     let evidence = std::thread::scope(|scope| {
         let handles = hosts
@@ -621,9 +702,16 @@ fn collect_snapshot_with(
             .cloned()
             .map(|host| {
                 let name = host.name.clone();
+                let runs_only = host.local && implicit_local_name.as_deref() == Some(&host.name);
                 (
                     name,
-                    scope.spawn(move || fetch_host_with(reader, host, timeout)),
+                    scope.spawn(move || {
+                        if runs_only {
+                            fetch_local_run_host(host)
+                        } else {
+                            fetch_host_with(reader, host, timeout)
+                        }
+                    }),
                 )
             })
             .collect::<Vec<_>>();
@@ -645,6 +733,15 @@ fn collect_snapshot_with(
     });
 
     snapshot_from_evidence(hosts, fleet, evidence, SystemTime::now())
+}
+
+fn fetch_local_run_host(host: FleetHostConfig) -> HostEvidence {
+    HostEvidence {
+        host,
+        agents: Ok(Vec::new()),
+        runs: local_run_states(),
+        runtime: HostRuntime::default(),
+    }
 }
 
 fn snapshot_from_evidence(
@@ -847,33 +944,72 @@ fn fetch_local_runtime(client: &ApiClient, timeout: Duration) -> HostRuntime {
         .unwrap_or_default()
 }
 
-fn local_run_states() -> Vec<Result<RunState, String>> {
+fn local_run_states() -> Vec<Result<crate::agent_runs::Observation, String>> {
     let Some(home) = std::env::var_os("HOME") else {
         return vec![Err("HOME is unavailable; cannot read ~/.agents/runs".into())];
     };
     read_run_state_dir(&PathBuf::from(home).join(".agents/runs"))
 }
 
-fn read_run_state_dir(root: &Path) -> Vec<Result<RunState, String>> {
+fn read_run_state_dir(root: &Path) -> Vec<Result<crate::agent_runs::Observation, String>> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => return vec![Err(format!("cannot read {}: {error}", root.display()))],
     };
+    recent_run_state_paths(entries.map(|entry| entry.map(|entry| entry.path())))
+        .into_iter()
+        .map(|path| read_run_state_file(&path))
+        .collect()
+}
+
+fn recent_run_state_paths(
+    entries: impl IntoIterator<Item = std::io::Result<PathBuf>>,
+) -> Vec<PathBuf> {
     let mut paths = entries
+        .into_iter()
+        .take(MAX_RUN_DIRECTORY_ENTRIES)
         .filter_map(Result::ok)
-        .map(|entry| entry.path().join("state.json"))
-        .filter(|path| path.is_file())
+        .map(|path| path.join("state.json"))
+        .filter_map(|path| {
+            let modified = path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
+            Some((modified, path))
+        })
         .collect::<Vec<_>>();
-    paths.sort();
+    paths.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     paths
         .into_iter()
-        .map(|path| {
-            std::fs::read(&path)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()))
-                .and_then(|bytes| parse_run_state(&bytes, &path.display().to_string()))
-        })
+        .take(crate::agent_runs::MAX_RUNS_PER_HOST)
+        .map(|(_, path)| path)
         .collect()
+}
+
+fn read_run_state_file(path: &Path) -> Result<crate::agent_runs::Observation, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let bytes =
+        match crate::platform::read_limited_reader(file, crate::agent_runs::MAX_RUN_STATE_BYTES)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?
+        {
+            crate::platform::LimitedRead::Empty => Vec::new(),
+            crate::platform::LimitedRead::Complete(bytes) => bytes,
+            crate::platform::LimitedRead::Oversized => {
+                return Err(format!(
+                    "run state {} exceeds {} bytes",
+                    path.display(),
+                    crate::agent_runs::MAX_RUN_STATE_BYTES
+                ));
+            }
+        };
+    crate::agent_runs::parse_state(&bytes, &path.display().to_string()).map(|state| {
+        crate::agent_runs::Observation {
+            pid_alive: crate::platform::process_exists(state.pid),
+            state,
+        }
+    })
 }
 
 fn fetch_remote_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
@@ -899,87 +1035,64 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
         .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
         .unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || exit $?\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  find \"$HOME/.agents/runs\" -mindepth 2 -maxdepth 2 -type f -name state.json -exec cat {{}} \\; -exec printf '\\n' \\;\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n"
+        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        crate::agent_runs::MAX_RUNS_PER_HOST,
+        crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
+        crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
     )
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn run_ssh_with_timeout(target: &str, script: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+pub(crate) fn run_ssh_with_timeout(
+    target: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    run_ssh_program_with_timeout("ssh", target, script, timeout)
+}
+
+fn run_ssh_program_with_timeout(
+    program: impl AsRef<OsStr>,
+    target: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let connect_timeout = timeout.as_secs().max(1).to_string();
-    let mut child = Command::new("ssh")
+    let mut command = crate::noninteractive_process::command(program);
+    command
         .args(["-o", "BatchMode=yes", "-o"])
         .arg(format!("ConnectTimeout={connect_timeout}"))
         .args(["-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=1"])
         .arg(target)
-        .args(["sh", "-s"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start ssh: {error}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|error| format!("failed to send remote read script: {error}"))?;
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "ssh stdout unavailable".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "ssh stderr unavailable".to_string())?;
-    let stdout_reader = std::thread::spawn(move || read_all(stdout));
-    let stderr_reader = std::thread::spawn(move || read_all(stderr));
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(format!(
-                    "STATUS UNKNOWN: host read timed out after {}ms",
-                    timeout.as_millis()
-                ));
-            }
-            Err(error) => return Err(format!("failed to wait for ssh: {error}")),
+        .args(["sh", "-s"]);
+    let output = crate::noninteractive_process::output_with_stdin_and_deadline_limited(
+        command,
+        script.as_bytes().to_vec(),
+        Instant::now() + timeout,
+        MAX_REMOTE_OUTPUT_BYTES,
+    )
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::TimedOut => format!(
+            "STATUS UNKNOWN: host read timed out after {}ms",
+            timeout.as_millis()
+        ),
+        std::io::ErrorKind::FileTooLarge => {
+            format!("STATUS UNKNOWN: host read exceeded {MAX_REMOTE_OUTPUT_BYTES} bytes")
         }
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| "ssh stdout reader panicked".to_string())??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| "ssh stderr reader panicked".to_string())??;
-    if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+        _ => format!("failed to run ssh: {error}"),
+    })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {
-            format!("STATUS UNKNOWN: ssh exited with {status}")
+            format!("STATUS UNKNOWN: ssh exited with {}", output.status)
         } else {
             format!("STATUS UNKNOWN: {detail}")
         });
     }
-    Ok(stdout)
-}
-
-fn read_all(mut reader: impl Read) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    Ok(bytes)
+    Ok(output.stdout)
 }
 
 fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
@@ -1015,22 +1128,44 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
                 ),
             )
         });
-    let runs = serde_json::Deserializer::from_slice(state_bytes)
-        .into_iter::<serde_json::Value>()
-        .enumerate()
-        .map(|(index, value)| {
-            value
-                .map_err(|error| format!("invalid remote run state #{}: {error}", index + 1))
-                .and_then(|value| {
-                    serde_json::to_vec(&value)
-                        .map_err(|error| error.to_string())
-                        .and_then(|bytes| {
-                            parse_run_state(&bytes, &format!("remote run state #{}", index + 1))
-                        })
-                })
-        })
-        .collect();
+    let runs = parse_remote_run_records(state_bytes);
     (response, runs, runtime)
+}
+
+fn parse_remote_run_records(bytes: &[u8]) -> Vec<Result<crate::agent_runs::Observation, String>> {
+    let mut records = Vec::new();
+    let mut remaining = bytes;
+    while let Some(marker_at) = remaining
+        .windows(REMOTE_RUN_RECORD_MARKER.len())
+        .position(|window| window == REMOTE_RUN_RECORD_MARKER)
+    {
+        remaining = &remaining[marker_at + REMOTE_RUN_RECORD_MARKER.len()..];
+        let Some(header_end) = remaining.windows(2).position(|window| window == b"\x1e\n") else {
+            records.push(Err("invalid remote run marker".to_string()));
+            break;
+        };
+        let pid_alive = &remaining[..header_end] == b"1";
+        remaining = &remaining[header_end + 2..];
+        let next_marker = remaining
+            .windows(REMOTE_RUN_RECORD_MARKER.len())
+            .position(|window| window == REMOTE_RUN_RECORD_MARKER)
+            .unwrap_or(remaining.len());
+        let state_bytes = remaining[..next_marker].trim_ascii();
+        let source = format!("remote run state #{}", records.len() + 1);
+        records.push(
+            if state_bytes.len() > crate::agent_runs::MAX_RUN_STATE_BYTES {
+                Err(format!(
+                    "run state {source} exceeds {} bytes",
+                    crate::agent_runs::MAX_RUN_STATE_BYTES
+                ))
+            } else {
+                crate::agent_runs::parse_state(state_bytes, &source)
+                    .map(|state| crate::agent_runs::Observation { state, pid_alive })
+            },
+        );
+        remaining = &remaining[next_marker..];
+    }
+    records
 }
 
 fn parse_host_runtime(bytes: &[u8]) -> HostRuntime {
@@ -1047,133 +1182,6 @@ fn parse_host_runtime(bytes: &[u8]) -> HostRuntime {
             .and_then(serde_json::Value::as_u64)
             .and_then(|protocol| u32::try_from(protocol).ok()),
     }
-}
-
-fn parse_run_state(bytes: &[u8], source: &str) -> Result<RunState, String> {
-    let value: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("invalid run state {source}: {error}"))?;
-    let schema = value.get("schema").and_then(serde_json::Value::as_u64);
-    if schema != Some(1) {
-        return Err(format!(
-            "rejected run state {source}: schema {} is unsupported; expected 1",
-            schema.map_or_else(|| "missing".into(), |value| value.to_string())
-        ));
-    }
-    let run: RunState = serde_json::from_value(value)
-        .map_err(|error| format!("invalid run state {source}: {error}"))?;
-    if run.run_id.len() > 64
-        || run.run_id.is_empty()
-        || !run
-            .run_id
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-        || !run.run_id.starts_with("ra-")
-    {
-        return Err(format!("invalid run state {source}: invalid run_id"));
-    }
-    for (field, timestamp) in [
-        ("started_at", Some(run.started_at.as_str())),
-        ("last_heartbeat", Some(run.last_heartbeat.as_str())),
-        ("blocked_since", run.blocked_since.as_deref()),
-    ] {
-        if timestamp.is_some_and(|timestamp| parse_utc_timestamp(timestamp).is_none()) {
-            return Err(format!(
-                "invalid run state {source}: {field} must be RFC3339 UTC with Z"
-            ));
-        }
-    }
-    Ok(run)
-}
-
-// Schema v1 fields are intentionally all deserialized even when the current table does not
-// display them. This makes malformed producer output fail at the consumer boundary.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-struct RunState {
-    schema: u32,
-    run_id: String,
-    host: String,
-    agent: String,
-    model: String,
-    effort: String,
-    label: String,
-    task: String,
-    cwd: String,
-    repo: String,
-    branch: String,
-    pid: u32,
-    started_at: String,
-    last_heartbeat: String,
-    phase: String,
-    state: RunStateKind,
-    blocked_reason: Option<BlockedReason>,
-    blocked_since: Option<String>,
-    exit_code: Option<i32>,
-    exit_reason: Option<ExitReason>,
-    log_path: String,
-    tokens_in: Option<u64>,
-    tokens_out: Option<u64>,
-    cost_usd: Option<f64>,
-    tool_calls: Option<u64>,
-    parent: RunParent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum RunStateKind {
-    Active,
-    Blocked,
-    Waiting,
-    Done,
-    Failed,
-    Unknown,
-}
-
-impl RunStateKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Blocked => "blocked",
-            Self::Waiting => "waiting",
-            Self::Done => "done",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum BlockedReason {
-    Approval,
-    Stalled,
-    Loop,
-}
-
-impl BlockedReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Approval => "approval",
-            Self::Stalled => "stalled",
-            Self::Loop => "loop",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ExitReason {
-    Completed,
-    Failed,
-    Killed,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RunParent {
-    host: String,
-    run_id: Option<String>,
-    session: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1287,6 +1295,8 @@ pub(crate) struct FleetRow {
     native_session: Option<String>,
     #[serde(skip)]
     agent_info: Option<AgentInfo>,
+    #[serde(skip)]
+    run_summary: Option<std::sync::Arc<crate::agent_runs::Summary>>,
 }
 
 pub(crate) fn counts_as_live_agent(entry: &FleetRow) -> bool {
@@ -1328,6 +1338,17 @@ impl FleetRow {
         row.agent = Some("codex".to_string());
         row.state = if blocked { "blocked" } else { "active" }.to_string();
         row.blocked = blocked;
+        row
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_run_summary_row(summary: crate::agent_runs::Summary) -> Self {
+        let mut row = Self::test_run_row(
+            &summary.host,
+            &summary.run_id,
+            summary.state == crate::agent_runs::DisplayState::Blocked,
+        );
+        row.run_summary = Some(std::sync::Arc::new(summary));
         row
     }
 
@@ -1441,27 +1462,39 @@ impl FleetRow {
             error: None,
             native_session,
             agent_info: Some(agent_info),
+            run_summary: None,
         })
     }
 
-    fn from_run(host: &str, run: RunState, now_s: u64, heartbeat_stale_s: u64) -> Option<Self> {
+    fn from_run(
+        host: &str,
+        observation: crate::agent_runs::Observation,
+        now_s: u64,
+        heartbeat_stale_s: u64,
+    ) -> Option<Self> {
+        let run = observation.state.clone();
         let heartbeat_at = parse_utc_timestamp(&run.last_heartbeat);
         let age_s = heartbeat_at.and_then(|heartbeat| now_s.checked_sub(heartbeat));
         let fresh = age_s.is_some_and(|age| age <= heartbeat_stale_s);
-        let blocked = run.state == RunStateKind::Blocked;
+        let blocked = run.state == crate::agent_runs::State::Blocked;
         let liveness = match run.state {
-            RunStateKind::Active | RunStateKind::Blocked | RunStateKind::Waiting if fresh => {
+            crate::agent_runs::State::Active
+            | crate::agent_runs::State::Blocked
+            | crate::agent_runs::State::Waiting
+                if fresh =>
+            {
                 Liveness::Live
             }
-            RunStateKind::Done | RunStateKind::Failed => Liveness::Terminal,
-            RunStateKind::Active
-            | RunStateKind::Blocked
-            | RunStateKind::Waiting
-            | RunStateKind::Unknown => Liveness::Unknown,
+            crate::agent_runs::State::Done | crate::agent_runs::State::Failed => Liveness::Terminal,
+            crate::agent_runs::State::Active
+            | crate::agent_runs::State::Blocked
+            | crate::agent_runs::State::Waiting
+            | crate::agent_runs::State::Unknown
+            | crate::agent_runs::State::Empty => Liveness::Unknown,
         };
         let raw_state = run.state.as_str().to_string();
         let state = effective_state(&raw_state, liveness, blocked);
-        let blocked_reason = run.blocked_reason.map(|reason| reason.as_str().to_string());
+        let blocked_reason = run.blocked_reason.clone();
         let gate_summary = blocked_reason
             .as_ref()
             .map(|reason| format!("windowless run blocked: {reason}"));
@@ -1470,8 +1503,20 @@ impl FleetRow {
             .run_id
             .as_ref()
             .and_then(|run_id| crate::api::schema::AgentRef::new(&run.parent.host, run_id).ok())
-            .map(|agent_ref| agent_ref.to_string());
-        let agent_ref = crate::api::schema::AgentRef::new(host, run.run_id.clone()).ok()?;
+            .map(|agent_ref| agent_ref.to_string())
+            .or_else(|| {
+                run.parent
+                    .session
+                    .as_ref()
+                    .map(|session| format!("session:{}/{}", run.parent.host, session))
+            });
+        let summary = std::sync::Arc::new(crate::agent_runs::summarize(
+            host,
+            observation,
+            now_s,
+            heartbeat_stale_s,
+        ));
+        let agent_ref = crate::api::schema::AgentRef::new(host, summary.run_id.clone()).ok()?;
         let handle = agent_ref.to_string();
         Some(Self {
             host: host.into(),
@@ -1479,7 +1524,7 @@ impl FleetRow {
             source: EvidenceSource::RunState,
             handle,
             agent: Some(run.agent),
-            name: Some(run.run_id),
+            name: Some(summary.run_id.clone()),
             title: None,
             model: Some(run.model),
             effort: Some(run.effort),
@@ -1500,15 +1545,12 @@ impl FleetRow {
             gate_summary,
             blocked_reason,
             state_change_seq: None,
-            parent_handle: parent_handle.or_else(|| {
-                run.parent
-                    .session
-                    .map(|session| format!("session:{}/{}", run.parent.host, session))
-            }),
+            parent_handle,
             descendants: DescendantScore::default(),
             error: None,
             native_session: None,
             agent_info: None,
+            run_summary: Some(summary),
         })
     }
 
@@ -1565,11 +1607,16 @@ impl FleetRow {
             error: Some(error),
             native_session: None,
             agent_info: None,
+            run_summary: None,
         }
     }
 
     pub(crate) fn agent_info(&self) -> Option<&AgentInfo> {
         self.agent_info.as_ref()
+    }
+
+    pub(crate) fn run_summary(&self) -> Option<&std::sync::Arc<crate::agent_runs::Summary>> {
+        self.run_summary.as_ref()
     }
 }
 
@@ -1966,7 +2013,7 @@ fn unix_seconds(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn parse_utc_timestamp(value: &str) -> Option<u64> {
+pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
     let value = value.strip_suffix('Z')?;
     let (date, time) = value.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);
@@ -2033,6 +2080,31 @@ fn print_fleet_help() {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn run_fixture_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-fleet-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fleet fixture directory");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).expect("write executable fixture");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("set executable fixture mode");
+    }
 
     struct FakeReader {
         local_calls: AtomicUsize,
@@ -2320,7 +2392,66 @@ mod tests {
         let polled = poll(&config);
         assert!(!unpolled.polled);
         assert!(polled.polled);
-        assert!(polled.hosts.is_empty());
+        assert_eq!(polled.hosts.len(), 1);
+        assert_eq!(polled.hosts[0].name, config.resolved_self_name());
+    }
+
+    #[test]
+    fn configured_host_named_like_self_does_not_collide_with_implicit_local() {
+        let config = FleetConfig {
+            self_name: Some("laptop".to_string()),
+            timeout_ms: MIN_TIMEOUT_MS,
+            hosts: vec![host("laptop", false)],
+            ..FleetConfig::default()
+        };
+        let polled = poll(&config);
+        assert!(polled.polled);
+        assert_eq!(polled.hosts.len(), 1);
+        assert_eq!(polled.hosts[0].name, "laptop");
+        assert_ne!(
+            polled.hosts[0].error.as_deref(),
+            Some("duplicate fleet host name: laptop")
+        );
+    }
+
+    #[test]
+    fn implicit_local_host_can_open_run_logs() {
+        let config = FleetConfig {
+            self_name: Some("laptop".to_string()),
+            hosts: vec![host("ub2", false)],
+            ..FleetConfig::default()
+        };
+        let poller = FleetPollerConfig::new(config);
+
+        let local = poller.host("laptop").expect("implicit local host");
+        assert!(local.local);
+        assert_eq!(local.name, "laptop");
+        assert_eq!(poller.host("ub2").expect("configured host").target, "ub2");
+    }
+
+    #[test]
+    fn symphony_defaults_local_and_can_target_remote_temporal() {
+        let local = FleetPollerConfig::new(FleetConfig::default());
+        assert!(local.symphony_target().expect("local target").0.is_none());
+
+        let remote = FleetPollerConfig::new(FleetConfig {
+            symphony_host: Some("ub2".to_string()),
+            hosts: vec![host("ub2", false)],
+            ..FleetConfig::default()
+        });
+        let (target, _) = remote.symphony_target().expect("remote target");
+        assert_eq!(target.expect("configured remote").target, "ub2");
+
+        let invalid = FleetPollerConfig::new(FleetConfig {
+            symphony_host: Some("unsafe".to_string()),
+            hosts: vec![FleetHostConfig {
+                name: "unsafe".to_string(),
+                target: "-oProxyCommand=bad".to_string(),
+                ..FleetHostConfig::default()
+            }],
+            ..FleetConfig::default()
+        });
+        assert!(invalid.symphony_target().is_err());
     }
 
     #[test]
@@ -2423,6 +2554,29 @@ mod tests {
         let snapshot = collect_snapshot_with(&reader, &hosts, &FleetConfig::default());
         assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
         assert_eq!(reader.local_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(reader.remote_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn implicit_local_run_host_does_not_call_back_into_the_server() {
+        let hosts = vec![host("laptop", true)];
+        let reader = fake_reader(
+            Ok(Vec::new()),
+            HostRuntime {
+                version: Some(crate::build_info::version().to_string()),
+                protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            },
+        );
+
+        let snapshot = collect_snapshot_with_implicit_local(
+            &reader,
+            &hosts,
+            &FleetConfig::default(),
+            Some("laptop".to_string()),
+        );
+
+        assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
+        assert_eq!(reader.local_calls.load(Ordering::Relaxed), 0);
         assert_eq!(reader.remote_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -2565,14 +2719,251 @@ mod tests {
 
     #[test]
     fn run_schema_mismatch_is_rejected_loudly() {
-        let error = parse_run_state(br#"{"schema":2}"#, "fixture").unwrap_err();
+        let error = crate::agent_runs::parse_state(br#"{"schema":2}"#, "fixture").unwrap_err();
         assert!(error.contains("schema 2 is unsupported; expected 1"));
+    }
+
+    #[test]
+    fn local_run_scan_caps_entries_before_metadata_and_keeps_newest_results() {
+        let inspected = std::sync::Arc::new(AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&inspected);
+        let entries = (0..MAX_RUN_DIRECTORY_ENTRIES + 20).map(move |index| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(PathBuf::from(format!("/missing/run-{index}")))
+        });
+        assert!(recent_run_state_paths(entries).is_empty());
+        assert_eq!(inspected.load(Ordering::Relaxed), MAX_RUN_DIRECTORY_ENTRIES);
+
+        let root = run_fixture_dir("newest-runs");
+        let mut entries = Vec::new();
+        for index in 0..crate::agent_runs::MAX_RUNS_PER_HOST + 5 {
+            let run = root.join(format!("run-{index:02}"));
+            std::fs::create_dir(&run).expect("create run directory");
+            std::fs::write(run.join("state.json"), b"{}").expect("write run state");
+            entries.push(Ok(run));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let newest = recent_run_state_paths(entries);
+        assert_eq!(newest.len(), crate::agent_runs::MAX_RUNS_PER_HOST);
+        assert!(newest.contains(&root.join("run-44").join("state.json")));
+        assert!(!newest.contains(&root.join("run-00").join("state.json")));
+        std::fs::remove_dir_all(root).expect("remove newest-runs fixture");
+    }
+
+    #[test]
+    fn local_and_remote_run_states_reject_bytes_past_the_cap() {
+        let root = run_fixture_dir("oversized-state");
+        let run = root.join("run");
+        std::fs::create_dir(&run).expect("create run fixture");
+        std::fs::write(
+            run.join("state.json"),
+            vec![b'x'; crate::agent_runs::MAX_RUN_STATE_BYTES + 1],
+        )
+        .expect("write oversized state");
+        let result = read_run_state_dir(&root);
+        assert_eq!(result.len(), 1);
+        assert!(result[0]
+            .as_ref()
+            .expect_err("oversized local state must fail")
+            .contains("exceeds 65536 bytes"));
+
+        let mut remote = REMOTE_RUN_RECORD_MARKER.to_vec();
+        remote.extend_from_slice(b"0\x1e\n");
+        remote.extend(std::iter::repeat_n(
+            b'x',
+            crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
+        ));
+        let records = parse_remote_run_records(&remote);
+        assert_eq!(records.len(), 1);
+        assert!(records[0]
+            .as_ref()
+            .expect_err("oversized remote state must fail")
+            .contains("exceeds 65536 bytes"));
+        std::fs::remove_dir_all(root).expect("remove oversized-state fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_timeout_does_not_wait_for_descendant_pipe_holders() {
+        let root = run_fixture_dir("ssh-descendant");
+        let fake_ssh = root.join("ssh");
+        write_executable(&fake_ssh, "#!/bin/sh\nsleep 30 &\nwait\n");
+
+        let started = Instant::now();
+        let error = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            "exit 0",
+            Duration::from_millis(500),
+        )
+        .expect_err("SSH wrapper with retained pipes must time out");
+
+        assert!(error.contains("timed out after 500ms"));
+        assert!(
+            started.elapsed() < Duration::from_millis(1_250),
+            "timeout must not block joining descendant-held pipes"
+        );
+        std::fs::remove_dir_all(root).expect("remove ssh-descendant fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_capture_caps_combined_stdout_and_stderr() {
+        let root = run_fixture_dir("ssh-output-cap");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nhead -c {} /dev/zero\nhead -c {} /dev/zero >&2\n",
+                MAX_REMOTE_OUTPUT_BYTES / 2 + 1,
+                MAX_REMOTE_OUTPUT_BYTES / 2 + 1,
+            ),
+        );
+
+        let error =
+            run_ssh_program_with_timeout(&fake_ssh, "fixture", "exit 0", Duration::from_secs(5))
+                .expect_err("SSH output past the cap must fail");
+        assert!(error.contains("exceeded 4194304 bytes"));
+        std::fs::remove_dir_all(root).expect("remove ssh-output-cap fixture");
+    }
+
+    fn legacy_run(
+        run_id: &str,
+        state: &str,
+        heartbeat: &str,
+        blocked_reason: Option<&str>,
+        parent_run_id: Option<&str>,
+    ) -> crate::agent_runs::Observation {
+        let value = serde_json::json!({
+            "schema": 1,
+            "run_id": run_id,
+            "host": "probe",
+            "agent": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "label": "compatibility probe",
+            "task": "preserve fleet status",
+            "cwd": "/tmp/probe",
+            "repo": "matthias-scale/herdr",
+            "branch": "feat/probe",
+            "pid": 4242,
+            "started_at": "2026-09-17T08:00:00Z",
+            "last_heartbeat": heartbeat,
+            "phase": "verify",
+            "state": state,
+            "blocked_reason": blocked_reason,
+            "blocked_since": blocked_reason.map(|_| "2026-09-17T08:01:00Z"),
+            "exit_code": null,
+            "exit_reason": null,
+            "log_path": "/home/probe/.agents/runs/probe/out.log",
+            "tokens_in": null,
+            "tokens_out": null,
+            "cost_usd": null,
+            "tool_calls": null,
+            "parent": {"host": "probe", "run_id": parent_run_id, "session": null}
+        });
+        crate::agent_runs::Observation {
+            state: crate::agent_runs::parse_state(
+                &serde_json::to_vec(&value).expect("legacy fixture JSON"),
+                "legacy fixture",
+            )
+            .expect("legacy run state"),
+            pid_alive: false,
+        }
+    }
+
+    fn run_snapshot(runs: Vec<crate::agent_runs::Observation>) -> Snapshot {
+        let configured_host = host("probe", false);
+        let fleet = FleetConfig {
+            heartbeat_stale_ms: 60_000,
+            ..FleetConfig::default()
+        };
+        snapshot_from_evidence(
+            std::slice::from_ref(&configured_host),
+            &fleet,
+            vec![HostEvidence {
+                host: configured_host.clone(),
+                agents: Ok(Vec::new()),
+                runs: runs.into_iter().map(Ok).collect(),
+                runtime: HostRuntime::default(),
+            }],
+            UNIX_EPOCH + Duration::from_secs(1_758_099_600), // 2025-09-17T09:00:00Z
+        )
+    }
+
+    #[test]
+    fn run_rows_preserve_stale_blocked_and_fresh_waiting_contract() {
+        let snapshot = run_snapshot(vec![
+            legacy_run(
+                "ra-stale-blocked",
+                "blocked",
+                "2025-09-17T08:00:00Z",
+                Some("approval"),
+                Some("ra-parent"),
+            ),
+            legacy_run(
+                "ra-fresh-waiting",
+                "waiting",
+                "2025-09-17T08:59:30Z",
+                None,
+                None,
+            ),
+        ]);
+        let rows = serde_json::to_value(&snapshot.hosts[0].entries).expect("serialize rows");
+        let rows = rows.as_array().expect("row array");
+        let blocked = rows
+            .iter()
+            .find(|row| row["name"] == "ra-stale-blocked")
+            .expect("blocked row");
+        assert_eq!(blocked["state"], "blocked_liveness_unknown");
+        assert_eq!(blocked["raw_state"], "blocked");
+        assert_eq!(blocked["liveness"], "unknown");
+        assert_eq!(blocked["blocked"], true);
+        assert_eq!(blocked["blocked_reason"], "approval");
+        assert_eq!(blocked["parent_handle"], "probe::ra-parent");
+
+        let waiting = rows
+            .iter()
+            .find(|row| row["name"] == "ra-fresh-waiting")
+            .expect("waiting row");
+        assert_eq!(waiting["state"], "waiting");
+        assert_eq!(waiting["raw_state"], "waiting");
+        assert_eq!(waiting["liveness"], "live");
+        assert_eq!(waiting["blocked"], false);
+    }
+
+    #[test]
+    fn run_parent_closure_includes_live_child() {
+        let snapshot = run_snapshot(vec![
+            legacy_run("ra-parent", "done", "2025-09-17T08:00:00Z", None, None),
+            legacy_run(
+                "ra-child",
+                "active",
+                "2025-09-17T08:59:30Z",
+                None,
+                Some("ra-parent"),
+            ),
+        ]);
+        let rows = serde_json::to_value(&snapshot.hosts[0].entries).expect("serialize rows");
+        let parent = rows
+            .as_array()
+            .expect("row array")
+            .iter()
+            .find(|row| row["name"] == "ra-parent")
+            .expect("parent row");
+        assert_eq!(parent["closure_liveness"], "live");
+        assert_eq!(parent["descendants"]["live"], 1);
     }
 
     #[test]
     fn rejected_run_state_is_listed_but_not_counted_as_live() {
         let configured_host = host("ub2", false);
-        let rejected = parse_run_state(br#"{"schema":2}"#, "fixture");
+        let rejected = crate::agent_runs::parse_state(br#"{"schema":2}"#, "fixture").map(|state| {
+            crate::agent_runs::Observation {
+                state,
+                pid_alive: false,
+            }
+        });
         let snapshot = snapshot_from_evidence(
             std::slice::from_ref(&configured_host),
             &FleetConfig::default(),
@@ -2633,14 +3024,35 @@ mod tests {
         let output = [
             serde_json::to_vec(&agent_response).unwrap(),
             REMOTE_RUNS_MARKER.to_vec(),
+            b"\x1eHERDR_FLEET_RUN_V1:1\x1e\n".to_vec(),
             serde_json::to_vec(&run).unwrap(),
         ]
         .concat();
         let (agents, runs, runtime) = parse_remote_output(&output);
         assert!(agents.unwrap().is_empty());
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].as_ref().unwrap().run_id, "ra-260826-test-a1b2c3d");
+        assert_eq!(
+            runs[0].as_ref().unwrap().state.run_id,
+            "ra-260826-test-a1b2c3d"
+        );
+        assert!(runs[0].as_ref().unwrap().pid_alive);
         assert_eq!(runtime, HostRuntime::default());
+    }
+
+    #[test]
+    fn remote_run_read_is_bounded_and_survives_an_unavailable_herdr_socket() {
+        let script = remote_read_script(None, None);
+
+        assert!(script.contains("herdr agent list || true"));
+        assert!(script.contains(&format!(
+            "sed -n '1,{}p'",
+            crate::agent_runs::MAX_RUNS_PER_HOST
+        )));
+        assert!(script.contains(&format!(
+            "head -c {} \"$file\"",
+            crate::agent_runs::MAX_RUN_STATE_BYTES + 1
+        )));
+        assert!(script.contains("kill -0 \"$pid\""));
     }
 
     #[test]

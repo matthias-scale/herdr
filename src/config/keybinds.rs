@@ -418,6 +418,7 @@ pub struct Keybinds {
     pub toggle_pomodoro: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
+    pub runs: ActionKeybinds,
     pub work: ActionKeybinds,
     pub usage: ActionKeybinds,
     pub tickets: ActionKeybinds,
@@ -642,6 +643,7 @@ impl Config {
             toggle_pomodoro: empty_action!(),
             toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
+            runs: empty_action!(),
             work: empty_action!(),
             usage: empty_action!(),
             tickets: empty_action!(),
@@ -853,6 +855,7 @@ impl Config {
             apply_action!(keybinds.toggle_pomodoro, toggle_pomodoro, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
+            apply_action!(keybinds.runs, runs, source);
             apply_action!(keybinds.work, work, source);
             apply_action!(keybinds.usage, usage, source);
             apply_action!(keybinds.tickets, tickets, source);

@@ -1147,6 +1147,12 @@
           "description": "Open the read-only Symphony workflow dashboard."
         },
         {
+          "key": "keys.runs",
+          "type": "keybinding",
+          "default": "\"prefix+alt+r\"",
+          "description": "Expand and focus the fleet Runs section."
+        },
+        {
           "key": "keys.work",
           "type": "keybinding",
           "default": "\"prefix+ctrl+w\"",
@@ -2206,6 +2212,12 @@
           "type": "integer",
           "default": "1800000",
           "description": "Age in milliseconds after which a non-terminal windowless run has unknown liveness. Minimum: 100."
+        },
+        {
+          "key": "remote.fleet.symphony_host",
+          "type": "string",
+          "default": "unset",
+          "description": "Configured fleet host that runs Temporal for Symphony polling. Unset keeps localhost polling."
         }
       ]
     },
