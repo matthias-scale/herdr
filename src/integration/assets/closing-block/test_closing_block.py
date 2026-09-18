@@ -2569,6 +2569,30 @@ class BundleInstallerTests(unittest.TestCase):
         self.assertFalse(reader.is_alive())
         self.assertEqual(observations, [True, True])
 
+    def test_first_install_rolls_back_when_failure_follows_replacement(self):
+        installer = self._installer_module()
+        installer.shutil.rmtree(self.target)
+        original_replace = installer.os.replace
+        replacements = 0
+
+        def fail_after_first_replacement(source, destination):
+            nonlocal replacements
+            result = original_replace(source, destination)
+            if installer.Path(destination).parent == self.target:
+                replacements += 1
+                if replacements == 1:
+                    raise OSError("injected post-replacement failure")
+            return result
+
+        with mock.patch.object(
+            installer.os, "replace", side_effect=fail_after_first_replacement
+        ), self.assertRaisesRegex(OSError, "injected post-replacement failure"):
+            installer.install_bundle(self.source, self.target, dry_run=False)
+
+        self.assertEqual(replacements, 1)
+        self.assertFalse(self.target.exists())
+        self.assertFalse(any(self.target.parent.glob(".herdr-closing-block.stage-*")))
+
     def test_dry_run_validates_without_writing_target_or_backup(self):
         installer = self._installer_module()
         before = {
