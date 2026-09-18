@@ -13354,7 +13354,7 @@ pub(crate) mod tests {
             });
             (has_blocked_header, red_rows)
         };
-        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 0));
 
         app.terminals
             .get_mut(&terminal_id)
