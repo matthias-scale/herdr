@@ -1723,10 +1723,27 @@ pub enum TabBarPositionConfig {
     Hidden,
 }
 
+fn deserialize_working_row_opacity<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u8::deserialize(deserializer)?;
+    if (25..=100).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "ui.working_row_opacity_percent must be between 25 and 100",
+        ))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub sidebar_width: u16,
+    /// Foreground opacity of blue-dot Working session rows. Default: 100.
+    #[serde(deserialize_with = "deserialize_working_row_opacity")]
+    pub working_row_opacity_percent: u8,
     /// Whether the sidebar draws its idle animation. The panel also has a pause
     /// button; this is the switch that removes it entirely.
     pub sidebar_animation: bool,
@@ -2161,6 +2178,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             sidebar_width: 26,
+            working_row_opacity_percent: 100,
             sidebar_animation: true,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
@@ -2748,6 +2766,18 @@ cjk_ime_agents = ["claude", "codex"]
             config.experimental.cjk_ime_agents,
             vec!["claude".to_string(), "codex".to_string()]
         );
+    }
+
+    #[test]
+    fn working_row_opacity_defaults_parses_and_rejects_invisible_values() {
+        assert_eq!(Config::default().ui.working_row_opacity_percent, 100);
+        let config: Config = toml::from_str("[ui]\nworking_row_opacity_percent = 25\n")
+            .expect("valid working row opacity");
+        assert_eq!(config.ui.working_row_opacity_percent, 25);
+        for value in [0, 24, 101] {
+            let text = format!("[ui]\nworking_row_opacity_percent = {value}\n");
+            assert!(toml::from_str::<Config>(&text).is_err(), "accepted {value}");
+        }
     }
 
     #[test]

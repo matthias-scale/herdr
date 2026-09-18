@@ -3487,6 +3487,8 @@ impl AppState {
                 seq,
                 session_ref,
                 claude_transcript_path,
+                session_name_write_target,
+                session_name_target_evaluated,
                 session_start_source,
             } => {
                 let claude_transcript_session_id = claude_transcript_path
@@ -3518,6 +3520,9 @@ impl AppState {
                                 claude_transcript_session_id,
                                 claude_transcript_path,
                             );
+                        }
+                        if session_name_target_evaluated || session_replaced {
+                            terminal.set_session_name_write_target(session_name_write_target);
                         }
                     }
                     mutation
@@ -6301,6 +6306,8 @@ mod tests {
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("first-session"),
             claude_transcript_path: None,
+            session_name_write_target: None,
+            session_name_target_evaluated: false,
             session_start_source: Some("startup".into()),
         });
 
