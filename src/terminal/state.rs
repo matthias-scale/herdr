@@ -288,10 +288,19 @@ struct ClosingReportScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyClosingReportGuard {
+    source: String,
+    agent_label: String,
+    session_id: String,
+    report_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosingReport {
     version: u8,
     scope: ClosingReportScope,
     retired_pending_completion: bool,
+    requires_legacy_session_guard: bool,
     pub(crate) closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     pub(crate) closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     pub(crate) closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -312,6 +321,7 @@ impl Default for ClosingReport {
             version: CLOSING_REPORT_MODEL_VERSION,
             scope: ClosingReportScope::default(),
             retired_pending_completion: false,
+            requires_legacy_session_guard: false,
             closing_gates: Vec::new(),
             closing_items: Vec::new(),
             closing_decisions: Vec::new(),
@@ -357,6 +367,8 @@ struct ClosingReportHandoffState {
     scope_turn_seq: Option<u64>,
     #[serde(default)]
     retired_pending_completion: bool,
+    #[serde(default)]
+    requires_legacy_session_guard: bool,
     gates: Vec<crate::api::schema::ClosingBlockItem>,
     items: Vec<crate::api::schema::ClosingBlockItem>,
     decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -380,6 +392,7 @@ impl ClosingReportHandoffState {
             scope_session_id: report.scope.session_id.clone(),
             scope_turn_seq: report.scope.turn_seq,
             retired_pending_completion: report.retired_pending_completion,
+            requires_legacy_session_guard: report.requires_legacy_session_guard,
             gates: report.closing_gates.clone(),
             items: report.closing_items.clone(),
             decisions: report.closing_decisions.clone(),
@@ -406,6 +419,7 @@ impl ClosingReportHandoffState {
                 turn_seq: self.scope_turn_seq,
             },
             retired_pending_completion: self.retired_pending_completion,
+            requires_legacy_session_guard: self.requires_legacy_session_guard,
             closing_gates: self.gates,
             closing_items: self.items,
             closing_decisions: self.decisions,
@@ -671,6 +685,7 @@ pub struct TerminalState {
     pub(super) hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
+    legacy_closing_report_guard: Option<LegacyClosingReportGuard>,
     pub(super) metadata_report_sequences: HashMap<String, u64>,
     pub(super) metadata_report_agents: HashMap<String, Agent>,
     pub(super) metadata_token_sequence_sources: std::collections::HashSet<String>,
@@ -757,6 +772,7 @@ impl TerminalState {
             hook_report_sequences: HashMap::new(),
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             stale_full_lifecycle_hook_sessions: HashMap::new(),
+            legacy_closing_report_guard: None,
             metadata_report_sequences: HashMap::new(),
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
@@ -1221,7 +1237,14 @@ impl TerminalState {
 
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
         let _ = now;
-        let empty = ClosingReport::default();
+        let requires_legacy_session_guard = self
+            .closing_report
+            .as_ref()
+            .is_some_and(|report| report.requires_legacy_session_guard);
+        let empty = ClosingReport {
+            requires_legacy_session_guard,
+            ..ClosingReport::default()
+        };
         let report_changed = self
             .closing_report
             .as_ref()
@@ -1234,8 +1257,15 @@ impl TerminalState {
     fn retire_closing_report_outside_current_session(
         &mut self,
         session_changed: bool,
+        session_replaced: bool,
         now: Instant,
     ) -> bool {
+        if session_replaced {
+            self.closing_report
+                .get_or_insert_default()
+                .requires_legacy_session_guard = true;
+            self.legacy_closing_report_guard = None;
+        }
         if !session_changed || !self.has_closing_report() {
             return false;
         }
@@ -2362,13 +2392,17 @@ impl TerminalState {
         }));
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
+        let session_replaced = previous_session.is_some() && session_ref_changed;
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
             false
         };
-        let closing_report_retired =
-            self.retire_closing_report_outside_current_session(session_ref_changed, now);
+        let closing_report_retired = self.retire_closing_report_outside_current_session(
+            session_ref_changed,
+            session_replaced,
+            now,
+        );
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -2378,7 +2412,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
-            session_replaced: previous_session.is_some() && session_ref_changed,
+            session_replaced,
             hook_work_context_changed,
             agent_released: false,
             sidebar_projection_changed: closing_report_retired,
@@ -3187,6 +3221,56 @@ impl TerminalState {
         )
     }
 
+    pub(crate) fn record_legacy_closing_report_precursor(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_id: Option<String>,
+        precursor_seq: Option<u64>,
+    ) {
+        if !crate::detect::is_closing_block_source(&source, &agent_label) {
+            return;
+        }
+        self.legacy_closing_report_guard = None;
+        let Some((session_id, report_seq)) = session_id
+            .zip(precursor_seq.and_then(|seq| seq.checked_add(1)))
+            .filter(|(session_id, _)| {
+                self.agent_session_id_matches_current_agent(&agent_label, session_id)
+            })
+        else {
+            return;
+        };
+        self.legacy_closing_report_guard = Some(LegacyClosingReportGuard {
+            source,
+            agent_label,
+            session_id,
+            report_seq,
+        });
+    }
+
+    pub(crate) fn legacy_closing_report_requires_guard(&self) -> bool {
+        self.closing_report
+            .as_ref()
+            .is_some_and(|report| report.requires_legacy_session_guard)
+    }
+
+    pub(crate) fn legacy_closing_report_session(
+        &self,
+        source: &str,
+        agent_label: &str,
+        seq: Option<u64>,
+    ) -> Option<String> {
+        self.legacy_closing_report_guard
+            .as_ref()
+            .filter(|guard| {
+                guard.source == source
+                    && guard.agent_label == agent_label
+                    && Some(guard.report_seq) == seq
+                    && self.agent_session_id_matches_current_agent(agent_label, &guard.session_id)
+            })
+            .map(|guard| guard.session_id.clone())
+    }
+
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
         self.current_session_identity_for_persistence().is_some_and(
             |(current_source, current_agent, _, _)| {
@@ -3421,13 +3505,17 @@ impl TerminalState {
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
                 let current_session = self.current_session_identity_for_persistence();
                 let session_ref_changed = previous_session != current_session;
+                let session_replaced = previous_session.is_some() && session_ref_changed;
                 let hook_work_context_changed = if session_ref_changed {
                     self.clear_hook_work_context()
                 } else {
                     false
                 };
-                let closing_report_retired =
-                    self.retire_closing_report_outside_current_session(session_ref_changed, now);
+                let closing_report_retired = self.retire_closing_report_outside_current_session(
+                    session_ref_changed,
+                    session_replaced,
+                    now,
+                );
                 return Some(TerminalStateMutation {
                     effective_state_change: self.recompute_effective_state(
                         previous_agent_label,
@@ -3437,7 +3525,7 @@ impl TerminalState {
                         now,
                     ),
                     session_ref_changed,
-                    session_replaced: previous_session.is_some() && session_ref_changed,
+                    session_replaced,
                     hook_work_context_changed,
                     agent_released: false,
                     sidebar_projection_changed: closing_report_retired,
@@ -3532,13 +3620,17 @@ impl TerminalState {
         });
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
+        let session_replaced = previous_session.is_some() && session_ref_changed;
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
             false
         };
-        let closing_report_retired =
-            self.retire_closing_report_outside_current_session(session_ref_changed, now);
+        let closing_report_retired = self.retire_closing_report_outside_current_session(
+            session_ref_changed,
+            session_replaced,
+            now,
+        );
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -3548,7 +3640,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
-            session_replaced: previous_session.is_some() && session_ref_changed,
+            session_replaced,
             hook_work_context_changed,
             agent_released: false,
             sidebar_projection_changed: closing_report_retired,

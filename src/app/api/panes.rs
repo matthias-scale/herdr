@@ -1604,6 +1604,26 @@ impl App {
             .get(ws_idx)
             .and_then(|workspace| workspace.pane_state(pane_id))
             .map(|pane| pane.attached_terminal_id.clone());
+        let legacy_session_id = (params.agent_session_id.is_none())
+            .then(|| {
+                terminal_id
+                    .as_ref()
+                    .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+                    .and_then(|terminal| {
+                        terminal.legacy_closing_report_session(
+                            &params.source,
+                            &agent_label,
+                            params.seq,
+                        )
+                    })
+            })
+            .flatten();
+        let legacy_guard_required = params.agent_session_id.is_none()
+            && terminal_id
+                .as_ref()
+                .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+                .is_some_and(|terminal| terminal.legacy_closing_report_requires_guard());
+        let closing_report_allowed = !legacy_guard_required || legacy_session_id.is_some();
         if params
             .agent_session_id
             .as_deref()
@@ -1628,7 +1648,8 @@ impl App {
                 })
                 .flatten()
         });
-        let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION)
+        let closing_block = (closing_report_allowed
+            && params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION)
             && (has_arrays || task_reported))
             .then(|| {
                 let (gates, items, decisions) = if dependencies_authoritative {
@@ -1656,7 +1677,10 @@ impl App {
                     parse_status,
                     workers_unknown,
                     dependencies_authoritative,
-                    session_id: params.agent_session_id.clone(),
+                    session_id: params
+                        .agent_session_id
+                        .clone()
+                        .or_else(|| legacy_session_id.clone()),
                 })
             });
         let report_state = if report_wait.is_some() {
@@ -1698,6 +1722,32 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let legacy_guard = (
+            params.source.clone(),
+            agent_label.clone(),
+            params.agent_session_id.clone(),
+            params.seq,
+        );
+        let closing_precursor_has_native_session =
+            crate::detect::is_closing_block_source(&params.source, &agent_label)
+                && self.state.workspaces[ws_idx]
+                    .pane_state(pane_id)
+                    .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+                    .is_some_and(|terminal| terminal.current_agent_session_id().is_some());
+        if closing_precursor_has_native_session {
+            if let Some(terminal) = self.state.workspaces[ws_idx]
+                .pane_state(pane_id)
+                .and_then(|pane| self.state.terminals.get_mut(&pane.attached_terminal_id))
+            {
+                terminal.record_legacy_closing_report_precursor(
+                    legacy_guard.0,
+                    legacy_guard.1,
+                    legacy_guard.2,
+                    legacy_guard.3,
+                );
+            }
+            return encode_success(id, ResponseResult::Ok {});
+        }
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1790,6 +1840,17 @@ impl App {
                 params.session_start_source,
             ),
         });
+        if let Some(terminal) = self.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .and_then(|pane| self.state.terminals.get_mut(&pane.attached_terminal_id))
+        {
+            terminal.record_legacy_closing_report_precursor(
+                legacy_guard.0,
+                legacy_guard.1,
+                legacy_guard.2,
+                legacy_guard.3,
+            );
+        }
         let _ = self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
@@ -1994,10 +2055,22 @@ impl App {
         ) {
             return encode_success(id, ResponseResult::Ok {});
         }
-        let closing_block_metadata = applies_to_source.as_deref() == Some(source.as_str())
-            && terminal
-                .effective_agent_label()
-                .is_some_and(|agent| crate::detect::is_closing_block_source(&source, agent));
+        let closing_agent = terminal
+            .effective_agent_label()
+            .filter(|agent| crate::detect::is_closing_block_source(&source, agent));
+        let closing_block_metadata =
+            applies_to_source.as_deref() == Some(source.as_str()) && closing_agent.is_some();
+        if closing_block_metadata
+            && agent_session_id.is_none()
+            && terminal.legacy_closing_report_requires_guard()
+            && closing_agent.is_none_or(|agent| {
+                terminal
+                    .legacy_closing_report_session(&source, agent, params.seq)
+                    .is_none()
+            })
+        {
+            return encode_success(id, ResponseResult::Ok {});
+        }
         if closing_block_metadata {
             if let Some(tokens) = tokens.as_mut() {
                 if tokens.contains_key("closing_idle") {
@@ -8719,6 +8792,230 @@ mod tests {
             "the old report cannot leave the new session Blocked or Done"
         );
         assert!(!pane.tokens.contains_key("closing_completion"));
+    }
+
+    #[test]
+    fn delayed_installed_v2_reports_cannot_restore_a_replaced_session() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state.active = None;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Working);
+
+        let session = |session_id: &str, seq: u64| PaneReportAgentSessionParams {
+            pane_id: pane_id.clone(),
+            source: "herdr:codex-closing-block".into(),
+            agent: "codex".into(),
+            seq: Some(seq),
+            agent_session_id: Some(session_id.into()),
+            agent_session_path: None,
+            session_start_source: None,
+        };
+        let report = |seq: u64,
+                      gates: Vec<crate::api::schema::ClosingBlockItem>,
+                      completion: crate::api::schema::ClosingCompletion| {
+            PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex-closing-block".into(),
+                agent: "codex".into(),
+                state: crate::api::schema::PaneAgentState::Idle,
+                v: Some(2),
+                message: None,
+                seq: Some(seq),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: Some(gates),
+                items: Some(Vec::new()),
+                decisions: Some(Vec::new()),
+                completion: Some(completion),
+                external_wait: None,
+                parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+                workers_unknown: Some(false),
+                agents: Some(0),
+            }
+        };
+        let metadata = |seq: u64| PaneReportMetadataParams {
+            pane_id: pane_id.clone(),
+            source: "herdr:codex-closing-block".into(),
+            agent: None,
+            applies_to_source: Some("herdr:codex-closing-block".into()),
+            agent_session_id: None,
+            title: None,
+            work_context: None,
+            display_agent: None,
+            state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::from([
+                ("closing_idle".into(), Some("1".into())),
+                ("closing_contract".into(), Some("finish the task".into())),
+                ("closing_contract_met".into(), Some("1".into())),
+            ]),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            seq: Some(seq),
+            ttl_ms: None,
+        };
+
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent_session(
+            "native-old".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(0),
+                agent_session_id: Some("old".into()),
+                agent_session_path: None,
+                session_start_source: Some("startup".into()),
+            },
+        ))
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent_session("old-precursor".into(), session("old", 1)),
+        )
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
+            "old-report".into(),
+            report(
+                2,
+                vec![test_gate()],
+                crate::api::schema::ClosingCompletion::Incomplete,
+            ),
+        ))
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("old-metadata".into(), metadata(2)),
+        )
+        .unwrap();
+        assert_eq!(app.pane_info(0, internal_pane_id).unwrap().gates.len(), 1);
+        assert_eq!(
+            app.state.terminals[&terminal_id].closing_contract_met(),
+            Some(true)
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent_session(
+            "replacement".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(3),
+                agent_session_id: Some("new".into()),
+                agent_session_path: None,
+                session_start_source: Some("clear".into()),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id].current_agent_session_id(),
+            Some("new")
+        );
+        assert!(app.state.terminals[&terminal_id].legacy_closing_report_requires_guard());
+        assert!(app.pane_info(0, internal_pane_id).unwrap().gates.is_empty());
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_active_subagents(Some(1));
+
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent_session("late-gate-precursor".into(), session("old", 9)),
+        )
+        .unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id].legacy_closing_report_session(
+                "herdr:codex-closing-block",
+                "codex",
+                Some(10),
+            ),
+            None
+        );
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
+            "late-gate".into(),
+            report(
+                10,
+                vec![test_gate()],
+                crate::api::schema::ClosingCompletion::Incomplete,
+            ),
+        ))
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("late-contract".into(), metadata(10)),
+        )
+        .unwrap();
+        assert!(app.pane_info(0, internal_pane_id).unwrap().gates.is_empty());
+        assert_eq!(
+            app.state.terminals[&terminal_id].closing_contract_met(),
+            None
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent_session(
+            "late-complete-precursor".into(),
+            session("old", 11),
+        ))
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
+            "late-complete".into(),
+            report(
+                12,
+                Vec::new(),
+                crate::api::schema::ClosingCompletion::Complete,
+            ),
+        ))
+        .unwrap();
+        let seen = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .seen;
+        let now = std::time::Instant::now();
+        let _ = app
+            .state
+            .update_terminal_state_at(internal_pane_id, now, |terminal| {
+                terminal
+                    .set_active_subagents_with_projection_at(Some(0), seen, now)
+                    .1
+            });
+
+        let pane = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_ne!(pane.agent_projection(terminal).status_key(), "done");
+        assert!(pane.seen);
+        assert!(pane.done_since.is_none());
+
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent_session("current-precursor".into(), session("new", 13)),
+        )
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
+            "current-report".into(),
+            report(
+                14,
+                vec![test_gate()],
+                crate::api::schema::ClosingCompletion::Incomplete,
+            ),
+        ))
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("current-metadata".into(), metadata(14)),
+        )
+        .unwrap();
+        assert_eq!(app.pane_info(0, internal_pane_id).unwrap().gates.len(), 1);
+        assert_eq!(
+            app.state.terminals[&terminal_id].closing_contract_met(),
+            Some(true)
+        );
     }
 
     #[test]
