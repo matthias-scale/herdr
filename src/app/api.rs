@@ -937,32 +937,26 @@ impl App {
         let Some(terminal) = self.state.terminals.get(&terminal_id) else {
             return;
         };
-        let tokens = terminal.metadata_tokens.values();
         let active_subagents = terminal
-            .active_subagents
-            .or_else(|| {
-                tokens
-                    .get("closing_agents")
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
+            .effective_active_subagents()
             .filter(|count| *count > 0);
         let tier = crate::terminal::state::derive_completion_tier(
             terminal.raw_agent_state(),
-            terminal.closing_contract.as_deref(),
-            terminal.closing_contract_met,
-            terminal.closing_idle,
-            !terminal.closing_gates.is_empty(),
+            terminal.closing_contract(),
+            terminal.closing_contract_met(),
+            terminal.closing_idle(),
+            !terminal.closing_gates().is_empty(),
             active_subagents,
             terminal.holds_shell,
-            tokens.keys().any(|key| key.starts_with("closing_")),
+            terminal.has_closing_report(),
         );
         if tier != Some(crate::terminal::state::CompletionTier::ContractSatisfied) {
             return;
         }
-        let Some(contract_met_at) = terminal.closing_contract_met_at else {
+        let Some(contract_met_at) = terminal.closing_contract_met_at() else {
             return;
         };
-        let Some(contract) = terminal.closing_contract.clone() else {
+        let Some(contract) = terminal.closing_contract().map(str::to_string) else {
             return;
         };
         let session_id = terminal.current_agent_session_id().map(str::to_string);
@@ -1196,7 +1190,7 @@ impl App {
         }
     }
 
-    fn emit_terminal_or_system_agent_notifications(
+    pub(crate) fn emit_terminal_or_system_agent_notifications(
         &self,
         pane_updates: &[crate::app::actions::PaneStateUpdate],
     ) {
