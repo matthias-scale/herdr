@@ -12,6 +12,8 @@ import re
 import shutil
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,6 +84,42 @@ def _validate_target(target: Path) -> None:
         raise BundleValidationError(f"install target is not a directory: {target}")
 
 
+@contextmanager
+def _exclusive_install_lock(target: Path):
+    # Keep this file in place so every installer locks the same inode.
+    lock_path = target.parent / f".{target.name}.install.lock"
+    with lock_path.open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"\0")
+                lock.flush()
+            lock.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _written_file_identity(path: Path) -> tuple[int, int, bytes]:
     stat = path.stat()
     return stat.st_dev, stat.st_ino, path.read_bytes()
@@ -142,48 +180,59 @@ def _rollback_runtime_files(
 def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
     source_dir = Path(source_dir).resolve()
     target = Path(target).expanduser().absolute()
-    _validate_target(target)
     expected = bundle_manifest(source_dir)
-    backup = _backup_path(target) if target.exists() else None
-    result = {
-        "mode": "dry-run" if dry_run else "installed",
-        "target": str(target),
-        "backup": backup.name if backup else None,
-        "files": expected,
-    }
     if dry_run:
+        _validate_target(target)
+        backup = _backup_path(target) if target.exists() else None
+        result = {
+            "mode": "dry-run",
+            "target": str(target),
+            "backup": backup.name if backup else None,
+            "files": expected,
+        }
         return result
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=target.parent))
-    try:
-        if target.exists():
-            shutil.copytree(target, stage, dirs_exist_ok=True, symlinks=True)
-        for name in RUNTIME_FILES:
-            staged_file = stage / name
-            if staged_file.exists() or staged_file.is_symlink():
-                staged_file.unlink()
-            shutil.copy2(source_dir / name, staged_file)
-        _verify_bundle(stage, expected)
-
-        if backup:
-            shutil.copytree(target, backup, symlinks=True)
-        written: list[tuple[Path, tuple[int, int, bytes]]] = []
+    with _exclusive_install_lock(target):
+        _validate_target(target)
+        backup = _backup_path(target) if target.exists() else None
+        result = {
+            "mode": "installed",
+            "target": str(target),
+            "backup": backup.name if backup else None,
+            "files": expected,
+        }
+        stage = Path(
+            tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=target.parent)
+        )
         try:
-            _replace_runtime_files(stage, target, written)
-        except OSError:
-            _rollback_runtime_files(backup, target, written)
-            raise
+            if target.exists():
+                shutil.copytree(target, stage, dirs_exist_ok=True, symlinks=True)
+            for name in RUNTIME_FILES:
+                staged_file = stage / name
+                if staged_file.exists() or staged_file.is_symlink():
+                    staged_file.unlink()
+                shutil.copy2(source_dir / name, staged_file)
+            _verify_bundle(stage, expected)
 
-        try:
-            _verify_bundle(target, expected)
-        except (BundleValidationError, OSError):
-            _rollback_runtime_files(backup, target, written)
-            raise
-        return result
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+            if backup:
+                shutil.copytree(target, backup, symlinks=True)
+            written: list[tuple[Path, tuple[int, int, bytes]]] = []
+            try:
+                _replace_runtime_files(stage, target, written)
+            except OSError:
+                _rollback_runtime_files(backup, target, written)
+                raise
+
+            try:
+                _verify_bundle(target, expected)
+            except (BundleValidationError, OSError):
+                _rollback_runtime_files(backup, target, written)
+                raise
+            return result
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
 
 
 def main(argv: list[str] | None = None) -> int:

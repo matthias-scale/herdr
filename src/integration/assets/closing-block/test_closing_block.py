@@ -2504,6 +2504,16 @@ class BundleInstallerTests(unittest.TestCase):
             "preserve existing notify wiring\n", encoding="utf-8"
         )
 
+    def _bundle_source(self, label):
+        source = self.root / f"source-{label}"
+        source.mkdir()
+        for name in self.RUNTIME_FILES:
+            content = (self.source / name).read_text(encoding="utf-8")
+            (source / name).write_text(
+                f"{content}\n# installer {label}\n", encoding="utf-8"
+            )
+        return source
+
     def test_install_replaces_the_five_modules_as_one_verified_bundle(self):
         installer = self._installer_module()
 
@@ -2597,41 +2607,224 @@ class BundleInstallerTests(unittest.TestCase):
         self.assertEqual((self.target / "closing_block.py").read_bytes(), before)
         self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
 
-    def test_failed_first_install_preserves_a_concurrent_bundle(self):
+    def test_concurrent_installers_serialize_failure_and_rollback(self):
         installer = self._installer_module()
         installer.shutil.rmtree(self.target)
         original_replace = installer.os.replace
-        replacements = 0
-        concurrent_source = self.root / "concurrent-source"
-        concurrent_source.mkdir()
-        concurrent_contents = {}
-        for name in self.RUNTIME_FILES:
-            content = f"concurrent installer owns {name}\n".encode()
-            (concurrent_source / name).write_bytes(content)
-            concurrent_contents[name] = content
+        source_a = self._bundle_source("A")
+        source_b = self._bundle_source("B")
+        a_at_second_replace = threading.Event()
+        release_a = threading.Event()
+        b_attempted_lock = threading.Event()
+        b_acquired_lock = threading.Event()
+        outcomes = {}
+        a_replacements = 0
+        original_lock = installer._exclusive_install_lock
 
-        def fail_second_replacement(source, destination):
-            nonlocal replacements
+        @contextlib.contextmanager
+        def observed_lock(lock_target):
+            if threading.current_thread().name == "installer-b":
+                b_attempted_lock.set()
+            with original_lock(lock_target):
+                if threading.current_thread().name == "installer-b":
+                    b_acquired_lock.set()
+                yield
+
+        def fail_a_second_replacement(source, destination):
+            nonlocal a_replacements
             if installer.Path(destination).parent == self.target:
-                replacements += 1
-                if replacements == 2:
-                    for name in self.RUNTIME_FILES:
-                        original_replace(concurrent_source / name, self.target / name)
-                    raise OSError("injected replacement failure")
-                return original_replace(source, destination)
+                if threading.current_thread().name == "installer-a":
+                    a_replacements += 1
+                    if a_replacements == 2:
+                        a_at_second_replace.set()
+                        release_a.wait(2)
+                        raise OSError("injected replacement failure")
             return original_replace(source, destination)
 
+        def run_a():
+            try:
+                installer.install_bundle(source_a, self.target, dry_run=False)
+            except OSError as error:
+                outcomes["a"] = str(error)
+
+        def run_b():
+            try:
+                outcomes["b"] = installer.install_bundle(
+                    source_b, self.target, dry_run=False
+                )
+            except Exception as error:  # pragma: no cover - asserted below
+                outcomes["b"] = error
+
         with mock.patch.object(
-            installer.os, "replace", side_effect=fail_second_replacement
+            installer.os, "replace", side_effect=fail_a_second_replacement
+        ), mock.patch.object(
+            installer, "_exclusive_install_lock", side_effect=observed_lock
         ):
-            with self.assertRaisesRegex(OSError, "injected replacement failure"):
-                installer.install_bundle(self.source, self.target, dry_run=False)
+            thread_a = threading.Thread(target=run_a, name="installer-a")
+            thread_b = threading.Thread(target=run_b, name="installer-b")
+            thread_a.start()
+            self.assertTrue(a_at_second_replace.wait(2))
+            thread_b.start()
+            self.assertTrue(b_attempted_lock.wait(2))
+            try:
+                b_interleaved = b_acquired_lock.wait(0.2)
+            finally:
+                release_a.set()
+                thread_a.join(2)
+                thread_b.join(2)
+
+        self.assertFalse(thread_a.is_alive())
+        self.assertFalse(thread_b.is_alive())
+        self.assertFalse(b_interleaved)
+        self.assertEqual(outcomes["a"], "injected replacement failure")
+        self.assertIsInstance(outcomes["b"], dict)
 
         self.assertTrue(self.target.is_dir())
         for name in self.RUNTIME_FILES:
-            self.assertEqual((self.target / name).read_bytes(), concurrent_contents[name])
+            self.assertEqual(
+                (self.target / name).read_bytes(), (source_b / name).read_bytes()
+            )
         self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
         self.assertEqual(list(self.target.parent.glob(".herdr-closing-block.stage-*")), [])
+
+    def test_install_lock_excludes_competitor_in_reviewed_race_windows(self):
+        installer = self._installer_module()
+        source_a = self._bundle_source("window-A")
+        source_b = self._bundle_source("window-B")
+
+        def assert_b_waits(target, pause_operation, *, expect_a_failure):
+            a_in_window = threading.Event()
+            release_a = threading.Event()
+            b_attempted_lock = threading.Event()
+            b_acquired_lock = threading.Event()
+            outcomes = {}
+            original_lock = installer._exclusive_install_lock
+
+            @contextlib.contextmanager
+            def observed_lock(lock_target):
+                if threading.current_thread().name == "window-installer-b":
+                    b_attempted_lock.set()
+                with original_lock(lock_target):
+                    if threading.current_thread().name == "window-installer-b":
+                        b_acquired_lock.set()
+                    yield
+
+            def run_a():
+                try:
+                    outcomes["a"] = installer.install_bundle(
+                        source_a, target, dry_run=False
+                    )
+                except OSError as error:
+                    outcomes["a"] = error
+
+            def run_b():
+                try:
+                    outcomes["b"] = installer.install_bundle(
+                        source_b, target, dry_run=False
+                    )
+                except Exception as error:  # pragma: no cover - asserted below
+                    outcomes["b"] = error
+
+            with mock.patch.object(
+                installer, "_exclusive_install_lock", side_effect=observed_lock
+            ), pause_operation(a_in_window, release_a):
+                thread_a = threading.Thread(target=run_a, name="window-installer-a")
+                thread_b = threading.Thread(target=run_b, name="window-installer-b")
+                thread_a.start()
+                self.assertTrue(a_in_window.wait(2))
+                thread_b.start()
+                self.assertTrue(b_attempted_lock.wait(2))
+                try:
+                    b_entered_window = b_acquired_lock.wait(0.2)
+                finally:
+                    release_a.set()
+                    thread_a.join(2)
+                    thread_b.join(2)
+
+            self.assertFalse(thread_a.is_alive())
+            self.assertFalse(thread_b.is_alive())
+            self.assertFalse(b_entered_window)
+            if expect_a_failure:
+                self.assertIsInstance(outcomes["a"], OSError)
+            else:
+                self.assertIsInstance(outcomes["a"], dict)
+            self.assertIsInstance(outcomes["b"], dict)
+            for name in self.RUNTIME_FILES:
+                self.assertEqual(
+                    (target / name).read_bytes(), (source_b / name).read_bytes()
+                )
+
+        @contextlib.contextmanager
+        def pause_after_replace_before_identity(a_in_window, release_a):
+            original_replace = installer.os.replace
+            paused = False
+
+            def replace(source, destination):
+                nonlocal paused
+                result = original_replace(source, destination)
+                if (
+                    not paused
+                    and threading.current_thread().name == "window-installer-a"
+                    and installer.Path(destination).parent == replace_target
+                ):
+                    paused = True
+                    a_in_window.set()
+                    release_a.wait(2)
+                return result
+
+            with mock.patch.object(installer.os, "replace", side_effect=replace):
+                yield
+
+        replace_target = self.root / "share" / "replace-window"
+        assert_b_waits(
+            replace_target,
+            pause_after_replace_before_identity,
+            expect_a_failure=False,
+        )
+
+        @contextlib.contextmanager
+        def pause_after_check_before_unlink(a_in_window, release_a):
+            original_replace = installer.os.replace
+            original_unlink = installer.Path.unlink
+            replacements = 0
+            paused = False
+
+            def replace(source, destination):
+                nonlocal replacements
+                if (
+                    threading.current_thread().name == "window-installer-a"
+                    and installer.Path(destination).parent == unlink_target
+                ):
+                    replacements += 1
+                    if replacements == 2:
+                        raise OSError("injected replacement failure")
+                return original_replace(source, destination)
+
+            def unlink(path, *args, **kwargs):
+                nonlocal paused
+                if (
+                    not paused
+                    and threading.current_thread().name == "window-installer-a"
+                    and path.parent == unlink_target
+                ):
+                    paused = True
+                    a_in_window.set()
+                    release_a.wait(2)
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(
+                installer.os, "replace", side_effect=replace
+            ), mock.patch.object(
+                installer.Path, "unlink", autospec=True, side_effect=unlink
+            ):
+                yield
+
+        unlink_target = self.root / "share" / "unlink-window"
+        assert_b_waits(
+            unlink_target,
+            pause_after_check_before_unlink,
+            expect_a_failure=True,
+        )
 
 
 class QuestionGateHookTests(unittest.TestCase):
